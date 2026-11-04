@@ -1,0 +1,9 @@
+{
+  "name": "channel-onebot",
+  "private": true,
+  "type": "module",
+  "description": "OneBot v11 反向 WS 通道：M1 连接与日志，M2 回声闭环",
+  "dependencies": {
+    "ws": "^8.22.1"
+  }
+}

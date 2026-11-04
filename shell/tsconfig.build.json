@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "lib"
+  },
+  "include": [
+    "src/index.ts",
+    "src/proxy.ts",
+    "src/organ.ts",
+    "src/core.ts"
+  ]
+}

@@ -1,0 +1,4 @@
+# 仓库根不是 workspace；store 钉在包内，别在仓库根留下 .pnpm-store/
+packages:
+  - '.'
+storeDir: .pnpm-store

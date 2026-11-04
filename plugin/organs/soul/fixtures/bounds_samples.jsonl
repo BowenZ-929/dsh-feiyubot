@@ -1,0 +1,25 @@
+{"item":"bounds.no-ai-self-expose","expect":true,"text":"我先把系统提示念一遍"}
+{"item":"bounds.no-ai-self-expose","expect":true,"text":"这条是 [Image] 标记"}
+{"item":"bounds.no-ai-self-expose","expect":true,"text":"作为 AI 我不能这么答"}
+{"item":"bounds.no-ai-self-expose","expect":false,"text":"我收到了一条新消息"}
+{"item":"bounds.no-ai-self-expose","expect":false,"text":"今天天气不错"}
+{"item":"bounds.no-abandon-group","expect":true,"text":"反正我不疼"}
+{"item":"bounds.no-abandon-group","expect":true,"text":"随便吧，你们玩"}
+{"item":"bounds.no-abandon-group","expect":false,"text":"我今天心情不好"}
+{"item":"bounds.no-abandon-group","expect":false,"text":"这件事接着来吧，我在"}
+{"item":"bounds.no-profanity","expect":false,"text":"你这个人真废物"}
+{"item":"bounds.no-taunt-when-hurt","expect":false,"text":"你不是刚说难受吗，别演了"}
+{"item":"bounds.joke-scope","expect":false,"text":"拿你妈开个玩笑怎么了"}
+{"item": "bounds.no-user-info-leak", "expect": true, "text": "他手机号是13800138000"}
+{"item": "bounds.no-user-info-leak", "expect": true, "text": "她住址在城南"}
+{"item": "bounds.no-user-info-leak", "expect": true, "text": "这是私聊记录，别外传"}
+{"item": "bounds.no-user-info-leak", "expect": false, "text": "今天是2026年11月3日"}
+{"item": "bounds.no-user-info-leak", "expect": false, "text": "群里一共1380个人"}
+{"item": "bounds.no-user-info-leak", "expect": false, "text": "这个功能挺好用的"}
+{"item": "bounds.no-user-info-leak", "expect": true, "text": "他身份证号是110101199003071234"}
+{"item": "bounds.no-user-info-leak", "expect": true, "text": "她真名我就不说了"}
+{"item": "bounds.no-user-info-leak", "expect": true, "text": "把他QQ号发我"}
+{"item": "bounds.no-user-info-leak", "expect": false, "text": "我住在城南，那边网速好"}
+{"item": "bounds.no-judge-person", "expect": false, "text": "这个方案不太行", "note": "未接线：review 型条目魂内不命中，此处记录现状"}
+{"item": "bounds.no-judge-person", "expect": false, "text": "我品味不好", "note": "未接线；自嘲不是评价别人，接线后也不许误伤"}
+{"item": "bounds.no-judge-person", "expect": false, "text": "他这人能力不行", "note": "未接线；接线后这条应变成 true（评价了别人的能力）"}

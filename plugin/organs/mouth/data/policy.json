@@ -1,0 +1,33 @@
+{
+  "split": {
+    "max_parts": 3,
+    "max_chars": 150,
+    "hard_cut_reason": "这一泡原本 {chars} 字，中间一个停顿符号都没有，只能按 {max_chars} 字硬切；带 degraded 一起发。",
+    "sentence_end": "。！？!?…~～",
+    "semicolon": "；;",
+    "comma": "，,",
+    "newline": "\n\r",
+    "trailing_closers": "”’」』）)】》〉\"'",
+    "left_banned": "的地得了着和与跟把被而但或且就都也还",
+    "right_banned": "的地得了着",
+    "cut_preference": ["sentence_end", "semicolon", "newline", "comma"],
+    "cut_window_chars": 30
+  },
+  "pace": {
+    "first_gap": 0.0,
+    "log_base": 2.6,
+    "min_gap": 0.6,
+    "max_gap": 3.0,
+    "jitter_span": 0.25,
+    "round_digits": 3
+  },
+  "visible": {
+    "strip": "，。、；：？！…～·—－「」『』“”‘’（）()《》〈〉【】[]{}<>,.;:?!\"'`~-_/\\|@#$%^&*+=　"
+  },
+  "summary": {
+    "item": "{i}/{n} {when}",
+    "immediate": "立即",
+    "gap": "+{gap:.1f}s",
+    "sep": " · "
+  }
+}

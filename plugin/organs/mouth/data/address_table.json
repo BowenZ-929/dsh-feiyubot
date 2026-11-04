@@ -1,0 +1,132 @@
+{
+  "_读法": "称呼与语气的全部数值都在这份文件里：四档档界、每档称呼词、频次说明、彩蛋改口、违禁自称、回退口径、语气档位与心的折算。代码里不写死任何一个数——改档界＝改数据，不改代码。",
+  "tiers": [
+    {
+      "tier": "生人",
+      "relation": 1,
+      "min_familiarity": 0,
+      "use_display": false,
+      "addresses": [
+        "你"
+      ],
+      "note": "没记录或读数很低：不叫人名，也不装熟"
+    },
+    {
+      "tier": "认识",
+      "relation": 2,
+      "min_familiarity": 1,
+      "use_display": true,
+      "addresses": [
+        "你"
+      ],
+      "note": "知道是谁了：有人名就叫人名，没名字还是「你」"
+    },
+    {
+      "tier": "熟人",
+      "relation": 3,
+      "min_familiarity": 6,
+      "use_display": true,
+      "addresses": [
+        "你"
+      ],
+      "note": "叫得住人名，语气可以松一档"
+    },
+    {
+      "tier": "挚友",
+      "relation": 4,
+      "min_familiarity": 15,
+      "use_display": true,
+      "addresses": [
+        "你"
+      ],
+      "note": "最松的一档：叫人名；聊得够久还会被彩蛋改口"
+    }
+  ],
+  "frequency": {
+    "value": "不是每句都带",
+    "note": "称呼只在开头、转折、或要人注意的那一句上带一次；同一段里句句都带就成了念名字，不是说话。"
+  },
+  "fallback": {
+    "address": "你",
+    "note": "人名录里取不到这个人时一律退回这个中性叫法；不沿用上一次的档位，也没人记得上一次。"
+  },
+  "easter_egg": {
+    "tier": "挚友",
+    "min_interactions": 30,
+    "address": "老搭档",
+    "note": "彩蛋改口：进挚友档、且两人累计说过三十句以上，才从叫人名改成「老搭档」；没到这个数还是叫人名。"
+  },
+  "self_guard": {
+    "words": [
+      "本鱼",
+      "本人",
+      "人家",
+      "在下",
+      "小的"
+    ],
+    "note": "这些是「自称」用字：只许出现在魂 identity.self_names 的授权名单里。表里挑出来的词落在名单之外又被当自称用，就是违禁自称——退到中性叫法，不抛错。",
+    "rename_note": "本人要的这个叫法落在违禁自称表里、又不在魂 identity.self_names 的授权名单里：改名（含会话里的临时覆盖）不能绕过自称红线——退到中性叫法，被挡下的那个词记在 banned_self 里。",
+    "rename_applied": "当场换：这一轮就用他要的这个叫法（不写回人名录、不改魂的自称口径；要长久的叫法靠投递给脑的那条记忆，下回合由人名录带回来）。",
+    "session_note": "会话里的临时覆盖：这一轮用这本账记下的叫法（只活这个会话、进程重启即丢；真值靠投递给脑的那条记忆）。",
+    "rename_memory_text": "他要求过叫他{address}",
+    "rename_memory_source_type": "亲历",
+    "rename_memory_note": "投给脑的那条记忆就是这句话：措辞在这份数据里，代码不写死；source_type 只许 亲历／日程模拟，改名是他说过的原话，所以是亲历。"
+  },
+  "source": {
+    "directory": "人名录",
+    "session": "会话覆盖",
+    "rename": "本轮改名",
+    "fallback": "回退",
+    "note": "每次称呼都说一句它从哪儿来：人名录档位挑的、会话里的临时覆盖、这一轮本人要求的改名、还是退到了回退词。四个词都在这份数据里。"
+  },
+  "tone": {
+    "tier_min": 1,
+    "tier_max": 4,
+    "neutral_tier": 2,
+    "softness_digits": 3,
+    "line": "{label}档｜对「{address}」｜{stance}｜自称{self_name}｜心：{heart}",
+    "tiers": {
+      "1": {
+        "label": "客气",
+        "softness": 0.2,
+        "ban_joke": true
+      },
+      "2": {
+        "label": "平常",
+        "softness": 0.4,
+        "ban_joke": true
+      },
+      "3": {
+        "label": "放松",
+        "softness": 0.6,
+        "ban_joke": false
+      },
+      "4": {
+        "label": "撒开",
+        "softness": 0.8,
+        "ban_joke": false
+      }
+    },
+    "heart": {
+      "source_prefix": "heart:",
+      "not_connected": "未接入",
+      "connected_empty": "接入但无读数",
+      "connected": "已接入（{readings}）",
+      "reading_item": "{name}={value}",
+      "reading_sep": " ",
+      "low_energy_below": 30,
+      "high_mood_at_least": 0.2,
+      "low_energy": {
+        "softness_delta": -0.2,
+        "tier_delta": -1,
+        "ban_joke": true
+      },
+      "high_mood": {
+        "softness_delta": 0.1,
+        "tier_delta": 0,
+        "ban_joke": null
+      },
+      "note": "心还没做：拿不到读数就按中性档算，但返回里必须说「未接入」，不许把未接入当成 mood=0 静默混过去。"
+    }
+  }
+}

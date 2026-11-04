@@ -1,0 +1,32 @@
+{
+  "time": 1761523320,
+  "self_id": 1000000001,
+  "post_type": "message",
+  "message_type": "private",
+  "sub_type": "friend",
+  "message_id": -1234567890,
+  "message_seq": 2000000003,
+  "user_id": 3000000003,
+  "message": [
+    {
+      "type": "text",
+      "data": {
+        "text": "私聊测试"
+      }
+    },
+    {
+      "type": "json",
+      "data": {
+        "data": "{\"app\":\"com.tencent.miniapp\"}"
+      }
+    }
+  ],
+  "raw_message": "私聊测试[CQ:json,data={\"app\":\"com.tencent.miniapp\"}]",
+  "font": 0,
+  "sender": {
+    "user_id": 3000000003,
+    "nickname": "路人甲",
+    "sex": "male",
+    "age": 30
+  }
+}

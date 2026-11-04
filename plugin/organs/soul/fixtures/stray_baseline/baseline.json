@@ -1,0 +1,19 @@
+{
+  "status": "draft",
+  "scale": {
+    "min": 0,
+    "max": 100
+  },
+  "axes": [
+    {
+      "id": "服气",
+      "label": "服气",
+      "inner": 92
+    },
+    {
+      "id": "耐心",
+      "label": "耐心",
+      "pending": true
+    }
+  ]
+}

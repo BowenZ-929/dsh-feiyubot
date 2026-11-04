@@ -1,0 +1,52 @@
+{
+  "name": "qqagent-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH 的壳：把「魂」「心」「脑」三个席位挂到面板上，并把面板的 HTTP 原样转给核（Python，127.0.0.1:8787）",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./client/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "build": "node -e \"for (const d of ['lib','client']) require('node:fs').rmSync(d,{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsc -p tsconfig.client.json",
+    "prepare": "pnpm build",
+    "typecheck": "tsc --noEmit",
+    "verify:build": "node scripts/verify-build.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
+    "compatibility": {
+      "note": "席位契约照 dsh-qqbot / dsh-world：宿主半边用 webServer.register({kind:'prefix'}) 挂路由，浏览器半边按 window.__ModuleLoader__.load({id, factory}) 出模块。宿主大版本升级后需重新验收席位。"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "typescript": "^5.9.3"
+  }
+}

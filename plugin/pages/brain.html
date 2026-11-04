@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>脑 · 只读</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
+         margin: 0; padding: 2.2rem 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.25rem; margin: 0 0 1rem; letter-spacing: .02em; }
+  h2 { font-size: 1rem; margin: 1.4rem 0 .6rem; }
+  section { background: #fff; border: 1px solid #dcdcdc; border-radius: 8px;
+            padding: .6rem 1rem 1rem; margin-bottom: 1rem; }
+  pre { margin: .4rem 0 0; padding: .7rem .8rem; background: #f4f7fb;
+        border: 1px solid #ccd8e6; border-radius: 6px; white-space: pre-wrap;
+        overflow-wrap: anywhere; font-size: .85rem; font-family: ui-monospace, Menlo, monospace; }
+  .note { margin: 0 0 1.4rem; color: #7a5c00; background: #fffbea;
+          border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
+  .muted { color: #666; font-size: .85rem; }
+  .back { font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>脑 · 只读</h1>
+  <p class="note">只读：人不能改心与脑（architecture.md §9.2：心与脑只能看）。这一页没有任何写入口；脑的写入是程序内的消息路径。</p>
+  <section aria-labelledby="ov-h">
+    <h2 id="ov-h">现状</h2>
+    <pre id="overview">载入中…</pre>
+  </section>
+  <section aria-labelledby="td-h">
+    <h2 id="td-h">今日</h2>
+    <pre id="today">载入中…</pre>
+  </section>
+  <section aria-labelledby="pp-h">
+    <h2 id="pp-h">人名录（含熟稔读数）</h2>
+    <pre id="people">载入中…</pre>
+  </section>
+  <section aria-labelledby="pr-h">
+    <h2 id="pr-h">改基线提案（每晚 0–2 条，各附三条依据记忆）</h2>
+    <pre id="proposals">载入中…</pre>
+  </section>
+  <section aria-labelledby="sn-h">
+    <h2 id="sn-h">自述（她写的，只记录不解释；心来读）</h2>
+    <pre id="self">载入中…</pre>
+  </section>
+  <p class="muted">待定未接：热记忆的形状、遗忘的力度、记忆滤镜（docs/plan.md §3）；向量检索只留接口。</p>
+  <p class="back"><a href="..">← 回魂面板</a></p>
+</main>
+<script>
+(function () {
+  "use strict";
+  function el(id) { return document.getElementById(id); }
+  function text(id, value) {
+    el(id).textContent = (value === null || value === undefined || value === "")
+      ? "（空）" : (typeof value === "string" ? value : JSON.stringify(value, null, 2));
+  }
+  function get(path) {
+    return fetch(path).then(function (res) {
+      return res.json().then(function (data) { return data; },
+        function () { return { ok: false, message: "响应不是 JSON" }; });
+    });
+  }
+  Promise.all([
+    get("/brain/overview"),
+    get("/brain/today"),
+    get("/brain/people"),
+    get("/brain/proposals"),
+    get("/brain/selfnarration")
+  ]).then(function (out) {
+    text("overview", out[0]);
+    text("today", out[1].entries ? out[1].entries : out[1]);
+    text("people", out[2].people ? out[2].people : out[2]);
+    text("proposals", out[3].proposals ? out[3].proposals : out[3]);
+    text("self", out[4].latest ? out[4].latest : out[4]);
+  }).catch(function (err) {
+    text("overview", "连不上后端：" + err);
+  });
+})();
+</script>
+</body>
+</html>

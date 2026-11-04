@@ -1,0 +1,14 @@
+{
+  "soul_dir": {
+    "type": "string",
+    "default": "organs/soul/data",
+    "description": "魂数据目录",
+    "hint": "相对路径按插件目录解析。换目录只是换一套卡，不改她是谁"
+  },
+  "enable_selfcheck": {
+    "type": "bool",
+    "default": true,
+    "description": "醒时自检",
+    "hint": "开启后启动时查缺块、账目与注入预算；关闭只做载入"
+  }
+}

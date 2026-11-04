@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "id": "b01",
+      "rule": "【待定稿】",
+      "match": {
+        "type": "literal",
+        "pattern": "【待定稿】"
+      },
+      "action": "block",
+      "active": true,
+      "enforced_by": "soul·字面"
+    },
+    {
+      "id": "b02",
+      "rule": "【待定稿·二】",
+      "match": {
+        "type": "regex",
+        "pattern": "^【待定稿·二】$"
+      },
+      "action": "block",
+      "active": true,
+      "enforced_by": "soul·字面"
+    }
+  ]
+}

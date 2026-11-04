@@ -1,0 +1,69 @@
+{
+  "time": 1761523260,
+  "self_id": 1000000001,
+  "post_type": "message",
+  "message_type": "group",
+  "sub_type": "normal",
+  "message_id": 2000000002,
+  "message_seq": 2000000002,
+  "group_id": 700000001,
+  "user_id": 3000000002,
+  "message": [
+    {
+      "type": "reply",
+      "data": {
+        "id": "2000000001"
+      }
+    },
+    {
+      "type": "at",
+      "data": {
+        "qq": "1000000001"
+      }
+    },
+    {
+      "type": "text",
+      "data": {
+        "text": " 帮我看下这段"
+      }
+    },
+    {
+      "type": "image",
+      "data": {
+        "file": "ab12cd34.image",
+        "url": "https://example.invalid/img.png",
+        "summary": "[图片]"
+      }
+    },
+    {
+      "type": "face",
+      "data": {
+        "id": "14"
+      }
+    },
+    {
+      "type": "mface",
+      "data": {
+        "summary": "[动画表情]",
+        "emoji_id": "abc123"
+      }
+    },
+    {
+      "type": "json",
+      "data": {
+        "data": "{\"config\": {\"type\": \"normal\", \"token\": \"0000000000000000000000000000\", \"width\": 0, \"height\": 0, \"ctime\": 1793027291, \"forward\": 1, \"autoSize\": 0}, \"prompt\": \"[QQ小程序]示例卡片\", \"app\": \"com.tencent.miniapp_01\", \"ver\": \"0.0.0.1\", \"appID\": \"100000001\", \"view\": \"view_00000000000000000000000000000000\", \"meta\": {\"detail_1\": {\"appid\": \"100000002\", \"title\": \"示例\", \"desc\": \"示例卡片\", \"preview\": \"https://example.invalid/preview.png\", \"icon\": \"https://example.invalid/icon.png\", \"qqdocurl\": \"https://example.invalid/card\", \"shareTemplateId\": \"00000000000000000000000000000000\", \"host\": {\"uin\": 3000000009, \"nick\": \"示例\"}}}, \"bthirdappforward\": true, \"bthirdappforwardforbackendswitch\": true, \"desc\": \"\"}"
+      }
+    }
+  ],
+  "raw_message": "[CQ:reply,id=2000000001][CQ:at,qq=1000000001] 帮我看下这段[CQ:image,file=ab12cd34.image][CQ:face,id=14][CQ:mface,summary=[动画表情]]",
+  "font": 0,
+  "sender": {
+    "user_id": 3000000002,
+    "nickname": "阿花",
+    "sex": "female",
+    "age": 20,
+    "card": "花姐",
+    "role": "admin"
+  },
+  "anonymous": null
+}

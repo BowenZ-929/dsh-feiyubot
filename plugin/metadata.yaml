@@ -1,0 +1,22 @@
+name: astrbot_plugin_qqagent
+display_name: 七器官与家
+short_desc: 七器官合体的她：魂、心、脑、嘴、手、眼、耳与家；当前只实现了魂
+desc: |
+  她是七器官加一个家，这套插件就是她的落地形态：眼、耳把世界收进来，魂、心、脑在里面过一遍，
+  嘴、手把结果做到外面去，痕迹落进家。一个器官对应 organs/ 下的一个子包。
+  当前只实现了魂（organs/soul）：魂是人写、程序只读的那四件正文（名字与自称、三句底色、待人姿态、红线，合计 ≤1000 字），带原子写、唯一写路径与变更史，
+  有自检与坏卡拒载；心、脑、嘴、手、眼、耳、家都还没有代码。
+  本轮只到最小壳加一个框架无关的 HTTP 层：四个端点（看魂、自检、变更史、改魂），本地开发服务器
+  只绑 127.0.0.1，没有鉴权；AstrBot 的 WebUI 适配、页面、热更新接线都还没做（宿主改判 DSH，这一层暂停）。
+  本插件是**过渡壳**：先跑来喂通道，不是绑定目标。目标壳是 DeepSeek Harness（基座 fork
+  NimuStudio/NimuQDock-dsh，通道 NapCat OneBot v11）。核在 organs/ 与 api/ 下，不含任何宿主 import；
+  壳可换、核只有一份，不许复制。
+version: 0.1.0
+author: "bowen"
+astrbot_version: ">=4.24.2"  # 过渡壳的运行下限，不是目标绑定
+support_platforms:
+  - aiocqhttp
+tags:
+  - 魂
+  - 七器官
+  - WebUI
