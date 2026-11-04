@@ -5,5 +5,30 @@ local/
 .scratch/
 *.log
 
+# 她的运行时数据（实盘状态，会天天变）—— 代码与参数入库，状态不入库
+plugin/organs/soul/data/
+# 脑：参数文件（tiers.json / retention.json / topics.json）必须入库，缺了它们行为会变；状态文件不入库
+plugin/organs/brain/data/today.json
+plugin/organs/brain/data/hot.json
+plugin/organs/brain/data/longterm.jsonl
+plugin/organs/brain/data/people.json
+plugin/organs/brain/data/edges.json
+plugin/organs/brain/data/proposals.json
+plugin/organs/brain/data/proposal_log.jsonl
+plugin/organs/brain/data/selfnarration.jsonl
+plugin/organs/brain/data/evictions.jsonl
+plugin/organs/brain/data/topic_candidates.json
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
+
+# 家的十间房：目录 + 两个决定入库（rooms.json 是骨架派生物，access.json 是"她写哪几间"这个决定本身），
+# 屋里放的东西一律不入库 —— 那是实盘，会天天变
+plugin/organs/home/data/*
+!plugin/organs/home/data/*/
+plugin/organs/home/data/*/*
+!plugin/organs/home/data/*/.gitkeep
+!plugin/organs/home/data/rooms.json
+!plugin/organs/home/data/access.json

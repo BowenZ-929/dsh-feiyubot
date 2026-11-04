@@ -44,7 +44,8 @@ NewQQAgent/
     ├── current-state.md 现状映射与 4 批收编顺序（每条含验收与回滚）
     ├── glossary.md      术语表：id、房间、规矩、读写权
     ├── star-map.html    星图：器官与家的可视化
-    └── modules/         逐器官分册，一器官一文件，文件名即 id（soul/heart/brain/eye/ear/mouth/hand/home）
+    ├── modules/         逐器官分册，一器官一文件，文件名即 id（soul/heart/brain/eye/ear/mouth/hand/home）
+    └── reference/       参考分册：社区十个仓库里各器官可抄的做法与代价，索引在 README.md
 ```
 
 *English: Repo layout — three root files plus docs, with a per-organ module directory named by organ id.*
@@ -53,10 +54,12 @@ NewQQAgent/
 
 | 去哪 | 它回答什么 |
 | --- | --- |
+| [docs/plan.md](docs/plan.md) | **先读这个**：已定了什么、还没定什么、后续对话各自领哪一条施工条目 |
 | [docs/README.md](docs/README.md) | 有哪些文档、按什么顺序读 |
 | [docs/architecture.md](docs/architecture.md) | 谁归谁、凭什么这么判；第八个器官的 S1/S2/S3 准入标准 |
 | [docs/current-state.md](docs/current-state.md) | 现有实盘与这套架构怎么对账、4 批收编怎么排 |
 | `docs/modules/*.md` | 单个器官管什么、不管什么、边界在哪 |
+| [docs/reference/](docs/reference/) | 写某个器官时，别人是怎么做的、参数多少、哪条别抄 |
 | [docs/glossary.md](docs/glossary.md) | 术语一句话定义，防止同名不同义 |
 | [docs/star-map.html](docs/star-map.html) | 星图全貌，一屏看完七器官与家 |
 
@@ -65,6 +68,8 @@ NewQQAgent/
 ## 5 状态
 
 设计阶段：没有代码，只有文档。本体论（七器官 + 家、R1/R2/R3）已定稿，命名不增不改；线上那台 bot 尚未按这套架构接线，差距逐条记在 `docs/current-state.md` 里。
+
+**最终形态已定**：合并成**一套完整插件**，带**一个 WebUI 页面**，人在页面上随时看、随时调；宿主接 **DeepSeek Harness**，基座 fork `NimuStudio/NimuQDock-dsh`（NapCat 个人号通道 + 人格引擎 + 控制台）。面板能改什么、只能看什么见 `docs/architecture.md` §9，宿主迁移的账与缺口见 `docs/current-state.md` §7。
 
 *English: Design stage — documents only, no code; the ontology is settled and the live bot is not yet wired to it.*
 
