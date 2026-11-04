@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 VERSION = 1
 
@@ -44,11 +44,13 @@ MOOD_CONFLICT = -2
 # 冲突一天最多扣两次，剩下的当天不再扣。
 MOOD_CONFLICT_DAILY_CAP = 2
 
-# 同向事件的边际递减：同一自然日内同向的第 2 次起只给半档——第 1 次最有效，
-# 第 3 次就薄了。只给 mood 折算档位用，别处不引用。
-MOOD_DIMINISH_FACTOR = 0.5
-# 单日同向累计上限，单位=档：同向一天最多攒到 2 档，攒满后当天不再给。
-MOOD_DAILY_SAME_DIRECTION_CAP_TIERS = 2.0
+# 天花板：就是 MOOD_MAX 那把尺，不另造同值常数。正向增量乘余量 (1 - 当前值/天花板)，
+# 越贴近顶越加不动——一顿夸顶不满，只能一路逼近。只给 mood 用。
+MOOD_CEILING = MOOD_MAX
+# 热度折扣的窗口与分母：同类型事件 HEAT_WINDOW_MIN 分钟内第 n+1 次，增益 × 1/(1 + n/K)。
+# 只压正向；负向不折扣——疲惫与压力是代价，不打折。窗口与分母都只给 mood 用。
+MOOD_HEAT_WINDOW_MIN = 10
+MOOD_HEAT_K = 12.0
 # 同一小时内的事件合并成一次，避免连珠炮式加分。
 MOOD_EVENT_WINDOW_H = 1
 # 两次采样至少隔 10 分钟，防止抖动被当成真变化。
@@ -127,12 +129,15 @@ REASON_DOUBLE_LOW = "mood-and-energy-low"
 REASON_TODAY_VOLUME = "today-volume"
 REASON_FAMILIARITY = "low-familiarity"
 REASON_INTERRUPTED = "recently-interrupted"
+# 近期事件窗口（engage.window_signal 现算）：连续被无视 / 最近 2 小时内被凶。
+REASON_IGNORED = "ignored-recently"
 REASON_UNATTRIBUTED = "unattributed"
 
 # 硬理由：一条就足够闭嘴，不看别的。
 HARD_REASONS = (REASON_NIGHT, REASON_INSULTED, REASON_DOUBLE_LOW)
 # 软理由：单独不足以沉默，累积才降态。
-SOFT_REASONS = (REASON_TODAY_VOLUME, REASON_FAMILIARITY, REASON_INTERRUPTED)
+SOFT_REASONS = (REASON_TODAY_VOLUME, REASON_FAMILIARITY, REASON_INTERRUPTED,
+                REASON_IGNORED)
 REASONS = HARD_REASONS + SOFT_REASONS + (REASON_UNATTRIBUTED,)
 
 INTENT_PASSIVE = "passive"

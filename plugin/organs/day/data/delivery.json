@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "stuck_minutes": 5,
+  "backoff_minutes": 2,
+  "backoff_cap_minutes": 32,
+  "note": "送达的阈值：stuck_minutes 是「最后一次尝试之后多久还没 ack 算卡住」（作者默认 5 分钟）；backoff_minutes 是重送退避的基数（第 n 次等 backoff_minutes×2^(n-1) 分钟，按 next_try_at 排）；backoff_cap_minutes 是退避封顶。**不**限制同时待投递的件数：单飞会把整条投递链堵在一件上（作者自己把它列进代价），理由见 organs/day/delivery.py 的判据第 4 条。"
+}

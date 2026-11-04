@@ -1,4 +1,4 @@
-"""心的人可读自检：python3 -m organs.heart.cli <card|energy-day|mood-praise3|gates|all>。
+"""心的人可读自检：python3 -m organs.heart.cli <card|energy-day|mood-praise3|gates|pending|window|all>。
 
 只做演示与取证，不是产品入口：每条命令都把数据根指到 tempfile.mkdtemp() 的临时目录，
 第一行就把这个路径打印出来——**仓里的 data 一个字节都不碰**。
@@ -19,10 +19,17 @@ from typing import Any, Dict, List
 from organs.heart import card as card_module
 from organs.heart import energy as energy_module
 from organs.heart import engage as engage_module
+from organs.heart import events as events_module
 from organs.heart import model
 from organs.heart import mood as mood_module
+from organs.heart import offset as offset_module
+from organs.heart import pending as pending_module
 
-SECTIONS = ("card", "energy-day", "mood-praise3", "gates")
+SECTIONS = ("card", "energy-day", "mood-praise3", "gates", "pending", "window")
+
+# 三连夸的期望值：写成字面量，不按公式现算——现算就等于拿实现给它自己判卷。
+PRAISE_EXPECTED = (64.0, 67.3, 70.1)
+PRAISE_HALF_LIFE_EXPECTED = 65.1
 
 
 def _stamp(day: int, hour: int, minute: int = 0) -> str:
@@ -98,11 +105,17 @@ def demo_energy_day(root: Path) -> None:
           % (again["settled_from"], again["settled_to"]))
 
 
-# ---- mood-praise3：60 → 70 → 80 → 90 → 3 小时后 75.0 ----------------------
+# ---- mood-praise3：60 → 64.0 → 67.3 → 70.1（3 小时后 65.1） -----------------
 
 
 def demo_mood_praise3(root: Path) -> None:
-    """三连夸把 now 推到 90，再等一个半衰（3 小时）读回 75.0。
+    """三连夸：60 → 64.0 → 67.3 → 70.1，一个半衰（3 小时）后读回 65.1。
+
+    口径（mood.apply_event 第 3 步）：正向增量 = 名义 10 分 × heat × headroom，
+      heat = 1/(1 + n/12)     —— 十分钟内同类型第 n+1 次，越密越薄（热度折扣）；
+      headroom = 1 − before/100 —— 越贴近天花板越加不动（渐近线）。
+    所以一顿夸顶不满：不是 60 → 70 → 80 → 90 那种加法，而是一路逼近 100。
+    末尾 65.1 是 3 小时（MOOD_NOW_HALF_LIFE_H = 3h，一个半衰）后 now 往基线 60 走一半。
 
     同一人同一小时只算一次（mood 的 window），所以三次夸来自三个不同的人；
     这是设计里的防连珠炮，不是演示的手脚。
@@ -110,17 +123,22 @@ def demo_mood_praise3(root: Path) -> None:
     _root_note(root)
     at = _stamp(5, 9)
     before = mood_module.read(root, at)
-    print("  %-22s now=%5.1f  baseline=%5.1f  %s"
-          % ("起点（%s）" % at, before["now"], before["baseline"], before["tier"]))
+    print("  起点（%s） now=%.1f  baseline=%.1f  %s"
+          % (at, before["now"], before["baseline"], before["tier"]))
     for index, who in enumerate(("甲", "乙", "丙"), start=1):
         result = mood_module.apply_event("praise", root=root, now=at, who=who)
-        print("  %-22s now %.1f → %.1f（delta %+.1f）"
-              % ("第 %d 次夸（%s）" % (index, who), result["before"], result["after"],
-                 result["delta"]))
+        expected = PRAISE_EXPECTED[index - 1]
+        print("  第 %d 次夸（%s） now %.1f → %.1f（delta %+.1f，heat %.4f，headroom %.4f）"
+              "  期望 %.1f → %s"
+              % (index, who, result["before"], result["after"], result["delta"],
+                 result["heat"], result["headroom"], expected,
+                 "一致" if abs(result["after"] - expected) < 0.05 else "不一致"))
     later = _stamp(5, 12)
     final = mood_module.read(root, later)
-    print("  %-22s now=%5.1f（%s）  期望 75.0（90 与基线 60 的中点）"
-          % ("3 小时后（%s）" % later, final["now"], final["tier"]))
+    print("  3 小时后（%s） now=%.1f（%s）  期望 %.1f（=%.1f 往基线 %.1f 走一个半衰） → %s"
+          % (later, final["now"], final["tier"], PRAISE_HALF_LIFE_EXPECTED,
+             PRAISE_EXPECTED[-1], final["baseline"],
+             "一致" if abs(final["now"] - PRAISE_HALF_LIFE_EXPECTED) < 0.05 else "不一致"))
     rows = mood_module.trajectory(root, limit=200)
     print("  轨迹账本：%d 行；最后一行 %s"
           % (len(rows), json.dumps(rows[-1], ensure_ascii=False) if rows else "（空）"))
@@ -168,8 +186,90 @@ def demo_gates(root: Path) -> None:
         print("    %-22s %d 次" % (reason, report["by_reason"][reason]))
 
 
+# ---- pending：三条冷落长出「想被夸」→ 结算消失；轴念头 TTL 到点 fade + 回吐 -----
+
+
+def demo_pending(root: Path) -> None:
+    """念头层两幕：① 三条 ignored → 长 wanted_praise → settle 掉；② 轴念头没人理 → fade + 回吐。"""
+    _root_note(root)
+    for minute in (50, 55, 58):
+        events_module.deliver("ignored", root=root, now=_stamp(5, 8, minute))
+    print("  ① 投 3 条 ignored（%s ~ %s）：她连着说了三次没人回。"
+          % (_stamp(5, 8, 50), _stamp(5, 8, 58)))
+    grown = pending_module.derive(root=root, now=_stamp(5, 9, 20))
+    print("  derive @ %s：新建 %d 条，dropped %d 条"
+          % (grown["at"], len(grown["created"]), len(grown["dropped"])))
+    for row in grown["open"]:
+        print("    %-14s source=%-13s state=%-6s attempts=%d  剩余 TTL %.1f 分钟"
+              % (row["kind"], row["source"], row["state"], row["attempts"],
+                 row["ttl_left_min"]))
+    settled = pending_module.settle("praise", root=root, now=_stamp(5, 9, 30))
+    event = settled.get("event") or {}
+    print("  settle(praise) @ %s：ok=%s，state=%s；投递事件 %s"
+          % (settled.get("settled_at") or settled.get("at"), settled["ok"],
+             settled.get("state"),
+             "praise（写心情的是 mood，念头层只投递）" if event else "无"))
+    if event:
+        print("    mood 那本账：now %.1f → %.1f（delta %+.1f）"
+              % (event["before"], event["after"], event["delta"]))
+    left = pending_module.open_thoughts(root=root, now=_stamp(5, 9, 30))
+    print("  结算后再读：open=%d（%s）"
+          % (len(left), "念头已经了了" if not left else left))
+
+    flux = root / "flux"
+    flux.mkdir()
+    offset_module.apply_daily("服气", 1.0, root=flux, now=_stamp(5, 7))
+    offset_module.apply_daily("服气", 1.0, root=flux, now=_stamp(6, 7))
+    peak = offset_module.overview(flux, _stamp(6, 8))["axes"]["服气"]["value"]
+    cfg = pending_module.overview(flux, _stamp(6, 8))["config"]
+    print("  ② 另一幕（新的临时子根）：%s / %s 各 +1 → 服气偏移 %.1f，阈值 axis_threshold=%.1f"
+          % (_stamp(5, 7), _stamp(6, 7), peak, cfg["axis_threshold"]))
+    for row in pending_module.derive(root=flux, now=_stamp(6, 8))["open"]:
+        print("    %-14s axis=%s  state=%s  剩余 TTL %.1f 分钟（到期 %s）"
+              % (row["kind"], row["axis"], row["state"], row["ttl_left_min"],
+                 row["expires_at"]))
+    later = _stamp(6, 11, 1)
+    faded = pending_module.open_thoughts(root=flux, now=later)
+    after = offset_module.overview(flux, later)["axes"]["服气"]["value"]
+    states = ["%s/%s@%s" % (row["kind"], row["state"], row["faded_at"])
+              for row in pending_module.overview(flux, later)["thoughts"]]
+    print("  TTL 到点（%s）再读一次：open=%d，念头 %s"
+          % (later, len(faded), "、".join(states) or "（无）"))
+    print("  fade 时按 config.release=%.1f 向轴回吐：服气偏移 %.1f → %.1f"
+          % (cfg["release"], peak, after))
+
+
+# ---- window：3 / 5 / 8 条 ignored 的 weight 与判决阶梯 ----------------------
+
+
+def demo_window(root: Path) -> None:
+    """同一时刻（09:00）三个子根各投 3 / 5 / 8 条 ignored，看 weight 与判决怎么变。"""
+    _root_note(root)
+    at = _stamp(5, 9)
+    print("  %-3s %-9s %-13s %-6s %-6s %s"
+          % ("n", "weight", "连续被无视", "窗内", "state", "hits"))
+    for count in (3, 5, 8):
+        sub = root / ("n%d" % count)
+        sub.mkdir()
+        for index in range(count):
+            events_module.deliver("ignored", root=sub, now=_stamp(5, 8, 50 + index))
+        signal = engage_module.window_signal(sub, at)
+        result = engage_module.decide(engage_module.EngageInput(
+            mood_now=60.0, energy=80.0, familiarity=2.0, today_count=0,
+            now=at, window=signal))
+        print("  %-3d %-8.3f %-11d %-6d %-6s %s"
+              % (count, signal["weight"], signal["consecutive_ignored"],
+                 signal["rows"], result["state"], "、".join(result["hits"])))
+    print("  阶梯：weight ≥ %.1f 判「不说」、≥ %.1f 判「少说」；连续被无视 ≥ %d 条兜底至少「少说」。"
+          % (engage_module.WINDOW_SILENT_WEIGHT, engage_module.WINDOW_LESS_WEIGHT,
+             engage_module.WINDOW_CONSECUTIVE_IGNORED))
+    print("  每条的权重按 (1 − 距今分钟数/%.0f) 线性衰减：越新越接近满权重，出了窗口自然归零。"
+          % engage_module.WINDOW_MIN)
+
+
 DEMOS = {"card": demo_card, "energy-day": demo_energy_day,
-         "mood-praise3": demo_mood_praise3, "gates": demo_gates}
+         "mood-praise3": demo_mood_praise3, "gates": demo_gates,
+         "pending": demo_pending, "window": demo_window}
 
 
 def _run_section(index: int, total: int, name: str) -> None:

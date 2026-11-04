@@ -3,9 +3,9 @@
 handle(method, path, body, store, query=None, brain=None) -> (status, payload)，payload 可直接 json.dumps。
 path 可以带查询串（"?"后段由 handle 自己解），也可以把解好的 query 映射直接传进来。
 
-路由按器官拆开：魂在 soul.py、脑在 brain.py、心在 heart.py、嘴在 mouth.py、家在 home.py，
-静态页名单在 pages.py。心的七条只读端点由 heart.py 全权接管——"只读页只是占位"那个
-概念随心线落地一起删掉了，只读语义现在由 HEART_ROUTES + 405 分支承担。
+路由按器官拆开：魂在 soul.py、脑在 brain.py、心在 heart.py、嘴在 mouth.py、家在 home.py、
+日子在 day.py，静态页名单在 pages.py。心的七条只读端点由 heart.py 全权接管——"只读页只是
+占位"那个概念随心线落地一起删掉了，只读语义现在由 HEART_ROUTES + 405 分支承担。
 这里只做两件事——把各器官表汇总成一张 ROUTES（同名键直接抛，不许两条线各自注册同
 一个端点），以及按表分发。导入顺序：本模块要汇总器官表，必须最先导入（api.api / devserver / panel 都已如此）。
 """
@@ -46,13 +46,14 @@ def _merge(*tables: Mapping[str, str]) -> Dict[str, str]:
 
 
 # 器官文件要 import 上面的公共件，所以汇总放最后：否则 core 还没定义完就被回头拿走。
-from . import brain as brain_api, heart as heart_api, home as home_api  # noqa: E402
+from . import brain as brain_api, day as day_api, heart as heart_api  # noqa: E402
+from . import home as home_api  # noqa: E402
 from . import mouth as mouth_api, pages as page_api, soul as soul_api  # noqa: E402
 from . import version as version_api  # noqa: E402
 
 ROUTES = _merge(soul_api.SOUL_ROUTES, brain_api.BRAIN_ROUTES, page_api.PAGE_ROUTES,
                 mouth_api.MOUTH_ROUTES, home_api.HOME_ROUTES, heart_api.HEART_ROUTES,
-                version_api.VERSION_ROUTES)
+                version_api.VERSION_ROUTES, day_api.DAY_ROUTES)
 
 
 def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
@@ -84,6 +85,11 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
                          "message": "%s 只收 %s：家有十条路由，只有 POST /home/write 这一条是写，"
                                     "其余九条只读，方法不对一律 405（写权限也看这张表，不看 UI）"
                                     % (route, ROUTES[route])}
+        if route in day_api.DAY_ROUTES:
+            return 405, {"ok": False,
+                         "message": "%s 只收 %s：日子线十条路由各认一个方法，派发前先看这张表"
+                                    "（换日与闸门都拦在调度层，换方法绕不过去）"
+                                    % (route, ROUTES[route])}
         return 405, {"ok": False, "message": "%s 只收 %s" % (route, ROUTES[route])}
     if route in heart_api.HEART_ROUTES:
         return heart_api.dispatch(route, params, store, brain)
@@ -93,6 +99,8 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
         return mouth_api.dispatch(route, params, store, brain)
     if route in home_api.HOME_ROUTES:
         return home_api.dispatch(route, params, store, brain, body)
+    if route in day_api.DAY_ROUTES:
+        return day_api.dispatch(route, params, body, store, brain)
     if route in version_api.VERSION_ROUTES:
         return version_api.dispatch(route)
     return soul_api.dispatch(route, params, body, store)

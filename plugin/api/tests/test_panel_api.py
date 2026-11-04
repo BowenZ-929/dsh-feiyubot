@@ -20,7 +20,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from api import api, core, devserver, panel
+from api import api, core, day as day_api, devserver, panel
 from api.tests.helpers import copy_fixture, read_bytes
 from organs.brain import BrainStore
 from organs.soul import load
@@ -30,6 +30,11 @@ PAGE = PLUGIN / "pages" / "soul.html"
 BLOCK_FILES = ("identity.json", "manner.json", "bounds.json", "history.jsonl")
 AUDIENCE = "熟人"
 PAGES = PLUGIN / "pages"
+# 心的数据目录：跑完一轮测试，这里只许剩这三个文件。mood.read / energy.read 是
+# "读时算、顺手落一笔"的设计，谁拿默认根跑一次就会往这儿丢运行时文件——守卫见
+# PanelContractTest.test_zz_heart_data_dir_stays_clean。
+HEART_DATA = PLUGIN / "organs" / "heart" / "data"
+ALLOWED_HEART_DATA = {".gitignore", ".gitkeep", "baseline-card.json"}
 BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
                 "/brain/recall", "/brain/selfnarration", "/brain/proposals")
 # 关键端点：方法 + 路径。条数由 api.ROUTES 自己算（见 RouteRegistryTest），这里只钉"必须在"。
@@ -45,6 +50,8 @@ REQUIRED_ROUTES = (
     ("GET", "/heart/engage"),
     # 2026-11-05 第二轮：/heart/effective 加入关键端点表
     ("GET", "/heart/effective"),
+    # 第三轮念头层：/heart/pending 与心跳同一条只读口径（谁加路由谁登记）
+    ("GET", "/heart/pending"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
@@ -59,6 +66,12 @@ REQUIRED_ROUTES = (
     # 脑线新落的两条只读端点（2026-11-05，四档列表与冷仓分页）：先在这儿认下来，
     # 脑线自己的断言到了再各自归位。
     ("GET", "/brain/tiers"), ("GET", "/brain/cold"),
+    # 日子线第一波（2026-11-05）：十条 = 四条只读 + 六条手工触发。
+    # 写着"手工触发"的那几条不是只读页：tick 排当天、night 跑四步、deliver 入队、ack 记回执。
+    ("POST", "/day/tick"), ("GET", "/day/plan"), ("POST", "/day/night"),
+    ("GET", "/day/log"), ("GET", "/day/schedule"), ("POST", "/day/schedule/draw"),
+    ("GET", "/day/pending"), ("POST", "/day/deliver"), ("POST", "/day/ack"),
+    ("POST", "/day/reconcile"),
 )
 # 有必填查询参数的 GET：空 query 时必须是 400（不是 200，也不许崩）——缺哪个参数就得在 message 里点名。
 # 以后加带必填参数的端点，放进这一组；别把它学成 skip（skip 掉就没人守「缺参要响」了）。
@@ -305,12 +318,16 @@ class PanelSourceTest(unittest.TestCase):
         魂（/soul*）、脑（/brain*）、家（/home*）、心（/heart*）、其余（嘴的干跑端点）。
         READONLY_PAGES 已删，所以「其余」只剩 MOUTH_ROUTES；五组两两不相交、并集就是整张
         ROUTES——每条路由都要有明确归属，不许有一条落在分类之外。
+
+        口径变更（2026-11-05 日子线第一波）：多第六组「日子」（/day*，DAY_ROUTES 那一张表），
+        「其余」仍只有嘴的干跑端点 + 核自报身份——日子不许混进 rest，混进去就等于没归属。
         """
         soul = {path for path in api.ROUTES if path.startswith("/soul")}
         brain = {path for path in api.ROUTES if path.startswith("/brain")}
         family = {path for path in api.ROUTES if path.startswith("/home")}
         heart = {path for path in api.ROUTES if path.startswith("/heart")}
-        rest = set(api.ROUTES) - soul - brain - family - heart
+        day = {path for path in api.ROUTES if path.startswith("/day")}
+        rest = set(api.ROUTES) - soul - brain - family - heart - day
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
         self.assertEqual({"/home/write"},
@@ -324,6 +341,10 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(core.heart_api.HEART_ROUTES), heart,
                          "心的路由就是 HEART_ROUTES 那一张表")
         self.assertEqual({"GET"}, {api.ROUTES[path] for path in heart}, "心只有只读端点")
+        self.assertEqual(set(core.day_api.DAY_ROUTES), day,
+                         "日子的路由就是 DAY_ROUTES 那一张表")
+        self.assertEqual({"GET", "POST"}, {api.ROUTES[path] for path in day},
+                         "日子只有四条只读 + 六条手工触发（写方法错了一律 405）")
         self.assertEqual(mouth | version_set, rest,
                          "魂、脑、家、心之外 = 嘴的干跑端点 + 核自报身份 %s"
                          % (sorted(mouth | version_set),))
@@ -345,8 +366,9 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(), heart & rest, "心与嘴有重叠")
         self.assertEqual(set(), brain & heart, "脑与心有重叠")
         self.assertEqual(set(), family & (soul | brain | heart | rest), "家与别的组有重叠")
-        self.assertEqual(set(api.ROUTES), soul | brain | family | heart | rest,
-                         "路由表分不成五组：有端点没归属")
+        self.assertEqual(set(), day & (soul | brain | family | heart | rest), "日子与别的组有重叠")
+        self.assertEqual(set(api.ROUTES), soul | brain | family | heart | day | rest,
+                         "路由表分不成六组：有端点没归属")
         self.assertEqual(set(REQUIRED_ROUTES),
                          {(api.ROUTES[path], path) for path in api.ROUTES},
                          "路由表就是那张关键端点表：多了少了都得在这儿说清楚")
@@ -457,43 +479,74 @@ class PanelContractTest(unittest.TestCase):
     def test_handlers_take_body_and_query_and_return_json_safe_payloads(self):
         """每条挂上的端点都能被调用，且返回 json 安全的 dict。
 
-        分两类，谁都不许 skip：
+        分三类，谁都不许 skip：
         - 无必填参数的 GET：空 query 必须 200；
         - REQUIRED_PARAM_ROUTES 里的 GET（嘴的 /mouth/split 与 /mouth/gate 缺 text，家的
           /home/list 与 /home/read 缺 room）：空 query 必须 400，而且仍是 json 安全的 dict +
-          ok:false + 一句点名缺哪个参数的 message。
-        枚举口径覆盖 api.ROUTES 里每一条 GET：没有一条落在两类之外（漏网即失败）。
+          ok:false + 一句点名缺哪个参数的 message；
+        - 未接入的端点（day_api.unconnected_routes()，由懒导入失败**推导**）：必须 501 +
+          message 含「未接入」。这一组不是手写名单——organs/day 的 schedule / delivery
+          一落地它就自动变空，那几条路由自动回到"必须 200"，不留永久例外。
+        枚举口径覆盖 api.ROUTES 里每一条 GET：没有一条落在三类之外（漏网即失败）。
         """
         seen_get = set()
+        answered_unconnected = set()
         # 口径变更（2026-11-05 心线落地）：心读自己的数据根，而 mood.read / energy.read 是
         # "读时算、顺手落一笔"的设计——所以这条"把每条 GET 都走一遍"的测试必须把心指到
         # 临时目录，否则跑一次测试就往仓里的 data 留下 mood_traj.jsonl 与 energy.json。
         heart_root = Path(self._tmp.name) / "heart"
         heart_root.mkdir()
+        # 口径变更（2026-11-05 日子线第一波）：日子的每条路由都会真落盘——tick 落计划账与
+        # 节律状态、tick/night 跑夜落夜日志与心的结算、schedule/draw 往家里落卡——所以 /day*
+        # 不分读写一律把**三个**根都指到临时目录。少指一个就是往真实的家/心写东西：
+        # home_root 缺了，draw 会往 organs/home/data/工作台 落测试卡（这条踩过）。
+        day_root = Path(self._tmp.name) / "day"
+        day_root.mkdir()
+        home_root = Path(self._tmp.name) / "home"
+        home_root.mkdir()
+        day_query = {"root": str(day_root), "home_root": str(home_root),
+                     "heart_root": str(heart_root)}
+        unconnected = set(day_api.unconnected_routes())
+        self.assertEqual(set(), unconnected - set(api.ROUTES), "未接入名单里有不存在的路由")
         for method, path, handler in panel.routes(self.store, self.brain):
             self.assertTrue(callable(handler), path)
+            query = dict(day_query) if path.startswith("/day") else {}
             if method == "GET":
-                query = {"q": "以前说过什么"} if path == "/brain/recall" else {}
+                if path == "/brain/recall":
+                    query["q"] = "以前说过什么"
                 if path.startswith("/heart"):
-                    query = dict(query, root=str(heart_root))
+                    query["root"] = str(heart_root)
                 status, payload = handler(None, query)
                 seen_get.add(path)
+                if status == 501:
+                    answered_unconnected.add(path)
                 if path in REQUIRED_PARAM_ROUTES:
                     self.assertEqual(400, status, path)
                     self.assertIsInstance(payload, dict, path)
                     self.assertFalse(payload.get("ok"), path)
                     self.assertIn(REQUIRED_PARAM_ROUTES[path],
                                   payload.get("message", ""), path)
+                elif path in unconnected:
+                    self.assertEqual(501, status, path)
+                    self.assertIn("未接入", payload.get("message", ""), path)
                 else:
                     self.assertEqual(200, status, path)
             else:
-                status, payload = handler({}, {})
+                status, payload = handler({}, query)
                 self.assertIsInstance(status, int, path)
+                if path in unconnected:
+                    self.assertEqual(501, status, path)
+                    self.assertIn("未接入", payload.get("message", ""), path)
             json.dumps(payload, ensure_ascii=False)
         registered_get = {path for path, method in api.ROUTES.items() if method == "GET"}
         self.assertEqual(registered_get, seen_get, "有 GET 路由没被这一层枚举到")
         self.assertTrue(set(REQUIRED_PARAM_ROUTES) <= registered_get,
                         "REQUIRED_PARAM_ROUTES 里有端点不在路由表上")
+        # 声明式收口：实际回 501 的 GET 集合 == unconnected_routes() ∩ GET 路由。
+        # 断言随模块落地自动变严，不会留下"某条路由永远豁免"的口子。
+        self.assertEqual(unconnected & registered_get, answered_unconnected,
+                         "501 的 GET 与未接入名单对不上：要么有路由被永久豁免，"
+                         "要么模块落地了名单没跟上")
 
     def test_render_handler_reads_audience_from_query(self):
         routes = dict(((method, path), handler)
@@ -502,6 +555,22 @@ class PanelContractTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual(AUDIENCE, payload["audience"])
         self.assertIn("【待人姿态】", payload["text"])
+
+    def test_zz_heart_data_dir_stays_clean(self):
+        """守卫：跑完这一轮，仓里的 heart/data 只许留 .gitignore / .gitkeep / baseline-card.json。
+
+        上面那条"把每条 GET 都走一遍"的用例是本目录里唯一会碰心全部端点的：
+        它一旦忘了把 root 指到临时目录，energy.read 的读时结算就会往这里写回
+        energy.json（pending.json / mood_traj.jsonl / event_log.jsonl 同理）。
+        故意把名字排到本类最后（test_zz_）：同一类里它一定最后跑，正好收这一类的尾。
+        """
+        present = {path.name for path in HEART_DATA.iterdir()}
+        extra = sorted(present - ALLOWED_HEART_DATA)
+        self.assertEqual(set(), set(extra),
+                         "心的 data 目录多了运行时文件 %r：有测试拿了默认根（真实数据根）"
+                         "跑心，root= 必须指到临时目录" % (extra,))
+        self.assertEqual(ALLOWED_HEART_DATA, present,
+                         "心的 data 目录少了卡或说明文件：%r" % (sorted(present),))
 
     def test_contract_module_documents_mount_point_and_imports_no_host(self):
         source = (PLUGIN / "api" / "panel.py").read_text(encoding="utf-8")
@@ -686,18 +755,24 @@ class DevserverHttpTest(unittest.TestCase):
 
 
 class RouteRegistryTest(unittest.TestCase):
-    """路由表的汇总口径：六张器官表拼一张，同名键当场炸——静默覆盖正是拆包要止住的事。"""
+    """路由表的汇总口径：八张器官表拼一张，同名键当场炸——静默覆盖正是拆包要止住的事。"""
 
     def test_route_table_is_the_merge_of_five_organ_tables(self):
-        """汇总表 = 六张器官表逐键拼起来，一条不少、一条不多。
+        """汇总表 = 八张器官表逐键拼起来，一条不少、一条不多。
 
         口径变更（2026-11-05 心线落地）：心的七条只读端点成了独立一张表
         （heart_api.HEART_ROUTES），占位页表 PAGE_ROUTES 留空——所以这里是六张，不是五张。
 
-        六张表各自守着一条器官线：soul_api.SOUL_ROUTES（魂）/ brain_api.BRAIN_ROUTES（脑）/
+        口径变更（2026-11-05 日子线第一波）：日子成了独立一张表（day_api.DAY_ROUTES，
+        十条：tick/plan/night/log/schedule/schedule-draw/pending/deliver/ack/reconcile）
+        ——所以这里是八张，不是六张（核自报身份那张一直在，从没算进"器官"里）。
+
+        八张表各自守着一条器官线：soul_api.SOUL_ROUTES（魂）/ brain_api.BRAIN_ROUTES（脑）/
         page_api.PAGE_ROUTES（占位页，已空）/ mouth_api.MOUTH_ROUTES（嘴的干跑端点）/
         home_api.HOME_ROUTES（家：九条只读 + 一条 POST /home/write）/
-        heart_api.HEART_ROUTES（心：七条只读）。
+        heart_api.HEART_ROUTES（心：七条只读）/
+        day_api.DAY_ROUTES（日子：四条只读 + 六条 POST，内容归 schedule、送达归 delivery）/
+        version_api.VERSION_ROUTES（核自报身份）。
         """
         tables = (("soul_api.SOUL_ROUTES", core.soul_api.SOUL_ROUTES),
                   ("brain_api.BRAIN_ROUTES", core.brain_api.BRAIN_ROUTES),
@@ -705,6 +780,7 @@ class RouteRegistryTest(unittest.TestCase):
                   ("mouth_api.MOUTH_ROUTES", core.mouth_api.MOUTH_ROUTES),
                   ("home_api.HOME_ROUTES", core.home_api.HOME_ROUTES),
                   ("heart_api.HEART_ROUTES", core.heart_api.HEART_ROUTES),
+                  ("day_api.DAY_ROUTES", core.day_api.DAY_ROUTES),
                   ("version_api.VERSION_ROUTES", core.version_api.VERSION_ROUTES))
         sources = " / ".join(name for name, _ in tables)
         merged = core._merge(*[table for _, table in tables])

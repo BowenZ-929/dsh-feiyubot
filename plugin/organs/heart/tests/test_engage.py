@@ -9,9 +9,10 @@ import tempfile
 import unittest
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from datetime import timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
-from organs.heart import engage, model, ports, store
+from organs.heart import engage, events, model, ports, store
 from organs.heart.tests import helpers
 
 # 固定时刻。
@@ -31,6 +32,17 @@ def make_input(**kw: Any) -> "engage.EngageInput":
     }
     base.update(kw)
     return engage.EngageInput(**base)
+
+
+def minutes_ago(minutes: float, base: str = DAY) -> str:
+    """base 往前 minutes 分钟的时刻串。"""
+    return model.iso(model.parse_ts(base) - timedelta(minutes=minutes))
+
+
+def feed(root: Any, kinds: List[str], gaps: List[float], base: str = DAY) -> None:
+    """按 gaps（距 base 几分钟）往临时账本投递一串事件。"""
+    for kind, gap in zip(kinds, gaps):
+        events.deliver(kind, root=root, now=minutes_ago(gap, base))
 
 
 class HardGatesTest(unittest.TestCase):
@@ -240,6 +252,46 @@ class AttributionTest(unittest.TestCase):
         silent = [r for r in rows if r["state"] == model.STATE_SILENT]
         self.assertTrue(silent, "20 次里应该有判「不说」的")
 
+    # 上一轮那 20 次判决的逐行快照（state, reason, hits）：
+    # 加第 4 道软门之后必须一模一样——硬门次序、软门三条、命中即停都没动。
+    EXPECTED: List[Tuple[str, Optional[str], List[str]]] = [
+        (model.STATE_SILENT, model.REASON_NIGHT, [model.REASON_NIGHT]),
+        (model.STATE_LESS, model.REASON_NIGHT, [model.REASON_NIGHT]),
+        (model.STATE_LESS, model.REASON_INSULTED, [model.REASON_INSULTED]),
+        (model.STATE_SILENT, model.REASON_DOUBLE_LOW, [model.REASON_DOUBLE_LOW]),
+        (model.STATE_LESS, model.REASON_INSULTED,
+         [model.REASON_INSULTED, model.REASON_DOUBLE_LOW]),
+        (model.STATE_LESS, model.REASON_TODAY_VOLUME, [model.REASON_TODAY_VOLUME]),
+        (model.STATE_SILENT, model.REASON_TODAY_VOLUME, [model.REASON_TODAY_VOLUME]),
+        (model.STATE_LESS, model.REASON_FAMILIARITY, [model.REASON_FAMILIARITY]),
+        (model.STATE_LESS, model.REASON_INTERRUPTED, [model.REASON_INTERRUPTED]),
+        (model.STATE_LESS, model.REASON_TODAY_VOLUME,
+         [model.REASON_TODAY_VOLUME, model.REASON_FAMILIARITY]),
+        (model.STATE_SILENT, model.REASON_TODAY_VOLUME,
+         [model.REASON_TODAY_VOLUME, model.REASON_FAMILIARITY,
+          model.REASON_INTERRUPTED]),
+        (model.STATE_SPEAK, None, []),
+        (model.STATE_SPEAK, None, []),
+        (model.STATE_SPEAK, None, []),
+        (model.STATE_LESS, model.REASON_INTERRUPTED, [model.REASON_INTERRUPTED]),
+        (model.STATE_SPEAK, None, []),
+        (model.STATE_LESS, model.REASON_NIGHT, [model.REASON_NIGHT]),
+        (model.STATE_LESS, model.REASON_INSULTED, [model.REASON_INSULTED]),
+        (model.STATE_LESS, model.REASON_FAMILIARITY, [model.REASON_FAMILIARITY]),
+        (model.STATE_SILENT, model.REASON_NIGHT, [model.REASON_NIGHT]),
+    ]
+
+    def test_twenty_judgments_unchanged_by_window_gate(self) -> None:
+        self.assertEqual(len(self.EXPECTED), len(self.CASES))
+        for index, (case, want) in enumerate(zip(self.CASES, self.EXPECTED), 1):
+            kw = dict(case)
+            label = kw.pop("label")
+            res = engage.decide(make_input(**kw))
+            self.assertEqual((res["state"], res["reason"], res["hits"]), want,
+                             "第 %d 次（%s）的判决变了" % (index, label))
+            # 没传窗口 → 第 4 道软门不参与，判决与被加之前逐行一致。
+            self.assertIsNone(res["window"])
+
     def test_invariant_stamps_unattributed_and_warns(self) -> None:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -267,6 +319,162 @@ class AttributionTest(unittest.TestCase):
                          {"total": 0, "unattributed": 0, "by_reason": {}})
         self.assertEqual(engage.attribution_report([None, "x"]),  # type: ignore[list-item]
                          {"total": 0, "unattributed": 0, "by_reason": {}})
+
+
+class WindowSignalTest(unittest.TestCase):
+    """验收 5：近期事件窗口现算加权——读账本、不落状态、窗口滑走自然归零。"""
+
+    def test_three_consecutive_ignored_judges_less(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["ignored"] * 3, [4, 2, 0])
+            sig = engage.window_signal(root, now=DAY)
+            self.assertEqual(sig["rows"], 3)
+            self.assertEqual(sig["consecutive_ignored"], 3)
+            self.assertEqual((sig["harsh"], sig["replied"]), (0, 0))
+            self.assertEqual(sig["window_min"], engage.WINDOW_MIN)
+            self.assertAlmostEqual(sig["weight"], 2.95, places=6)
+            res = engage.decide(make_input(window=sig))
+            self.assertEqual(res["state"], model.STATE_LESS)
+            self.assertEqual(res["hits"], [model.REASON_IGNORED])
+            self.assertEqual(res["reason"], model.REASON_IGNORED)
+            self.assertEqual(res["soft"], [model.REASON_IGNORED])
+            self.assertEqual(res["window"], sig)
+            self.assertIn(model.REASON_IGNORED, model.SOFT_REASONS)
+
+    def test_normal_reply_restores_speak(self) -> None:
+        # 连喂 3 条 ignored 判少说；补一次正常互动，下一次判定回到「说」。
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["ignored"] * 3, [6, 4, 2])
+            before = engage.window_signal(root, now=DAY)
+            before_res = engage.decide(make_input(window=before))
+            self.assertEqual(before_res["state"], model.STATE_LESS)
+            self.assertAlmostEqual(before["weight"], 2.9, places=6)
+            events.deliver("replied", root=root, now=DAY)
+            after = engage.window_signal(root, now=DAY)
+            after_res = engage.decide(make_input(window=after))
+            self.assertAlmostEqual(after["weight"], 1.9, places=6)
+            self.assertEqual(after["replied"], 1)
+            self.assertEqual(after["consecutive_ignored"], 0)
+            self.assertEqual(after_res["state"], model.STATE_SPEAK)
+            self.assertEqual(after_res["hits"], [])
+            self.assertIsNone(after_res["reason"])
+
+    def test_window_slides_away_and_weights_return_to_zero(self) -> None:
+        # 同一批事件、只把 now 推后 3 小时：weight 归 0、判「说」——证明没留状态。
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["ignored"] * 3, [4, 2, 0])
+            later = model.iso(model.parse_ts(DAY) + timedelta(hours=3))
+            sig = engage.window_signal(root, now=later)
+            self.assertEqual(sig["rows"], 0)
+            self.assertEqual(sig["weight"], 0.0)
+            self.assertEqual(sig["consecutive_ignored"], 0)
+            res = engage.decide(make_input(now=later, window=sig))
+            self.assertEqual(res["state"], model.STATE_SPEAK)
+            self.assertEqual(res["hits"], [])
+            # 账本一行没动：回到原来那一刻，窗口里还是那 3 条。
+            self.assertEqual(engage.window_signal(root, now=DAY)["rows"], 3)
+
+    def test_weight_ladder_grows_with_ignored(self) -> None:
+        # 「越来越冷」长在加权里：条数越多、越贴 now，weight 单调爬，跨线就降态。
+        expect = {1: model.STATE_SPEAK, 2: model.STATE_SPEAK,
+                  3: model.STATE_LESS, 5: model.STATE_LESS,
+                  8: model.STATE_SILENT}
+        weights: List[float] = []
+        for n in (1, 2, 3, 5, 8):
+            with tempfile.TemporaryDirectory() as temp:
+                root = helpers.make_root(temp)
+                feed(root, ["ignored"] * n,
+                     [2.0 * (n - 1 - index) for index in range(n)])
+                sig = engage.window_signal(root, now=DAY)
+                res = engage.decide(make_input(window=sig))
+                self.assertEqual(sig["consecutive_ignored"], n)
+                self.assertEqual(res["state"], expect[n],
+                                 "%d 条 ignored 该判「%s」，实际「%s」"
+                                 % (n, expect[n], res["state"]))
+                if expect[n] == model.STATE_SPEAK:
+                    self.assertEqual(res["hits"], [])
+                else:
+                    self.assertEqual(res["hits"], [model.REASON_IGNORED])
+                weights.append(sig["weight"])
+        self.assertEqual(weights, sorted(weights), "weight 没有随条数单调爬：%s" % weights)
+        self.assertAlmostEqual(weights[0], 1.0, places=6)
+        self.assertAlmostEqual(weights[1], 1.98333, places=4)
+        self.assertAlmostEqual(weights[2], 2.95, places=6)
+        self.assertAlmostEqual(weights[3], 4.83333, places=4)
+        self.assertAlmostEqual(weights[4], 7.53333, places=4)
+
+    def test_harsh_weighs_harder_than_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["harsh"] * 3, [4, 2, 0])
+            harsh_sig = engage.window_signal(root, now=DAY)
+            self.assertEqual(harsh_sig["harsh"], 3)
+            self.assertAlmostEqual(harsh_sig["weight"], 4.425, places=6)
+            res = engage.decide(make_input(window=harsh_sig))
+            self.assertEqual(res["state"], model.STATE_LESS)
+            self.assertEqual(res["hits"], [model.REASON_IGNORED])
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["ignored"] * 3, [4, 2, 0])
+            ignored_sig = engage.window_signal(root, now=DAY)
+        self.assertGreater(harsh_sig["weight"], ignored_sig["weight"],
+                           "同样的条数与间隔，harsh 该压得比 ignored 更狠")
+
+    def test_harsh_and_ignored_mix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["harsh", "ignored", "harsh", "ignored"], [6, 4, 2, 0])
+            sig = engage.window_signal(root, now=DAY)
+            self.assertEqual((sig["harsh"], sig["rows"]), (2, 4))
+            # 最新一条是 ignored、上一条是 harsh：连续数就停在 1。
+            self.assertEqual(sig["consecutive_ignored"], 1)
+            self.assertAlmostEqual(sig["weight"], 4.86667, places=4)
+            res = engage.decide(make_input(window=sig))
+            self.assertEqual(res["state"], model.STATE_LESS)
+            self.assertEqual(res["hits"], [model.REASON_IGNORED])
+
+    def test_window_edges_are_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            events.deliver("ignored", root=root, now=minutes_ago(121))
+            events.deliver("ignored", root=root, now=minutes_ago(119))
+            sig = engage.window_signal(root, now=DAY)
+            self.assertEqual(sig["rows"], 1)
+            self.assertEqual(sig["consecutive_ignored"], 1)
+            self.assertAlmostEqual(sig["weight"], 1.0 - 119.0 / 120.0, places=6)
+
+    def test_no_window_signal_is_no_hit(self) -> None:
+        res = engage.decide(make_input())
+        self.assertIsNone(res["window"])
+        self.assertNotIn(model.REASON_IGNORED, res["hits"])
+        self.assertEqual(res["state"], model.STATE_SPEAK)
+
+    def test_broken_window_signal_degrades_to_no_hit(self) -> None:
+        res = engage.decide(make_input(window={"weight": "坏", "consecutive_ignored": None}))
+        self.assertEqual(res["hits"], [])
+        self.assertEqual(res["state"], model.STATE_SPEAK)
+        empty = engage.decide(make_input(window={}))
+        self.assertEqual(empty["hits"], [])
+
+    def test_hard_gate_still_wins_over_window(self) -> None:
+        # 硬门次序一个字不改：夜里主动依旧「不说」，窗口再响也进不了 soft。
+        with tempfile.TemporaryDirectory() as temp:
+            root = helpers.make_root(temp)
+            feed(root, ["ignored"] * 8,
+                 [2.0 * (7 - index) for index in range(8)], base=NIGHT)
+            sig = engage.window_signal(root, now=NIGHT)
+            self.assertGreater(sig["weight"], engage.WINDOW_SILENT_WEIGHT)
+            res = engage.decide(make_input(now=NIGHT, window=sig,
+                                           intent=model.INTENT_PROACTIVE))
+            self.assertEqual(res["hard"], [model.REASON_NIGHT])
+            self.assertTrue(res["soft_skipped"])
+            self.assertEqual(res["soft"], [])
+            self.assertEqual(res["hits"], [model.REASON_NIGHT])
+            self.assertEqual(res["state"], model.STATE_SILENT)
+            self.assertEqual(res["window"], sig)
 
 
 class FakeBrain(object):

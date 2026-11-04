@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "tick_seconds": 60,
+  "min_gap_minutes": 10,
+  "daily_cap": 12,
+  "day_cutover_hour": 4,
+  "kinds": {
+    "night": {
+      "at": "03:30",
+      "min_gap_minutes": 10,
+      "daily_cap": 1
+    }
+  },
+  "note": "日子线的阈值：改这份就是改节奏，代码里只留 model.DEFAULTS 兜底。tick_seconds 是节律线程的间隔（秒）；min_gap_minutes 是同类型计划之间的硬下限；daily_cap 是每类每天的条数上限；day_cutover_hour 是本地时区的换日钟点。kinds 是自动排程表：每个 kind 每天按 at 那个钟点（本地时区，按换日点归到某一天）确保恰有一条计划，本期只有 night；kind 自己那一栏里的 min_gap_minutes / daily_cap 覆盖全局值。删掉整个 kinds 就完全没有自动排程。"
+}

@@ -1,7 +1,7 @@
-"""心的八条只读端点：形状、405 措辞、坏卡不假装、轨迹、干跑、偏移键集、唯一合成点。
+"""心的九个只读端点：形状、405 措辞、坏卡不假装、轨迹、干跑、偏移键集、唯一合成点、窗口。
 
 判据（architecture §9.2：心与脑只能看）：
-- 八条路由全是 GET，写方法一律 405，且心的措辞点名「只收 GET」；
+- 九条路由全是 GET，写方法一律 405，且心的措辞点名「只收 GET」；
 - 卡坏了 HTTP 仍是 200，但 ok 必须是 False、issues 必须非空——页面要能显示；
   500 等于把「她没载入」藏起来，假装成功更是骗人；
 - /heart/engage 是干跑：只调 decide，一个字节都不落盘（日志文件不许出现）；
@@ -32,13 +32,16 @@ from organs.heart import energy as energy_module
 from organs.heart import engage as engage_module
 from organs.heart import model as heart_model
 from organs.heart import mood as mood_module
+from organs.heart import events as events_module
 from organs.heart import offset as offset_module
+from organs.heart import pending as pending_module
 
 PLUGIN = Path(__file__).resolve().parents[2]
 REAL_CARD = PLUGIN / "organs" / "heart" / "data" / "baseline-card.json"
 
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
-                "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective")
+                "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
+                "/heart/pending")
 
 # 固定时刻：断言不看"现在几点"。09:00 / 23:00 分别避开与落进夜间窗口（23-8）。
 T0 = "2026-11-05T09:00:00+09:00"
@@ -68,6 +71,21 @@ class HeartApiTest(unittest.TestCase):
         return status, payload
 
 
+class _WarmBrain(object):
+    """假脑：只提供 ports 的两条通道（people_list / today_view）。
+
+    熟稔给 2.0（高于 ENGAGE_FAMILIARITY_LOW），好把第 4 道软门单独隔出来看——
+    否则 brain=None 的降级会同时塞一条 low-familiarity，"ignored-recently 生效了没有"
+    就混在别的命中里说不清。
+    """
+
+    def people_list(self, now: Any = None) -> List[Dict[str, Any]]:
+        return [{"id": "主人", "display": "主人", "familiarity": 2.0}]
+
+    def today_view(self, now: Any = None) -> Dict[str, Any]:
+        return {"entries": []}
+
+
 class EightReadonlyRoutes(HeartApiTest):
     def test_route_table_has_the_eight_get_routes(self):
         for route in HEART_ROUTES:
@@ -81,18 +99,32 @@ class EightReadonlyRoutes(HeartApiTest):
             status, payload = self.get(route, now=T0)
             self.assertEqual(200, status, route)
             for key in ("status", "ok", "readonly", "agent", "baseline", "render",
-                        "mood", "energy", "offset", "pending", "effective"):
+                        "mood", "energy", "offset", "pending", "thoughts", "window",
+                        "effective"):
                 self.assertIn(key, payload, "%s 少了 %s" % (route, key))
             self.assertEqual("已接入", payload["status"])
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["readonly"])
             self.assertEqual("heart", payload["agent"])
+            # 老键不换义：pending 仍是待定两轴名单（与上一轮逐字一致），也没有同义的
+            # 第二个键；念头块叫 thoughts（外层块、块里的列表同名，两层各归各的）。
             self.assertEqual(["耐心", "记性"], payload["pending"])
+            self.assertNotIn("pending_axes", payload, "不许留同义的第二把钥匙")
             self.assertEqual([], payload["issues"])
+            # 念头块与窗口块：与 /heart/pending、engage 的 signal 是同一份（同一个纯读）
+            for key in ("config", "thoughts", "open", "at"):
+                self.assertIn(key, payload["thoughts"], "%s 的 thoughts 少了 %s" % (route, key))
+            self.assertEqual(payload["thoughts"]["thoughts"],
+                             self.get("/heart/pending", now=T0)[1]["thoughts"])
+            for key in ("weight", "consecutive_ignored", "rows", "window_min"):
+                self.assertIn(key, payload["window"], "%s 的 window 少了 %s" % (route, key))
 
     def test_baseline_is_tier_wordsonly_with_pending_axes_greyed(self):
         status, payload = self.get("/heart/baseline", now=T0)
         self.assertEqual(200, status)
+        # /heart/baseline 的 pending 也是那份名单（老键不换义），念头块不在这条端点上
+        self.assertEqual(["耐心", "记性"], payload["pending"])
+        self.assertNotIn("thoughts", payload, "baseline 只给档位与名单，不给念头块")
         view = payload["baseline"]
         self.assertEqual(list(heart_model.PAIRED_AXES), view["loaded"])
         self.assertEqual([{"axis": axis, "greyed": True} for axis in heart_model.PENDING_AXES],
@@ -418,6 +450,113 @@ class BrokenNowIsA400(HeartApiTest):
                                          query={"root": str(self.root), "now": "不是时间"})
             self.assertEqual(400, status, route)
             self.assertIn("不是时间", payload["message"], route)
+
+
+class PendingThoughtsRoute(HeartApiTest):
+    """/heart/pending：念头层的只读读数（config + 每条念头的 state / attempts / 剩余 TTL）。
+
+    两条口径：
+    - 它**纯读**：GET 一次不许长出 pending.json（derive 才落笔）；
+    - 它**不读卡**：卡坏了这一块照常给念头（拒载由 /heart、/heart/effective 报）。
+    """
+
+    def test_route_is_registered_and_payload_has_the_envelope(self):
+        self.assertIn("/heart/pending", api.ROUTES)
+        self.assertEqual("GET", api.ROUTES["/heart/pending"])
+        status, payload = self.get("/heart/pending", now=T0)
+        self.assertEqual(200, status, payload)
+        for key in ("ok", "readonly", "agent", "status", "config", "thoughts", "open", "at"):
+            self.assertIn(key, payload, "/heart/pending 少了 %s" % key)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("heart", payload["agent"])
+        self.assertEqual("已接入", payload["status"])
+        for key in ("release", "ttl_min", "max_attempts", "max_open",
+                    "ignore_window_min", "ignore_threshold", "axis_threshold"):
+            self.assertIn(key, payload["config"], "config 少了 %s" % key)
+
+    def test_no_thoughts_is_an_empty_list_not_a_blank(self):
+        status, payload = self.get("/heart/pending", now=T0)
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["thoughts"], "没念头就是空列表")
+        self.assertEqual(0, payload["open"])
+        self.assertFalse((self.root / pending_module.PENDING_FILE).exists(),
+                         "/heart/pending 是纯读：不许凭空落一个 pending.json")
+
+    def test_three_ignored_events_grow_a_thought_and_the_route_shows_it(self):
+        for minute in (50, 51, 52):
+            events_module.deliver("ignored", root=self.root, now=_stamp(5, 8, minute))
+        grown = pending_module.derive(root=self.root, now=T0)
+        self.assertEqual(1, len(grown["created"]), grown)
+
+        status, payload = self.get("/heart/pending", now=T0)
+        self.assertEqual(200, status)
+        self.assertEqual(1, payload["open"])
+        self.assertEqual(1, len(payload["thoughts"]))
+        row = payload["thoughts"][0]
+        self.assertEqual(pending_module.KIND_PRAISE, row["kind"], "连续被冷落长出的是「想被夸」")
+        self.assertEqual(pending_module.SOURCE_IGNORED, row["source"])
+        self.assertEqual(pending_module.STATE_OPEN, row["state"])
+        self.assertEqual(0, row["attempts"])
+        self.assertGreater(row["ttl_left_min"], 0.0, "刚长出来的念头还该有剩余 TTL")
+        self.assertFalse(row["expired"])
+
+    def test_bad_card_does_not_affect_the_pending_block(self):
+        (self.root / card_module.CARD_FILE).write_text("{坏卡", encoding="utf-8")
+        status, payload = self.get("/heart/pending", now=T0)
+        self.assertEqual(200, status, "它不读卡：坏卡不许影响念头这一块")
+        self.assertTrue(payload["ok"])
+        self.assertEqual("已接入", payload["status"])
+        self.assertIn("thoughts", payload)
+        self.assertNotIn("issues", payload, "念头块不替卡的拒载背书")
+
+
+class WindowReachesTheEndpoint(HeartApiTest):
+    """本轮的判据落点：第 4 道软门要能在**端点级**生效，不是只在单测里存在。
+
+    造 3 条 ignored 投进临时根的事件账本 → GET /heart/engage 必须报
+    hits 含 "ignored-recently"、state=少说；再补一条 replied → 回到「说」。
+    假脑只给熟稔 2.0，把别的软门隔在外面。
+    """
+
+    def _engage(self, **params: Any) -> Any:
+        query = {"root": str(self.root), "now": T0}
+        query.update(dict((key, str(value)) for key, value in params.items()))
+        status, payload = api.handle("GET", "/heart/engage", None, None,
+                                     query=query, brain=_WarmBrain())
+        return status, payload
+
+    def test_three_ignored_events_flip_the_judgement_to_less(self):
+        for minute in (50, 51, 52):
+            events_module.deliver("ignored", root=self.root, now=_stamp(5, 8, minute))
+        status, payload = self._engage(intent="passive")
+        self.assertEqual(200, status, payload)
+        self.assertEqual([heart_model.REASON_IGNORED], payload["hits"],
+                         "窗口没接进端点：hits 里没有 %s" % heart_model.REASON_IGNORED)
+        self.assertEqual(heart_model.REASON_IGNORED, payload["reason"])
+        self.assertEqual(heart_model.STATE_LESS, payload["state"])
+        self.assertEqual(3, payload["window"]["consecutive_ignored"])
+        self.assertGreater(payload["window"]["weight"], 0.0)
+        self.assertIn(heart_model.REASON_IGNORED, payload["soft"])
+
+    def test_one_reply_brings_her_back_to_speaking(self):
+        for minute in (50, 51, 52):
+            events_module.deliver("ignored", root=self.root, now=_stamp(5, 8, minute))
+        self.assertEqual(heart_model.STATE_LESS, self._engage()[1]["state"])
+        events_module.deliver("replied", root=self.root, now=_stamp(5, 8, 56))
+        status, payload = self._engage()
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["hits"], "回了一句就该恢复：%r" % (payload["hits"],))
+        self.assertEqual(heart_model.STATE_SPEAK, payload["state"])
+        self.assertEqual(0, payload["window"]["consecutive_ignored"])
+        self.assertEqual(1, payload["window"]["replied"])
+
+    def test_overview_window_is_the_same_signal_as_the_judgement(self):
+        events_module.deliver("harsh", root=self.root, now=_stamp(5, 8, 40))
+        judged = self._engage()[1]["window"]
+        overview = self.get("/heart/overview", now=T0)[1]["window"]
+        self.assertEqual(judged, overview, "/heart/overview 的窗口与判决用的不是同一份 signal")
+        self.assertEqual(1, overview["harsh"])
 
 
 if __name__ == "__main__":

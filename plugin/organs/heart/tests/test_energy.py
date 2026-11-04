@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,27 @@ def _local(hour: int = 14) -> datetime:
 
 def _at(hours: float = 0.0, base: Optional[datetime] = None) -> str:
     return model.iso((base or _local()) + timedelta(hours=hours))
+
+
+def _slice_walk(
+    value: float, start_iso: str, end_iso: str, window: Any = None
+) -> float:
+    """参照实现：关掉夹断、一片一片地走完整个 Δt。
+
+    刻意不经过 _settle（那条路现在会按整天折算），而是直接按 ENERGY_SLICE_MIN 逐片
+    调 energy._step——这就是"没有步数上限时必须走的那条路"，用来钉住折算不改变结果。
+    """
+    cursor = model.parse_ts(start_iso)
+    end = model.parse_ts(end_iso)
+    remaining = (end - cursor).total_seconds() / 60.0
+    slice_min = float(model.ENERGY_SLICE_MIN)
+    band = energy.DEFAULT_SLEEP_WINDOW if window is None else window
+    while remaining > 1e-9:
+        take = min(slice_min, remaining)
+        value = energy._step(value, cursor, take, band)
+        cursor = cursor + timedelta(minutes=take)
+        remaining -= take
+    return value
 
 
 class EnergyTest(unittest.TestCase):
@@ -139,18 +161,73 @@ class EnergyTest(unittest.TestCase):
         got = energy.read(self.root, now=start)
         self.assertAlmostEqual(float(model.ENERGY_MAX), got["value"], places=1)
 
-    def test_capped_settle_drops_the_rest(self) -> None:
-        """单次最多补算 24 小时，超出不追，但起点照样推到 now。"""
+    def test_thirty_days_ago_is_settled_by_folding(self) -> None:
+        """30 天前：一天逐片、其余整天折算——整段算得完，步数有上限，结果与逐片相同。
+
+        步数上限 ENERGY_STEP_CAP 就是一天的量，所以 steps ⇒ 一天；剩下的 29 天整天
+        折算。逐片走 30 天要 8640 片，夹断后只走 288 片。
+        """
         start = _at()
-        self._seed(80.0, _at(-30))
+        old = _at(-24 * 30)
+        self._seed(80.0, old)
+        naive_steps = int(30 * 24 * 60 / float(model.ENERGY_SLICE_MIN))
+
+        began = time.perf_counter()
         got = energy.read(self.root, now=start)
+        elapsed_ms = (time.perf_counter() - began) * 1000.0
+
         self.assertTrue(got["capped"])
-        self.assertAlmostEqual(
-            float(model.ENERGY_MAX_SETTLE_H), got["hours"], places=2
-        )
+        self.assertEqual(energy.ENERGY_STEP_CAP, got["steps"], "步进没停在步数上限")
+        self.assertEqual(29, got["folded_days"], "剩下的整天没折算")
+        self.assertAlmostEqual(30 * 24.0, got["hours"], places=2)
         self.assertEqual(start, self._state()["updated_at"])
+        self.assertLess(
+            abs(got["value"] - _slice_walk(80.0, old, start)),
+            0.05,
+            "折算出来的值与逐片积分不一致",
+        )
+        self.assertLess(got["steps"] * 10, naive_steps, "夹断没把步数压下来")
+        self.assertLess(elapsed_ms, 100.0, "夹断后读一次仍要 %.2f ms" % elapsed_ms)
+
         follow = energy.read(self.root, now=start)
         self.assertAlmostEqual(0.0, follow["hours"], places=2)
+        self.assertEqual(0, follow["folded_days"])
+
+    def test_folding_matches_slice_by_slice(self) -> None:
+        """1 天 / 1.5 天 / 3 天：夹断后的 read 与关掉夹断的逐片积分差 < 0.05。
+
+        1 天正好一天，不许走进折算（folded_days=0）；1.5 天 = 一天 + 半天尾巴；
+        51 小时 = 一天 + 一天整 + 3 小时尾巴（折算与切片两种走法混在一次调用里）；
+        3 天 = 一天 + 两天整。默认窗口一天就顶到 100 附近，算术压不出差别，所以再补
+        一组 (1, 2)（一天只睡一小时）——值落在中间、还会撞 0 的下限，折算里那道上下限
+        才真被压到。
+        """
+        for hours in (24, 36, 51, 72):
+            for band, seeds in (
+                (None, (5.0, 50.0, 80.0)),
+                ((1, 2), (5.0, 60.0, 95.0)),
+            ):
+                for seed in seeds:
+                    start = _at()
+                    old = _at(-hours)
+                    self._seed(seed, old)
+                    got = energy.read(self.root, now=start, sleep_window=band)
+                    want = _slice_walk(seed, old, start, band)
+                    where = "%s 小时、起点 %s、窗口 %r" % (hours, seed, band)
+                    self.assertLess(
+                        abs(got["value"] - want), 0.05, "%s 折算偏了" % where
+                    )
+                    if hours == 24:
+                        self.assertEqual(0, got["folded_days"], "%s 不该折算" % where)
+                        self.assertEqual(
+                            energy.ENERGY_STEP_CAP, got["steps"], where
+                        )
+                    if hours == 51:
+                        self.assertEqual(1, got["folded_days"], where)
+                        tail = int(3 * 60 / float(model.ENERGY_SLICE_MIN))
+                        self.assertEqual(
+                            energy.ENERGY_STEP_CAP + tail, got["steps"], where
+                        )
 
     def test_tier_words_move_with_the_value(self) -> None:
         """四档：累 / 偏累 / 一般 / 充沛。"""
@@ -261,7 +338,16 @@ class EnergyTest(unittest.TestCase):
         got = energy.overview(self.root, now=start)
         self.assertIn("deducted", got)
         self.assertAlmostEqual(3.0, got["deducted"], places=2)
-        for key in ("value", "tier", "settled_from", "settled_to", "hours", "capped"):
+        for key in (
+            "value",
+            "tier",
+            "settled_from",
+            "settled_to",
+            "hours",
+            "capped",
+            "steps",
+            "folded_days",
+        ):
             self.assertIn(key, got)
 
     def test_bad_json_falls_back_to_defaults(self) -> None:
@@ -542,11 +628,14 @@ class EnergyGoldenTest(unittest.TestCase):
                         self.assertEqual(want, got[key], "%s 的 %s 变了" % (where, key))
 
 
-# 模块级大写名字的白名单：除 DEFAULT_SLEEP_WINDOW 外与改动前完全相同；
-# 去重不设过期时间，所以这里也不许再出现 _SEEN_BURSTS_TTL_S 那种第二个时钟。
+# 模块级大写名字的白名单：除 DEFAULT_SLEEP_WINDOW 与派生量 ENERGY_STEP_CAP 外与
+# 改动前完全相同；去重不设过期时间，所以这里也不许再出现 _SEEN_BURSTS_TTL_S 那种
+# 第二个时钟。ENERGY_STEP_CAP 不是新常数，是 ENERGY_MAX_SETTLE_H / ENERGY_SLICE_MIN
+# 的派生量（下面有用例钉住它确实由既有常数算出）。
 _ALLOWED_UPPER_NAMES = (
     "DEFAULT_SLEEP_WINDOW",
     "ENERGY_FILE",
+    "ENERGY_STEP_CAP",
     "_ENERGY_TIERS",
     "_SEEN_BURSTS",
     "_SEEN_BURSTS_MAX",
@@ -665,6 +754,22 @@ class SleepWindowTest(unittest.TestCase):
         for name in upper:
             self.assertNotIn("TTL", name.upper(), "又是过期常数：%s" % name)
             self.assertNotIn("EXPIRE", name.upper(), "又是过期常数：%s" % name)
+
+    def test_step_cap_is_derived_not_hardcoded(self) -> None:
+        """步数上限是派生量：= ENERGY_MAX_SETTLE_H 小时 ÷ 每片 ENERGY_SLICE_MIN 分钟。"""
+        self.assertEqual(
+            int(
+                float(model.ENERGY_MAX_SETTLE_H)
+                * 60.0
+                / float(model.ENERGY_SLICE_MIN)
+            ),
+            energy.ENERGY_STEP_CAP,
+        )
+        self.assertEqual(
+            int(model.ENERGY_MAX_SETTLE_H * 60 / model.ENERGY_SLICE_MIN),
+            energy.ENERGY_STEP_CAP,
+            "换成整数算也必须是同一个数",
+        )
 
     def test_one_event_id_never_deducts_twice(self) -> None:
         """幂等键不随时间失效：同一 event_id 隔 30 分钟再调仍然是 duplicate。

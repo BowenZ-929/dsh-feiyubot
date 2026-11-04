@@ -21,6 +21,7 @@
   .axes li { padding: .25rem 0; border-bottom: 1px dashed #f0f0f0; }
   li.greyed { color: #9a9a9a; }
   #engage { white-space: pre-line; margin: 0 0 .6rem; }
+  #window { white-space: pre-line; margin: 0 0 .6rem; }
   #hits { margin: 0; padding-left: 1.2rem; font-size: .9rem; color: #444; }
   canvas { width: 100%; height: auto; background: #fff; border: 1px solid #e6e6e6;
            border-radius: 8px; margin: .4rem 0 .2rem; }
@@ -62,7 +63,23 @@
   </section>
 
   <section>
-    <h2>⑤ 语气档（嘴读它定冷热）</h2>
+    <h2>⑤ 念头（她此刻想要什么：只是说话方式，不是发生过的事）</h2>
+    <ul id="thoughts" class="axes"></ul>
+    <p id="pending-info" class="legend"></p>
+    <p class="legend">来自 /heart/pending：kind / 轴 / 剩余 TTL / 已试次数 / 状态。
+      念头只影响怎么说、要不要开口，永不被当成发生过的事，也不进证据链。</p>
+  </section>
+
+  <section>
+    <h2>⑥ 近期窗口（她最近遇到的：冷落、被凶、正常回话）</h2>
+    <p id="window">……</p>
+    <p class="legend">窗内逐条加权（ignored +1.0、harsh +1.5、replied −1.0、normal −0.5，
+      越新越接近满权重）。命中时理由码是 ignored-recently：weight ≥ 3 判「少说」、
+      ≥ 5 判「不说」，连续被无视 3 条兜底至少「少说」；没到线就不影响判决。</p>
+  </section>
+
+  <section>
+    <h2>⑦ 语气档（嘴读它定冷热）</h2>
     <p id="voice">……</p>
     <p class="legend">档位词、方向与禁令都来自 /heart/effective 的 voice：一个合成点，
       面板说的档与嘴上念的档不会分叉。</p>
@@ -131,6 +148,46 @@
     }
     renderAxes(data.axes || {});
     renderVoice(data.voice || {});
+  }
+
+  function renderPending(data) {
+    var rows = (data.thoughts || []).filter(function (row) {
+      return row.state === "open" && typeof row.ttl_left_min === "number" && row.ttl_left_min > 0;
+    });
+    var list = el("thoughts");
+    list.textContent = "";
+    if (!rows.length) {
+      say("pending-info", "此刻没有未了的念头。");
+      return;
+    }
+    rows.forEach(function (row) {
+      var item = document.createElement("li");
+      var axis = row.axis ? "· 轴 " + row.axis + " " : "";
+      var ttl = "还剩 " + row.ttl_left_min + " 分钟";
+      item.textContent = row.kind + " " + axis + "· " + ttl + " · 已试 " +
+        row.attempts + " 次 · 状态 " + row.state;
+      list.appendChild(item);
+    });
+    say("pending-info", "未了的念头 " + rows.length + " 条（这一块是纯读，不结算、不回吐）。");
+  }
+
+  function renderWindow(signal) {
+    if (!signal) {
+      say("window", "这一轮没有窗口读数（判决没拿到 signal）。");
+      return;
+    }
+    var weight = Math.round(Number(signal.weight) * 100) / 100;
+    var verdict = "没到线，这一条门没命中，判决不受影响";
+    if (Number(signal.weight) >= 5) {
+      verdict = "weight ≥ 5 → 判「不说」";
+    } else if (Number(signal.weight) >= 3) {
+      verdict = "weight ≥ 3 → 判「少说」";
+    } else if (Number(signal.consecutive_ignored) >= 3) {
+      verdict = "连续被无视 ≥ 3 条 → 兜底至少「少说」";
+    }
+    say("window", "窗口 " + signal.window_min + " 分钟 · 加权 " + weight +
+      " · 连续被无视 " + signal.consecutive_ignored + " 条 · 窗内事件 " +
+      signal.rows + " 条\n命中时判决怎么变：" + verdict + "（理由码 ignored-recently，逐条列在④的命中门里）");
   }
 
   function renderMood(data) {
@@ -225,6 +282,7 @@
   function renderEngage(label, data) {
     judged.push({ label: label, data: data });
     renderGates();
+    if (data.window) { renderWindow(data.window); }
   }
 
   fetch("/heart").then(function (res) { return res.json(); }).then(renderStatus).catch(fail);
@@ -242,6 +300,9 @@
   fetch("/heart/engage?intent=proactive").then(function (res) { return res.json(); }).then(function (data) {
     renderEngage("主动", data);
   }).catch(fail);
+
+  fetch("/heart/pending").then(function (res) { return res.json(); }).then(renderPending).catch(fail);
+
 }());
 </script>
 </body>

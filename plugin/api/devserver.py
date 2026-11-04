@@ -107,6 +107,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--root", required=True, help="魂数据目录")
     parser.add_argument("--brain-root", default=DEFAULT_BRAIN_DIR, help="脑数据目录")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--day", action="store_true",
+                        help="开日子线的节律线程（60 秒一次；默认关，不开就不起任何循环）")
     return parser.parse_args(argv)
 
 
@@ -129,6 +131,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stderr.write("魂载入失败，不启动：%s\n" % root)
         return 1
     _Handler.brain = _load_brain(Path(args.brain_root).resolve())
+    # 日子线：唯一的那一个循环，默认关；--day 才开，进程结束就关（不留后台线程）
+    if args.day:
+        from organs.day import rhythm as day_rhythm
+        info = day_rhythm.start(brain=_Handler.brain)
+        sys.stderr.write("[devserver] 日子线节律：%s（%s 秒一次）\n"
+                         % (info.get("message") or "已启动", info.get("interval_seconds")))
     server = HTTPServer(("127.0.0.1", args.port), _Handler)
     print("http://127.0.0.1:%d/  root=%s  brain=%s" % (
         args.port, root, "未载入" if _Handler.brain is None else "已接入"), flush=True)
@@ -138,6 +146,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         pass
     finally:
         server.server_close()
+        if args.day:
+            from organs.day import rhythm as day_rhythm
+            day_rhythm.stop(1.0)
     return 0
 
 

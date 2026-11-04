@@ -1,7 +1,7 @@
-"""心的八个只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
+"""心的九个只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
 
 判据（architecture §9.2：心与脑只能看）：
-- 八条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
+- 九条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
 - 合成只有一处：/heart/effective 的三块（mood / axes / voice）由
   organs/heart/effective.py 出；/heart/overview 的 effective 块、/heart/mood 的
   两个数与档位词、/heart/engage 的 mood_now 都从那里取，本模块不自己换算档位。
@@ -33,6 +33,7 @@ from organs.heart import engage as engage_module
 from organs.heart import model as heart_model
 from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
+from organs.heart import pending as pending_module
 from organs.heart import ports as ports_module
 
 from .core import Result
@@ -46,6 +47,7 @@ HEART_ROUTES = {
     "/heart/offset": "GET",
     "/heart/engage": "GET",
     "/heart/effective": "GET",
+    "/heart/pending": "GET",
 }
 
 # /heart/offset 每轴对外只承诺这四个键；offset 模块以后多出来的键原样透传。
@@ -220,12 +222,15 @@ def _baseline_payload(root: Optional[Path], now: Optional[str]) -> Dict[str, Any
         "agent": "heart",
         "baseline": base["baseline"],
         "render": base["render"],
+        # pending 一直是"待定两轴名单"，第三轮念头层不改它的意思（老键不换义）：
+        # 念头块另开一个键叫 thoughts（见 _overview）——外层是块、块里的列表也叫
+        # thoughts，两层各归各的，不共用一个名字。
         "pending": _pending(),
         "issues": base["issues"],
     }
 
 
-# ---- 八个端点 ------------------------------------------------------------
+# ---- 九个端点 ------------------------------------------------------------
 
 
 def _overview(params: Mapping[str, str]) -> Result:
@@ -242,6 +247,10 @@ def _overview(params: Mapping[str, str]) -> Result:
     payload["energy"] = energy_module.read(root, now)
     payload["offset"] = offset_module.overview(root, now)
     payload["effective"] = _effective_readout(root, now, mood_read)
+    # 念头块与事件窗口：两块都是纯读（pending.overview 不落笔、window_signal 现算）。
+    # 块名 thoughts（不叫 pending：pending 是待定轴名单，老键不换义）。
+    payload["thoughts"] = pending_module.overview(root, now)
+    payload["window"] = engage_module.window_signal(root, now)
     return 200, payload
 
 
@@ -298,6 +307,19 @@ def _effective_route(params: Mapping[str, str]) -> Result:
     return 200, _effective_readout(root, now, mood_module.read(root, now))
 
 
+def _pending_route(params: Mapping[str, str]) -> Result:
+    """/heart/pending：念头层的读数（config + 每条念头的 state / attempts / 剩余 TTL）。
+
+    纯读：pending.overview 不落笔，过期的念头这里只标 expired 不标 faded。
+    它不读卡，所以坏卡与它无关——卡坏了这一块照常给出念头。
+    """
+    root, now = _root(params), _now(params)
+    payload = pending_module.overview(root, now)
+    payload.update({"ok": True, "readonly": True, "agent": "heart",
+                    "status": STATUS_CONNECTED})
+    return 200, payload
+
+
 def _engage(params: Mapping[str, str], brain: Any) -> Result:
     """/heart/engage：干跑一次判决——只调 engage.decide，不写日志、不说话。
 
@@ -321,8 +343,11 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
         # 坏卡不影响门：门只读 mood.now（档位与禁令本来就不进门）。拒载由
         # /heart、/heart/baseline、/heart/effective 如实报出来，判决这里照常干跑。
         eff = {"mood": effective_module.mood_block(values["baseline"], values["now"])}
+    # 第 4 道软门读的是窗口：不传 = 这道门只在单测里存在（端点永远判不出 ignored-recently）。
+    window = engage_module.window_signal(root, now)
     judgement = engage_module.EngageInput.from_effective(
         eff,
+        window=window,
         energy=energy_module.read(root, now)["value"],
         familiarity=readout.familiarity(who, now),
         today_count=readout.today_count(who, now),
@@ -340,7 +365,7 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
 
 def dispatch(route: str, params: Mapping[str, str],
              store: Any = None, brain: Any = None) -> Result:
-    """心的八条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage。
+    """心的九条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage。
 
     只收 ValueError 这一种：查询串里的时间戳坏了一个（now / interrupted）就走 400，
     把坏值原样带出来——失败必须响，但响成一条能读的 400，不是一条 traceback。
@@ -371,4 +396,6 @@ def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Resul
         return _engage(params, brain)
     if route == "/heart/effective":
         return _effective_route(params)
+    if route == "/heart/pending":
+        return _pending_route(params)
     return 404, {"ok": False, "message": "没有这个端点：%s" % route}

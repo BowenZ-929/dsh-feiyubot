@@ -20,25 +20,29 @@
 面板能看轨迹（trajectory）、不能改；人工覆盖只算一次，下次 settle_day 结算盖掉。
 本轮不实现人工覆盖，规矩先写在这里。
 
-事件不给全额：同一自然日内同向（正向 {praise}；负向 {cold, conflict, insult}）
-的第 2 次起只给半档（model.MOOD_DIMINISH_FACTOR），且单日同向累计封顶
-model.MOOD_DAILY_SAME_DIRECTION_CAP_TIERS 档——第 1 次最有效，第 3 次就薄了。
-判据与顺序见 apply_event 的 docstring。
+事件给的是有界增量，两条规矩：
+1. 渐近线天花板：正向增量乘余量 (1 − 当前值/model.MOOD_CEILING)——天花板就是
+   MOOD_MAX，一顿夸只能逼近它，顶不满；
+2. 热度折扣：同一类型事件 model.MOOD_HEAT_WINDOW_MIN 分钟内第 n+1 次，
+   增益 × 1/(1 + n/model.MOOD_HEAT_K)——越密越薄。
+负向（cold / conflict / insult）两个折扣**一个都不给**：疲惫与压力是代价，不打折，
+只挡地板（不许穿底）。
+上一轮那两条"第 2 次起半档 / 单日同向封顶 N 档"连同
+model.MOOD_DIMINISH_FACTOR、model.MOOD_DAILY_SAME_DIRECTION_CAP_TIERS 一起撤了——
+留着会让第 3 条之后恒为 0，曲线就出不来。判据与顺序见 apply_event 的 docstring。
 
 状态 schema（不许悄悄加字段）：
 {"version": 1, "now": float, "baseline": float, "updated_at": iso,
- "day": "YYYY-MM-DD", "conflict_used": int, "window": {who: "YYYY-MM-DDTHH"},
- "day_events": {"praise": int, "cold": int, "conflict": int, "insult": int},
- "day_delta_tiers": {"positive": float, "negative": float}}
-后两栏算的是"本自然日已经发过几次 / 已经落了多少档"，跨日归零（沿用 day 判）。
-旧文件没有这两栏就按 0 起算——不炸，也不补成别的数。
+ "day": "YYYY-MM-DD", "conflict_used": int, "window": {who: "YYYY-MM-DDTHH"}}
+day_events / day_delta_tiers 两栏随旧日上限一起退役：不再写；旧文件里读到就
+静默忽略（不炸，也不搬进新字段）。
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from organs.heart import model, store
+from organs.heart import events, model, store
 
 MOOD_FILE = "mood.json"
 TRAJ_FILE = "mood_traj.jsonl"
@@ -63,11 +67,6 @@ _DIRECTION_HOT = "偏热"
 _DIRECTION_NEUTRAL = "中性"
 _DIRECTION_COLD = "偏冷"
 
-# 记账用的两个方向名（与上面说人话的"偏热/偏冷"不是一回事：那两个是相对基线的读数）。
-# 正向 = {praise}；负向 = {cold, conflict, insult}，按名义档的正负自动归组。
-_DIRECTION_POSITIVE = "positive"
-_DIRECTION_NEGATIVE = "negative"
-_DAY_DELTA_KEYS = (_DIRECTION_POSITIVE, _DIRECTION_NEGATIVE)
 
 
 # ---- 内部小工具 ----------------------------------------------------------
@@ -107,50 +106,6 @@ def _clamp(value: float) -> float:
     return min(float(model.MOOD_MAX), max(float(model.MOOD_MIN), value))
 
 
-def _event_direction(kind: str) -> str:
-    """事件归组：名义档为正算正向，为负算负向（不另抄一张表）。"""
-    if float(_EVENT_TIERS[kind]) > 0.0:
-        return _DIRECTION_POSITIVE
-    return _DIRECTION_NEGATIVE
-
-
-def _zero_day_events() -> Dict[str, int]:
-    """本日"发过几次"的账：四个事件各一格，从 0 起算。"""
-    return dict((kind, 0) for kind in model.EVENTS)
-
-
-def _zero_day_delta() -> Dict[str, float]:
-    """本日"落了多少档"的账：两个方向各一格，从 0 起算。"""
-    return dict((key, 0.0) for key in _DAY_DELTA_KEYS)
-
-
-def _load_day_events(raw: Any) -> Dict[str, int]:
-    """读 day_events；旧文件缺这一栏、或里面缺键 / 值坏了，一律按 0 起算。"""
-    table = raw if isinstance(raw, dict) else {}
-    counts = _zero_day_events()
-    for kind in model.EVENTS:
-        counts[kind] = max(0, _as_int(table.get(kind), 0))
-    return counts
-
-
-def _load_day_delta(raw: Any) -> Dict[str, float]:
-    """读 day_delta_tiers；同上，缺的 / 坏的一律按 0 起算（不许补成别的数）。"""
-    table = raw if isinstance(raw, dict) else {}
-    tiers = _zero_day_delta()
-    for key in _DAY_DELTA_KEYS:
-        tiers[key] = max(0.0, _as_float(table.get(key), 0.0))
-    return tiers
-
-
-def _direction_events(day_events: Dict[str, int], direction: str) -> int:
-    """本日该方向一共发过几次——"第 2 次起折算"看的是方向，不是单个事件名。"""
-    total = 0
-    for kind in model.EVENTS:
-        if _event_direction(kind) == direction:
-            total += int(day_events.get(kind, 0))
-    return total
-
-
 def _load(root: Any, at: str) -> Dict[str, Any]:
     """读状态；缺字段 / 坏字段一律补默认，坏 JSON 交给 store 回默认。"""
     data = store.read_json(_path(root), {})
@@ -169,9 +124,8 @@ def _load(root: Any, at: str) -> Dict[str, Any]:
         else model.day_key(at),
         "conflict_used": max(0, _as_int(data.get("conflict_used"), 0)),
         "window": dict(window) if isinstance(window, dict) else {},
-        "day_events": _load_day_events(data.get("day_events")),
-        "day_delta_tiers": _load_day_delta(data.get("day_delta_tiers")),
     }
+    # day_events / day_delta_tiers 两栏已退役：旧文件里读到就静默丢掉，不搬也不炸。
     return state
 
 
@@ -290,28 +244,30 @@ def read(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
 def apply_event(
     kind: str, root: Any = None, now: Optional[str] = None, who: str = "主人"
 ) -> Dict[str, Any]:
-    """一个事件：先现算衰减，按边际递减折算档位，切掉超出的部分，再落账。
+    """一个事件：先现算衰减，再按"渐近线 + 热度"折算增量，切掉超出的部分，最后落账。
 
     落账顺序钉死，别调换：
     1. 现算衰减得 before（_effective：baseline 先漂，now 再往漂好的 baseline 走）；
-    2. 取该事件名义档 nominal（_EVENT_TIERS）；若本日该方向已发生过 ≥1 次，
-       则 nominal *= model.MOOD_DIMINISH_FACTOR——第 1 次最有效，第 3 次就薄了；
-    3. allowed = model.MOOD_DAILY_SAME_DIRECTION_CAP_TIERS - 本日该方向已累计档；
-       delta_tiers 朝 0 取 min(|nominal|, |allowed|) 并带 nominal 的符号；
-       allowed <= 0 表示这一向今天已吃满，返回 {"ok": False, "skipped": "capped"}，
-       状态一个字节不改；
-    4. after = clamp(before + delta_tiers * MOOD_UNIT)，写回 now / updated_at / day /
-       day_events / day_delta_tiers（连同 baseline / conflict_used / window）。
+    2. 名义增量 nominal = 名义档 × MOOD_UNIT（praise +1、cold −1、conflict −2、insult −2）；
+    3. 正向（nominal > 0）两个折扣一起上：
+       n = events.same_kind_since(kind, …) 本热度窗口内已有几次（不含本次）
+       heat = 1 / (1 + n / MOOD_HEAT_K)           ← 越密越薄
+       headroom = 1 − before / MOOD_CEILING       ← 越接近天花板越加不动
+       delta = nominal × heat × headroom
+    4. 负向（nominal ≤ 0）一个折扣都不给：delta = nominal，
+       再 delta = max(delta, −before) 不许穿底——疲惫与压力是代价，不打折；
+    5. after = clamp(before + delta)，写回 now / baseline / updated_at / day /
+       conflict_used / window。day_events / day_delta_tiers 两栏随旧日上限退役，不再写；
+    6. events.append(kind, who, root, now, delta=…, after=…)：本模块只读账本一次（数热度），
+       落账时也只投递一次；心不自己编事件。
 
     - kind 不在 model.EVENTS 里 → ValueError，不静默吞掉；
-    - 两道旧闸照旧保留在前面：
-      同一人同一小时最多一次：{"ok": False, "skipped": "windowed"}，状态一个字节不改；
-      冲突 / 被骂单日封顶 MOOD_CONFLICT_DAILY_CAP 次：{"ok": False, "skipped": "capped"}。
-      默认值下 MOOD_CONFLICT_DAILY_CAP 会先被同向档位上限吃掉（负向一次 −2 档就吃满
-      两档限额），这条闸留给名义档值改动后的世界；
-    - 成功返回 {"ok": True, "before", "after", "delta", "skipped": None, "tiers",
-      "diminished"}：delta 是真正落账的分差（被夹到刻度边界时比名义档位小），
-      tiers 是本次真正落账的档数（正负），diminished 表示这次是否被折算过。
+    - 两道旧闸照旧保留在前面，被挡时状态一个字节不改、账本也不落行：
+      同一人同一小时最多一次：{"ok": False, "skipped": "windowed"}；
+      冲突 / 被骂单日封顶 MOOD_CONFLICT_DAILY_CAP 次：{"ok": False, "skipped": "capped"}；
+    - 成功返回 {"ok": True, "before", "after", "delta", "heat", "headroom", "skipped",
+      "kind", "who", "tier"}：delta 是真正落账的分差（被夹到刻度边界时比名义增量小），
+      heat 是这次用的热度系数、headroom 是渐近线系数（负向两者都是 1.0：没打过折）。
     """
     if kind not in model.EVENTS:
         raise ValueError("不认识的事件：%r（只认 %s）" % (kind, "、".join(model.EVENTS)))
@@ -329,32 +285,27 @@ def apply_event(
     if capping and used >= int(model.MOOD_CONFLICT_DAILY_CAP):
         return {"ok": False, "skipped": "capped"}
 
-    # 跨自然日：当日三本账（事件次数、两个方向的档、冲突次数）一起归零，判据沿用 day 栏。
-    same_day = state["day"] == today
-    day_events = dict(state["day_events"]) if same_day else _zero_day_events()
-    day_delta = dict(state["day_delta_tiers"]) if same_day else _zero_day_delta()
-
     # 1) 现算衰减
     values = _effective(state, at)
     before = values["now"]
-    # 2) 名义档 → 本日该方向第 2 次起折半
-    direction = _event_direction(kind)
-    nominal = float(_EVENT_TIERS[kind])
-    diminished = _direction_events(day_events, direction) >= 1
-    if diminished:
-        nominal *= float(model.MOOD_DIMINISH_FACTOR)
-    # 3) 单日同向档位上限，朝 0 取小
-    used_tiers = float(day_delta.get(direction, 0.0))
-    allowed = float(model.MOOD_DAILY_SAME_DIRECTION_CAP_TIERS) - used_tiers
-    if allowed <= 0.0:
-        return {"ok": False, "skipped": "capped"}
-    room = min(abs(nominal), abs(allowed))
-    delta_tiers = room if nominal >= 0.0 else -room
-    # 4) 落账
-    after = _clamp(before + delta_tiers * float(model.MOOD_UNIT))
+    # 2) 名义档 → 分
+    nominal = float(_EVENT_TIERS[kind]) * float(model.MOOD_UNIT)
+    heat = 1.0
+    headroom = 1.0
+    if nominal > 0.0:
+        # 3) 正向：热度折扣 × 渐近线余量
+        n = events.same_kind_since(
+            kind, root=root, now=at, window_min=float(model.MOOD_HEAT_WINDOW_MIN)
+        )
+        heat = 1.0 / (1.0 + float(n) / float(model.MOOD_HEAT_K))
+        headroom = max(0.0, 1.0 - before / float(model.MOOD_CEILING))
+        delta = nominal * heat * headroom
+    else:
+        # 4) 负向：不折扣、不缩放，只挡地板
+        delta = max(nominal, -before)
+    # 5) 落账
+    after = _clamp(before + delta)
 
-    day_events[kind] = int(day_events.get(kind, 0)) + 1
-    day_delta[direction] = used_tiers + abs(delta_tiers)
     window = dict((k, v) for k, v in state["window"].items() if v == hour)
     window[label] = hour
     state.update(
@@ -365,22 +316,29 @@ def apply_event(
             "day": today,
             "conflict_used": used + (1 if capping else 0),
             "window": window,
-            "day_events": day_events,
-            "day_delta_tiers": day_delta,
         }
     )
     store.write_json(_path(root), state)
+    # 6) 同一本账落一行
+    events.append(
+        kind,
+        who=label,
+        root=root,
+        now=at,
+        delta=round(after - before, 4),
+        after=round(after, 4),
+    )
     return {
         "ok": True,
         "before": round(before, 1),
         "after": round(after, 1),
         "delta": round(after - before, 1),
+        "heat": round(heat, 4),
+        "headroom": round(headroom, 4),
         "skipped": None,
         "kind": kind,
         "who": label,
         "tier": tier_of(after),
-        "tiers": delta_tiers,
-        "diminished": diminished,
     }
 
 
@@ -389,8 +347,8 @@ def settle_day(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
 
     状态 schema 里没有"日初锚点"这一格（schema 定死，不许加字段），所以当日净变化
     就取结算时刻现算出来的 now 与 baseline 的差——baseline 只在结算时移动，这个差
-    正好是今天累积下来的净变化。写进去的一半夹在刻度内，然后把当日三本账一起归零：
-    conflict_used、day_events、day_delta_tiers，day 落到今天（这是新的一天，不是昨天）。
+    正好是今天累积下来的净变化。写进去的一半夹在刻度内，然后把当日的账归零：
+    conflict_used，day 落到今天（这是新的一天，不是昨天）。
     """
     at = now if isinstance(now, str) and now else model.now_iso()
     state = _load(root, at)
@@ -408,8 +366,6 @@ def settle_day(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
             "day": today,
             "conflict_used": 0,
             "window": window,
-            "day_events": _zero_day_events(),
-            "day_delta_tiers": _zero_day_delta(),
         }
     )
     store.write_json(_path(root), state)

@@ -1,0 +1,276 @@
+"""plan：绝对时刻入账、同一个 (kind, at) 幂等、两道闸门拦在调度层。"""
+from __future__ import annotations
+
+import unittest
+from datetime import timezone
+
+from organs.day import model, plan
+from organs.day.tests.helpers import at, candidates, temp_root
+
+NOW = "2026-11-05T08:00:00"
+
+
+class IdempotencyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        self.items = candidates(("diary", "2026-11-05T09:00:00"), ("walk", "2026-11-05T10:00:00"))
+
+    def test_same_candidates_twice_add_nothing(self):
+        first = plan.add(self.items, root=self.root, now_ts=at(NOW))
+        second = plan.add(self.items, root=self.root, now_ts=at(NOW))
+        self.assertEqual(2, len(first["added"]))
+        self.assertEqual([], second["added"])
+        self.assertEqual(sorted(row["id"] for row in first["added"]), second["duplicates"])
+        self.assertEqual(first["plan_ids"], second["plan_ids"])
+        self.assertEqual(first["counts"], second["counts"])
+
+    def test_same_instant_with_another_offset_is_one_plan(self):
+        local = at("2026-11-05T09:00:00")
+        utc = model.parse_ts(local).astimezone(timezone.utc).isoformat()
+        plan.add([{"kind": "diary", "at": local}], root=self.root)
+        again = plan.add([{"kind": "diary", "at": utc}], root=self.root)
+        self.assertEqual([], again["added"])
+        self.assertEqual(1, len(again["duplicates"]))
+
+
+class GateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+
+    def test_three_minutes_apart_is_blocked_by_min_gap(self):
+        first = plan.add([{"kind": "diary", "at": at("2026-11-05T09:00:00")}], root=self.root)
+        second = plan.add([{"kind": "diary", "at": at("2026-11-05T09:03:00")}], root=self.root)
+        self.assertEqual(1, len(first["added"]))
+        self.assertEqual([], second["added"])
+        self.assertEqual([plan.REASON_MIN_GAP], [row["reason"] for row in second["blocked"]])
+        listing = plan.listing(self.root)
+        self.assertEqual([row["id"] for row in first["added"]],
+                         [row["id"] for row in listing["pending"]])
+        self.assertEqual(1, len(listing["blocked"]))
+
+    def test_ten_minutes_apart_is_allowed(self):
+        plan.add([{"kind": "diary", "at": at("2026-11-05T09:00:00")}], root=self.root)
+        ok = plan.add([{"kind": "diary", "at": at("2026-11-05T09:10:00")}], root=self.root)
+        self.assertEqual(1, len(ok["added"]))
+        self.assertEqual([], ok["blocked"])
+
+    def test_min_gap_is_per_kind(self):
+        plan.add([{"kind": "diary", "at": at("2026-11-05T09:00:00")}], root=self.root)
+        other = plan.add([{"kind": "walk", "at": at("2026-11-05T09:03:00")}], root=self.root)
+        self.assertEqual(1, len(other["added"]), "不同类互不影响")
+
+    def test_thirteenth_of_a_kind_is_blocked_by_daily_cap(self):
+        stamps = ["2026-11-05T%02d:%02d:00" % (7 + index // 2, 0 if index % 2 == 0 else 15)
+                  for index in range(13)]
+        rows = [{"kind": "diary", "at": at(stamp)} for stamp in stamps]
+        result = plan.add(rows, root=self.root)
+        self.assertEqual(12, len(result["added"]))
+        self.assertEqual([plan.REASON_DAILY_CAP], [row["reason"] for row in result["blocked"]])
+        self.assertEqual(12, result["counts"]["pending"])
+
+    def test_blocked_candidate_is_never_added_later(self):
+        """拦下就是拦下：同一条候选再进来仍然 blocked，账一条不增。"""
+        stamps = ["2026-11-05T%02d:%02d:00" % (7 + index // 2, 0 if index % 2 == 0 else 15)
+                  for index in range(13)]
+        rows = [{"kind": "diary", "at": at(stamp)} for stamp in stamps]
+        plan.add(rows, root=self.root)
+        before = plan.listing(self.root)
+        again = plan.add([rows[-1]], root=self.root)
+        after = plan.listing(self.root)
+        self.assertEqual([], again["added"])
+        self.assertEqual([plan.REASON_DAILY_CAP], [row["reason"] for row in again["blocked"]])
+        self.assertEqual(len(before["blocked"]), len(after["blocked"]))
+        self.assertEqual(before["plan_ids"], after["plan_ids"])
+
+    def test_cap_is_per_kind_and_per_day(self):
+        early = [{"kind": "diary", "at": at("2026-11-05T%02d:%02d:00" % (7 + index // 2,
+                                                                        0 if index % 2 == 0 else 15))}
+                 for index in range(12)]
+        plan.add(early, root=self.root)
+        nxt = plan.add([{"kind": "diary", "at": at("2026-11-06T09:00:00")}], root=self.root)
+        self.assertEqual(1, len(nxt["added"]), "换一天不算进昨天那 12 条")
+
+
+class BookkeepingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        plan.add(candidates(("diary", "2026-11-05T09:00:00"), ("diary", "2026-11-05T10:00:00"),
+                            ("diary", "2026-11-05T11:00:00")),
+                 root=self.root, now_ts=at("2026-11-05T08:00:00"))
+
+    def test_due_lists_only_plans_at_or_before_now(self):
+        due = plan.due(at("2026-11-05T10:30:00"), root=self.root)
+        self.assertEqual([at("2026-11-05T09:00:00"), at("2026-11-05T10:00:00")],
+                         [row["at"] for row in due])
+
+    def test_next_at_is_arithmetic_over_pending(self):
+        self.assertEqual(at("2026-11-05T11:00:00"), plan.next_at(at("2026-11-05T10:30:00"),
+                                                                 root=self.root))
+        self.assertIsNone(plan.next_at(at("2026-11-05T23:00:00"), root=self.root))
+
+    def test_consume_moves_pending_to_consumed(self):
+        target = plan.listing(self.root)["pending"][0]["id"]
+        result = plan.consume([target, "pl-nope"], root=self.root,
+                              now_ts=at("2026-11-05T09:10:00"))
+        self.assertEqual(1, len(result["consumed"]))
+        self.assertEqual(["pl-nope"], result["missing"])
+        self.assertEqual(2, result["counts"]["pending"])
+        self.assertEqual(1, result["counts"]["consumed"])
+        self.assertEqual(plan.STATUS_CONSUMED, result["consumed"][0]["status"])
+
+    def test_corrupt_ledger_raises_instead_of_looking_empty(self):
+        (self.root / plan.PLANS_FILE).write_text("{不是 JSON", encoding="utf-8")
+        with self.assertRaises(plan.PlanError):
+            plan.load(self.root)
+
+    def test_row_missing_fields_raises_instead_of_hiding(self):
+        """行不齐就没法算闸门：坏行要响，不许静默跳过（跳过等于把下限放开）。"""
+        data = {"version": 1, "pending": [{"id": "pl-x", "kind": "diary"}], "consumed": [],
+                "blocked": []}
+        (self.root / plan.PLANS_FILE).write_text(__import__("json").dumps(data), encoding="utf-8")
+        with self.assertRaises(plan.PlanError):
+            plan.load(self.root)
+
+    def test_bad_candidate_shape_raises(self):
+        with self.assertRaises(ValueError):
+            plan.add([{"at": at("2026-11-05T09:00:00")}], root=self.root)
+        with self.assertRaises(ValueError):
+            plan.add(["不是候选"], root=self.root)
+        with self.assertRaises(ValueError):
+            plan.add([{"kind": "diary", "at": "明天"}], root=self.root)
+
+    def test_plan_id_is_derived_from_kind_and_instant(self):
+        local = at("2026-11-05T09:00:00")
+        utc = model.parse_ts(local).astimezone(timezone.utc).isoformat()
+        once = plan.plan_id("diary", model.iso(local))
+        self.assertEqual(once, plan.plan_id("diary", model.iso(utc)), "归一后同一时刻同一个 id")
+        self.assertNotEqual(once, plan.plan_id("walk", model.iso(local)))
+
+
+class ExpireTest(unittest.TestCase):
+    """expired 是第四种结局：不执行、不补跑、不占闸门。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+
+    def test_expire_moves_pending_out_with_reason(self):
+        row = plan.add([{"kind": "diary", "at": at("2026-11-05T09:00:00")}],
+                       root=self.root)["added"][0]
+        out = plan.expire([row["id"]], root=self.root, now_ts=at("2026-11-08T05:00:00"),
+                          reason="过期不补")
+        listing = plan.listing(self.root)
+        self.assertEqual([], listing["pending"])
+        self.assertEqual(1, len(listing["expired"]))
+        self.assertEqual(plan.STATUS_EXPIRED, listing["expired"][0]["status"])
+        self.assertEqual("过期不补", listing["expired"][0]["reason"])
+        self.assertEqual(1, out["counts"]["expired"])
+
+    def test_expired_does_not_take_a_slot_or_a_gap(self):
+        """过期那条不占 min_gap / daily_cap：同一天同一类还能再排一条。"""
+        config = {"min_gap_minutes": 10, "daily_cap": 12, "day_cutover_hour": 4,
+                  "kinds": {"night": {"at": "09:00", "min_gap_minutes": 10, "daily_cap": 1}}}
+        first = plan.add([{"kind": "night", "at": at("2026-11-05T09:00:00")}], root=self.root,
+                         config=config)["added"][0]
+        plan.expire([first["id"]], root=self.root, now_ts=at("2026-11-05T09:30:00"),
+                    reason="过期不补")
+        again = plan.add([{"kind": "night", "at": at("2026-11-05T09:20:00")}], root=self.root,
+                         config=config)
+        self.assertEqual(1, len(again["added"]), "过期那条既不算名额也不算间隔")
+        self.assertEqual([], again["blocked"])
+
+    def test_consumed_row_carries_the_result_summary(self):
+        row = plan.add([{"kind": "night", "at": at("2026-11-05T09:00:00")}],
+                       root=self.root)["added"][0]
+        summary = {"steps": {"brain_compact": "ok"}, "statuses": {"ok": 1}, "failed": [],
+                   "written": 1}
+        out = plan.consume([row["id"]], root=self.root, now_ts=at("2026-11-05T09:01:00"),
+                           results={row["id"]: summary})
+        self.assertEqual(summary, out["consumed"][0]["result"])
+        self.assertEqual(summary, plan.listing(self.root)["consumed"][0]["result"])
+
+
+class EnsureTest(unittest.TestCase):
+    """ensure：为"当天"每个 kind 确保恰有一条计划——跨天重排，同一天一条不新增。"""
+
+    NIGHT = {"tick_seconds": 60, "min_gap_minutes": 10, "daily_cap": 12, "day_cutover_hour": 4,
+             "kinds": {"night": {"at": "03:30", "min_gap_minutes": 10, "daily_cap": 1}}}
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+
+    def test_kind_at_uses_day_key_as_the_judge(self):
+        """03:30 在换日点之前 → 归前一天，所以绝对时刻落在次日凌晨。"""
+        self.assertEqual(at("2026-11-06T03:30:00"), plan.kind_at("2026-11-05", "03:30", 4))
+        self.assertEqual(at("2026-11-05T09:00:00"), plan.kind_at("2026-11-05", "09:00", 4))
+
+    def test_bad_clock_raises(self):
+        for clock in ("25:00", "03:60", "03:30:00", None, ""):
+            with self.assertRaises(ValueError):
+                plan.kind_at("2026-11-05", clock, 4)
+
+    def test_thresholds_prefer_the_kind_column(self):
+        cfg = {"min_gap_minutes": 10, "daily_cap": 12,
+               "kinds": {"night": {"min_gap_minutes": 30, "daily_cap": 1}}}
+        self.assertEqual((1800, 1), plan.thresholds(cfg, "night"))
+        self.assertEqual((600, 12), plan.thresholds(cfg, "diary"))
+
+    def test_ensure_lands_exactly_one_plan_per_kind(self):
+        first = plan.ensure(at("2026-11-05T09:30:00"), root=self.root, config=self.NIGHT)
+        self.assertEqual(["night"], first["kinds"])
+        self.assertEqual(1, len(first["added"]))
+        row = first["added"][0]
+        self.assertEqual(at("2026-11-06T03:30:00"), row["at"])
+        self.assertEqual("2026-11-05", row["day"])
+        again = plan.ensure(at("2026-11-05T09:30:00"), root=self.root, config=self.NIGHT)
+        self.assertEqual([], again["added"], "同一天再 ensure 一条都不新增")
+        self.assertEqual([row["id"]], again["duplicates"])
+        self.assertEqual(first["plan_ids"], again["plan_ids"])
+
+    def test_ensure_rerolls_next_day_and_leaves_yesterday(self):
+        plan.ensure(at("2026-11-05T09:30:00"), root=self.root, config=self.NIGHT)
+        before = plan.listing(self.root)["pending"][0]
+        second = plan.ensure(at("2026-11-06T05:00:00"), root=self.root, config=self.NIGHT)
+        self.assertEqual(1, len(second["added"]))
+        self.assertEqual(at("2026-11-07T03:30:00"), second["added"][0]["at"])
+        pending = plan.listing(self.root)["pending"]
+        self.assertEqual(2, len(pending))
+        self.assertEqual(before, [row for row in pending if row["id"] == before["id"]][0])
+
+    def test_ensure_does_not_replan_a_consumed_day(self):
+        first = plan.ensure(at("2026-11-05T09:30:00"), root=self.root, config=self.NIGHT)
+        pid = first["added"][0]["id"]
+        plan.consume([pid], root=self.root, now_ts=at("2026-11-06T03:31:00"))
+        same_day = plan.ensure(at("2026-11-06T03:31:00"), root=self.root, config=self.NIGHT)
+        self.assertEqual([], same_day["added"], "那天已经跑过（consumed），不再排第二条")
+        self.assertEqual([pid], same_day["duplicates"])
+        next_day = plan.ensure(at("2026-11-06T04:30:00"), root=self.root, config=self.NIGHT)
+        self.assertEqual(1, len(next_day["added"]), "04:00 之后是新的一天，要重排")
+
+    def test_ensure_goes_through_the_same_gate(self):
+        """ensure 不是后门：被拦的候选进 blocked 带 reason，一条都不进 pending。"""
+        capped = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 12,
+                  "kinds": {"night": {"at": "09:00", "min_gap_minutes": 10, "daily_cap": 1}}}
+        plan.add([{"kind": "night", "at": at("2026-11-05T10:00:00")}], root=self.root,
+                 config=capped)
+        out = plan.ensure(at("2026-11-05T11:00:00"), root=self.root, config=capped)
+        self.assertEqual([], out["added"])
+        self.assertEqual([plan.REASON_DAILY_CAP], [row["reason"] for row in out["blocked"]])
+        self.assertEqual(1, out["counts"]["pending"])
+
+        gap = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 12,
+               "kinds": {"night": {"at": "09:00", "min_gap_minutes": 10, "daily_cap": 2}}}
+        other = temp_root(self)
+        plan.add([{"kind": "night", "at": at("2026-11-05T09:05:00")}], root=other, config=gap)
+        out = plan.ensure(at("2026-11-05T11:00:00"), root=other, config=gap)
+        self.assertEqual([plan.REASON_MIN_GAP], [row["reason"] for row in out["blocked"]])
+
+    def test_ensure_without_kinds_does_nothing(self):
+        out = plan.ensure(at("2026-11-05T09:30:00"), root=self.root,
+                          config={"day_cutover_hour": 4, "kinds": {}})
+        self.assertEqual([], out["kinds"])
+        self.assertEqual([], out["added"])
+        self.assertEqual(0, out["counts"]["total"])
+
+
+if __name__ == "__main__":
+    unittest.main()

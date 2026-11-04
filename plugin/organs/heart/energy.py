@@ -9,8 +9,12 @@
 模块自己的一段私有积分。
 
 结算即落盘：read() 把 value 与 updated_at 一起写回，"重启不重复扣"就靠这一条，
-下次只算从那之后的新 Δt。单次最多补算 model.ENERGY_MAX_SETTLE_H 小时，超出部分
-不追（起点仍推到 now）。Δt 小于 ENERGY_MIN_GAP_MIN 分钟就不动，连文件都不碰。
+下次只算从那之后的新 Δt。步进积分有步数上限 ENERGY_STEP_CAP（= 一整天 288 片）：
+超出的整天用闭式折算结清（一天只算一次映射，逐天套用），所以"上次结算在 30 天前"
+也算得完、且耗时可忽略。Δt 小于 ENERGY_MIN_GAP_MIN 分钟就不动，连文件都不碰。
+
+夹断只为省算力，不改变结果：一天以内的事件按切片精确算；超出一天按整天闭式折算，
+结果与逐片积分相同（写测试钉住）。
 
 作息窗口（几点算睡、几点算醒）从外面注入，不在本文件里写死：DEFAULT_SLEEP_WINDOW
 只是默认值；注入进来的是「她此刻该算醒着还是睡着」的档，心不自己判断日程。默认值
@@ -37,6 +41,14 @@ ENERGY_FILE = "energy.json"
 DEFAULT_SLEEP_WINDOW: Tuple[int, int] = (
     int(model.ENERGY_SLEEP_START_H),
     int(model.ENERGY_SLEEP_END_H),
+)
+
+# 派生量（不是新常数）：一次补算最多走多少片 = ENERGY_MAX_SETTLE_H 小时 ÷ 每片
+# ENERGY_SLICE_MIN 分钟。24 × 60 / 5 = 288——这个除法就是把"小时"换成"片"：
+# 一整天 24 × 60 = 1440 分钟，除以 5 分钟一片，正好 288 片，所以它同时也是
+# "一天多少片"，超出的部分按整天闭式折算。
+ENERGY_STEP_CAP = int(
+    float(model.ENERGY_MAX_SETTLE_H) * 60.0 / float(model.ENERGY_SLICE_MIN)
 )
 
 # 档位词：30 取自 model.ENERGY_LOW（"累"的门槛），50 / 75 是本模块自己的档界——
@@ -109,13 +121,43 @@ def _is_asleep(stamp: Any, window: Tuple[int, int]) -> bool:
     return start_h <= hour < end_h
 
 
+def _delta(stamp: Any, minutes: float, window: Tuple[int, int]) -> float:
+    """一个切片的净增量（还没夹进 0–100）：睡着按分钟回血，醒着按小时掉。
+
+    增量只跟切片的钟点、时长、作息窗口有关，与 value 无关——整天折算靠的就是这条。
+    """
+    if _is_asleep(stamp, window):
+        return float(model.ENERGY_SLEEP_PER_MIN) * minutes
+    return float(model.ENERGY_AWAKE_PER_H) * (minutes / 60.0)
+
+
 def _step(value: float, stamp: Any, minutes: float, window: Tuple[int, int]) -> float:
     """一个切片：睡着按分钟回血，醒着按小时掉；每片都夹进 0–100。"""
-    if _is_asleep(stamp, window):
-        value += float(model.ENERGY_SLEEP_PER_MIN) * minutes
-    else:
-        value += float(model.ENERGY_AWAKE_PER_H) * (minutes / 60.0)
-    return _clamp(value)
+    return _clamp(value + _delta(stamp, minutes, window))
+
+
+def _day_fold(cursor: Any, window: Tuple[int, int]) -> Tuple[float, float, float]:
+    """一整天（ENERGY_STEP_CAP 片）的折算映射，写成 (offset, floor, ceiling)：
+    v → min(ceiling, max(floor, v + offset))。
+
+    每片都是"加一个增量再夹进 ENERGY_MIN–MAX"，这种映射对复合封闭，288 片能合成
+    一个映射；增量与 value 无关，只跟起始钟点与作息窗口有关，而起点前进整整一天后
+    钟点不变，所以同一个映射可以逐天套用——一天只算一次，不是每天再走 288 片。
+    """
+    low = float(model.ENERGY_MIN)
+    high = float(model.ENERGY_MAX)
+    slice_min = float(model.ENERGY_SLICE_MIN)
+    offset = 0.0
+    floor = low
+    ceiling = high
+    stamp = cursor
+    for _ in range(ENERGY_STEP_CAP):
+        delta = _delta(stamp, slice_min, window)
+        offset += delta
+        floor = min(high, max(low, floor + delta))
+        ceiling = min(high, max(low, ceiling + delta))
+        stamp = stamp + timedelta(minutes=slice_min)
+    return offset, floor, ceiling
 
 
 def _default_state(at: str) -> Dict[str, Any]:
@@ -155,10 +197,11 @@ def _load(root: Any, at: str) -> Tuple[Dict[str, Any], bool]:
 def _settle(
     state: Dict[str, Any], at: str, window: Tuple[int, int]
 ) -> Dict[str, Any]:
-    """把 updated_at → at 的 Δt 按 5 分钟切片积分，就地改 state，返回结算说明。
+    """把 updated_at → at 的 Δt 按 ENERGY_SLICE_MIN 切片积分，就地改 state。
 
     - Δt < ENERGY_MIN_GAP_MIN 分钟：什么都不动；
-    - 单次最多补算 ENERGY_MAX_SETTLE_H 小时，超出的不追；
+    - 步进积分最多走 ENERGY_STEP_CAP 片（一整天）：再往后的整天用 _day_fold 闭式
+      折算，不足一天的尾巴继续逐片算——夹断只为省算力，整段 Δt 都会结清；
     - 起点永远推到 at：下次只算新 Δt，这就是"重启不重复扣"的依据。
     """
     start_iso = str(state["updated_at"])
@@ -174,26 +217,56 @@ def _settle(
         state["deducted"] = 0.0
         state["day"] = today
     if gap_min < float(model.ENERGY_MIN_GAP_MIN):
-        return {"from": start_iso, "to": start_iso, "hours": 0.0, "capped": False}
+        return {
+            "from": start_iso,
+            "to": start_iso,
+            "hours": 0.0,
+            "capped": False,
+            "steps": 0,
+            "folded_days": 0,
+        }
 
-    capped = gap_min / 60.0 > float(model.ENERGY_MAX_SETTLE_H)
-    budget = min(gap_min, float(model.ENERGY_MAX_SETTLE_H) * 60.0)
+    slice_min = float(model.ENERGY_SLICE_MIN)
+    day_min = ENERGY_STEP_CAP * slice_min  # 一整天 = ENERGY_STEP_CAP 片
     value = float(state["value"])
     cursor = start_ts
-    slice_min = float(model.ENERGY_SLICE_MIN)
-    remaining = budget
+    remaining = gap_min
+    steps = 0
+
+    # 第一段：逐片积分，最多 ENERGY_STEP_CAP 片（一整天）
+    while remaining > 1e-9 and steps < ENERGY_STEP_CAP:
+        take = min(slice_min, remaining)
+        value = _step(value, cursor, take, window)
+        cursor = cursor + timedelta(minutes=take)
+        remaining -= take
+        steps += 1
+
+    # 第二段：剩下的整天按闭式折算——映射算一次，逐天套用
+    folded_days = int((remaining + 1e-9) // day_min)
+    if folded_days > 0:
+        offset, floor, ceiling = _day_fold(cursor, window)
+        for _ in range(folded_days):
+            value = min(ceiling, max(floor, value + offset))
+        cursor = cursor + timedelta(days=folded_days)
+        remaining -= folded_days * day_min
+
+    # 第三段：不足一天的尾巴仍逐片算，一片不省
     while remaining > 1e-9:
         take = min(slice_min, remaining)
         value = _step(value, cursor, take, window)
         cursor = cursor + timedelta(minutes=take)
         remaining -= take
+        steps += 1
+
     state["value"] = _clamp(value)
     state["updated_at"] = at
     return {
         "from": start_iso,
         "to": at,
-        "hours": round(budget / 60.0, 2),
-        "capped": capped,
+        "hours": round(gap_min / 60.0, 2),
+        "capped": folded_days > 0,
+        "steps": steps,
+        "folded_days": folded_days,
     }
 
 
@@ -205,6 +278,8 @@ def _snapshot(state: Dict[str, Any], info: Dict[str, Any]) -> Dict[str, Any]:
         "settled_to": info["to"],
         "hours": round(float(info["hours"]), 2),
         "capped": bool(info["capped"]),
+        "steps": int(info["steps"]),
+        "folded_days": int(info["folded_days"]),
     }
 
 
@@ -268,7 +343,9 @@ def read(
 
     sleep_window 不传就用 DEFAULT_SLEEP_WINDOW；传了就是「这段时间算她醒着还是睡着」
     的档，本模块不自己判断日程。
-    返回 {"value", "tier", "settled_from", "settled_to", "hours", "capped"}。
+    返回 {"value", "tier", "settled_from", "settled_to", "hours", "capped",
+    "steps", "folded_days"}：steps 是这次真正走过的切片数，folded_days 是按整天
+    闭式折算掉的天数（两者都只为把"省了多少"报出来，不影响 value）。
     """
     at = now if isinstance(now, str) and now else model.now_iso()
     window = _window(sleep_window)

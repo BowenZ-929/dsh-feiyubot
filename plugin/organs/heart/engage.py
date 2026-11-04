@@ -4,15 +4,22 @@
 - 硬门先于软门，次序固定：① 夜间窗口 → ② 被骂当天 → ③ mood 与 energy 双低。
 - 硬门命中一条就不再算软门（soft_skipped=True、soft=[]）：夜里、被骂、双低，
   这三件事发生的时候再去数今天说了几条没有意义。
-- 没有硬门才把软门三条全算一遍（不短路）：今日量硬线判不说 / 软线判少说、
-  熟稔偏低判少说、刚被打断判少说。命中集全列，最强的那门定三态。
+- 没有硬门才把软门四条全算一遍（不短路）：今日量硬线判不说 / 软线判少说、
+  熟稔偏低判少说、刚被打断判少说、近期连着被无视/被凶判少说或不说。命中集
+  全列，最强的那门定三态。
+- 第 4 道软门读「近期事件窗口」（window_signal）：连续被无视、最近 2 小时内
+  被凶 → 判少说/不说，理由码 model.REASON_IGNORED。**窗口是现算的**：每次判决
+  现读 events.recent、现算每条事件的 age；"越来越冷"是窗口内加权叠出来的，
+  不落任何"冷度"状态，所以窗口滑走（事件出了窗口、时间推过去）自然恢复，
+  没有需要回滚的东西。
 - 每次出结论都要能说出"哪几个门命中"：hits 为空而态不是"说"，那就是
   "判了但不知道为什么"，属失败——塞 model.REASON_UNATTRIBUTED 并 WARN 出来。
 
 本模块持有的"尺"：**一条半衰都没有**。engage 的每个量都是当刻快照——
 夜间窗口按 now 的小时现算（跨午夜 23→8），被打断的冷却按时间戳差值现算，
-既不累加也不衰减，所以这里不写任何半衰常数，也不许借 mood 的 3h/7d 或
-offset 的 6h/4h 那把尺。熟稔 21 天那把尺在脑：心只搬运 ports 给的读数，
+事件窗口的线性衰减（1 − age_min/window_min）同样只在 window_signal 里一次算完，
+既不累加也不衰减、不跨次累积，所以这里不写任何半衰常数，也不许借 mood 的
+3h/7d 或 offset 的 6h/4h 那把尺。熟稔 21 天那把尺在脑：心只搬运 ports 给的读数，
 不持有、不重算、不抄常数；今日条数同样是脑给的，心不自己数文件。
 
 纯函数：decide 不读盘、不写盘、不产生任何句子、不掷骰子、不调模型；
@@ -25,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from organs.heart import model, store
+from organs.heart import events, model, store
 
 # 判决日志的文件名：一行一次判决，只看不判。
 LOG_FILE = "engage_log.jsonl"
@@ -36,6 +43,20 @@ _STATE_RANK = {
     model.STATE_LESS: 1,
     model.STATE_SILENT: 2,
 }
+
+# 事件窗口的尺：加权口径与门槛都只给 window_signal / 第 4 道软门用。
+# model.py 只放"门"的线与理由码（这一轮只许它多一个 reason），窗口是窗口
+# 自己的算法常数，所以和 _STATE_RANK 一样留在这里。
+WINDOW_MIN = 120.0
+WINDOW_KIND_WEIGHT = {
+    events.KIND_IGNORED: 1.0,
+    events.KIND_HARSH: 1.5,
+    events.KIND_REPLIED: -1.0,
+    events.KIND_NORMAL: -0.5,
+}
+WINDOW_LESS_WEIGHT = 3.0
+WINDOW_SILENT_WEIGHT = 5.0
+WINDOW_CONSECUTIVE_IGNORED = 3
 
 
 @dataclass
@@ -54,6 +75,9 @@ class EngageInput:
     now: Optional[str] = None
     insulted_today: bool = False
     last_interrupted_at: Optional[str] = None
+    # 近期事件窗口的 signal（调用方用 window_signal 现算好传进来）。
+    # decide 仍然不读盘：窗口是入参，不是它自己的副作用。
+    window: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_effective(cls, eff: Dict[str, Any], energy: float, familiarity: float,
@@ -130,10 +154,84 @@ def _minutes_since(stamp: Optional[str], now: str) -> Optional[float]:
         return None
 
 
-def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
-    """三道软门全算一遍（不短路），返回 (理由码, 它主张的态)。
+def window_signal(root: Any, now: Optional[str] = None,
+                  window_min: float = WINDOW_MIN) -> Dict[str, Any]:
+    """近期事件窗口：现读 events.recent、现算一个加权信号，不落任何状态。
 
-    今日量一档只出一条码：过硬线判不说，只过软线判少说。
+    权重口径（机械可算）：
+        w = Σ kind_weight(kind) × (1 − age_min / window_min)
+    age_min = now − at 的分钟数（现算），kind_weight：
+    ignored = +1.0、harsh = +1.5、replied = −1.0、normal = −0.5。
+    账本里别的 kind（mood 的 praise/cold/conflict/insult）只计数不参与加权。
+
+    所以越新的事件越接近满权重、越贴窗口边缘越接近 0：连续的 ignored 一条条
+    叠起来就是"越来越冷"，靠的是这条线性衰减，**不靠任何累积的"冷度"状态**；
+    时间一过、事件出了窗口，weight 自然回到 0，不需要谁来清。
+
+    consecutive_ignored = 从最新一行往前数连续 ignored 的条数（遇到别的 kind 就停）。
+    返回 {"weight", "consecutive_ignored", "harsh", "replied", "window_min", "rows"}。
+    """
+    at = now if isinstance(now, str) and now else model.now_iso()
+    span = float(window_min)
+    rows = events.recent(root, at, span)
+    weight = 0.0
+    harsh = 0
+    replied = 0
+    consecutive = 0
+    for row in rows:
+        kind = row.get("kind")
+        if kind == events.KIND_HARSH:
+            harsh += 1
+        elif kind == events.KIND_REPLIED:
+            replied += 1
+        unit = WINDOW_KIND_WEIGHT.get(kind)
+        if unit is None:
+            continue
+        minutes = model.hours_between(row.get("at"), at) * 60.0
+        share = 1.0 - (minutes / span) if span > 0 else 0.0
+        weight += unit * share
+    for row in reversed(rows):
+        if row.get("kind") != events.KIND_IGNORED:
+            break
+        consecutive += 1
+    return {
+        "weight": weight,
+        "consecutive_ignored": consecutive,
+        "harsh": harsh,
+        "replied": replied,
+        "window_min": span,
+        "rows": len(rows),
+    }
+
+
+def _window_hit(sig: Optional[Dict[str, Any]]) -> Optional[str]:
+    """第 4 道软门：窗口 signal → 它主张的态（None = 没命中）。
+
+    weight ≥ 5.0 主张不说、≥ 3.0 主张少说；连续被无视 ≥ 3 条兜底至少少说
+    （挡住 weight 恰好被 replied 抵回去的情形）。没传窗口 / 窗口坏 → 没命中。
+    """
+    if not isinstance(sig, dict):
+        return None
+    try:
+        weight = float(sig.get("weight") or 0.0)
+    except (TypeError, ValueError):
+        weight = 0.0
+    try:
+        consecutive = int(sig.get("consecutive_ignored") or 0)
+    except (TypeError, ValueError):
+        consecutive = 0
+    if weight >= WINDOW_SILENT_WEIGHT:
+        return model.STATE_SILENT
+    if weight >= WINDOW_LESS_WEIGHT or consecutive >= WINDOW_CONSECUTIVE_IGNORED:
+        return model.STATE_LESS
+    return None
+
+
+def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
+    """四道软门全算一遍（不短路），返回 (理由码, 它主张的态)。
+
+    今日量一档只出一条码：过硬线判不说，只过软线判少说。第 4 道是近期事件
+    窗口，读调用方传进来的 signal（本函数自己不读盘）。
     """
     hits: List[Tuple[str, str]] = []
     if inp.today_count >= model.ENGAGE_TODAY_HARD:
@@ -145,6 +243,9 @@ def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
     minutes = _minutes_since(inp.last_interrupted_at, now)
     if minutes is not None and minutes < model.ENGAGE_INTERRUPT_COOLDOWN_MIN:
         hits.append((model.REASON_INTERRUPTED, model.STATE_LESS))
+    window_state = _window_hit(inp.window)
+    if window_state is not None:
+        hits.append((model.REASON_IGNORED, window_state))
     return hits
 
 
@@ -201,9 +302,11 @@ def decide(inp: EngageInput) -> Dict[str, Any]:
     """纯函数：给一次判决，说清态与理由码，不读盘、不写盘、不说话。
 
     返回 {"state", "reason", "hits", "hard", "soft", "soft_skipped",
-          "readouts", "score"}；reason 是主因（最强那门的码，无门则 None），
-    hits 是所有命中门（硬门时等于 hard），score 只做读数。
+          "readouts", "score", "window"}；reason 是主因（最强那门的码，无门则
+    None），hits 是所有命中门（硬门时等于 hard），score 只做读数，
+    window 是调用方传进来的窗口 signal 原样带回（没传就是 None）。
     """
+    signal = dict(inp.window) if isinstance(inp.window, dict) else None
     now = inp.now or model.now_iso()
     hard = _hard_hits(inp, now)
     if hard:
@@ -228,6 +331,7 @@ def decide(inp: EngageInput) -> Dict[str, Any]:
         "soft_skipped": soft_skipped,
         "readouts": _readouts(inp),
         "score": _score(inp),
+        "window": signal,
     }
 
 

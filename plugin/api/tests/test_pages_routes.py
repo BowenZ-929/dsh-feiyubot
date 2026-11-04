@@ -36,7 +36,8 @@ ANCHOR_RE = re.compile(r'<a\b[^>]*\bhref="([^"]+)"')
 WRITE_VERBS = ('"post"', '"put"', '"delete"', '"patch"')
 # 心页只许拉自己那八条：页面自检用（顺序无所谓，集合相等就够）
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
-                "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective")
+                "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
+                "/heart/pending")
 
 
 def _text(name: str) -> str:
@@ -120,10 +121,12 @@ class HeartHasNoWriteEntry(unittest.TestCase):
 class HeartPageOnlySpeaksGet(unittest.TestCase):
     """心页只读的机器证据（本轮补齐）：它要拉数据，所以光「没有写控件」不够。
 
-    三件事一起看住：
+    四件事一起看住：
     1. 页面上每一次 fetch 的路径都在 api.ROUTES 里，且那条路由就是 GET；
     2. 画的是 mood 的轨迹：<canvas> + trajectory + fetch("/heart/mood") 三样都在；
-    3. 没有任何非 GET 的写法（连 "method" 这种第二参数都不许出现），也不挂定时器。
+    3. 没有任何非 GET 的写法（连 "method" 这种第二参数都不许出现），也不挂定时器；
+    4. 念头块与窗口块真的在页上，且各自读的是自己那一块的键——只断言"没有写控件"
+      的话，把这两块的取数删掉也照样是绿的。
     """
 
     def setUp(self) -> None:
@@ -151,6 +154,18 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
             self.assertNotIn(needle, self.text, "心页出现了非 GET 写法：%s" % needle)
         for needle in ("setTimeout", "setInterval"):
             self.assertNotIn(needle, self.text, "心页不挂定时器：%s" % needle)
+
+    def test_pending_and_window_blocks_read_their_own_keys(self):
+        """念头（/heart/pending）与近期窗口（判决带的 window）各读各的键。"""
+        for needle, note in (('fetch("/heart/pending"', "念头块来自 GET /heart/pending"),
+                             ("thoughts", "念头列表读 pending 的 thoughts"),
+                             ("ttl_left_min", "念头要显示剩余 TTL"),
+                             ("此刻没有未了的念头", "没念头时给一句话，不显示空白"),
+                             ("ignored-recently", "窗口命中时的理由码要写在页上"),
+                             ("signal.weight", "窗口块显示 weight"),
+                             ("signal.consecutive_ignored", "窗口块显示 consecutive_ignored"),
+                             ("signal.rows", "窗口块显示窗内事件条数")):
+            self.assertTrue(needle in self.text, "%s：页面上找不到 %r" % (note, needle))
 
     def test_axes_and_voice_come_from_the_effective_route(self):
         """六轴档位与语气档都从合成点读：页面自己不做第二套换算。"""
