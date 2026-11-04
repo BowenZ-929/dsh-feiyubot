@@ -73,13 +73,13 @@ _DIRECTION_COLD = "偏冷"
 
 
 def _path(root: Any) -> Path:
-    """状态文件路径：root 给了就用 root，没给就用 store.DATA_DIR。"""
-    base = Path(root) if root is not None else store.DATA_DIR
+    """状态文件路径：root 给了就用 root，没给就用 store.default_root()（实盘）。"""
+    base = Path(root) if root is not None else store.default_root()
     return base / MOOD_FILE
 
 
 def _traj_path(root: Any) -> Path:
-    base = Path(root) if root is not None else store.DATA_DIR
+    base = Path(root) if root is not None else store.default_root()
     return base / TRAJ_FILE
 
 

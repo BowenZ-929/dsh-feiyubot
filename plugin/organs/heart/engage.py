@@ -336,8 +336,8 @@ def decide(inp: EngageInput) -> Dict[str, Any]:
 
 
 def _log_path(root: Any = None) -> Path:
-    """日志落 root（默认 store.DATA_DIR），测试一律给临时目录。"""
-    base = Path(root) if root is not None else store.DATA_DIR
+    """日志落 root（默认 store.default_root() 那份实盘），测试一律给临时目录。"""
+    base = Path(root) if root is not None else store.default_root()
     return base / LOG_FILE
 
 

@@ -11,7 +11,20 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import paths
+
+ENV_ROOT = "HEART_ROOT"
+#: 出厂默认参数（卡、说明）在这里；实盘状态在 <仓库>/home/organs/heart（见 organs/paths.py）
 DATA_DIR = Path(__file__).resolve().parent / "data"
+
+
+def default_root() -> Path:
+    """实盘根：环境变量 HEART_ROOT > <仓库>/home/organs/heart。
+
+    构造参数仍然最优先（各模块 root 非空就直接用）——测试一律给临时根，不碰实盘。
+    """
+    env = os.environ.get(ENV_ROOT, "")
+    return Path(env) if env else paths.organ_dir("heart")
 
 
 def ensure_dir(path: Any) -> Path:

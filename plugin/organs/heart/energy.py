@@ -67,7 +67,7 @@ _SEEN_BURSTS_MAX = 64
 
 
 def _path(root: Any) -> Path:
-    base = Path(root) if root is not None else store.DATA_DIR
+    base = Path(root) if root is not None else store.default_root()
     return base / ENERGY_FILE
 
 

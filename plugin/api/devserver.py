@@ -1,8 +1,12 @@
 """本地验收用的开发服务器：标准库 http.server，只绑 127.0.0.1。
 
 用法（在 plugin/ 下）：
-    python3 -m api.devserver --root organs/soul/data --port 8787
-    python3 -m api.devserver --root organs/soul/data --brain-root organs/brain/data --port 8787
+    python3 -m api.devserver --port 8787
+
+数据根默认走 api/roots.py：魂在 <仓库>/home/organs/soul，脑在 <仓库>/home/organs/brain
+（家 / 心 / 日子线由 roots 写进 HOME_ROOT / HEART_ROOT / DAY_ROOT 交给器官层）。
+--root 与 --brain-root 只为兼容保留，显式给了就用，但同样要过 api/roots.py 的门禁：
+她的实盘必须在 <仓库>/home 下，指向 plugin/、docs/ 或仓库外一律拒绝启动。
 
 顺带把面板页静态发出来：GET / 与 GET /panel 是 soul.html，GET /heart、GET /brain
 是心与脑的只读页（找不到回 404；写方法走 api.handle，一律 405）。
@@ -19,13 +23,12 @@ from typing import Any, Dict, Optional, Sequence
 
 from organs.brain import BrainStore, load as load_brain
 from organs.soul import SoulLoadError, load
-from . import api, inbound
+from . import api, inbound, roots
 from .pages import PAGE_FILES, read_page
 
 # 静态页：路径 → 页面文件（与 api.ROUTES 无关，这几个路径只发 html，不进 api.handle）
 PAGE_ROUTES = PAGE_FILES
 PAGE_TYPE = "text/html; charset=utf-8"
-DEFAULT_BRAIN_DIR = "organs/brain/data"
 
 
 def _decode_target(raw: str) -> str:
@@ -104,8 +107,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python3 -m api.devserver")
-    parser.add_argument("--root", required=True, help="魂数据目录")
-    parser.add_argument("--brain-root", default=DEFAULT_BRAIN_DIR, help="脑数据目录")
+    parser.add_argument("--root", default=None,
+                        help="魂数据目录（默认 <仓库>/home/organs/soul；兼容保留，同样过门禁）")
+    parser.add_argument("--brain-root", default=None,
+                        help="脑数据目录（默认 <仓库>/home/organs/brain；兼容保留，同样过门禁）")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--day", action="store_true",
                         help="开日子线的节律线程（60 秒一次；默认关，不开就不起任何循环）")
@@ -122,7 +127,20 @@ def _load_brain(path: Path) -> Optional[BrainStore]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    root = Path(args.root).resolve()
+    try:
+        info = roots.bootstrap()
+    except roots.RootsError as exc:
+        sys.stderr.write("[devserver] 拒不起身：%s\n" % exc)
+        return 2
+    for organ, count in sorted(info["seeded"].items()):
+        if count:
+            sys.stderr.write("[devserver] 出厂默认补件 %s：%d 个\n" % (organ, count))
+    try:
+        root = roots.organ_root("soul", args.root)
+        brain_root = roots.organ_root("brain", args.brain_root)
+    except roots.RootsError as exc:
+        sys.stderr.write("[devserver] 拒不起身：%s\n" % exc)
+        return 2
     try:
         _Handler.store = load(root)
     except SoulLoadError as exc:
@@ -130,13 +148,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             sys.stderr.write("[%s] %s %s\n" % (issue.level, issue.code, issue.message))
         sys.stderr.write("魂载入失败，不启动：%s\n" % root)
         return 1
-    _Handler.brain = _load_brain(Path(args.brain_root).resolve())
+    _Handler.brain = _load_brain(brain_root)
     # 日子线：唯一的那一个循环，默认关；--day 才开，进程结束就关（不留后台线程）
     if args.day:
         from organs.day import rhythm as day_rhythm
-        info = day_rhythm.start(brain=_Handler.brain)
+        started = day_rhythm.start(brain=_Handler.brain)
         sys.stderr.write("[devserver] 日子线节律：%s（%s 秒一次）\n"
-                         % (info.get("message") or "已启动", info.get("interval_seconds")))
+                         % (started.get("message") or "已启动", started.get("interval_seconds")))
     server = HTTPServer(("127.0.0.1", args.port), _Handler)
     print("http://127.0.0.1:%d/  root=%s  brain=%s" % (
         args.port, root, "未载入" if _Handler.brain is None else "已接入"), flush=True)

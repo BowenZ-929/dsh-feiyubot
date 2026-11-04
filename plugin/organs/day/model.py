@@ -7,7 +7,7 @@
 - 换日点与三条闸门阈值（tick 间隔 / 同类型硬下限 / 每日上限）的默认值写在本文件的
   DEFAULTS 里，实际取值优先读 data/limits.json——改节奏改那份配置，不改代码。
 - 时间一律可注入：对外函数都收 now_ts，不给才取本地当前时刻。测试不许依赖真实时钟。
-- 落盘根三级：构造参数 > 环境变量 DAY_ROOT > 包内 data/（与家的 home_root 同一套规矩）。
+- 落盘根三级：构造参数 > 环境变量 DAY_ROOT > <仓库>/home/organs/day（与家的 home_root 同一套规矩）。
 - 计划一律存**绝对时刻**（带偏移的 ISO8601），不存「今天 9 点」这种相对说法：
   换日、补算、跨时区都不会把同一条计划算出两个时刻。
 
@@ -24,6 +24,8 @@ import os
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from .. import paths
 
 ENV_ROOT = "DAY_ROOT"
 LIMITS_FILE = "limits.json"
@@ -104,13 +106,13 @@ def day_key(value: Any = None, cutover_hour: Optional[int] = None) -> str:
 
 
 def day_root(root: Any = None) -> Path:
-    """日子线的数据根：构造参数 > DAY_ROOT > 包内 data/。"""
+    """日子线的数据根：构造参数 > DAY_ROOT > <仓库>/home/organs/day。"""
     if root is not None:
         return Path(root)
     env = os.environ.get(ENV_ROOT, "")
     if env:
         return Path(env)
-    return DATA_DIR
+    return paths.organ_dir("day")
 
 
 def limits_file(root: Any = None) -> Path:

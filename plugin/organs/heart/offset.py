@@ -49,7 +49,7 @@ KIND_OVERWRITE = "overwrite"
 
 def _paths(root: Any = None):
     """状态文件与账本文件的落点；root 缺省是仓里的 data 目录。"""
-    base = Path(root) if root is not None else store.DATA_DIR
+    base = Path(root) if root is not None else store.default_root()
     return base / OFFSET_FILE, base / LEDGER_FILE
 
 

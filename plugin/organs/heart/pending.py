@@ -82,8 +82,8 @@ _FALLBACK_TS = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _path(root: Any) -> Path:
-    """念头文件路径：root 给了就用 root，没给就用 store.DATA_DIR。"""
-    base = Path(root) if root is not None else store.DATA_DIR
+    """念头文件路径：root 给了就用 root，没给就用 store.default_root()（实盘）。"""
+    base = Path(root) if root is not None else store.default_root()
     return base / PENDING_FILE
 
 

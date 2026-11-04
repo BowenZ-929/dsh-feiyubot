@@ -27,8 +27,9 @@ except ImportError:
             self.context = context
 
 
-DEFAULT_SOUL_DIR = "organs/soul/data"
-DEFAULT_BRAIN_DIR = "organs/brain/data"
+# 数据根默认走 api/roots.py（实盘在 <仓库>/home 下）；配置里给了 soul_dir / brain_dir 就照用，
+# 但同样要过 roots 的门禁——她的实盘不许指回 plugin/ 或 docs/。
+PLUGIN_DIR = Path(__file__).resolve().parent
 # 宿主把面板挂载点叫成什么，就在这儿认什么；一个都没有就跳过，面板不是起身的前提。
 MOUNT_HOOKS = ("mount_panel_routes", "register_panel_routes")
 
@@ -69,6 +70,23 @@ def _mount_panel(context: Any, store: Any, brain: Any = None) -> None:
             return
 
 
+def _roots_module() -> Any:
+    """api.roots：包内相对导入（AstrBot 加载）与单跑（测试、脚本）两种姿势都要成立。"""
+    try:
+        from .api import roots
+    except ImportError:
+        from api import roots
+    return roots
+
+
+def _organ_dir(roots: Any, organ: str, conf_value: Any) -> Path:
+    """配置给了就用配置（相对 plugin/ 解析，老写法照旧）；没给就用实盘根。"""
+    if not conf_value:
+        return roots.organ_root(organ)
+    raw = Path(str(conf_value)).expanduser()
+    return roots.organ_root(organ, raw if raw.is_absolute() else PLUGIN_DIR / raw)
+
+
 def _report(issue: model.Issue) -> None:
     line = "[qqagent] %s %s" % (issue.code, issue.message)
     if issue.level == model.ERROR:
@@ -82,8 +100,18 @@ class QQAgent(Star):
 
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(context)
-        soul_dir = Path(__file__).resolve().parent / str(_conf(context, "soul_dir", DEFAULT_SOUL_DIR))
-        brain_dir = Path(__file__).resolve().parent / str(_conf(context, "brain_dir", DEFAULT_BRAIN_DIR))
+        roots = _roots_module()
+        try:
+            roots.bootstrap()
+        except roots.RootsError as exc:
+            logger.error("[qqagent] 拒不起身：%s", exc)
+            return
+        try:
+            soul_dir = _organ_dir(roots, "soul", _conf(context, "soul_dir", None))
+            brain_dir = _organ_dir(roots, "brain", _conf(context, "brain_dir", None))
+        except roots.RootsError as exc:
+            logger.error("[qqagent] 拒不起身：%s", exc)
+            return
         self.store: Optional[SoulStore] = None
         self.brain: Any = None
         try:

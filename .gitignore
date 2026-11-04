@@ -4,31 +4,49 @@ local/
 # 本地临时与产物
 .scratch/
 *.log
-
-# 她的运行时数据（实盘状态，会天天变）—— 代码与参数入库，状态不入库
-plugin/organs/soul/data/
-# 脑：参数文件（tiers.json / retention.json / topics.json）必须入库，缺了它们行为会变；状态文件不入库
-plugin/organs/brain/data/today.json
-plugin/organs/brain/data/hot.json
-plugin/organs/brain/data/longterm.jsonl
-plugin/organs/brain/data/people.json
-plugin/organs/brain/data/edges.json
-plugin/organs/brain/data/proposals.json
-plugin/organs/brain/data/proposal_log.jsonl
-plugin/organs/brain/data/selfnarration.jsonl
-plugin/organs/brain/data/evictions.jsonl
-plugin/organs/brain/data/topic_candidates.json
 __pycache__/
 *.pyc
 
 # macOS
 .DS_Store
 
-# 家的十间房：目录 + 两个决定入库（rooms.json 是骨架派生物，access.json 是"她写哪几间"这个决定本身），
-# 屋里放的东西一律不入库 —— 那是实盘，会天天变
+# 她的实盘（<仓库>/home）：魂的正文、记忆、十间房物件、日程、审计，天天变，整棵不进库。
+# 只留骨架：目录本身与 .gitkeep 例外出去，好让 clone 下来有同样的目录可读。
+home/**
+!home/**/
+!home/**/.gitkeep
+# 迁移备份（home/.migrated-<时间戳>/）在这条之后整棵挡死：它自带一份她自己的 .gitignore，
+# 不先把那一层目录挡掉，它会替自己翻案（.gitignore / baseline-card.json 会冒出来）。
+home/.migrated-*/
+
+# ── 出厂默认（plugin/organs/<器官>/data）：参数入库，她的东西不入库 ──
+# 一律「先整目录挡住，再逐份点名放行」：没被点名的文件默认不入库，漏不了。
+# 魂：她真实的魂正文就在这里——出厂默认里若含她的正文，不入库。
+plugin/organs/soul/data/
+
+# 脑：四份参数（档界 / 遗忘曲线 / 话题表 / 名片史）入库；
+# 记忆、人名录、夜里的话、热点、候选话题一律不入库。
+plugin/organs/brain/data/*
+!plugin/organs/brain/data/tiers.json
+!plugin/organs/brain/data/retention.json
+!plugin/organs/brain/data/topics.json
+!plugin/organs/brain/data/people_card_history.jsonl
+
+# 家：十间房的目录骨架（.gitkeep）与两个决定入库——
+# rooms.json 是代码的镜像，access.json 是「她写哪几间」这个决定本身；
+# 屋里放的东西、审计账一律不入库。
 plugin/organs/home/data/*
 !plugin/organs/home/data/*/
 plugin/organs/home/data/*/*
 !plugin/organs/home/data/*/.gitkeep
 !plugin/organs/home/data/rooms.json
 !plugin/organs/home/data/access.json
+
+# 日子线：三份参数（limits / schedule / delivery）入库；
+# 跑出来的账（plans / rhythm / 夜日志 / 日程日志 / 送达待发）不入库。
+plugin/organs/day/data/*
+!plugin/organs/day/data/limits.json
+!plugin/organs/day/data/schedule.json
+!plugin/organs/day/data/delivery.json
+
+# 心：自己目录里的 .gitignore 管自己（卡与说明入库，跑出来的状态不入库）。

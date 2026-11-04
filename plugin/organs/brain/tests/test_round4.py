@@ -63,6 +63,25 @@ class TiersAndColdTest(unittest.TestCase):
         self.assertEqual(0, summary["longterm"]["count"])
         self.assertEqual(0, summary["cold"]["count"])
 
+    def test_cold_page_annotates_retention_and_clarity(self):
+        store, tmp = fresh_store()
+        self.addCleanup(tmp.cleanup)
+        result = ingest(store, "主人", "我妈住院了", "2026-10-01T10:00:00+00:00")
+        entry_id = result["entry"]["id"]
+        store.today_entries("2026-11-20T10:00:00+00:00")
+        found = store._latest_longterm(entry_id)
+        updated = dict(found)
+        updated["ts"] = "2026-10-01T10:00:00+00:00"
+        updated["last_recalled_at"] = "2026-10-02T10:00:00+00:00"
+        updated["recall_count"] = 0
+        store._append_longterm([updated])
+        store.recall("住院", now_ts="2026-11-20T10:05:00+00:00")
+        page = store.cold_page(now_ts="2026-11-20T10:06:00+00:00")
+        self.assertEqual(1, len(page["items"]))
+        self.assertIn("retention", page["items"][0])
+        self.assertIn("clarity", page["items"][0])
+        self.assertLess(page["items"][0]["retention"], 0.08)
+
     def test_cold_page_empty_is_empty_array_and_bad_line_raises(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)

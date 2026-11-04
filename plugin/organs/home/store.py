@@ -1,7 +1,7 @@
 """家的落盘底座：根目录只派生一次，写一律同目录 .tmp + os.replace，读一律不静默吞坏行。
 
-根目录三级：构造参数 > 环境变量 HOME_ROOT > 包内 data/。测试只走前两级——
-真目录里是实盘，会天天变，不入库。
+根目录三级：构造参数 > 环境变量 HOME_ROOT > <仓库>/home/organs/home。测试只走前两级——
+实盘在仓库根的 home/ 底下（见 organs/paths.py），会天天变，不入库。
 """
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import secrets
 import string
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+from .. import paths
 
 ENV_ROOT = "HOME_ROOT"
 TMP_PREFIX = ".tmp-"
@@ -35,13 +37,13 @@ class StoreError(Exception):
 
 
 def home_root(root=None) -> Path:
-    """家的根：构造参数 > HOME_ROOT > 包内 data/。"""
+    """家的根：构造参数 > HOME_ROOT > <仓库>/home/organs/home。"""
     if root is not None:
         return Path(root)
     env = os.environ.get(ENV_ROOT, "")
     if env:
         return Path(env)
-    return Path(__file__).resolve().parent / "data"
+    return paths.organ_dir("home")
 
 
 def ensure_dir(path: Path) -> None:

@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from organs import paths
 from organs.home import store
 from organs.home.store import (
     StoreError, append_line, atomic_write_text, encode_name, ensure_dir, home_root,
@@ -21,9 +22,10 @@ class HomeRootTest(unittest.TestCase):
             self.assertEqual(Path("/tmp/given"), home_root("/tmp/given"))
             self.assertEqual(Path("/tmp/env-home"), home_root())
 
-    def test_falls_back_to_package_data(self):
+    def test_falls_back_to_home_organs(self):
+        """没给参数、没有 HOME_ROOT：实盘根是 <仓库>/home/organs/home，包内 data/ 只是出厂默认参数。"""
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(Path(store.__file__).resolve().parent / "data", home_root())
+            self.assertEqual(paths.organ_dir("home"), home_root())
 
 
 class AtomicWriteTest(unittest.TestCase):

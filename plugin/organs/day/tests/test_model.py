@@ -5,6 +5,7 @@ import json
 import unittest
 from datetime import timezone
 
+from organs import paths
 from organs.day import model
 from organs.day.tests.helpers import at, temp_root
 
@@ -75,10 +76,11 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(60, values["tick_seconds"])
         self.assertEqual(5, values["daily_cap"])
 
-    def test_root_is_explicit_then_env_then_package(self):
+    def test_root_is_explicit_then_env_then_home(self):
         root = temp_root(self)
         self.assertEqual(root, model.day_root(root))
-        self.assertEqual(model.DATA_DIR, model.day_root())
+        # 没给参数、没有 DAY_ROOT：实盘根是 <仓库>/home/organs/day，包内 data/ 只是出厂默认参数
+        self.assertEqual(paths.organ_dir("day"), model.day_root())
 
 
 if __name__ == "__main__":

@@ -518,8 +518,13 @@ class BrainStore:
         }
 
     def cold_page(self, cursor: Optional[str] = None,
-                  limit: int = 20) -> Dict[str, Any]:
-        """冷仓分页：空就是空数组；读不到/读坏要报错，不许折叠成 0 条。"""
+                  limit: int = 20, now_ts: Optional[str] = None) -> Dict[str, Any]:
+        """冷仓分页：空就是空数组；读不到/读坏要报错，不许折叠成 0 条。
+
+        每项带现算的 retention/clarity——遗忘曲线的意义是"看得见正在变淡"，
+        冷仓是最后一档，这里也必须能看见它淡到了哪一格。
+        """
+        now_ts = now_ts or now_iso()
         rows = _read_jsonl_strict(self._root / LONGTERM_FILE)
         latest: Dict[str, Dict[str, Any]] = {}
         for row in rows:
@@ -529,7 +534,7 @@ class BrainStore:
         cold.sort(key=lambda row: row.get("ts", ""), reverse=True)
         if cursor:
             cold = [row for row in cold if row.get("ts", "") < cursor]
-        page = cold[:limit]
+        page = [self._annotate_retention(dict(row), now_ts) for row in cold[:limit]]
         next_cursor = page[-1].get("ts") if len(page) == limit else None
         return {"items": page, "next_cursor": next_cursor}
 

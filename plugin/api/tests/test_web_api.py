@@ -210,7 +210,10 @@ class MainImportTest(unittest.TestCase):
         import main
 
         self.assertTrue(issubclass(main.QQAgent, object))
-        self.assertEqual("organs/soul/data", main.DEFAULT_SOUL_DIR)
+        # 默认数据根不再是包内 organs/soul/data（那是出厂默认参数），而是实盘 <仓库>/home/organs/soul
+        from api import roots
+        self.assertEqual(roots.organ_root("soul"), main._organ_dir(roots, "soul", None))
+        self.assertIn("home", roots.organ_root("soul").parts)
 
 
 if __name__ == "__main__":
