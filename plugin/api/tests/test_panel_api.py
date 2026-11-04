@@ -4,7 +4,7 @@
 - 七个魂端点各有一条成功路径；提案端点成功与被拒（只两条依据、改红线）都有；
 - 面板上心与脑只有只读入口：GET /heart 返回「未接入」，GET /brain 返回「已接入」，
   心与脑的路径上 POST/PUT/DELETE 一律 405（入口存在，但没有写），
-  pages/heart.html 无任何写控件，pages/brain.html 只有 GET 拉取、没有任何写控件，
+  pages/heart.html 无任何写控件；pages/brain.html 的写只有一条（接受提案 → 写魂不写脑），
   pages/soul.html 里心与脑只以两条链接 + 只读说明 + 只读提案框出现；
 - 只读端点无副作用：GET 前后五个数据文件字节不变；
 - 面板改完这里就变：POST /soul/edit 改 tone → GET /soul/render 立刻是新句子（同一进程，不重启）。
@@ -39,16 +39,31 @@ REQUIRED_ROUTES = (
     ("GET", "/soul/render"), ("POST", "/soul/edit"), ("POST", "/soul/migrate"),
     ("POST", "/soul/proposal"), ("POST", "/soul/redline"), ("POST", "/soul/rollback"),
     ("POST", "/soul/acceptance"),
-    ("GET", "/heart"),
+    # 口径变更（2026-11-05 心线落地）：心从占位页变成七条只读端点，全在这一张表里。
+    ("GET", "/heart"), ("GET", "/heart/overview"), ("GET", "/heart/baseline"),
+    ("GET", "/heart/mood"), ("GET", "/heart/energy"), ("GET", "/heart/offset"),
+    ("GET", "/heart/engage"),
+    # 2026-11-05 第二轮：/heart/effective 加入关键端点表
+    ("GET", "/heart/effective"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
     ("GET", "/mouth/split"), ("GET", "/mouth/address"),
     ("GET", "/mouth/tone"), ("GET", "/mouth/gate"),
+    ("GET", "/home/rooms"), ("GET", "/home/access"), ("GET", "/home/list"),
+    ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
+    ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
+    ("POST", "/home/write"),
+    # 核自报身份（2026-11-05）：跑的是哪一版、什么时候起的、源码有没有在它脚下被改过。
+    ("GET", "/healthz"),
+    # 脑线新落的两条只读端点（2026-11-05，四档列表与冷仓分页）：先在这儿认下来，
+    # 脑线自己的断言到了再各自归位。
+    ("GET", "/brain/tiers"), ("GET", "/brain/cold"),
 )
-# 有必填查询参数的 GET：空 query 时必须是 400（不是 200，也不许崩）——嘴的干跑端点缺 text 就该响。
+# 有必填查询参数的 GET：空 query 时必须是 400（不是 200，也不许崩）——缺哪个参数就得在 message 里点名。
 # 以后加带必填参数的端点，放进这一组；别把它学成 skip（skip 掉就没人守「缺参要响」了）。
-REQUIRED_PARAM_ROUTES = {"/mouth/split", "/mouth/gate"}
+REQUIRED_PARAM_ROUTES = {"/mouth/split": "text", "/mouth/gate": "text",
+                         "/home/list": "room", "/home/read": "room"}
 
 
 def _proposal(target: str = "manner.stance", value: Any = "提案定的基调",
@@ -211,9 +226,22 @@ class PanelApiTest(unittest.TestCase):
 
     # —— 心与脑：入口得在，写方法一律 405 —————————————————————
     def test_heart_and_brain_are_readonly_pages(self):
-        status, payload = self._call("GET", "/heart")
+        # 口径变更（2026-11-05 心线落地）：/heart 不再是占位页，返回七条真读数；
+        # 只读语义由 HEART_ROUTES 承担。这里只钉「只读 + 心在这一页 + 六块读数都在」，
+        # 每块的形状与取值由 api/tests/test_heart_api.py 逐个端点钉。
+        # 心读的是自己的数据根：一律指向临时目录（root= 只收绝对路径且存在的目录）。
+        heart_root = Path(self._tmp.name) / "heart"
+        heart_root.mkdir()
+        card = PLUGIN / "organs" / "heart" / "data" / "baseline-card.json"
+        (heart_root / card.name).write_bytes(card.read_bytes())
+        status, payload = api.handle("GET", "/heart", None, self.store,
+                                     query={"root": str(heart_root)}, brain=self.brain)
         self.assertEqual(200, status)
-        self.assertEqual({"status": "未接入", "readonly": True, "agent": "heart"}, payload)
+        self.assertIn(payload["status"], ("已接入", "拒载"), payload)
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("heart", payload["agent"])
+        for key in ("baseline", "render", "mood", "energy", "offset", "pending"):
+            self.assertIn(key, payload, "/heart 少了读数：%s" % key)
         for method in ("POST", "PUT", "DELETE"):
             self.assertEqual(405, self._call(method, "/heart", {})[0], "%s /heart" % method)
 
@@ -253,8 +281,12 @@ class PanelSourceTest(unittest.TestCase):
     """面板上没有改心、改脑的入口——用源码断言看住，不靠人记。"""
 
     def test_heart_and_brain_routes_are_get_only(self):
-        self.assertEqual({"/heart": "GET"},
-                         dict((path, api.ROUTES[path]) for path in api.READONLY_PAGES))
+        # 口径变更（2026-11-05 心线落地）：READONLY_PAGES 已随「心不再是占位页」删除，
+        # 只读语义改由 HEART_ROUTES 承担——七条路由全 GET，且没有第二条登记口。
+        self.assertEqual(set(core.heart_api.HEART_ROUTES),
+                         {path for path in api.ROUTES if path.startswith("/heart")})
+        self.assertEqual({"GET"}, {api.ROUTES[path] for path in core.heart_api.HEART_ROUTES})
+        self.assertEqual({}, core.page_api.PAGE_ROUTES, "占位页表已空：心不再是占位页")
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         mounted = {(method, path) for method, path, _ in panel.routes(
@@ -269,17 +301,32 @@ class PanelSourceTest(unittest.TestCase):
     def test_route_table_partitions_into_soul_brain_and_readonly_pages(self):
         """按前缀分组断言，不写死条数：别处加端点这里不该红，写错归属才该红。
 
-        三组：魂（/soul*）、脑（/brain*）、其余（只读页 + 嘴的干跑端点）。
-        「其余」= READONLY_PAGES ∪ MOUTH_ROUTES，且三组两两不相交、并集就是整张 ROUTES——
-        每条路由都要有明确归属，不许有一条落在分类之外。
+        口径变更（2026-11-05 心线落地）：心从「占位页」变成六张器官表里的一张，四组变五组——
+        魂（/soul*）、脑（/brain*）、家（/home*）、心（/heart*）、其余（嘴的干跑端点）。
+        READONLY_PAGES 已删，所以「其余」只剩 MOUTH_ROUTES；五组两两不相交、并集就是整张
+        ROUTES——每条路由都要有明确归属，不许有一条落在分类之外。
         """
         soul = {path for path in api.ROUTES if path.startswith("/soul")}
         brain = {path for path in api.ROUTES if path.startswith("/brain")}
-        rest = set(api.ROUTES) - soul - brain
+        family = {path for path in api.ROUTES if path.startswith("/home")}
+        heart = {path for path in api.ROUTES if path.startswith("/heart")}
+        rest = set(api.ROUTES) - soul - brain - family - heart
+        self.assertEqual(set(core.home_api.HOME_ROUTES), family,
+                         "家的路由就是 HOME_ROUTES 那一张表")
+        self.assertEqual({"/home/write"},
+                         {path for path in family if api.ROUTES[path] == "POST"},
+                         "家只有一条写路由：POST /home/write")
+        self.assertEqual({"GET"},
+                         {api.ROUTES[path] for path in family} - {"POST"},
+                         "家其余九条只读")
         mouth = set(core.mouth_api.MOUTH_ROUTES)
-        self.assertEqual(set(api.READONLY_PAGES) | mouth, rest,
-                         "魂、脑之外 = 只读页 %s + 嘴的干跑端点 %s"
-                         % (sorted(api.READONLY_PAGES), sorted(mouth)))
+        version_set = set(core.version_api.VERSION_ROUTES)
+        self.assertEqual(set(core.heart_api.HEART_ROUTES), heart,
+                         "心的路由就是 HEART_ROUTES 那一张表")
+        self.assertEqual({"GET"}, {api.ROUTES[path] for path in heart}, "心只有只读端点")
+        self.assertEqual(mouth | version_set, rest,
+                         "魂、脑、家、心之外 = 嘴的干跑端点 + 核自报身份 %s"
+                         % (sorted(mouth | version_set),))
         self.assertEqual({"GET"}, {api.ROUTES[path] for path in brain}, "脑只有只读端点")
         # 写入口六条：改值 / 换形状 / 提案 / 红线逐条加撤 / 回滚 / 验收探针。
         # 前五条是「改她的魂」；探针是「写两次再写回」的验收路径，edit 上的 probe 键已关掉。
@@ -289,13 +336,17 @@ class PanelSourceTest(unittest.TestCase):
                          {path for path in soul if api.ROUTES[path] == "POST"},
                          "魂的写入口：改值 / 换形状 / 提案 / 红线逐条 / 回滚 / 验收探针")
         self.assertEqual({"GET"}, {api.ROUTES[path] for path in rest},
-                         "只读页与嘴的干跑端点都只有 GET")
-        # 三组必须真的分区：两两不相交，并集就是整张表——没有端点落在分类之外
+                         "嘴的干跑端点都只有 GET")
+        # 五组必须真的分区：两两不相交，并集就是整张表——没有端点落在分类之外
         self.assertEqual(set(), soul & brain, "魂与脑有重叠")
-        self.assertEqual(set(), soul & rest, "魂与只读页/嘴有重叠")
-        self.assertEqual(set(), brain & rest, "脑与只读页/嘴有重叠")
-        self.assertEqual(set(api.ROUTES), soul | brain | rest,
-                         "路由表分不成三组：有端点没归属")
+        self.assertEqual(set(), soul & heart, "魂与心有重叠")
+        self.assertEqual(set(), soul & rest, "魂与嘴有重叠")
+        self.assertEqual(set(), brain & rest, "脑与嘴有重叠")
+        self.assertEqual(set(), heart & rest, "心与嘴有重叠")
+        self.assertEqual(set(), brain & heart, "脑与心有重叠")
+        self.assertEqual(set(), family & (soul | brain | heart | rest), "家与别的组有重叠")
+        self.assertEqual(set(api.ROUTES), soul | brain | family | heart | rest,
+                         "路由表分不成五组：有端点没归属")
         self.assertEqual(set(REQUIRED_ROUTES),
                          {(api.ROUTES[path], path) for path in api.ROUTES},
                          "路由表就是那张关键端点表：多了少了都得在这儿说清楚")
@@ -350,25 +401,31 @@ class PanelSourceTest(unittest.TestCase):
         「未接入」这类实时状态由端点自己报（见 test_heart_and_brain_are_readonly_json），
         不写进源码断言：页面是活是占位，这条断言都不该红。
         """
-        for name, title in (("heart.html", "心 · 只读"), ("brain.html", "脑 · 只读")):
-            text = (PAGES / name).read_text(encoding="utf-8")
-            self.assertIn(title, text)
-            self.assertIn("只读：人不能改心与脑", text)
-            self.assertIn("§9.2", text, "只读的理由要引 architecture §9.2")
-            for needle in ("button", "form", "textarea", "<input"):
-                self.assertNotIn(needle, text.lower(),
-                                 "%s 里出现了写控件：%s" % (name, needle))
-            for needle in ('"post"', '"put"', '"delete"'):
-                self.assertNotIn(needle, text.lower(),
-                                 "%s 的请求只能是 GET：%s" % (name, needle))
+        text = (PAGES / "heart.html").read_text(encoding="utf-8")
+        self.assertIn("心 · 只读", text)
+        self.assertIn("只读：人不能改心与脑", text)
+        self.assertIn("§9.2", text, "只读的理由要引 architecture §9.2")
+        for needle in ("button", "form", "textarea", "<input"):
+            self.assertNotIn(needle, text.lower(), "heart.html 里出现了写控件：%s" % needle)
+        for needle in ('"post"', '"put"', '"delete"'):
+            self.assertNotIn(needle, text.lower(), "heart.html 的请求只能是 GET：%s" % needle)
+
+        # 脑页多一条写（接受提案，写魂不写脑），所以上面那张图不能整张套到它头上；
+        # 完整判据在 test_pages_brain.py：写只有 POST /soul/proposal，其余全 GET。
+        brain = (PAGES / "brain.html").read_text(encoding="utf-8")
+        self.assertIn("脑 · 只读", brain)
+        self.assertIn("§9.2", brain, "只读的理由要引 architecture §9.2")
+        for needle in ("<form", "<textarea", "<select", "contenteditable", 'call("put"',
+                       'call("delete"'):
+            self.assertNotIn(needle, brain.lower(), "brain.html 里出现了写控件：%s" % needle)
 
         # 脑已接入：这一页是活的只读视图，五条 GET 的路径直接来自脑的路由表
         brain = (PAGES / "brain.html").read_text(encoding="utf-8")
         for path in BRAIN_ROUTES:
             if path in ("/brain", "/brain/recall"):
-                # /brain 是这一页自己（devserver 静态页），回想要带 q，面板没有输入框
+                # /brain 是这一页自己（devserver 静态页）；回想要带 q，只在人点的时候拉
                 continue
-            self.assertIn('get("%s")' % path, brain, "brain.html 要拉 %s" % path)
+            self.assertIn('call("GET", "%s")' % path, brain, "brain.html 要拉 %s" % path)
 
     def test_panel_page_reads_five_blocks_and_budget(self):
         text = PAGE.read_text(encoding="utf-8")
@@ -402,22 +459,31 @@ class PanelContractTest(unittest.TestCase):
 
         分两类，谁都不许 skip：
         - 无必填参数的 GET：空 query 必须 200；
-        - REQUIRED_PARAM_ROUTES 里的 GET（这一轮是 /mouth/split 与 /mouth/gate）：空 query 必须
-          400，而且仍是 json 安全的 dict + ok:false + 一句说清「要给 text」的 message。
+        - REQUIRED_PARAM_ROUTES 里的 GET（嘴的 /mouth/split 与 /mouth/gate 缺 text，家的
+          /home/list 与 /home/read 缺 room）：空 query 必须 400，而且仍是 json 安全的 dict +
+          ok:false + 一句点名缺哪个参数的 message。
         枚举口径覆盖 api.ROUTES 里每一条 GET：没有一条落在两类之外（漏网即失败）。
         """
         seen_get = set()
+        # 口径变更（2026-11-05 心线落地）：心读自己的数据根，而 mood.read / energy.read 是
+        # "读时算、顺手落一笔"的设计——所以这条"把每条 GET 都走一遍"的测试必须把心指到
+        # 临时目录，否则跑一次测试就往仓里的 data 留下 mood_traj.jsonl 与 energy.json。
+        heart_root = Path(self._tmp.name) / "heart"
+        heart_root.mkdir()
         for method, path, handler in panel.routes(self.store, self.brain):
             self.assertTrue(callable(handler), path)
             if method == "GET":
                 query = {"q": "以前说过什么"} if path == "/brain/recall" else {}
+                if path.startswith("/heart"):
+                    query = dict(query, root=str(heart_root))
                 status, payload = handler(None, query)
                 seen_get.add(path)
                 if path in REQUIRED_PARAM_ROUTES:
                     self.assertEqual(400, status, path)
                     self.assertIsInstance(payload, dict, path)
                     self.assertFalse(payload.get("ok"), path)
-                    self.assertIn("text", payload.get("message", ""), path)
+                    self.assertIn(REQUIRED_PARAM_ROUTES[path],
+                                  payload.get("message", ""), path)
                 else:
                     self.assertEqual(200, status, path)
             else:
@@ -426,7 +492,7 @@ class PanelContractTest(unittest.TestCase):
             json.dumps(payload, ensure_ascii=False)
         registered_get = {path for path, method in api.ROUTES.items() if method == "GET"}
         self.assertEqual(registered_get, seen_get, "有 GET 路由没被这一层枚举到")
-        self.assertTrue(REQUIRED_PARAM_ROUTES <= registered_get,
+        self.assertTrue(set(REQUIRED_PARAM_ROUTES) <= registered_get,
                         "REQUIRED_PARAM_ROUTES 里有端点不在路由表上")
 
     def test_render_handler_reads_audience_from_query(self):
@@ -511,7 +577,8 @@ class DevserverPageTest(unittest.TestCase):
 
     def test_root_and_panel_serve_the_same_page(self):
         self.assertEqual({"/": "soul.html", "/panel": "soul.html",
-                          "/heart": "heart.html", "/brain": "brain.html"},
+                          "/heart": "heart.html", "/brain": "brain.html",
+                          "/home": "home.html"},
                          devserver.PAGE_ROUTES)
         data = devserver.read_page("soul.html")
         self.assertIsNotNone(data)
@@ -597,7 +664,11 @@ class DevserverHttpTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertIn("text/html", ctype)
         self.assertIn("心 · 只读".encode("utf-8"), body)
-        self.assertIn("未接入：这一层还没有代码".encode("utf-8"), body)
+        # 口径变更（2026-11-05 心线落地，第 8 处）：心页是活视图，不再是"未接入"占位页。
+        # 断真话：只读说明在、页面上没有任何写控件、也不再说自己没接入。
+        self.assertIn("只读：人不能改心与脑".encode("utf-8"), body)
+        self.assertNotIn(b"<button", body.lower())
+        self.assertNotIn("未接入：这一层还没有代码".encode("utf-8"), body)
 
         status, body, ctype = self._get("/brain")
         self.assertEqual(200, status)
@@ -615,24 +686,32 @@ class DevserverHttpTest(unittest.TestCase):
 
 
 class RouteRegistryTest(unittest.TestCase):
-    """路由表的汇总口径：四张器官表拼一张，同名键当场炸——静默覆盖正是拆包要止住的事。"""
+    """路由表的汇总口径：六张器官表拼一张，同名键当场炸——静默覆盖正是拆包要止住的事。"""
 
-    def test_route_table_is_the_merge_of_four_organ_tables(self):
-        """汇总表 = 四张器官表逐键拼起来，一条不少、一条不多。
+    def test_route_table_is_the_merge_of_five_organ_tables(self):
+        """汇总表 = 六张器官表逐键拼起来，一条不少、一条不多。
 
-        四张表各自守着一条器官线：soul_api.SOUL_ROUTES（魂）/ brain_api.BRAIN_ROUTES（脑）/
-        page_api.PAGE_ROUTES（只读页）/ mouth_api.MOUTH_ROUTES（嘴的干跑端点）。
+        口径变更（2026-11-05 心线落地）：心的七条只读端点成了独立一张表
+        （heart_api.HEART_ROUTES），占位页表 PAGE_ROUTES 留空——所以这里是六张，不是五张。
+
+        六张表各自守着一条器官线：soul_api.SOUL_ROUTES（魂）/ brain_api.BRAIN_ROUTES（脑）/
+        page_api.PAGE_ROUTES（占位页，已空）/ mouth_api.MOUTH_ROUTES（嘴的干跑端点）/
+        home_api.HOME_ROUTES（家：九条只读 + 一条 POST /home/write）/
+        heart_api.HEART_ROUTES（心：七条只读）。
         """
         tables = (("soul_api.SOUL_ROUTES", core.soul_api.SOUL_ROUTES),
                   ("brain_api.BRAIN_ROUTES", core.brain_api.BRAIN_ROUTES),
                   ("page_api.PAGE_ROUTES", core.page_api.PAGE_ROUTES),
-                  ("mouth_api.MOUTH_ROUTES", core.mouth_api.MOUTH_ROUTES))
+                  ("mouth_api.MOUTH_ROUTES", core.mouth_api.MOUTH_ROUTES),
+                  ("home_api.HOME_ROUTES", core.home_api.HOME_ROUTES),
+                  ("heart_api.HEART_ROUTES", core.heart_api.HEART_ROUTES),
+                  ("version_api.VERSION_ROUTES", core.version_api.VERSION_ROUTES))
         sources = " / ".join(name for name, _ in tables)
         merged = core._merge(*[table for _, table in tables])
-        self.assertEqual(merged, core.ROUTES, "汇总表不是这四张表的拼接：%s" % sources)
+        self.assertEqual(merged, core.ROUTES, "汇总表不是这六张表的拼接：%s" % sources)
         self.assertEqual(set(core.ROUTES),
                          set().union(*[set(table) for _, table in tables]),
-                         "汇总表的路径不是这四张表的并集：%s" % sources)
+                         "汇总表的路径不是这六张表的并集：%s" % sources)
         for name, table in tables:
             self.assertEqual([], [route for route in table if route not in core.ROUTES],
                              "%s 里的路由漏在汇总表外面了" % name)

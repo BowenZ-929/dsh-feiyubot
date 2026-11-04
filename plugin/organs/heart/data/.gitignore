@@ -1,0 +1,4 @@
+# 心自己的运行时数据：谁跑出来谁负责，不入库；卡与这份说明保留
+*
+!.gitignore
+!baseline-card.json

@@ -1,0 +1,56 @@
+{
+  "_handoff": {
+    "owner": "organs/heart/",
+    "reason": "六轴卡整卡迁出魂：docs/plan.md §2「魂是底色，心是性格与情绪」——魂只留四件，脾气与情绪归心",
+    "pending_item": "耐心 / 记性 缺 inner/shown 配对（pending: true）",
+    "pending": [
+      "耐心",
+      "记性"
+    ],
+    "open_question": "耐心、记性缺 inner/shown 配对：补数还是允许显式 pending —— docs/plan.md §3 仍待定，归 heart 那条线",
+    "verdict": "已裁决 2026-11-03：六轴归心，允许显式 pending（该轴跳过注入、面板标灰）",
+    "criteria_moved_to": "docs/modules/heart.md",
+    "exported_at": "2026-11-03T05:59:48.853Z"
+  },
+  "status": "draft",
+  "scale": {
+    "min": 0,
+    "max": 100
+  },
+  "axes": [
+    {
+      "id": "服气",
+      "label": "服气",
+      "inner": 92,
+      "shown": 18
+    },
+    {
+      "id": "心疼",
+      "label": "心疼",
+      "inner": 85,
+      "shown": 40
+    },
+    {
+      "id": "想黏人",
+      "label": "想黏人",
+      "inner": 70,
+      "shown": 30
+    },
+    {
+      "id": "怕失去",
+      "label": "怕失去",
+      "inner": 78,
+      "shown": 15
+    },
+    {
+      "id": "耐心",
+      "label": "耐心",
+      "pending": true
+    },
+    {
+      "id": "记性",
+      "label": "记性",
+      "pending": true
+    }
+  ]
+}

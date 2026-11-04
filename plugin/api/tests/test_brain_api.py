@@ -13,7 +13,8 @@ from organs.brain import BrainStore
 from organs.soul import load
 
 BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
-                "/brain/recall", "/brain/selfnarration", "/brain/proposals")
+                "/brain/recall", "/brain/selfnarration", "/brain/proposals",
+                "/brain/tiers", "/brain/cold")
 
 
 class BrainApiTest(unittest.TestCase):
@@ -72,6 +73,47 @@ class BrainApiTest(unittest.TestCase):
         status, payload = self._call("GET", "/brain/today", brain=None)
         self.assertEqual(503, status)
         self.assertFalse(payload["ok"])
+
+    def test_round4_endpoints_answer(self):
+        status, payload = self._call("GET", "/brain/tiers")
+        self.assertEqual(200, status)
+        for tier in ("today", "hot", "longterm", "cold"):
+            self.assertIn(tier, payload)
+        status, payload = self._call("GET", "/brain/cold")
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["items"])
+
+    def test_cold_and_tiers_distinguish_empty_from_read_error(self):
+        self.assertEqual(200, self._call("GET", "/brain/cold")[0])
+        with open(self.brain.root / "longterm.jsonl", "a", encoding="utf-8") as f:
+            f.write("{bad json\n")
+        self.assertEqual(500, self._call("GET", "/brain/cold")[0])
+        self.assertEqual(500, self._call("GET", "/brain/tiers")[0])
+
+    def test_card_patch_whitelist_and_familiarity_rejected(self):
+        self.brain.ingest("主人", "我妈住院了")
+        status, payload = self._call("PATCH", "/brain/people/主人/card",
+                                     {"actor": "panel", "fields": {"称呼": "老板", "雷点": ["别提工作"]}})
+        self.assertEqual(200, status, payload)
+        self.assertEqual(2, len(payload["history_lines"]))
+        self.assertEqual("老板", payload["card"]["display"])
+        self.assertEqual(400, self._call("PATCH", "/brain/people/主人/card",
+                                         {"actor": "panel", "fields": {"熟稔": 99}})[0])
+        self.assertEqual(400, self._call("PATCH", "/brain/people/主人/card",
+                                         {"actor": "panel", "fields": {"爱好": ["猫"]}})[0])
+        self.assertEqual(404, self._call("GET", "/brain/people/不存在/card")[0])
+        self.assertEqual(405, self._call("POST", "/brain/people/主人/card", {})[0])
+
+    def test_today_and_people_annotate_retention_and_memories_ts(self):
+        self.brain.ingest("主人", "我妈住院了")
+        status, payload = self._call("GET", "/brain/today")
+        self.assertEqual(200, status)
+        self.assertIn("retention", payload["entries"][0])
+        self.assertIn("clarity", payload["entries"][0])
+        status, payload = self._call("GET", "/brain/people")
+        person = payload["people"][0]
+        self.assertTrue(person["memories"])
+        self.assertTrue(all("ts" in m for m in person["memories"]))
 
     def test_panel_routes_mount_all_brain_get_endpoints(self):
         routes = panel.routes(self.store, self.brain)

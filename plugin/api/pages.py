@@ -1,8 +1,11 @@
-"""心（/heart）的只读端点，与面板静态页（pages/ 目录的 html 读取）。
+"""面板静态页的名单（pages/ 目录的 html 读取）。
 
-心的只读页只有 GET，没有任何写方法（architecture §9.2：只能看）。
-/ 与 /panel 是魂面板，/heart、/brain 是心与脑的只读页——这几条只在 devserver 上静态发出，
-不是 api.handle 的路由；api.handle 只登记 /heart 这一个只读 JSON 端点。
+只读语义已经不在这一层：心的七条读数端点由 api/heart.py（HEART_ROUTES）全权接管，
+脑由 api/brain.py（BRAIN_ROUTES）接管，405 的措辞与路由归组都在 core.handle 里按器官
+表分派。"READONLY_PAGES：心还是占位页"那个化石概念随心线落地一起删掉了——两处登记
+同一个 /heart 会被 core._merge 当场拒掉。
+这里只剩一件事：PAGE_FILES，devserver 直接发字节的静态页名单（/heart 仍发 heart.html）。
+architecture §9.2：心与脑只能看。页是活的只读视图，不含任何写入口。
 """
 from __future__ import annotations
 
@@ -10,13 +13,13 @@ from pathlib import Path
 from typing import Dict, Optional
 
 PAGE_DIR = Path(__file__).resolve().parents[1] / "pages"
-# api.handle 的只读端点：路径 → 方法
-PAGE_ROUTES = {"/heart": "GET"}
-# 只读页：路径 → 器官名（响应里如实报「未接入」+ readonly）
-READONLY_PAGES = {"/heart": "heart"}
+# api.handle 的只读端点：路径 → 方法。心在 heart.py、脑在 brain.py，这张表留空
+# （同名键重复注册会被 core._merge 当场拒掉），不再有"占位页"这类端点。
+PAGE_ROUTES: Dict[str, str] = {}
 # 静态页：路径 → 页面文件（devserver 直接发字节，不经 api.handle）
 PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "soul.html",
-                              "/heart": "heart.html", "/brain": "brain.html"}
+                              "/heart": "heart.html", "/brain": "brain.html",
+                              "/home": "home.html"}
 
 
 def read_page(name: str, root: Optional[Path] = None) -> Optional[bytes]:

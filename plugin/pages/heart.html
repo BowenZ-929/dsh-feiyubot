@@ -8,21 +8,241 @@
   :root { color-scheme: light; }
   body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
          margin: 0; padding: 2.2rem 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
-  main { max-width: 40rem; margin: 0 auto; }
+  main { max-width: 44rem; margin: 0 auto; }
   h1 { font-size: 1.25rem; margin: 0 0 1rem; letter-spacing: .02em; }
-  .placeholder { margin: 0 0 .9rem; padding: .9rem 1rem; background: #fff;
-                 border: 1px solid #dcdcdc; border-radius: 8px; }
-  .note { margin: 0 0 1.4rem; color: #7a5c00; background: #fffbea;
+  h2 { font-size: 1rem; margin: 2rem 0 .6rem; color: #333; }
+  section { border-top: 1px solid #ececec; }
+  .note { margin: 0 0 1.2rem; color: #7a5c00; background: #fffbea;
           border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
-  .back { font-size: .9rem; }
+  .status { margin: 0 0 .4rem; font-weight: 600; }
+  .issues { margin: 0 0 .4rem; font-family: ui-monospace, Menlo, monospace;
+            font-size: .85rem; color: #a03030; white-space: pre-line; }
+  .axes { list-style: none; margin: 0; padding: 0; }
+  .axes li { padding: .25rem 0; border-bottom: 1px dashed #f0f0f0; }
+  li.greyed { color: #9a9a9a; }
+  #engage { white-space: pre-line; margin: 0 0 .6rem; }
+  #hits { margin: 0; padding-left: 1.2rem; font-size: .9rem; color: #444; }
+  canvas { width: 100%; height: auto; background: #fff; border: 1px solid #e6e6e6;
+           border-radius: 8px; margin: .4rem 0 .2rem; }
+  .legend { margin: 0 0 .6rem; color: #8a8a8a; font-size: .82rem; }
+  .back { font-size: .9rem; margin-top: 2.4rem; }
 </style>
 </head>
 <body>
 <main>
   <h1>心 · 只读</h1>
-  <p class="placeholder">未接入：这一层还没有代码</p>
-  <p class="note">只读：人不能改心与脑（architecture.md §9.2：心与脑只能看）。这一页没有任何写入口。</p>
+  <p class="note">只读：人不能改心与脑（architecture.md §9.2：心与脑只能看）。只读：这一页没有任何能改她的控件。</p>
+
+  <p id="status" class="status">正在读……</p>
+  <p id="issues" class="issues"></p>
+
+  <section>
+    <h2>① 六轴档位（只讲档位词，不讲数字）</h2>
+    <ul id="axes" class="axes"></ul>
+    <p id="pending" class="legend"></p>
+  </section>
+
+  <section>
+    <h2>② 心情：此刻与基线 + 轨迹</h2>
+    <p id="mood">……</p>
+    <canvas id="curve" width="720" height="200"></canvas>
+    <p class="legend">实线＝此刻，虚线＝基线；横轴是读取时刻，纵轴是心情刻度。</p>
+    <p id="traj-info" class="legend"></p>
+  </section>
+
+  <section>
+    <h2>③ 精力</h2>
+    <p id="energy">……</p>
+  </section>
+
+  <section>
+    <h2>④ 开口与否（干跑：只算不说）</h2>
+    <p id="engage">……</p>
+    <ul id="hits"></ul>
+  </section>
+
+  <section>
+    <h2>⑤ 语气档（嘴读它定冷热）</h2>
+    <p id="voice">……</p>
+    <p class="legend">档位词、方向与禁令都来自 /heart/effective 的 voice：一个合成点，
+      面板说的档与嘴上念的档不会分叉。</p>
+  </section>
+
   <p class="back"><a href="..">← 回魂面板</a></p>
 </main>
+<script>
+(function () {
+  "use strict";
+
+  var STATES = ["说", "少说", "不说"];
+  var judged = [];
+
+  function el(id) { return document.querySelector("#" + id); }
+  function say(id, text) { el(id).textContent = text; }
+
+  function fail(err) {
+    say("status", "读不到：心的端点没有应答（" + err + "）");
+  }
+
+  function renderStatus(data) {
+    if (data.ok === true) {
+      say("status", "已接入（只读）：她的卡载入了，" + (data.pending || []).length + " 个轴待定。");
+      say("issues", "");
+      return;
+    }
+    say("status", "拒载：卡没有载入，档位一个都不给");
+    var codes = (data.issues || []).map(function (row) {
+      return row.axis ? row.code + " / " + row.axis : String(row.code);
+    });
+    say("issues", codes.length ? codes.join("\n") : "拒载：没有给出理由（issues 为空）");
+  }
+
+  function renderAxes(axes) {
+    var list = el("axes");
+    list.textContent = "";
+    var grey = [];
+    Object.keys(axes).forEach(function (axis) {
+      var item = axes[axis] || {};
+      var row = document.createElement("li");
+      if (item.greyed) {
+        grey.push(axis);
+        row.className = "greyed";
+        row.textContent = axis + "：待定·跳过注入（标灰，不写数）。";
+      } else {
+        row.textContent = axis + "：心里 " + item.inner_word + "，面上 " + item.shown_word + "。";
+      }
+      list.appendChild(row);
+    });
+    say("pending", grey.length ? "待定轴：" + grey.join("、") + "。" : "");
+  }
+
+  function renderVoice(voice) {
+    var bans = voice.bans || [];
+    say("voice", "语气档 " + voice.tone + " · 方向 " + voice.direction +
+        " · 禁令 " + (bans.length ? bans.join("；") : "无"));
+  }
+
+  function renderEffective(data) {
+    if (data.ok !== true) {
+      el("axes").textContent = "";
+      say("pending", "");
+      say("voice", "拒载：卡没有载入，语气档一个都不给");
+      return;
+    }
+    renderAxes(data.axes || {});
+    renderVoice(data.voice || {});
+  }
+
+  function renderMood(data) {
+    say("mood", "此刻 " + data.now + "（" + data.tier + "）· 基线 " + data.baseline +
+        " · 方向 " + data.direction + " · 读数于 " + data.as_of);
+    drawCurve(data.trajectory || []);
+  }
+
+  function stroke(ctx, points, color, dashed) {
+    if (points.length < 2) { return; }
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash(dashed ? [5, 4] : []);
+    ctx.beginPath();
+    points.forEach(function (point, index) {
+      if (index === 0) { ctx.moveTo(point[0], point[1]); } else { ctx.lineTo(point[0], point[1]); }
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCurve(rows) {
+    var canvas = el("curve");
+    var ctx = canvas.getContext("2d");
+    var width = canvas.width;
+    var height = canvas.height;
+    var left = 36, right = width - 12, top = 12, bottom = height - 24;
+    ctx.clearRect(0, 0, width, height);
+    ctx.strokeStyle = "#cccccc";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(left, top);
+    ctx.lineTo(left, bottom);
+    ctx.lineTo(right, bottom);
+    ctx.stroke();
+    ctx.fillStyle = "#8a8a8a";
+    ctx.font = "11px sans-serif";
+    ctx.fillText("100", 4, top + 8);
+    ctx.fillText("0", 14, bottom + 2);
+
+    var points = rows.filter(function (row) { return typeof row.now === "number"; });
+    if (points.length < 2) {
+      say("traj-info", "轨迹只有 " + points.length + " 个采样点，还不能连线（多读几次就有了）。");
+      return;
+    }
+    var span = points.length - 1;
+    function x(index) { return left + (right - left) * (index / span); }
+    function y(value) {
+      var clipped = Math.max(0, Math.min(100, Number(value)));
+      return bottom - (bottom - top) * (clipped / 100);
+    }
+    stroke(ctx, points.map(function (row, index) { return [x(index), y(row.now)]; }), "#b0523a", false);
+    stroke(ctx, points.map(function (row, index) { return [x(index), y(row.baseline)]; }), "#5b7ea8", true);
+    say("traj-info", "轨迹 " + points.length + " 个采样点，来自 /heart/mood 的 trajectory。");
+  }
+
+  function renderEnergy(data) {
+    var tail = data.capped ? "（超过一次补算的上限，更早的部分不追）" : "";
+    say("energy", "精力 " + data.value + "（" + data.tier + "）· 这次结算 " +
+        data.settled_from + " → " + data.settled_to + "，共 " + data.hours + " 小时" + tail);
+  }
+
+  function renderGates() {
+    var lines = judged.map(function (item) {
+      var marks = STATES.map(function (state) {
+        return state === item.data.state ? "【" + state + "】" : state;
+      }).join(" / ");
+      var reason = item.data.reason ? item.data.reason : "没有命中任何门";
+      return item.label + " → " + marks + "（主因 " + reason + "；干跑，不写日志）";
+    });
+    say("engage", lines.join("\n"));
+
+    var list = el("hits");
+    list.textContent = "";
+    judged.forEach(function (item) {
+      var hits = item.data.hits || [];
+      if (!hits.length) {
+        var empty = document.createElement("li");
+        empty.textContent = item.label + " · 没有命中任何门，判「说」";
+        list.appendChild(empty);
+        return;
+      }
+      hits.forEach(function (hit) {
+        var row = document.createElement("li");
+        row.textContent = item.label + " · 命中门 " + hit;
+        list.appendChild(row);
+      });
+    });
+  }
+
+  function renderEngage(label, data) {
+    judged.push({ label: label, data: data });
+    renderGates();
+  }
+
+  fetch("/heart").then(function (res) { return res.json(); }).then(renderStatus).catch(fail);
+
+  fetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
+
+  fetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(fail);
+
+  fetch("/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(fail);
+
+  fetch("/heart/engage").then(function (res) { return res.json(); }).then(function (data) {
+    renderEngage("被动", data);
+  }).catch(fail);
+
+  fetch("/heart/engage?intent=proactive").then(function (res) { return res.json(); }).then(function (data) {
+    renderEngage("主动", data);
+  }).catch(fail);
+}());
+</script>
 </body>
 </html>

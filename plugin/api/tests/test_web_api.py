@@ -162,10 +162,23 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual([], self.store.history())
 
     def test_heart_and_brain_are_readonly_json(self):
-        for path, agent in (("/heart", "heart"), ("/brain", "brain")):
-            status, payload = self._call("GET", path)
-            self.assertEqual(200, status, path)
-            self.assertEqual({"status": "未接入", "readonly": True, "agent": agent}, payload)
+        # 口径变更（2026-11-05 心线落地）：/heart 不再返回占位三键，而是七条真读数；
+        # /brain 那半保持原口径（没给脑就是「未接入」）。心读自己的数据根，这里给空临时根：
+        # 没卡就如实拒载（200 + ok=False + issues），不是 500、也不是假装成功。
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        status, payload = api.handle("GET", "/heart", None, self.store,
+                                     query={"root": temp.name})
+        self.assertEqual(200, status, "/heart")
+        self.assertEqual("heart", payload["agent"])
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("拒载", payload["status"])
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["issues"], "坏卡必须逐条报出来，不许白屏")
+
+        status, payload = self._call("GET", "/brain")
+        self.assertEqual(200, status, "/brain")
+        self.assertEqual({"status": "未接入", "readonly": True, "agent": "brain"}, payload)
 
     def test_write_methods_on_heart_and_brain_are_405(self):
         for path in ("/heart", "/brain"):
