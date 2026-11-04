@@ -1,0 +1,65 @@
+{
+  "note": "派生物：真源是 organs/home/rooms.py，这份只是盘上镜像；对不上就报错，别手改这份。",
+  "rooms": [
+    {
+      "name": "玄关",
+      "slug": "entrance",
+      "purpose": "刚进门的东西先落这儿：谁给的、哪天的",
+      "writable": true
+    },
+    {
+      "name": "客厅",
+      "slug": "living",
+      "purpose": "家里最公开的一间，放着等人来看的东西",
+      "writable": false
+    },
+    {
+      "name": "名片盒",
+      "slug": "cards",
+      "purpose": "一人一张卡：谁、怎么认识、他给过什么",
+      "writable": true
+    },
+    {
+      "name": "工作台",
+      "slug": "desk",
+      "purpose": "她画出来、写出来的东西落这儿",
+      "writable": true
+    },
+    {
+      "name": "仓库",
+      "slug": "store",
+      "purpose": "她的素材：画风、构图、参考，取用时来这儿拿",
+      "writable": true
+    },
+    {
+      "name": "信箱",
+      "slug": "mailbox",
+      "purpose": "一封一件的信，来往的长文",
+      "writable": true
+    },
+    {
+      "name": "卧室",
+      "slug": "bedroom",
+      "purpose": "她自己的痕迹：一天一条主日记，加零散短痕迹",
+      "writable": false
+    },
+    {
+      "name": "橱柜",
+      "slug": "closet",
+      "purpose": "衣服与随身物件",
+      "writable": false
+    },
+    {
+      "name": "抽屉",
+      "slug": "drawer",
+      "purpose": "她自己的资料卡，只读，只有人能直接改文件",
+      "writable": false
+    },
+    {
+      "name": "台历",
+      "slug": "calendar",
+      "purpose": "今天是哪天、什么日子",
+      "writable": false
+    }
+  ]
+}
