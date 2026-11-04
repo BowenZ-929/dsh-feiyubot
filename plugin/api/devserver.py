@@ -52,6 +52,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         self._dispatch("PUT")
 
+    # 名片是唯一一条 PATCH（GET 读、PATCH 写白名单字段）：不接这一条，请求会落到
+    # BaseHTTPRequestHandler 的 501，看着像「端点没做」。
+    def do_PATCH(self) -> None:
+        self._dispatch("PATCH")
+
     def do_DELETE(self) -> None:
         self._dispatch("DELETE")
 
@@ -62,7 +67,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._page(PAGE_ROUTES[path])
             return
         body: Optional[Dict[str, Any]] = None
-        if method == "POST":
+        if method in ("POST", "PUT", "PATCH"):
             try:
                 raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 body = json.loads(raw.decode("utf-8")) if raw else {}

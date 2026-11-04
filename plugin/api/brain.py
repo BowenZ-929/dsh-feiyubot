@@ -6,6 +6,7 @@ brain=None（脑没载入）时 /brain 保持"未接入"，其余如实报未载
 from __future__ import annotations
 
 from typing import Any, Mapping
+from urllib.parse import unquote
 
 from organs.brain.model import PENDING
 
@@ -82,7 +83,8 @@ def dispatch_card(method: str, route: str, body: Any, brain: Any) -> Result:
     """PATCH /brain/people/<id>/card：名片白名单字段人可写，熟稔不收；GET 读名片+历史。"""
     if brain is None:
         return 503, {"ok": False, "message": "脑未载入：先起脑的数据目录（devserver --brain-root）"}
-    person_id = route[len("/brain/people/"):-len("/card")]
+    # 人名可以是中文：路由里是百分号编码，取出来要先还原，否则「小明」永远查不到。
+    person_id = unquote(route[len("/brain/people/"):-len("/card")])
     if not person_id:
         return 404, {"ok": False, "message": "没有这个端点：%s" % route}
     if method == "GET":

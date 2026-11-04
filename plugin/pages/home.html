@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>家 · 面板</title>
+<style>
+  /* 颜色全吃宿主变量（--dsw-alias-*），每一项带兜底值：宿主没定义也读得下去。
+     深色不自造色板——只换兜底色，宿主变量仍然优先。 */
+  :root {
+    color-scheme: light dark;
+    --home-fg: var(--dsw-alias-text-primary, #1b1b1b);
+    --home-bg: var(--dsw-alias-bg-base, #fbfbfb);
+    --home-card: var(--dsw-alias-bg-elevated, #ffffff);
+    --home-border: var(--dsw-alias-border-l2, rgba(120, 120, 120, .35));
+    --home-muted: var(--dsw-alias-text-secondary, #666666);
+    --home-brand: var(--dsw-alias-brand, #2f6f4f);
+    --home-warn: var(--dsw-alias-warning-fg, #7a5c00);
+    --home-warn-bg: var(--dsw-alias-warning-bg, #fffbea);
+    --home-err: var(--dsw-alias-danger-fg, #a11111);
+    --home-mono: ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --home-fg: var(--dsw-alias-text-primary, #e6e6e6);
+      --home-bg: var(--dsw-alias-bg-base, #17181a);
+      --home-card: var(--dsw-alias-bg-elevated, #202225);
+      --home-border: var(--dsw-alias-border-l2, rgba(200, 200, 200, .26));
+      --home-muted: var(--dsw-alias-text-secondary, #a2a2a2);
+      --home-brand: var(--dsw-alias-brand, #6f9c85);
+      --home-warn: var(--dsw-alias-warning-fg, #e8cf85);
+      --home-warn-bg: var(--dsw-alias-warning-bg, #2c2818);
+      --home-err: var(--dsw-alias-danger-fg, #ff8f8f);
+    }
+  }
+  :root[data-theme="dark"] {
+    --home-fg: var(--dsw-alias-text-primary, #e6e6e6);
+    --home-bg: var(--dsw-alias-bg-base, #17181a);
+    --home-card: var(--dsw-alias-bg-elevated, #202225);
+    --home-border: var(--dsw-alias-border-l2, rgba(200, 200, 200, .26));
+    --home-muted: var(--dsw-alias-text-secondary, #a2a2a2);
+    --home-brand: var(--dsw-alias-brand, #6f9c85);
+    --home-warn: var(--dsw-alias-warning-fg, #e8cf85);
+    --home-warn-bg: var(--dsw-alias-warning-bg, #2c2818);
+    --home-err: var(--dsw-alias-danger-fg, #ff8f8f);
+  }
+  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
+         margin: 0; padding: 0 1.2rem 3rem; color: var(--home-fg); background: var(--home-bg); }
+  header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
+                  padding: .55rem 1.2rem; background: var(--home-warn-bg);
+                  border-bottom: 1px solid var(--home-border); color: var(--home-warn); font-weight: 600; }
+  nav.links { max-width: 1240px; margin: 0 0 .9rem; font-size: .9rem; color: var(--home-muted); }
+  nav.links a { color: var(--home-brand); }
+  main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+         gap: 1.1rem; align-items: start; max-width: 1240px; }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--home-card); border: 1px solid var(--home-border);
+            border-radius: 8px; padding: .6rem 1rem 1rem; margin-bottom: 1.1rem; }
+  h2 { font-size: 1rem; margin: .4rem 0 .7rem; letter-spacing: .02em; }
+  h2 small { font-weight: 400; color: var(--home-muted); margin-left: .5rem; }
+  #room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: .5rem; }
+  button { font: inherit; padding: .42rem 1rem; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--home-brand); background: var(--home-brand); color: #fff; }
+  button.room { text-align: left; padding: .5rem .6rem; background: transparent;
+                color: var(--home-fg); border-color: var(--home-border); }
+  button.room:hover { border-color: var(--home-brand); }
+  button.room.on { border-color: var(--home-brand); box-shadow: inset 3px 0 0 var(--home-brand); }
+  button.room .rn { font-weight: 600; }
+  button.room .rm { font-size: .78rem; color: var(--home-muted); white-space: normal; }
+  button.slim { margin: .1rem .3rem .1rem 0; padding: .1rem .5rem; font-size: .8rem;
+                background: transparent; color: var(--home-brand); border-color: var(--home-border); }
+  label { display: block; font-size: .85rem; color: var(--home-muted); margin: .7rem 0 .25rem; }
+  input[type=text], textarea, select { width: 100%; box-sizing: border-box; color: var(--home-fg);
+        background: var(--home-bg); border: 1px solid var(--home-border); border-radius: 6px; padding: .4rem .5rem; }
+  textarea { resize: vertical; font-family: var(--home-mono); font-size: .86rem; }
+  .state { font-size: .85rem; color: var(--home-muted); margin: .5rem 0 0; }
+  .bad { color: var(--home-err); font-weight: 600; }
+  /* 页脚：核自报版本。只报不藏——旧代码要能一眼看见。 */
+  .build { margin: 1.4rem 0 0; padding-top: .7rem; border-top: 1px dashed var(--home-line, #dcdcdc);
+           font: .78rem/1.6 ui-monospace, Menlo, monospace; color: #6b6b6b; overflow-wrap: anywhere; }
+  .ok { color: var(--home-brand); }
+  .note { margin: .8rem 0 0; color: var(--home-warn); background: var(--home-warn-bg);
+          border-left: 3px solid var(--home-border); padding: .45rem .6rem; font-size: .88rem; }
+  table.rows { width: 100%; border-collapse: collapse; font-size: .86rem; margin: .4rem 0 0; }
+  table.rows th, table.rows td { border-top: 1px dashed var(--home-border); padding: .35rem .3rem;
+          text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+  table.rows th { color: var(--home-muted); font-weight: 500; }
+  pre { margin: .5rem 0 0; padding: .6rem .7rem; background: var(--home-bg); white-space: pre-wrap;
+        overflow-wrap: anywhere; font: .84rem/1.5 var(--home-mono); border: 1px solid var(--home-border);
+        border-radius: 6px; max-height: 22rem; overflow: auto; }
+  #audit-shrink { display: none; margin: .6rem 0 0; padding: .5rem .6rem; color: var(--home-err);
+        background: var(--home-warn-bg); border-left: 3px solid var(--home-err); font-weight: 600; }
+  #log { margin: .9rem 0 0; font: .82rem/1.5 var(--home-mono); white-space: pre-wrap;
+         overflow-wrap: anywhere; color: var(--home-fg); background: var(--home-bg);
+         border: 1px solid var(--home-border); border-radius: 6px; padding: .5rem .6rem; min-height: 2.4rem; }
+</style>
+</head>
+<body>
+<header class="banner">家 · 十间房 / 存取 / 审计。本面板无鉴权，只许绑 127.0.0.1；十间房固定，本页没有「新建房间」。</header>
+<nav class="links" aria-label="别的页">回 <a href="./">魂 · 面板</a>；只读两页：<a href="heart">心</a>、<a href="brain">脑</a></nav>
+
+<main>
+  <div>
+    <section aria-labelledby="rooms-h">
+      <h2 id="rooms-h">十间房<small id="rooms-total">载入中…</small></h2>
+      <div id="room-grid"></div>
+      <p class="state" id="rooms-state">载入中…</p>
+      <p class="note">房名表固定十间（真源 organs/home/rooms.py，改它等于改建房）；「可写」是两栏：
+        结构可写（这间房放不放东西）与她此刻可写（白名单 access.json）。点一间看里面有什么。</p>
+    </section>
+
+    <section aria-labelledby="list-h">
+      <h2 id="list-h">这间里有什么<small id="list-title">还没选房</small></h2>
+      <div id="list-body"></div>
+      <p class="state" id="list-state">点上面任意一间房。</p>
+    </section>
+
+    <section aria-labelledby="read-h">
+      <h2 id="read-h">翻看一件<small id="read-title">还没选件</small></h2>
+      <pre id="read-body">点物件行里的「翻看」。</pre>
+      <p class="state" id="read-state">家只记卡的路径与指纹，不搬本体：正文读的是卡上 path 指向的那份文件。</p>
+    </section>
+  </div>
+
+  <div>
+    <section aria-labelledby="write-h">
+      <h2 id="write-h">放一件东西<small>唯一的写入口 POST /home/write</small></h2>
+
+      <label for="write-room">房名（十间都在这儿，不灰化：能不能写由门判，不看 UI）</label>
+      <select id="write-room"></select>
+
+      <label for="write-kind">这是哪一类</label>
+      <select id="write-kind"></select>
+
+      <label for="write-name">名字（一件东西一个名字，≤64 字一段）</label>
+      <input id="write-name" type="text" autocomplete="off">
+
+      <label for="write-note">一句话：这是什么（记进卡的 note）</label>
+      <textarea id="write-note" rows="2" spellcheck="false"></textarea>
+
+      <label for="write-content">内容（只折算成 chars 并过 2000 字上限：家不搬本体，正文不进这一层）</label>
+      <textarea id="write-content" rows="6" spellcheck="false"></textarea>
+
+      <label for="write-path">盘上位置（可选：正文已经由人写进房间目录时填它的绝对路径，家只记路径与指纹）</label>
+      <input id="write-path" type="text" autocomplete="off">
+
+      <button id="write-submit" type="button">放进这间</button>
+      <p class="state" id="write-state">就绪。</p>
+
+      <p class="note">不许把「她此刻如何」当物件写进来：心情、状态、此刻在哪、关系读数都不归家——
+        家只放东西（谁给的、哪天的、一句话说明）。她的当下归心与脑，长相归魂。</p>
+      <p class="note">只读五间（客厅 / 卧室 / 橱柜 / 抽屉 / 台历）由结构决定：这里不预判、也不拦，
+        提交后门会拒并带 door 说清是哪一道——structure＝这间房从不放东西，whitelist＝她今天被收回这间。</p>
+    </section>
+
+    <section aria-labelledby="drawer-h" id="drawer-block">
+      <h2 id="drawer-h">抽屉<small>只读房：人直接改文件，程序只读</small></h2>
+      <div id="drawer-body"></div>
+      <p class="state" id="drawer-state">载入中…</p>
+      <p class="note">抽屉里的资料卡是「人直接改文件，程序只读」：这一块没有任何写控件，
+        程序写不进去——照 template 那份由人直接在盘上写。</p>
+    </section>
+
+    <section aria-labelledby="borrow-h">
+      <h2 id="borrow-h">借阅条<small>词库那一类：借自哪、哪一版、她现在认得多少词</small></h2>
+      <div id="borrow-body"></div>
+      <p class="state" id="borrow-state">载入中…</p>
+      <p class="note">借阅条落在名片盒（十间里的一间，不是第十一间房），一条一借、只借不搬；
+        读数由人改文件、程序只在读的时候合并——答不出就是 learned=null + readout_status=未接入，不报 0。</p>
+    </section>
+
+    <section aria-labelledby="audit-h">
+      <h2 id="audit-h">审计<small>只增不改</small></h2>
+      <div id="audit-shrink" role="alert"></div>
+      <div id="audit-body"></div>
+      <p class="state" id="audit-state">载入中…</p>
+      <button id="audit-verify" type="button" class="slim">校验审计链（只比对，不修补）</button>
+      <pre id="audit-verify-out">还没校验。</pre>
+      <p class="note">审计只增不改：行数或序号比上次读到的少就红字报出来，不补行、不重写高水位——
+        补回去就把事故抹平了。上次读到的行数记在 localStorage，取不到就记在本次页面内存里。</p>
+    </section>
+
+    <section aria-labelledby="wh-h">
+      <h2 id="wh-h">仓库指针<small>卡上记的 vs 盘上现算</small></h2>
+      <div id="warehouse-body"></div>
+      <p class="state" id="warehouse-state">载入中…</p>
+    </section>
+
+    <section aria-labelledby="log-h">
+      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐六条读端点</small></h2>
+      <button id="refresh-all" type="button">刷新全部</button>
+      <pre id="log">就绪。</pre>
+      <p class="state" id="status">载入中…</p>
+    </section>
+  </div>
+  <footer class="build" id="build" aria-label="核自报版本">核版本读不到</footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // 壳把本页挂在 /qqagent/panel/home 下（iframe 的文档路径没有结尾斜杠），核自己挂在 /home。
+  // 请求一律按当前挂载前缀补回去：绝对路径 "/home/rooms" 在 iframe 里会打到壳的根，那是 404。
+  var MOUNT = location.pathname.replace(/\/+$/, "");
+  var BASE = MOUNT.slice(-5) === "/home" ? MOUNT.slice(0, -5) : "";
+
+  var LAST_LINES_KEY = "home.audit.lines";
+  var LAST_SEQ_KEY = "home.audit.seq";
+  var KINDS = ["物件", "痕迹", "名片", "借阅条", "素材", "自画像"];
+  // 只读五间各写一句「谁写的」：只读不许灰化，也不许沉默。
+  var WRITTEN_BY_PROGRAM = {
+    "客厅": "只读：放着等人来看，谁都不往里放",
+    "卧室": "由程序写：一天一条主日记加零散短痕迹",
+    "橱柜": "只读：衣服与随身物件，程序不往里写",
+    "抽屉": "只读：人直接改文件，程序只读",
+    "台历": "由程序写：今天是哪天、什么日子"
+  };
+
+  var state = { rooms: null, access: null, room: null, item: null, seen: null };
+
+  function el(id) { return document.getElementById(id); }
+
+  function say(text, cls) {
+    var line = document.createElement("div");
+    if (cls) { line.className = cls; }
+    line.textContent = text;
+    el("log").appendChild(line);
+  }
+
+  function mark(id, text) {
+    var node = el(id);
+    node.className = "state";
+    node.textContent = text;
+  }
+
+  function call(method, path, body) {
+    var init = { method: method, headers: {} };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    return fetch(BASE + path, init).then(function (res) {
+      return res.json().then(function (data) {
+        return { status: res.status, data: data };
+      }, function () {
+        return { status: res.status, data: { ok: false, message: "响应不是 JSON" } };
+      });
+    }, function (err) {
+      return { status: 0, data: { ok: false, code: "NETWORK",
+               message: "连不上核：" + (err && err.message ? err.message : "fetch 失败") } };
+    });
+  }
+
+  // 错误三分不开一句「没数据」：核没起 / 连不上 / 数据坏（带码与话原样上去）。
+  function problem(res) {
+    if (res.status === 0) {
+      return "核没在跑或连不上（HTTP 未到手）：先把核起起来（python3 -m api.devserver），再点「刷新全部」。";
+    }
+    var d = res.data || {};
+    var line = "HTTP " + res.status + (d.code ? " " + d.code : "") + "：" + (d.message || "响应里没有 message");
+    if (d.door === "structure") {
+      line += "｜door=structure：这间房从不放东西（改结构等于改建房，得人改代码）";
+    } else if (d.door === "whitelist") {
+      line += "｜door=whitelist：她今天被收回这间（改 access.json 的 writable）";
+    }
+    if (d.status === "未接入") { line += "｜status=未接入：不是 0，是这一层还没接上"; }
+    return line;
+  }
+
+  function writableLine(room) {
+    if (!room.writable_by_structure) {
+      return "只读（结构决定）" + (WRITTEN_BY_PROGRAM[room.name] ? " · " + WRITTEN_BY_PROGRAM[room.name] : "");
+    }
+    if (room.writable_now === null) { return "可写（结构）· 白名单读不出来"; }
+    return room.writable_now ? "她现在可写（白名单）" : "她现在被收回（白名单）";
+  }
+
+  // —— 十间房 ————————————————————————————————————————
+  function showRooms(rooms, access) {
+    var grid = el("room-grid");
+    while (grid.firstChild) { grid.removeChild(grid.firstChild); }
+    var select = el("write-room");
+    var keep = select.value;
+    while (select.firstChild) { select.removeChild(select.firstChild); }
+
+    rooms.forEach(function (room) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "room" + (state.room === room.name ? " on" : "");
+      var name = document.createElement("div");
+      name.className = "rn";
+      name.textContent = room.name;
+      var meta = document.createElement("div");
+      meta.className = "rm";
+      meta.textContent = room.count + " 件 · "
+        + (room.cap === null ? "没有件数上限" : "上限 " + room.cap + "，还剩 " + room.headroom) + " · "
+        + writableLine(room);
+      meta.title = room.purpose;
+      button.appendChild(name);
+      button.appendChild(meta);
+      button.addEventListener("click", function () { openRoom(room.name); });
+      grid.appendChild(button);
+
+      var option = document.createElement("option");
+      option.value = room.name;
+      option.textContent = room.name + "（" + (room.writable_by_structure ? "可写" : "只读") + "，" + room.count + " 件）";
+      select.appendChild(option);
+    });
+    if (keep) { select.value = keep; }
+
+    el("rooms-total").textContent = rooms.length + " 间 · 共 "
+      + rooms.reduce(function (sum, room) { return sum + room.count; }, 0) + " 件";
+    var tail = access
+      ? "白名单来自 " + access.source + "：她现在可写 " + access.writable.join("、")
+      : "白名单读不出来";
+    mark("rooms-state", "十间固定（真源 organs/home/rooms.py），本页没有「新建房间」。" + tail + "。");
+  }
+
+  // —— 一间房里有什么 ————————————————————————————————
+  function openRoom(roomName) {
+    state.room = roomName;
+    el("list-title").textContent = roomName;
+    mark("list-state", "载入中…");
+    var gridButtons = el("room-grid").getElementsByTagName("button");
+    for (var i = 0; i < gridButtons.length; i += 1) {
+      var label = gridButtons[i].getElementsByClassName("rn")[0];
+      if (label && label.textContent === roomName) { gridButtons[i].className = "room on"; }
+      else { gridButtons[i].className = "room"; }
+    }
+    call("GET", "/home/list?room=" + encodeURIComponent(roomName)).then(function (res) {
+      if (res.status !== 200) {
+        el("list-body").textContent = "";
+        var node = el("list-state");
+        node.className = "state bad";
+        node.textContent = "读 /home/list 失败：" + problem(res);
+        return;
+      }
+      showList(res.data);
+    });
+  }
+
+  function showList(data) {
+    var body = el("list-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var items = data.items || [];
+    if (!items.length) {
+      // 200 且空数组：读到了，就是空的——不许折叠成读不到。
+      mark("list-state", data.room + " 现在空着（0 件，读到了，不是读不到）。total=" + data.total + "，bad_lines=" + data.bad_lines + "。");
+      return;
+    }
+    var table = document.createElement("table");
+    table.className = "rows";
+    var head = document.createElement("tr");
+    ["名字", "谁给的 / 她做的", "什么时候放下", "一句话说明", ""].forEach(function (text) {
+      var th = document.createElement("th");
+      th.textContent = text;
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+
+    items.forEach(function (item) {
+      var row = document.createElement("tr");
+      var name = document.createElement("td");
+      name.textContent = item.name + "（" + item.kind + " · " + item.card_id + "）";
+      var by = document.createElement("td");
+      by.textContent = item.by + " / " + item.role;
+      var at = document.createElement("td");
+      at.textContent = item.at;
+      var note = document.createElement("td");
+      note.textContent = item.note || "（这张卡没写说明）";
+      var open = document.createElement("td");
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "slim";
+      button.textContent = "翻看";
+      button.addEventListener("click", function () { openItem(data.room, item.name); });
+      open.appendChild(button);
+      row.appendChild(name);
+      row.appendChild(by);
+      row.appendChild(at);
+      row.appendChild(note);
+      row.appendChild(open);
+      table.appendChild(row);
+    });
+    body.appendChild(table);
+
+    var tail = data.room + "：" + data.total + " 件，这次读到 " + items.length + " 行";
+    if (data.truncated) { tail += "（截了：一次最多 " + data.limit + " 行 / 6000 字，total 是折叠后的件数）"; }
+    if (data.bad_lines) { tail += "；有 " + data.bad_lines + " 行读不出来（数据坏，不是空）"; }
+    mark("list-state", tail + "。");
+  }
+
+  // —— 翻一件 ————————————————————————————————————————
+  function openItem(roomName, itemName) {
+    el("read-title").textContent = roomName + " · " + itemName;
+    el("read-body").textContent = "载入中…";
+    mark("read-state", "载入中…");
+    call("GET", "/home/read?room=" + encodeURIComponent(roomName) + "&name=" + encodeURIComponent(itemName))
+      .then(function (res) {
+        if (res.status !== 200) {
+          el("read-body").textContent = "";
+          var node = el("read-state");
+          node.className = "state bad";
+          node.textContent = "读 /home/read 失败：" + problem(res);
+          return;
+        }
+        var data = res.data;
+        var card = data.card || {};
+        if (data.body === null) {
+          el("read-body").textContent = "（这张卡没有可读的正文："
+            + (card.path ? "原件不是 md / jsonl，家不搬本体" : "纯说明卡，家只记路径与指纹") + "）";
+        } else {
+          el("read-body").textContent = data.body;
+        }
+        mark("read-state", "card_id=" + (card.card_id || "—")
+          + " · verified=" + data.verified + " · external=" + data.external
+          + " · chars=" + data.chars + " · lines=" + data.lines
+          + (data.truncated ? " · 截了（一次最多 200 行 / 6000 字）" : "")
+          + " · path=" + (data.path || "（没有 path）"));
+      });
+  }
+
+  // —— 审计 ——————————————————————————————————————————
+  function readSeen() {
+    try {
+      var lines = localStorage.getItem(LAST_LINES_KEY);
+      var seq = localStorage.getItem(LAST_SEQ_KEY);
+      if (lines !== null && seq !== null) {
+        return { lines: parseInt(lines, 10), seq: parseInt(seq, 10) };
+      }
+    } catch (err) { /* 无 localStorage（沙箱 / 隐私模式）：退回页面内存 */ }
+    return state.seen;
+  }
+
+  function writeSeen(lines, seq) {
+    state.seen = { lines: lines, seq: seq };
+    try {
+      localStorage.setItem(LAST_LINES_KEY, String(lines));
+      localStorage.setItem(LAST_SEQ_KEY, String(seq));
+    } catch (err) { /* 记不住就记不住：不因此改任何判断 */ }
+  }
+
+  function showAudit(data) {
+    var body = el("audit-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var entries = data.entries || [];
+    var shrink = el("audit-shrink");
+    var lastSeq = entries.length ? entries[entries.length - 1].seq : 0;
+
+    if (!entries.length) {
+      shrink.style.display = "none";
+      mark("audit-state", "审计账 0 行：家还没登记过任何东西（读到了，是空的，不是读不到）。limit=" + data.limit + "。");
+      return;
+    }
+
+    var table = document.createElement("table");
+    table.className = "rows";
+    var head = document.createElement("tr");
+    ["seq", "什么时候", "谁 · 角色", "哪间", "哪件", "字 / 字节", "结果"].forEach(function (text) {
+      var th = document.createElement("th");
+      th.textContent = text;
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    entries.slice(-20).reverse().forEach(function (entry) {
+      var row = document.createElement("tr");
+      [entry.seq, entry.at, entry.by + " · " + entry.role, entry.room, entry.name,
+       entry.chars + " / " + entry.bytes, (entry.ok ? "ok" : "拒 " + entry.code)]
+        .forEach(function (value) {
+          var cell = document.createElement("td");
+          cell.textContent = String(value);
+          row.appendChild(cell);
+        });
+      table.appendChild(row);
+    });
+    body.appendChild(table);
+
+    var seen = readSeen();
+    var complaint = "";
+    if (seen && isFinite(seen.lines) && entries.length < seen.lines) {
+      complaint = "审计账比上次读到的少：上次 " + seen.lines + " 行，现在 " + entries.length + " 行。";
+    } else if (seen && isFinite(seen.seq) && lastSeq < seen.seq) {
+      complaint = "审计账的序号比上次小：上次最大 seq " + seen.seq + "，现在 " + lastSeq + "。";
+    }
+    if (complaint) {
+      shrink.textContent = complaint
+        + "只报不修——不补行、不重写高水位；补回去就把事故抹平了。先人工看 audit.jsonl 与 audit.seen.json。";
+      shrink.style.display = "block";
+      mark("audit-state", "这次读到 " + entries.length + " 行 / 最大 seq " + lastSeq + "：账变短了，红字在下面。");
+      return;
+    }
+    shrink.style.display = "none";
+    writeSeen(entries.length, lastSeq);
+    mark("audit-state", "这次读到 " + entries.length + " 行（limit=" + data.limit
+      + "）· 最大 seq " + lastSeq + " · 上次读到 " + (seen ? seen.lines + " 行" : "——记录已写下")
+      + "。只增不改。");
+  }
+
+  function verifyAudit() {
+    var out = el("audit-verify-out");
+    out.textContent = "校验中…";
+    call("GET", "/home/audit/verify").then(function (res) {
+      var data = res.data || {};
+      if (res.status === 200) {
+        out.textContent = "校验通过（只比对不修补）：ok=" + data.ok
+          + " · lines=" + data.lines + " · seq=" + data.seq
+          + " · repaired=" + data.repaired + " · mark=" + JSON.stringify(data.mark);
+        return;
+      }
+      out.textContent = "校验不通过：" + problem(res) + "\n原始：" + JSON.stringify(data, null, 1);
+    });
+  }
+
+  // —— 抽屉（只读，没有写控件） ——————————————————————
+  function showDrawer(data) {
+    var body = el("drawer-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var pre = document.createElement("pre");
+    if (data.status === "已接入") {
+      pre.textContent = data.body === null || data.body === undefined
+        ? "（status=已接入，但正文读不出来：家不编内容）"
+        : data.body;
+    } else {
+      pre.textContent = "（status=" + data.status + "）抽屉里还没有那张资料卡：\n"
+        + (data.message || "缺件就报未接入，不报 0 字、不编内容。");
+    }
+    body.appendChild(pre);
+    mark("drawer-state", "只读房：path=" + data.path + " · status=" + data.status
+      + " · 模板 template=" + data.template + "（照这份由人直接在盘上写）");
+  }
+
+  // —— 借阅条 ————————————————————————————————————————
+  function showBorrow(data) {
+    var body = el("borrow-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var rows = data.borrows || [];
+    if (!rows.length) {
+      mark("borrow-state", data.total === 0 && data.status === "未接入"
+        ? "借阅条账还没建（status=未接入，path=" + data.path + "）：不是「0 条」，是这份账不存在。"
+        : "借阅条账在（" + data.path + "），但这一版是空的：0 条（读到了，是空的）。");
+      return;
+    }
+    var table = document.createElement("table");
+    table.className = "rows";
+    var head = document.createElement("tr");
+    ["借自哪", "哪一版", "一共多少", "她现在认得多少词", "读数"].forEach(function (text) {
+      var th = document.createElement("th");
+      th.textContent = text;
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    rows.forEach(function (row) {
+      var tr = document.createElement("tr");
+      [row.source || "（没记来源）", row.version || "（没记版本）",
+       row.total === null || row.total === undefined ? "—" : String(row.total),
+       row.learned === null || row.learned === undefined ? "答不出" : String(row.learned),
+       row.readout_status + (row.borrow_id ? " · " + row.borrow_id : "")]
+        .forEach(function (value) {
+          var cell = document.createElement("td");
+          cell.textContent = value;
+          row.readout_status === "未接入" ? cell.className = "bad" : cell.className = "";
+          tr.appendChild(cell);
+        });
+      table.appendChild(tr);
+    });
+    body.appendChild(table);
+    mark("borrow-state", "借阅条落在 " + data.room + "：" + data.total + " 条 · 读数整体 "
+      + data.readout_status + " · bad_lines=" + data.bad_lines + " · path=" + data.path);
+  }
+
+  // —— 仓库指针 ————————————————————————————————————
+  function showWarehouse(res) {
+    var body = el("warehouse-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var data = res.data || {};
+    var pointers = data.pointers || (res.status === 409 ? data.detail.pointers : []) || [];
+    if (!pointers.length) {
+      var pre0 = document.createElement("pre");
+      pre0.textContent = data.message || "（没有指针卡）";
+      body.appendChild(pre0);
+      mark("warehouse-state", "status=" + (data.status || "—") + " · total=0：不是「对齐了」，是还没有卡。");
+      return;
+    }
+    var table = document.createElement("table");
+    table.className = "rows";
+    var head = document.createElement("tr");
+    ["卡", "名字", "现场重算", "字节"].forEach(function (text) {
+      var th = document.createElement("th");
+      th.textContent = text;
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    pointers.forEach(function (pointer) {
+      var tr = document.createElement("tr");
+      [pointer.card_id, pointer.name + "\n" + pointer.path,
+       (pointer.aligned ? "对齐（" + pointer.code + "）" : "对不上（" + pointer.code + "）") + "\n" + pointer.sha256,
+       String(pointer.bytes)]
+        .forEach(function (value, index) {
+          var cell = document.createElement("td");
+          cell.textContent = value;
+          cell.style.whiteSpace = "pre-wrap";
+          if (index === 2 && !pointer.aligned) { cell.className = "bad"; }
+          tr.appendChild(cell);
+        });
+      table.appendChild(tr);
+    });
+    body.appendChild(table);
+    if (res.status === 409) {
+      mark("warehouse-state", "对不上，只报不修：" + problem(res));
+    } else {
+      mark("warehouse-state", "total=" + data.total + " · aligned=" + data.aligned
+        + " · stale=" + JSON.stringify(data.stale) + " · missing=" + JSON.stringify(data.missing)
+        + " · bad_lines=" + data.bad_lines);
+    }
+  }
+
+  // —— 放一件东西 ————————————————————————————————————
+  function submitWrite() {
+    var room = el("write-room").value;
+    var kind = el("write-kind").value;
+    var name = el("write-name").value.trim();
+    var note = el("write-note").value.trim();
+    var content = el("write-content").value;
+    var path = el("write-path").value.trim();
+    if (!room || !name) {
+      mark("write-state", "先选房、再填名字：一张卡必须有房名与名字（名字 ≤64 字一段）。");
+      el("write-state").className = "state bad";
+      return;
+    }
+    var card = { kind: kind, name: name, note: note, chars: content.length };
+    if (path) { card.path = path; }
+    mark("write-state", "写入中…");
+    say("POST /home/write → " + room + " / " + name + "（chars=" + content.length
+      + (path ? "，path=" + path : "，纯说明卡") + "）");
+    call("POST", "/home/write", { role: "human", by: "panel", room: room, cards: [card] })
+      .then(function (res) {
+        var node = el("write-state");
+        if (res.status === 200) {
+          node.className = "state ok";
+          node.textContent = "已放进 " + res.data.rooms.join("、") + "：" + res.data.count
+            + " 张卡，审计追了 " + (res.data.audit || []).length + " 行。";
+          say("写成功：" + JSON.stringify(res.data.cards), "ok");
+          el("write-name").value = "";
+          el("write-note").value = "";
+          el("write-content").value = "";
+          el("write-path").value = "";
+          loadAll();
+          return;
+        }
+        node.className = "state bad";
+        node.textContent = "被拒：" + problem(res);
+        say("写被拒：" + JSON.stringify(res.data), "bad");
+      });
+  }
+
+  // —— 一套组件一份数据源：只有这一个轮次，没有第二处轮询 ————
+  function loadAll() {
+    mark("status", "加载中…");
+    if (state.rooms === null) {
+      mark("rooms-state", "载入中…");
+      el("rooms-total").textContent = "载入中…";
+      mark("drawer-state", "载入中…");
+      mark("borrow-state", "载入中…");
+      mark("audit-state", "载入中…");
+      mark("warehouse-state", "载入中…");
+    }
+    return Promise.all([
+      call("GET", "/home/rooms"),
+      call("GET", "/home/access"),
+      call("GET", "/home/audit?limit=200"),
+      call("GET", "/home/drawer"),
+      call("GET", "/home/archive/borrow"),
+      call("GET", "/home/warehouse")
+    ]).then(function (out) {
+      var failures = 0;
+
+      if (out[0].status === 200) {
+        state.rooms = out[0].data.rooms;
+        showRooms(out[0].data.rooms, out[1].status === 200 ? out[1].data : null);
+      } else {
+        failures += 1;
+        el("room-grid").textContent = "";
+        var roomsNode = el("rooms-state");
+        roomsNode.className = "state bad";
+        roomsNode.textContent = "读 /home/rooms 失败：" + problem(out[0]);
+      }
+
+      // 白名单读不出来只影响「她现在可写」那一栏，但确实是一条读端点失败：照数。
+      if (out[1].status !== 200) {
+        failures += 1;
+        say("读 /home/access 失败：" + problem(out[1]), "bad");
+      }
+
+      if (out[2].status === 200) { showAudit(out[2].data); }
+      else {
+        failures += 1;
+        el("audit-body").textContent = "";
+        var auditNode = el("audit-state");
+        auditNode.className = "state bad";
+        auditNode.textContent = "读 /home/audit 失败：" + problem(out[2]);
+      }
+
+      if (out[3].status === 200) { showDrawer(out[3].data); }
+      else {
+        failures += 1;
+        el("drawer-body").textContent = "";
+        var drawerNode = el("drawer-state");
+        drawerNode.className = "state bad";
+        drawerNode.textContent = "读 /home/drawer 失败：" + problem(out[3]);
+      }
+
+      if (out[4].status === 200) { showBorrow(out[4].data); }
+      else {
+        failures += 1;
+        el("borrow-body").textContent = "";
+        var borrowNode = el("borrow-state");
+        borrowNode.className = "state bad";
+        borrowNode.textContent = "读 /home/archive/borrow 失败：" + problem(out[4]);
+      }
+
+      if (out[5].status === 200 || out[5].status === 409) { showWarehouse(out[5]); }
+      else {
+        failures += 1;
+        el("warehouse-body").textContent = "";
+        var whNode = el("warehouse-state");
+        whNode.className = "state bad";
+        whNode.textContent = "读 /home/warehouse 失败：" + problem(out[5]);
+      }
+
+      if (state.room) { openRoom(state.room); }
+
+      var statusNode = el("status");
+      if (failures) {
+        statusNode.className = "state bad";
+        statusNode.textContent = "这次刷新有 " + failures + " 条读端点失败（原因在各块下面，逐条带码与话）："
+          + new Date().toLocaleTimeString();
+      } else {
+        statusNode.className = "state ok";
+        statusNode.textContent = "六条读端点都拿到了：" + new Date().toLocaleTimeString()
+          + "（本页没有第二处轮询，也没有自动重试）。";
+      }
+    });
+  }
+
+  // 写的那一类：提到（机器写）要 params.ref，本页不造那种卡。
+  KINDS.forEach(function (kind) {
+    var option = document.createElement("option");
+    option.value = kind;
+    option.textContent = kind;
+    el("write-kind").appendChild(option);
+  });
+
+  el("refresh-all").addEventListener("click", function () { loadAll(); });
+  el("audit-verify").addEventListener("click", function () { verifyAudit(); });
+  el("write-submit").addEventListener("click", function () { submitWrite(); });
+
+  // 页脚那一行：核自己报「跑的是哪一版」。源码在它脚下被改过时红字提醒——重启即变。
+  function showBuild() {
+    call("GET", "/healthz").then(function (res) {
+      var node = el("build");
+      if (res.status !== 200 || !res.data || res.data.ok !== true) {
+        node.textContent = "核版本读不到（HTTP " + res.status + "）：面板照常可用，但看不出跑的是旧是新。";
+        node.className = "build bad";
+        return;
+      }
+      var d = res.data;
+      var line = "核 " + d.git_head + " · 启动 " + d.started_at + " · 源码 " + d.source_digest
+        + "（进程 " + d.pid + "）";
+      if (d.stale) {
+        node.textContent = "⚠ 进程旧了：" + line + " —— 磁盘上现在是 " + d.source_digest_now
+          + "，" + d.advice;
+        node.className = "build bad";
+      } else {
+        node.textContent = line + " —— " + d.advice;
+        node.className = "build";
+      }
+    }).catch(function (err) {
+      var node = el("build");
+      node.textContent = "核版本读不到：" + err;
+      node.className = "build bad";
+    });
+  }
+
+  loadAll();
+  showBuild();
+})();
+</script>
+</body>
+</html>

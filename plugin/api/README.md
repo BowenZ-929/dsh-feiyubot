@@ -123,8 +123,10 @@ cd /Users/bowen/NewQQAgent/plugin && python3 -m api.devserver --root organs/soul
 Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会生效。改过 `organs/soul/model.py` 或 `data/*.json` 的校验规则后，**老进程会继续按旧代码拒载**，表现是 `/soul` 一直 500 说「多出某个键」，而磁盘上的代码其实早就允许了。
 
 - 改 `organs/*` 或 `data/*` → **重启核**（`pkill -f api.devserver` 再起）。
-- 改 `shell/*` → **重启宿主**（壳是插进宿主的）；核不用动。
+- 改 `shell/*` → **pnpm build 再重启宿主**（壳的产物在宿主启动时载入）；核不用动。
 - 壳不缓存、不解析魂的内容：核一旦好，面板下一条请求就正常，不需要重启壳。
+
+**发现「源码里有、请求却 404/500」，先怀疑进程旧，再怀疑代码少**（CONTRIBUTING §1.3）。这条在本文件上被咬过两次：一次是 `organs/soul/model.py` 早已允许 `appearance`、老进程仍按旧规则拒载；一次是 `ROUTES` 里早有 `/soul/revisions`、`/soul/pin`、`/soul/redline`、`/soul/rollback`，老进程全 404——照那轮结果动手会误删四个好按钮。**验接口一律打当前进程，读源码不算验。**
 - 下发带 `echo`，协议端的应答帧（`{status, retcode, data, echo}`）只用来打 `ack` 日志。
 - 核不可达时：记一条「核不可达」，**本轮不回落**，进程不崩。
 - 实测间隔（①→④）：15ms / 3ms / 4ms，验收线是 < 2s。
@@ -185,6 +187,52 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 | 端点 | 参数 | 返回 | 只读理由 |
 | --- | --- | --- | --- |
 | `GET /mouth/split` | `text`（必填，原文）、`seed`（可选，间隔抖动的种子） | `parts[]`（`text`/`gap_before`/`send_at`/`degraded`/`reason`）+ `summary` + `chars` + `visible_chars` | 只把切分与节奏算一遍；阈值全在 `organs/mouth/data/policy.json`，不写盘 |
-| `GET /mouth/address` | `who`（人名录 id）、`familiarity`（可选，覆盖这一次的读数） | `who`/`display`/`tier`/`relation`/`address`/`frequency`/`banned_self`/`note` | 只读人名录取一次称呼；查不到人就按生人档回退，不写回人名录 |
-| `GET /mouth/tone` | `who`、`familiarity`、`mood`、`energy`、`engage`、`offset` | `addressee{…}` + `tone{tier,label,line,stance,self_name,heart_source,softness,ban_joke}` | 心的读数只从查询参数来；没给就是 `heart:未接入`，不假装有读数 |
-| `GET /mouth/gate` | `text`（必填，原文） | `hit{clause_id,kind,reason,matched}` 或 `null` + `decision` + `reason` | 条款全在 `organs/mouth/data/clauses.json`；没有重写器，命中即 `dropped`，不代写也不放行 |
+| `GET /mouth/address` | `who`（人名录 id）、`familiarity`（可选，覆盖这一次的读数）、`rename`（可选，对方这一轮要求的叫法） | `who`/`display`/`tier`/`relation`/`address`/`frequency`/`banned_self`/`note` + `renamed` + `source`（`人名录`/`会话覆盖`/`本轮改名`/`回退`）+ `memory_draft`（当场换时给出：投给脑的那条亲历记忆） | 只读人名录取一次称呼；查不到人就按生人档回退，不写回人名录。改名**当场换**，但端点**不落盘**；要落到记忆里，靠出口把 `memory_draft` 交给脑 |
+| `GET /mouth/tone` | `who`、`familiarity`、`mood`、`energy`、`engage`、`offset`、`rename`（可选） | `addressee{…}` + `tone{tier,label,line,stance,self_name,heart_source,softness,ban_joke}`；给了 `rename` 时顶层另带 `renamed` 与 `memory_draft` | 心的读数只从查询参数来；没给就是 `heart:未接入`，不假装有读数；改名同样只算不写 |
+| `GET /mouth/gate` | `text`（必填，原文） | `hit{clause_id,kind,reason,matched}` 或 `null` + `decision` + `reason` + `disabled_ids` + `drops{today,last_clause_id,line,exists,errors,trace}` | 条款全在 `organs/mouth/data/clauses.json`；没有重写器，命中即 `dropped`，不代写也不放行；弃言在账本里留痕（见下） |
+
+两处跨端点的字段：
+
+- **`disabled_ids`**（`/mouth/gate`）：清单里 `enabled:false` 因而被跳过的条款 id。跳过**不静默**——返回里看得见，免得「没命中」被当成「闸变松了」。全部条款都被停用时抛 `ClauseBroken`（HTTP 500 明说没有生效条款），不当没命中放行。
+- **`drops`**（`/mouth/gate`，**pass 的那次也带**）：弃言账本的读数 `{today, last_clause_id, line, exists, errors, trace}`。`line` 就是那句人话「今天因闸弃言 N 次，最近一次命中 <clause-id>」。三件事分开报：账本不存在 = `today:0 + exists:false`（等于今天还没记过，不是读不到）；有坏行 = 跳过并计入 `errors`；写不进去 = 直接 500（记不上账就要响，不报 0 次）。账本属于「临时落脚」，家那一轮搬去家·痕迹。
+- **`renamed` / `source` / `memory_draft`**（`/mouth/address`、`/mouth/tone`）：给了 `rename` 就**当场换**（`source=本轮改名`、`renamed=true`），档位不动；落不到盘，也改不了人名录——`memory_draft` 就是「他要求过叫他 X」这条**亲历记忆草稿**，形状恰好是脑 `ingest()` 的入参，由出口投递。违禁自称过不了这道门（`source=回退`、`banned_self` 记下被挡的词）。
+
+## 7 家（第四批：十间房 + 存取接口 + 审计）
+
+十条路由：九条 GET、一条 POST。房名表、两道门、审计、索引卡都在 `organs/home/`，
+这一层只把它们翻成 HTTP：**不重判一次写权、不给白名单兜底、不补审计行**。
+
+| 方法 | 路径 | 参数 | 返回 | 一句话 |
+| --- | --- | --- | --- | --- |
+| GET | `/home/rooms` | — | `rooms[]{name,slug,purpose,writable_by_structure,writable_now,count,cap,headroom}` + `writable_now` + `writable_now_source` | 十间房的表：**结构可写**与**她此刻可写**分两栏答（前者改代码、后者改配置），另报件数与余量。读侧不看白名单，这一栏只用来给人看 |
+| GET | `/home/access` | — | `writable` + `source` / `source_kind` / `file` / `env` + `default` + `readonly_rooms` | 「她写哪几间现在怎么配置」的对外答案：哪几间、哪一级解析出来的（构造参数 / `HOME_ACCESS_FILE` / 包内）、要改哪份文件。每次请求重读盘，不缓存 |
+| GET | `/home/list` | `room`（必填）、`offset`、`limit` | `items[]`（折叠后视角，含 `mentions`）+ `total` + `truncated` + `bad_lines` | 读一间房的索引卡；按 `READ_MAX_LINES` / `READ_MAX_CHARS` 截断，截了就如实回 `truncated` 与 `total` |
+| GET | `/home/read` | `room`、`name`（卡名或 `card_id`） | `card` + `body` / `external` / `verified` + `truncated` | 读一件；卡与盘对不上回 409 `CARD_DISK_MISMATCH`。纯说明卡如实回 `body=null, external=true`，不编内容 |
+| GET | `/home/audit` | `limit`（默认 20、上限 200） | `entries[]{seq,at,role,by,room,name,chars,bytes,ok,code}` | 审计尾。读账不算写账，不碰高水位 |
+| GET | `/home/audit/verify` | — | `lines` / `seq` / `mark` / `code` / `repaired:false` | 行数／序号 vs 高水位；变少回 409 `AUDIT_SHRUNK`，正文写明「只报不修」——不补行、不重写高水位 |
+| GET | `/home/drawer` | — | `status`（`已接入` / `未接入`）+ `body` + `template` | 抽屉资料卡，只读；缺件回 200 + `status="未接入"` + 模板路径，**不报 0 字、不编内容** |
+| GET | `/home/archive/borrow` | — | `room`（名片盒）+ `borrows[]{borrow_id,source,version,total,learned,readout_status}` + `readout_status` | 借阅条账（落名片盒，一条一借）+ 读数合并；缺读数一律 `learned=null, readout_status="未接入"`，不报 0 |
+| GET | `/home/warehouse` | — | `pointers[]{name,path,sha256,aligned,code}` + `aligned` + `stale` / `missing` | 仓库指针卡 + 现场重算 sha256；对不上回 409 `POINTER_STALE`（只报，不自动更新卡）。一张卡都没有时回 `status="未接入"` |
+| POST | `/home/write` | body：`{role,by,room,cards[]}` | `cards[]{card_id,room,kind,name,…}` + `audit[]{…}` | 整批登记：整批 ≤20 张、每张 ≤2000 字。**门在 access 里**（结构门＋白名单门），这一层不判一次，也不兜底 |
+
+### 7.1 两道门与状态码
+
+```text
+400  ROOM_MISS（body 带 nearest：最接近的那一间）／PATH_TRAVERSAL／PATH_ABSOLUTE／PATH_SHAPE
+     ／CHARS_OVER／FILES_OVER／BAD_ARGUMENT
+403  ROLE_UNKNOWN／门挡下来的（code 是库里的原码，detail.door 说明是哪道门）
+     ├─ door="structure"  这间房从不放东西（只读五间：客厅、卧室、台历、橱柜、抽屉），三个角色一律拒
+     └─ door="whitelist"  她今天被收回这间（只管 role=agent；organ／human 不经这道门）
+404  CARD_NOT_FOUND（房名对、件不在）
+409  CARD_DISK_MISMATCH／AUDIT_SHRUNK／POINTER_STALE／ROOM_CAP_REACHED／DAY_QUOTA_REACHED
+```
+
+错误一律 `{"ok": false, "code": …, "message": …, "detail": …}`；`detail.door` 与 `detail.nearest`
+另在顶层各露一份——人要能一眼分清「这间房从不放东西」和「她今天被收回这间」（`docs/plan.md:45`
+「能不能写看路由表，不看 UI 灰化」）。房名不在十间时，读侧与写侧都回同一个 `ROOM_MISS`
+（库里另一条线叫 `ROOM_UNKNOWN`，原码留在 `detail.code_from`）。
+
+方法不对由 `core.handle` 统一回 405，家的措辞说清「只有 `POST /home/write` 这一条是写」。
+`store=None`（家未载入）回 200 + `status="未接入"`，写的那条另说 `wrote:0`——不 500，
+也不假装写成功。白名单只在 `/home/access`（与 `/home/rooms` 那一栏）里**展示**：
+改 `access.json` 的 `writable` 数组，下一次请求立刻照新的算，不重启、不缓存。

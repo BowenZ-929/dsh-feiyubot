@@ -3,81 +3,1088 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>脑 · 只读</title>
+<title>脑 · 只读面板</title>
 <style>
-  :root { color-scheme: light; }
+  /* 颜色全部取宿主变量并带兜底值（docs/reference/ui.md §1.5）；深色跟随宿主 data-theme 与系统偏好。 */
+  :root {
+    color-scheme: light;
+    --bg: var(--dsw-alias-bg-l1, #fbfbfb);
+    --panel: var(--dsw-alias-bg-l2, #ffffff);
+    --line: var(--dsw-alias-border-l2, #dcdcdc);
+    --fg: var(--dsw-alias-text-l1, #1b1b1b);
+    --dim: var(--dsw-alias-text-l2, #666666);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+    --radius: 8px;
+    --shadow: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: var(--dsw-alias-bg-l1, #0f1115);
+      --panel: var(--dsw-alias-bg-l2, #171a21);
+      --line: var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+      --fg: var(--dsw-alias-text-l1, #e8eaf0);
+      --dim: var(--dsw-alias-text-l2, #9aa2b1);
+    }
+  }
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: var(--dsw-alias-bg-l1, #0f1115);
+    --panel: var(--dsw-alias-bg-l2, #171a21);
+    --line: var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+    --fg: var(--dsw-alias-text-l1, #e8eaf0);
+    --dim: var(--dsw-alias-text-l2, #9aa2b1);
+  }
+  * { box-sizing: border-box; }
   body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 2.2rem 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
-  main { max-width: 46rem; margin: 0 auto; }
-  h1 { font-size: 1.25rem; margin: 0 0 1rem; letter-spacing: .02em; }
-  h2 { font-size: 1rem; margin: 1.4rem 0 .6rem; }
-  section { background: #fff; border: 1px solid #dcdcdc; border-radius: 8px;
-            padding: .6rem 1rem 1rem; margin-bottom: 1rem; }
-  pre { margin: .4rem 0 0; padding: .7rem .8rem; background: #f4f7fb;
-        border: 1px solid #ccd8e6; border-radius: 6px; white-space: pre-wrap;
-        overflow-wrap: anywhere; font-size: .85rem; font-family: ui-monospace, Menlo, monospace; }
-  .note { margin: 0 0 1.4rem; color: #7a5c00; background: #fffbea;
-          border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
-  .muted { color: #666; font-size: .85rem; }
-  .back { font-size: .9rem; }
+         margin: 0; padding: 0 1.2rem 3rem; color: var(--fg); background: var(--bg); }
+  header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
+                  padding: .55rem 1.2rem; background: var(--panel);
+                  border-bottom: 1px solid var(--line); color: var(--fg); font-weight: 600;
+                  box-shadow: var(--shadow); }
+  nav.links { max-width: 60rem; margin: 0 0 1rem; font-size: .9rem; color: var(--dim); }
+  nav.links a { color: var(--brand); }
+  main { max-width: 60rem; margin: 0 auto; }
+  section.card { background: var(--panel); border: 1px solid var(--line);
+                 border-radius: var(--radius); padding: .6rem 1rem 1rem; margin-bottom: 1rem; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between;
+               gap: .8rem; flex-wrap: wrap; margin: .3rem 0 .7rem; }
+  h1 { font-size: 1.25rem; margin: 1rem 0 .6rem; letter-spacing: .02em; }
+  h2 { font-size: 1rem; margin: 0; letter-spacing: .02em; }
+  h3 { font-size: .92rem; margin: 0 0 .3rem; }
+  h3 small { font-weight: 400; color: var(--dim); margin-left: .4rem; }
+  .owner { font-size: .78rem; color: var(--dim); }
+  .owner.auto { color: var(--warn); }
+  .muted { color: var(--dim); font-size: .85rem; }
+  .note { margin: .7rem 0 0; color: var(--warn); background: transparent;
+          border-left: 3px solid var(--warn); padding: .2rem .6rem; font-size: .84rem; }
+  .pre, .log { margin: .4rem 0 0; padding: .7rem .8rem; background: var(--bg);
+               border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap;
+               overflow-wrap: anywhere; font-size: .84rem;
+               font-family: ui-monospace, Menlo, monospace; color: var(--fg); }
+  .log { min-height: 2.4rem; }
+  .log .err { color: var(--warn); }
+  /* 页脚：核自报版本。只报不藏——旧代码要能一眼看见。 */
+  .build { margin: 1.4rem 0 0; padding-top: .7rem; border-top: 1px dashed var(--line, #dcdcdc);
+           font: .78rem/1.6 ui-monospace, Menlo, monospace; color: #6b6b6b; overflow-wrap: anywhere; }
+  .build.bad { color: var(--warn); font-weight: 600; }
+  .log .ok { color: var(--brand); }
+  .btn { background: transparent; border: 1px solid var(--line); color: var(--fg);
+         border-radius: 6px; padding: .3rem .75rem; font: inherit; font-size: .84rem;
+         cursor: pointer; }
+  .btn:hover { border-color: var(--brand); color: var(--brand); }
+  .btn.minor { padding: .1rem .5rem; font-size: .78rem; }
+
+  /* 名片：四栏人写 + 熟稔只读 + 历史 */
+  .fields { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: .35rem .7rem;
+            align-items: start; margin: .45rem 0 0; font-size: .84rem; }
+  .fields label { color: var(--dim); padding-top: .25rem; }
+  .fields input, .fields textarea { font: inherit; font-size: .86rem; width: 100%;
+            padding: .3rem .5rem; border: 1px solid var(--line); border-radius: 6px;
+            background: var(--bg); color: var(--fg); }
+  .fields textarea { min-height: 2.9rem; resize: vertical; }
+  .fields input:focus, .fields textarea:focus { outline: 1px solid var(--brand); }
+  .card-actions { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
+  .ro-line { margin: .5rem 0 0; font-size: .8rem; color: var(--dim); }
+  ul.history { list-style: none; margin: .55rem 0 0; padding: 0; font-size: .8rem; }
+  ul.history li { padding: .22rem 0; border-bottom: 1px dashed var(--line); }
+  ul.history li:last-child { border-bottom: 0; }
+  ul.history li.empty { color: var(--dim); }
+
+  /* 现状 */
+  .nums { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .n { border: 1px solid var(--line); border-radius: 6px; padding: .35rem .7rem;
+       min-width: 6.5rem; }
+  .n b { display: block; font-size: 1.15rem; line-height: 1.3; }
+  .n span { font-size: .76rem; color: var(--dim); }
+
+  /* 人名录：一人一卡，骨架照 docs/reference/ui.html §1.1 */
+  .people { display: flex; flex-direction: column; gap: .9rem; }
+  .person { border: 1px solid var(--line); border-radius: var(--radius);
+            padding: .7rem .9rem .9rem; }
+  .hd { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;
+        flex-wrap: wrap; }
+  .name { font-size: 1.15rem; font-weight: 700; }
+  .qq { color: var(--dim); font-size: .8rem; margin-left: .5rem; }
+  .aff { text-align: right; min-width: 11rem; }
+  .aff-num { font-size: 1.2rem; font-weight: 700; }
+  .aff-spark { letter-spacing: 2px; color: var(--brand); font-size: .95rem; }
+  .meta { color: var(--dim); font-size: .8rem; margin-top: .2rem; }
+  .block { margin-top: .8rem; border-top: 1px dashed var(--line); padding-top: .5rem; }
+  .block-head { display: flex; align-items: baseline; justify-content: space-between;
+                gap: .6rem; flex-wrap: wrap; margin-bottom: .35rem; }
+  .block-title { font-size: .88rem; font-weight: 600; }
+  dl.kv { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: .2rem .7rem;
+          margin: 0; font-size: .84rem; }
+  dl.kv dt { color: var(--dim); }
+  dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+  .facts { list-style: none; padding: 0; margin: 0; font-size: .84rem; }
+  .facts li { display: flex; justify-content: space-between; gap: .8rem;
+              padding: .25rem 0; border-bottom: 1px dashed var(--line); }
+  .facts li:last-child { border-bottom: 0; }
+  .date { color: var(--dim); font-size: .76rem; white-space: nowrap; }
+  .recent { font-size: .84rem; }
+  .recent span { color: var(--dim); }
+
+  /* 记忆四档 */
+  .recall { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+  .recall label { font-size: .8rem; color: var(--dim); }
+  .recall input[type=search] { flex: 1 1 16rem; min-width: 12rem; font: inherit;
+        font-size: .86rem; padding: .32rem .55rem; border: 1px solid var(--line);
+        border-radius: 6px; background: var(--bg); color: var(--fg); }
+  .recall input[type=search]:focus { outline: 1px solid var(--brand); }
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+           gap: .8rem; margin-top: .8rem; }
+  .tier { border: 1px solid var(--line); border-radius: 6px; padding: .5rem .7rem .7rem; }
+  .tier-note { margin: 0 0 .35rem; font-size: .74rem; color: var(--dim); }
+  ul.rows { list-style: none; margin: 0; padding: 0; font-size: .82rem; }
+  ul.rows li { padding: .3rem 0; border-bottom: 1px dashed var(--line); }
+  ul.rows li:last-child { border-bottom: 0; }
+  ul.rows li.empty { color: var(--dim); }
+  .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+           padding: 0 .4rem; font-size: .72rem; color: var(--dim); margin-right: .35rem; }
+  .badge.lived { border-color: var(--brand); color: var(--brand); }
+  .badge.sim { border-style: dashed; }
+  .row-meta { display: block; color: var(--dim); font-size: .74rem; margin-top: .1rem; }
+  .forget { color: var(--dim); }
+
+  /* 提案 */
+  .proposal { border: 1px solid var(--line); border-radius: 6px; padding: .5rem .7rem .7rem;
+              margin-bottom: .7rem; }
+  .proposal.rejected { opacity: .75; border-style: dashed; }
+  .proposal .head { display: flex; align-items: baseline; justify-content: space-between;
+                    gap: .6rem; flex-wrap: wrap; }
+  .proposal .want { font-size: .9rem; margin: .35rem 0; overflow-wrap: anywhere; }
+  .proposal .want code { font-family: ui-monospace, Menlo, monospace; font-size: .84rem;
+                         background: var(--bg); border: 1px solid var(--line);
+                         border-radius: 4px; padding: 0 .25rem; }
+  .proposal .evidence { font-size: .78rem; color: var(--dim); margin: .2rem 0 .45rem; }
+  .proposal .actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+
+  /* 三态 */
+  .skel { height: 76px; border-radius: 6px; margin-bottom: .5rem;
+          background: linear-gradient(90deg, var(--line), var(--bg), var(--line));
+          background-size: 200% 100%; animation: sh 1.2s infinite; }
+  .skel.short { height: 40px; margin-bottom: 0; }
+  @keyframes sh { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
+  .hidden { display: none; }
+  #error-card { border-color: var(--warn); }
+  #error-card .card-title { color: var(--warn); font-weight: 600; margin-bottom: .3rem; }
 </style>
 </head>
 <body>
-<main>
-  <h1>脑 · 只读</h1>
-  <p class="note">只读：人不能改心与脑（architecture.md §9.2：心与脑只能看）。这一页没有任何写入口；脑的写入是程序内的消息路径。</p>
-  <section aria-labelledby="ov-h">
-    <h2 id="ov-h">现状</h2>
-    <pre id="overview">载入中…</pre>
+<header class="banner">脑 · 记忆与判断只能看：都由程序写（architecture.md §9.2）。人能写的只有名片四栏（称呼 / 雷点 / 备注 / 照片说明），熟稔仍在只读侧。本页两条写：「接受提案」写的是魂，不是脑；名片写的是人写的字段，不动熟稔。</header>
+<nav class="links" aria-label="页面导航"><a href="..">← 回魂面板</a> · <a href="heart">心 · 只读</a></nav>
+<script>
+  // 壳把本页挂在 /qqagent/panel/brain 下（iframe 的文档路径没有结尾斜杠），裸相对 href 会被浏览器
+  // 折成 /qqagent/heart —— 那是壳的 JSON 端点，不是核的只读页。按当前挂载前缀把链接补回去。
+  (function () {
+    var mount = location.pathname.replace(/\/+$/, "");
+    var base = mount.slice(-6) === "/brain" ? mount.slice(0, -6) : "";
+    if (!base) { return; }
+    for (const a of document.querySelectorAll("nav.links a")) {
+      if (a.getAttribute("href") !== "..") { a.href = base + "/" + a.getAttribute("href"); }
+    }
+  })();
+</script>
+<main id="page" data-state="loading">
+  <h1>脑</h1>
+  <p class="note">三块读：人名录（含熟稔读数）、记忆四档、判断结论。脑的写入是程序内的消息路径；
+    面板上只有名片那四栏是人写的（PATCH /brain/people/&lt;id&gt;/card，body 带 actor），
+    熟稔、记忆、判断都不在人手上。</p>
+
+  <section class="card" aria-labelledby="ov-h">
+    <div class="card-head">
+      <h2 id="ov-h">现状</h2>
+      <span class="owner auto" id="overview-owner">由程序写：脑的读数</span>
+    </div>
+    <div class="nums" id="overview-nums"><span class="muted">载入中…</span></div>
+    <p class="muted" id="overview-pending" style="margin:.6rem 0 0">载入中…</p>
   </section>
-  <section aria-labelledby="td-h">
-    <h2 id="td-h">今日</h2>
-    <pre id="today">载入中…</pre>
+
+  <section class="card" aria-labelledby="pp-h">
+    <div class="card-head">
+      <h2 id="pp-h">人名录</h2>
+      <span class="owner auto">由程序写：熟稔与记忆　·　人写：名片四栏（块里单独标）</span>
+    </div>
+    <div class="people" id="people-list" aria-live="polite">
+      <p class="muted">载入中…</p>
+    </div>
   </section>
-  <section aria-labelledby="pp-h">
-    <h2 id="pp-h">人名录（含熟稔读数）</h2>
-    <pre id="people">载入中…</pre>
+
+  <section class="card" aria-labelledby="mm-h">
+    <div class="card-head">
+      <h2 id="mm-h">记忆 · 四档</h2>
+      <span class="owner auto">由程序写：她的记性由记忆写入路径落条；本页只读，人不在这里改</span>
+    </div>
+    <div class="recall">
+      <label for="recall-q">回想（GET /brain/recall?q=）</label>
+      <input id="recall-q" type="search" autocomplete="off"
+             placeholder="问一句：她上次说过什么">
+      <button class="btn" id="recall-btn" type="button">回想</button>
+      <span class="muted" id="recall-state">还没回想</span>
+    </div>
+    <p class="note">回想是 GET；脑会顺手把命中条目的「想起次数」+1（遗忘曲线的输入），
+      这是脑自己的记账，不是人改记忆——这一页没有任何改记忆的控件。</p>
+    <div class="tiers">
+      <div class="tier">
+        <h3>今日 <small id="tier-today-count"></small></h3>
+        <p class="tier-note">由程序写：今日档由消息入库逐条落</p>
+        <ul class="rows" id="tier-today"><li class="empty">载入中…</li></ul>
+      </div>
+      <div class="tier">
+        <h3>热 <small id="tier-hot-count"></small></h3>
+        <p class="tier-note">热档：回想命中时落进 hot.json 的条目</p>
+        <ul class="rows" id="tier-hot"><li class="empty">载入中…</li></ul>
+      </div>
+      <div class="tier">
+        <h3>长期 <small id="tier-long-count"></small></h3>
+        <p class="tier-note">长期档：longterm.jsonl 里 status=active 的条目</p>
+        <ul class="rows" id="tier-longterm"><li class="empty">载入中…</li></ul>
+      </div>
+      <div class="tier">
+        <h3>冷仓 <small id="tier-cold-count"></small></h3>
+        <p class="tier-note">冷仓：status=archived 的条目，分页读（/brain/cold）</p>
+        <ul class="rows" id="tier-cold"><li class="empty">载入中…</li></ul>
+        <div id="tier-cold-more"></div>
+      </div>
+    </div>
+    <p class="note">四档条目来自 GET /brain/tiers（每档 count + 最近几条），冷仓来自 GET /brain/cold
+      （有 next_cursor 才有「下一页」）。遗忘进度：每条自带的 retention（0–1）按百分比显示，clarity 一并给出；
+      某条没带这两个值就整栏不显示——不编数，也不拿 β 冒充。</p>
   </section>
-  <section aria-labelledby="pr-h">
-    <h2 id="pr-h">改基线提案（每晚 0–2 条，各附三条依据记忆）</h2>
-    <pre id="proposals">载入中…</pre>
+
+  <section class="card" aria-labelledby="pr-h">
+    <div class="card-head">
+      <h2 id="pr-h">改基线提案</h2>
+      <span class="owner">人点头才落魂：接受 = POST /soul/proposal；拒绝只在这一页记一条，不发请求</span>
+    </div>
+    <p class="muted" id="proposal-night" style="margin:0 0 .6rem">载入中…</p>
+    <div id="proposal-list"><p class="muted">载入中…</p></div>
+    <p class="note">这是本页唯一的写：它改的是魂的 manner.stance（魂是人写、程序只读），不是脑。
+      脑只产出提案，接受与否由人决定。</p>
+    <pre class="log" id="log">就绪。</pre>
   </section>
-  <section aria-labelledby="sn-h">
-    <h2 id="sn-h">自述（她写的，只记录不解释；心来读）</h2>
-    <pre id="self">载入中…</pre>
+
+  <footer class="build" id="build" aria-label="核自报版本">核版本取不到</footer>
+
+  <section class="card" aria-labelledby="sn-h">
+    <div class="card-head">
+      <h2 id="sn-h">自述</h2>
+      <span class="owner auto">由程序写：她写的，只记录不解释；心来读</span>
+    </div>
+    <pre class="pre" id="self">载入中…</pre>
   </section>
-  <p class="muted">待定未接：热记忆的形状、遗忘的力度、记忆滤镜（docs/plan.md §3）；向量检索只留接口。</p>
-  <p class="back"><a href="..">← 回魂面板</a></p>
+
+  <section class="card hidden" id="loading-card" aria-live="polite">
+    <div class="skel"></div><div class="skel"></div><div class="skel short"></div>
+  </section>
+
+  <section class="card hidden" id="error-card">
+    <div class="card-title" id="error-title">没取到</div>
+    <div class="muted" id="error-text">…</div>
+    <button class="btn" id="retry-btn" type="button" style="margin-top:.6rem">重试</button>
+  </section>
 </main>
 <script>
 (function () {
   "use strict";
+  var ACTOR = "panel";      // 账本上记作 panel：接受提案的那只手，也是名片历史的签字人
+  var POLL_MS = 5000;       // 一条轮询，只拉只读端点；回想与冷仓翻页只在人点的时候拉
+  var CARD_SAVE = "保存名片（PATCH /brain/people/<id>/card）";
+  var CARD_HISTORY = "历史（GET /brain/people/<id>/card）";
+  // 名片白名单字段（服务端只收这四个中文名）：[中文名, 人名录/名片里的键, 控件]
+  // 雷点与备注是数组，页面上用换行分隔——一行一条。
+  var CARD_FIELDS = [
+    ["称呼", "display", "input"],
+    ["雷点", "prefs", "textarea"],
+    ["备注", "notes", "textarea"],
+    ["照片说明", "photo_note", "input"]
+  ];
+  // 壳把本页挂在 /qqagent/panel/brain 下（iframe 的文档路径没有结尾斜杠），核自己挂在 /brain。
+  // 请求一律按当前挂载前缀补回去：绝对路径 "/brain/overview" 在 iframe 里会打到壳的根，那是 404。
+  var MOUNT = location.pathname.replace(/\/+$/, "");
+  var BASE = MOUNT.slice(-6) === "/brain" ? MOUNT.slice(0, -6) : "";
+  var STATE = {
+    loaded: false,
+    overview: null, today: null, people: null, proposals: null, self: null,
+    // 四档：一次 GET /brain/tiers 带四档的 count + recent
+    tiers: { status: 0, data: null, message: "" },
+    // 冷仓：GET /brain/cold 分页，把「已读」累起来；next 非 null 才有「下一页」
+    cold: { status: 0, requested: false, loading: false, message: "", items: [], next: null },
+    cards: {},   // 名片：每个人的历史与照片说明（轮询重渲染时不许冲掉正在敲的字）
+    recall: { q: "", items: [], source: null, status: 0, message: "" }
+  };
+  var lastPeopleJson = null;   // 人名录没变就不重建 DOM：重建会把名片里正在敲的字冲掉
+  var rejected = {};        // 拒绝只记在这一页：不发请求、不落盘
+  var timer = null;
+
   function el(id) { return document.getElementById(id); }
-  function text(id, value) {
-    el(id).textContent = (value === null || value === undefined || value === "")
-      ? "（空）" : (typeof value === "string" ? value : JSON.stringify(value, null, 2));
+
+  function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
   }
-  function get(path) {
-    return fetch(path).then(function (res) {
-      return res.json().then(function (data) { return data; },
-        function () { return { ok: false, message: "响应不是 JSON" }; });
+
+  function say(text, cls) {
+    var line = node("div", cls, text);
+    el("log").appendChild(line);
+  }
+
+  function call(method, path, body) {
+    var init = { method: method, headers: {} };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    // 取数与写都只从这一条出去：BASE 是挂载前缀（直开核时是空串）。
+    return fetch(BASE + path, init).then(function (res) {
+      return res.json().then(function (data) {
+        return { status: res.status, data: data };
+      }, function () {
+        return { status: res.status, data: { ok: false, message: "响应不是 JSON" } };
+      });
     });
   }
-  Promise.all([
-    get("/brain/overview"),
-    get("/brain/today"),
-    get("/brain/people"),
-    get("/brain/proposals"),
-    get("/brain/selfnarration")
-  ]).then(function (out) {
-    text("overview", out[0]);
-    text("today", out[1].entries ? out[1].entries : out[1]);
-    text("people", out[2].people ? out[2].people : out[2]);
-    text("proposals", out[3].proposals ? out[3].proposals : out[3]);
-    text("self", out[4].latest ? out[4].latest : out[4]);
-  }).catch(function (err) {
-    text("overview", "连不上后端：" + err);
+
+  function setState(state) { el("page").setAttribute("data-state", state); }
+
+  function shortTime(value) {
+    if (!value) { return "时间未知"; }
+    return String(value).replace("T", " ").slice(0, 16);
+  }
+
+  // 关于他：只显示日子（2026-11-04 这种可读格式），取每条记忆 ts 的前 10 位。
+  function dayText(value) {
+    var text = String(value || "");
+    return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : "日期没带上";
+  }
+
+  // —— 现状 ————————————————————————————————————
+  function renderOverview() {
+    var box = el("overview-nums");
+    clear(box);
+    var data = STATE.overview;
+    if (!data) { box.appendChild(node("span", "muted", "载入中…")); return; }
+    var cells = [
+      ["今日条目", STATE.today && STATE.today.entries
+        ? STATE.today.entries.length : data.today_entries],
+      ["人名录", data.people],
+      ["长期条目", data.longterm_entries],
+      ["待接受提案", data.pending_proposals],
+      ["自述版本", data.selfnarration_version]
+    ];
+    cells.forEach(function (pair) {
+      var cell = node("div", "n");
+      cell.appendChild(node("b", null, pair[1]));
+      cell.appendChild(node("span", null, pair[0]));
+      box.appendChild(cell);
+    });
+    var pending = data.pending && data.pending.length
+      ? "待定未接（docs/plan.md §3）：" + data.pending.join("、")
+      : "待定未接：无";
+    el("overview-pending").textContent = pending + "　·　readonly=" + String(data.readonly);
+  }
+
+  // —— 人名录：一人一卡 ————————————————————————————
+  function spark(interactions) {
+    var days = Object.keys(interactions || {}).sort();
+    if (!days.length) { return { text: "曲线无数据", total: 0 }; }
+    var recent = days.slice(-7);
+    var max = 1;
+    recent.forEach(function (day) {
+      max = Math.max(max, Number(interactions[day]) || 0);
+    });
+    var blocks = "▁▂▄▆█";
+    var total = 0;
+    days.forEach(function (day) { total += Number(interactions[day]) || 0; });
+    var curve = recent.map(function (day) {
+      var count = Number(interactions[day]) || 0;
+      var index = count <= 0 ? 0 : Math.min(4, Math.round((count / max) * 4));
+      return blocks.charAt(index);
+    }).join("");
+    return { text: curve, total: total, last: recent[recent.length - 1] };
+  }
+
+  // —— 名片：四栏人写，熟稔只读 ——————————————————————
+  // 人名可能是中文：路径段一律 encodeURIComponent，服务端 unquote 还原。
+  function cardPath(personId) {
+    return "/brain/people/" + encodeURIComponent(personId) + "/card";
+  }
+
+  function cardState(person) {
+    var id = person.id || "";
+    if (!STATE.cards[id]) { STATE.cards[id] = { history: null, photo_note: "", error: "" }; }
+    return STATE.cards[id];
+  }
+
+  function historyId(person) { return "card-history-" + (person.id || ""); }
+
+  // 输入框里的值：雷点 / 备注是数组，页面上换行分隔、一行一条。
+  function inputValue(inputs, spec) {
+    var raw = String(inputs[spec[1]].value);
+    if (spec[1] === "prefs" || spec[1] === "notes") {
+      return raw.split("\n").map(function (line) { return line.trim(); })
+        .filter(function (line) { return line !== ""; });
+    }
+    return raw.trim();
+  }
+
+  // 当前的真源值（人名录里的 display/prefs/notes；照片说明要 GET 名片才知道）
+  function cardValue(person, spec) {
+    if (spec[1] === "prefs" || spec[1] === "notes") { return (person[spec[1]] || []).map(String); }
+    if (spec[1] === "photo_note") { return String(cardState(person).photo_note || ""); }
+    return String(person.display || "");
+  }
+
+  function cardText(person, spec) {
+    var value = cardValue(person, spec);
+    return value instanceof Array ? value.join("\n") : String(value);
+  }
+
+  function renderHistoryInto(person, box) {
+    clear(box);
+    var state = cardState(person);
+    if (state.error) { box.appendChild(node("li", "empty", state.error)); return; }
+    if (state.history === null) {
+      box.appendChild(node("li", "empty", "还没读历史：点「" + CARD_HISTORY + "」拉一次"));
+      return;
+    }
+    if (!state.history.length) {
+      box.appendChild(node("li", "empty", "空（这个名字还没有改动记录）"));
+      return;
+    }
+    state.history.slice().reverse().forEach(function (line) {
+      var li = node("li");
+      li.appendChild(node("span", "date", shortTime(line.ts)));
+      li.appendChild(node("span", null, "　" + (line.field || "？") + "："
+        + (line.old_summary || "（空）") + " → " + (line.new_summary || "（空）")));
+      li.appendChild(node("span", "row-meta", "记作 " + (line.actor || "？")));
+      box.appendChild(li);
+    });
+  }
+
+  function renderHistory(person) {
+    var box = el(historyId(person));
+    if (box) { renderHistoryInto(person, box); }
+  }
+
+  function saveCard(person, inputs, button) {
+    var fields = {};
+    CARD_FIELDS.forEach(function (spec) {
+      var now = inputValue(inputs, spec);
+      if (JSON.stringify(now) !== JSON.stringify(cardValue(person, spec))) { fields[spec[0]] = now; }
+    });
+    if (!Object.keys(fields).length) {
+      say("名片没改：四栏与当前值一样，没发请求", "err");
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "提交中…";
+    call("PATCH", cardPath(person.id), { actor: ACTOR, fields: fields }).then(function (res) {
+      button.disabled = false;
+      button.textContent = CARD_SAVE;
+      if (res.status === 200 && res.data && res.data.ok !== false) {
+        var state = cardState(person);
+        var lines = res.data.history_lines || [];
+        state.error = "";
+        state.history = (state.history || []).concat(lines);
+        if (res.data.card) { state.photo_note = String(res.data.card.photo_note || ""); }
+        say("名片写进 " + lines.length + " 栏：" + lines.map(function (line) {
+          return line.field + " " + (line.old_summary || "（空）") + " → "
+            + (line.new_summary || "（空）");
+        }).join("；"), "ok");
+        renderHistory(person);
+        return refresh();
+      }
+      say("名片写入被拒（" + res.status + "）："
+        + ((res.data && res.data.message) || "未知原因"), "err");
+      renderHistory(person);
+    }).catch(function (err) {
+      button.disabled = false;
+      button.textContent = CARD_SAVE;
+      say("名片写入失败：" + err, "err");
+    });
+  }
+
+  // 历史：GET 名片的同一条路由；顺手把四栏回填成服务端当前值（只覆盖没被改过的框）。
+  function loadCard(person, inputs) {
+    var state = cardState(person);
+    call("GET", cardPath(person.id)).then(function (res) {
+      if (res.status !== 200) {
+        state.error = "读失败（HTTP " + res.status + "）："
+          + ((res.data && res.data.message) || "服务端没给原因");
+        renderHistory(person);
+        return;
+      }
+      var card = res.data || {};
+      state.error = "";
+      state.history = card.history || [];
+      CARD_FIELDS.forEach(function (spec) {
+        var key = spec[1];
+        var server = (key === "prefs" || key === "notes")
+          ? (card[key] || []).map(String).join("\n")
+          : String(card[key] === undefined || card[key] === null ? "" : card[key]);
+        if (inputs[key].value === cardText(person, spec)) { inputs[key].value = server; }
+      });
+      state.photo_note = String(card.photo_note || "");
+      say("已读名片 " + (person.id || "") + "：历史 " + state.history.length + " 条", "ok");
+      renderHistory(person);
+    }).catch(function (err) {
+      state.error = "连不上后端：" + err;
+      renderHistory(person);
+    });
+  }
+
+  function cardBlock(person) {
+    var block = node("div", "block");
+    var head = node("div", "block-head");
+    head.appendChild(node("div", "block-title", "名片"));
+    head.appendChild(node("span", "owner",
+      "人写四栏（称呼 / 雷点 / 备注 / 照片说明）：PATCH /brain/people/<id>/card，body 带 actor"));
+    block.appendChild(head);
+    block.appendChild(node("p", "ro-line", "别名（只读）："
+      + ((person.aliases || []).length ? person.aliases.join("、") : "（还没记别名）")));
+
+    var fields = node("div", "fields");
+    var inputs = {};
+    CARD_FIELDS.forEach(function (spec) {
+      var cid = "card-" + (person.id || "x") + "-" + spec[1];
+      var label = node("label", null, spec[0]);
+      label.setAttribute("for", cid);
+      var input = node(spec[2]);
+      input.id = cid;
+      input.value = cardText(person, spec);
+      if (spec[1] === "prefs" || spec[1] === "notes") { input.placeholder = "一行一条，换行分隔"; }
+      if (spec[1] === "photo_note") { input.placeholder = "照片说明（可空）"; }
+      fields.appendChild(label);
+      fields.appendChild(input);
+      inputs[spec[1]] = input;
+    });
+    block.appendChild(fields);
+    block.appendChild(node("p", "ro-line",
+      "熟稔由程序写：记忆写入路径更新，人改不了。四栏之外没有可写的东西，熟稔也没有输入框。"));
+
+    var actions = node("div", "card-actions");
+    var save = node("button", "btn", CARD_SAVE);
+    save.type = "button";
+    save.addEventListener("click", function () { saveCard(person, inputs, save); });
+    var hist = node("button", "btn minor", CARD_HISTORY);
+    hist.type = "button";
+    hist.addEventListener("click", function () { loadCard(person, inputs); });
+    actions.appendChild(save);
+    actions.appendChild(hist);
+    block.appendChild(actions);
+
+    var history = node("ul", "history");
+    history.id = historyId(person);
+    block.appendChild(history);
+    renderHistoryInto(person, history);
+    return block;
+  }
+
+  function factsBlock(person) {
+    var block = node("div", "block");
+    var head = node("div", "block-head");
+    head.appendChild(node("div", "block-title", "关于他"));
+    head.appendChild(node("span", "owner auto", "由程序写：这些是记忆里的事实，人不在这里改"));
+    block.appendChild(head);
+    var list = node("ul", "facts");
+    // 人名录已经把 memories 带回来了（每条有 ts）：按时间从新到旧取 5 条，日期就是 ts 的日子。
+    var memories = (person.memories || []).slice().sort(function (a, b) {
+      return String(b.ts || "").localeCompare(String(a.ts || ""));
+    }).slice(0, 5);
+    if (!memories.length) {
+      list.appendChild(node("li", "muted", "空（脑里还没有关于他的记忆）"));
+    } else {
+      memories.forEach(function (memory) {
+        var li = node("li");
+        li.appendChild(node("span", null, memory.text || "（正文为空）"));
+        li.appendChild(node("span", "date", dayText(memory.ts)));
+        list.appendChild(li);
+      });
+    }
+    block.appendChild(list);
+    block.appendChild(node("p", "muted",
+      "日期取每条记忆的 ts（前 10 位）；最多列 5 条，从新到旧。"));
+    return block;
+  }
+
+  function recentBlock(person) {
+    var block = node("div", "block");
+    var head = node("div", "block-head");
+    head.appendChild(node("div", "block-title", "近期"));
+    head.appendChild(node("span", "owner auto", "由程序写：由记忆写入路径更新"));
+    block.appendChild(head);
+    var info = spark(person.interactions);
+    var today = new Date();
+    var key = today.getFullYear() + "-"
+      + String(today.getMonth() + 1).padStart(2, "0") + "-"
+      + String(today.getDate()).padStart(2, "0");
+    var todayCount = (person.interactions || {})[key] || 0;
+    var line = node("div", "recent");
+    line.appendChild(node("span", null, "今天说了 "));
+    line.appendChild(node("b", null, todayCount + " 次"));
+    line.appendChild(node("span", null, " · 最近一次互动 " + shortTime(person.last_interaction)
+      + " · 一共 " + info.total + " 次"));
+    block.appendChild(line);
+    return block;
+  }
+
+  function personCard(person) {
+    var card = node("article", "person");
+    var hd = node("div", "hd");
+    var left = node("div");
+    var name = node("div", "name", person.display || person.id || "（没名字）");
+    name.appendChild(node("span", "qq", person.id || ""));
+    left.appendChild(name);
+    left.appendChild(node("div", "meta", "认识 " + shortTime(person.first_seen)
+      + " · 最近互动 " + shortTime(person.last_interaction)
+      + " · 一起聊过 " + spark(person.interactions).total + " 次"));
+    hd.appendChild(left);
+
+    var aff = node("div", "aff");
+    aff.appendChild(node("div", "aff-num", "熟稔 " + Math.round(Number(person.familiarity) || 0)));
+    var info = spark(person.interactions);
+    aff.appendChild(node("div", "aff-spark", info.text));
+    aff.appendChild(node("div", "owner auto",
+      "由程序写：熟稔由记忆写入路径更新，人改会变成第二份真源"));
+    hd.appendChild(aff);
+    card.appendChild(hd);
+
+    card.appendChild(cardBlock(person));
+    card.appendChild(factsBlock(person));
+    card.appendChild(recentBlock(person));
+    return card;
+  }
+
+  function renderPeople() {
+    var box = el("people-list");
+    if (!STATE.people) {
+      clear(box);
+      box.appendChild(node("p", "muted", "载入中…"));
+      return;
+    }
+    var people = STATE.people.people || [];
+    var raw = JSON.stringify(people);
+    // 名字与记忆没变就不重建：重建会把名片里正在敲的四栏冲掉。
+    if (raw === lastPeopleJson && box.querySelector(".person")) { return; }
+    lastPeopleJson = raw;
+    clear(box);
+    if (!people.length) {
+      box.appendChild(node("p", "muted", "空（脑里还没有人：她还没跟谁说过话）"));
+      return;
+    }
+    people.forEach(function (person) { box.appendChild(personCard(person)); });
+  }
+
+  // —— 记忆四档：GET /brain/tiers（四档 count + recent）+ GET /brain/cold（分页）——
+  // clarity 是服务端的短码；认识的翻成中文，不认识的原样显示（不猜）。
+  var CLARITY = { clear: "清晰" };
+
+  // 遗忘进度只用条目自带的 retention（0–1，一律按百分比）与 clarity；
+  // 缺这两个值就整栏不显示——不编数，也不写占位词。
+  function forgetText(entry) {
+    var value = entry.retention;
+    var num = Number(value);
+    if (value === undefined || value === null || value === "" || isNaN(num)) { return ""; }
+    var clarity = entry.clarity ? (CLARITY[entry.clarity] || String(entry.clarity)) : "";
+    // 0–1 是契约，按百分比显示；越界的读数原样给（实测冷仓那条能给到负数），不硬折成 %。
+    var kept = num >= 0 && num <= 1
+      ? Math.round(num * 100) + "%"
+      : String(Math.round(num * 1000) / 1000);
+    return "遗忘进度：保留 " + kept + (clarity ? " · " + clarity : "");
+  }
+
+  function memoryRow(entry, extra) {
+    var li = node("li");
+    var sourceType = entry.source_type || "亲历";
+    var badge = node("span", "badge " + (sourceType === "日程模拟" ? "sim" : "lived"), sourceType);
+    li.appendChild(badge);
+    li.appendChild(node("span", null, entry.text || "（正文为空）"));
+    li.appendChild(node("span", "row-meta", "谁 " + (entry.who || "未知")
+      + " · " + shortTime(entry.ts)
+      + (entry.count > 1 ? " · 合并 " + entry.count + " 次" : "")
+      + (extra ? " · " + extra : "")));
+    var forget = forgetText(entry);
+    if (forget) { li.appendChild(node("span", "row-meta forget", forget)); }
+    return li;
+  }
+
+  // 空与出错是两件事：空数组写「空」，读失败写 HTTP 状态与原因，不折叠成一句话。
+  function fillTier(listId, countId, status, message, items, count, emptyText, extraOf) {
+    var list = el(listId);
+    clear(list);
+    var countNode = el(countId);
+    if (status === 0) {
+      countNode.textContent = "";
+      list.appendChild(node("li", "empty", "载入中…"));
+      return;
+    }
+    if (status !== 200) {
+      countNode.textContent = " 读失败";
+      list.appendChild(node("li", "empty",
+        "读失败（HTTP " + status + "）：" + (message || "服务端没给原因")));
+      return;
+    }
+    countNode.textContent = " " + count + " 条"
+      + (items.length && items.length !== count ? " · 近 " + items.length + " 条" : "");
+    if (!items.length) {
+      list.appendChild(node("li", "empty", emptyText));
+      return;
+    }
+    items.forEach(function (entry) {
+      list.appendChild(memoryRow(entry, extraOf ? extraOf(entry) : ""));
+    });
+  }
+
+  function renderCold(tierStatus, coldTier) {
+    var list = el("tier-cold");
+    clear(list);
+    var countNode = el("tier-cold-count");
+    var cold = STATE.cold;
+    if (cold.status === 0) {
+      countNode.textContent = "";
+      list.appendChild(node("li", "empty", "载入中…"));
+    } else if (cold.status !== 200) {
+      countNode.textContent = " 读失败";
+      list.appendChild(node("li", "empty",
+        "读失败（HTTP " + cold.status + "）：" + (cold.message || "服务端没给原因")));
+    } else {
+      var total = tierStatus === 200 ? (coldTier.count || 0) : null;
+      countNode.textContent = " " + (total === null ? cold.items.length : total) + " 条"
+        + " · 已读 " + cold.items.length;
+      if (!cold.items.length) {
+        list.appendChild(node("li", "empty", "空（冷仓 0 条）"));
+      } else {
+        cold.items.forEach(function (entry) { list.appendChild(memoryRow(entry)); });
+      }
+    }
+    renderColdMore();
+  }
+
+  // 「下一页」只在服务端给了 next_cursor 时出现；null 就是没有下一页，按钮不存在。
+  function renderColdMore() {
+    var box = el("tier-cold-more");
+    clear(box);
+    if (STATE.cold.status !== 200 || !STATE.cold.next) { return; }
+    var more = node("button", "btn minor",
+      STATE.cold.loading ? "载入中…" : "下一页（GET /brain/cold?cursor=…）");
+    more.type = "button";
+    more.disabled = !!STATE.cold.loading;
+    more.addEventListener("click", function () { loadCold(STATE.cold.next); });
+    box.appendChild(more);
+  }
+
+  // 冷仓分页：首页与翻页都走这一条；cursor 为空串就是第一页。
+  function loadCold(cursor) {
+    STATE.cold.loading = true;
+    renderColdMore();
+    var request = cursor
+      ? call("GET", "/brain/cold?cursor=" + encodeURIComponent(cursor))
+      : call("GET", "/brain/cold");
+    return request.then(function (res) {
+      STATE.cold.loading = false;
+      STATE.cold.requested = true;
+      STATE.cold.status = res.status;
+      STATE.cold.message = (res.data && res.data.message) || "";
+      if (res.status === 200) {
+        var items = (res.data && res.data.items) || [];
+        STATE.cold.items = cursor ? STATE.cold.items.concat(items) : items;
+        var next = res.data ? res.data.next_cursor : null;
+        STATE.cold.next = next === undefined ? null : next;
+      } else if (!cursor) {
+        STATE.cold.items = [];
+        STATE.cold.next = null;
+      }
+      renderTiers();
+    }).catch(function (err) {
+      STATE.cold.loading = false;
+      STATE.cold.requested = true;
+      STATE.cold.status = 0;
+      STATE.cold.message = "连不上后端：" + err;
+      STATE.cold.items = [];
+      STATE.cold.next = null;
+      renderTiers();
+    });
+  }
+
+  function renderTiers() {
+    var status = STATE.tiers.status;
+    var data = STATE.tiers.data || {};
+    var today = data.today || {};
+    var hot = data.hot || {};
+    var long = data.longterm || {};
+    var cold = data.cold || {};
+    fillTier("tier-today", "tier-today-count", status, STATE.tiers.message,
+      today.recent || [], today.count || 0, "空（今日档今天没有条目）");
+    fillTier("tier-hot", "tier-hot-count", status, STATE.tiers.message,
+      hot.recent || [], hot.count || 0, "空（热档没有条目）");
+    fillTier("tier-longterm", "tier-long-count", status, STATE.tiers.message,
+      long.recent || [], long.count || 0, "空（长期档没有生效条目）");
+    renderCold(status, cold);
+  }
+
+  // —— 提案 ————————————————————————————————————
+  function proposalRow(proposal) {
+    var row = node("div", "proposal");
+    row.setAttribute("data-proposal-id", proposal.id || "");
+    var head = node("div", "head");
+    head.appendChild(node("div", "block-title", "提案 " + (proposal.id || "（无 id）")));
+    head.appendChild(node("span", "owner", "target " + (proposal.target || "？")));
+    row.appendChild(head);
+
+    var want = node("div", "want");
+    want.appendChild(node("span", null, "她想把 "));
+    want.appendChild(node("code", null, proposal.target || "？"));
+    want.appendChild(node("span", null, " 改成："));
+    want.appendChild(node("b", null, proposal.value || "（缺 value）"));
+    row.appendChild(want);
+
+    var evidence = (proposal.evidence || []).join("、");
+    row.appendChild(node("div", "evidence", "依据 " + (proposal.evidence || []).length
+      + " 条记忆：" + (evidence || "（没有依据 → 服务端会拒）") + "　·　" + (proposal.reason || "")));
+
+    var actions = node("div", "actions");
+    var accept = node("button", "btn", "接受（POST /soul/proposal）");
+    accept.type = "button";
+    accept.addEventListener("click", function () { acceptProposal(proposal, accept); });
+    var reject = node("button", "btn minor", "拒绝（不发请求）");
+    reject.type = "button";
+    reject.addEventListener("click", function () { rejectProposal(proposal, row); });
+    actions.appendChild(accept);
+    actions.appendChild(reject);
+    row.appendChild(actions);
+    return row;
+  }
+
+  function renderProposals() {
+    var box = el("proposal-list");
+    clear(box);
+    if (!STATE.proposals) { box.appendChild(node("p", "muted", "载入中…")); return; }
+    var batch = STATE.proposals;
+    el("proposal-night").textContent = batch.night_of
+      ? "夜结算日 " + batch.night_of + " · " + (batch.proposals || []).length + " 条提案"
+      : "还没有夜结算（night_of 为空）：今晚跑过之后才有提案";
+    var proposals = batch.proposals || [];
+    if (!proposals.length) {
+      box.appendChild(node("p", "muted",
+        "这一晚没有提案（每晚 0–2 条）：空就是 0 条，不是出错。"));
+      return;
+    }
+    proposals.forEach(function (proposal) {
+      var row = proposalRow(proposal);
+      if (rejected[proposal.id]) {
+        row.className = "proposal rejected";
+        row.appendChild(node("p", "muted", "已拒绝（只记在这一页，没有发请求、没有落盘）"));
+      }
+      box.appendChild(row);
+    });
+  }
+
+  function renderSelf() {
+    var data = STATE.self;
+    if (!data) { el("self").textContent = "载入中…"; return; }
+    var latest = data.latest;
+    if (!latest) {
+      el("self").textContent = "她还没写过自述（空就是空，不是出错）。";
+      return;
+    }
+    var versions = data.versions || [];
+    el("self").textContent = "版本 " + latest.version + " · " + shortTime(latest.ts)
+      + " · 共 " + versions.length + " 版\n" + (latest.text || "")
+      + (latest.note ? "\n（note：" + latest.note + "）" : "");
+  }
+
+  function render() {
+    renderOverview();
+    renderPeople();
+    renderTiers();
+    renderProposals();
+    renderSelf();
+  }
+
+  // —— 三态：加载 / 空 / 错误（503 核没起、400 参数不对、200 空数组都分开写）—————
+  function showError(title, text) {
+    el("error-title").textContent = title;
+    el("error-text").textContent = text;
+    el("loading-card").classList.add("hidden");
+    el("error-card").classList.remove("hidden");
+    setState("error");
+  }
+
+  function hideError() {
+    el("error-card").classList.add("hidden");
+    setState("ready");
+  }
+
+  function refresh() {
+    if (!STATE.loaded) {
+      el("loading-card").classList.remove("hidden");
+      setState("loading");
+    }
+    var jobs = [
+      call("GET", "/brain/overview"),
+      call("GET", "/brain/today"),
+      call("GET", "/brain/people"),
+      call("GET", "/brain/proposals"),
+      call("GET", "/brain/selfnarration"),
+      call("GET", "/brain/tiers")
+    ];
+    // 冷仓只在还没拉到、或上次失败时重拉首页：翻页已经把页累起来了，轮询不许冲掉。
+    if (!STATE.cold.requested || STATE.cold.status !== 200) { jobs.push(loadCold(null)); }
+    return Promise.all(jobs).then(function (out) {
+      var first = out[0];
+      if (first.status === 200) {
+        STATE.overview = first.data;
+      } else if (first.status === 503) {
+        showError("核里的脑没载入（503）",
+          (first.data && first.data.message) || "脑未载入：先起脑的数据目录（devserver --brain-root）");
+      } else {
+        // 404 不折叠成「载入中」：多半是这一段路径没被转发（宿主壳只转 /soul）。
+        showError("没取到 /brain/overview（" + first.status + "）",
+          (first.data && first.data.message)
+            || "这条路径没被转发：核对宿主壳的路由前缀（壳只转 /soul 时脑页拿不到数）");
+      }
+      STATE.today = out[1].status === 200 ? out[1].data : STATE.today;
+      STATE.people = out[2].status === 200 ? out[2].data : STATE.people;
+      STATE.proposals = out[3].status === 200 ? out[3].data : STATE.proposals;
+      STATE.self = out[4].status === 200 ? out[4].data : STATE.self;
+      // 四档一次拉齐：status 0 才是「载入中」，非 200 一律按出错报，不写成空。
+      STATE.tiers.status = out[5].status;
+      STATE.tiers.data = out[5].status === 200 ? out[5].data : null;
+      STATE.tiers.message = (out[5].data && out[5].data.message) || "";
+      STATE.loaded = true;
+      el("loading-card").classList.add("hidden");
+      if (first.status === 200) { hideError(); }
+      render();
+    }).catch(function (err) {
+      showError("核没在跑", "连不上后端（" + err + "）。先启动它：python3 -m api.devserver --port 8787");
+    });
+  }
+
+  function startPoll() {
+    if (timer) { return; }
+    timer = setInterval(function () {
+      if (document.visibilityState === "visible") { refresh(); }
+    }, POLL_MS);
+  }
+
+  // —— 回想：唯一的读入口，人点了才拉 ——————————————
+  function recall() {
+    var q = el("recall-q").value.trim();
+    el("recall-state").textContent = "回想中…";
+    // q 为空也照样问服务端：400 的文案由脑给，不在前端编。
+    return call("GET", "/brain/recall?q=" + encodeURIComponent(q)).then(function (res) {
+      STATE.recall.q = q;
+      STATE.recall.status = res.status;
+      if (res.status === 200) {
+        STATE.recall.source = q;
+        STATE.recall.items = res.data.items || [];
+        STATE.recall.message = "";
+        el("recall-state").textContent = "「" + (q || "（空）") + "」命中 "
+          + STATE.recall.items.length + " 条"
+          + (res.data.has_material === false ? "（没材料）" : "");
+      } else if (res.status === 400) {
+        // 参数不对不是「命中 0 条」：四档回落到「还没回想」的说法，400 的文案只写在回想那一行。
+        STATE.recall.source = null;
+        STATE.recall.items = [];
+        STATE.recall.message = (res.data && res.data.message) || "";
+        el("recall-state").textContent = "400 参数不对：" + STATE.recall.message;
+      } else if (res.status === 503) {
+        STATE.recall.source = null;
+        STATE.recall.items = [];
+        STATE.recall.message = (res.data && res.data.message) || "";
+        el("recall-state").textContent = "503 核没起：" + STATE.recall.message;
+      } else {
+        STATE.recall.source = q;
+        STATE.recall.items = [];
+        el("recall-state").textContent = "读失败（" + res.status + "）："
+          + ((res.data && res.data.message) || "未知原因");
+      }
+      renderTiers();
+    }).catch(function (err) {
+      el("recall-state").textContent = "连不上后端：" + err;
+    });
+  }
+
+  // —— 写：只有这一条（写魂，不写脑）————————————————
+  function acceptProposal(proposal, button) {
+    button.disabled = true;
+    button.textContent = "提交中…";
+    call("POST", "/soul/proposal", { actor: ACTOR, proposal: proposal }).then(function (res) {
+      button.disabled = false;
+      button.textContent = "接受（POST /soul/proposal）";
+      if (res.status === 200 && res.data.ok !== false) {
+        var line = res.data.history_line ? JSON.stringify(res.data.history_line) : "已写入魂";
+        say("接受提案 " + (proposal.id || "") + " 成功：" + line, "ok");
+        return refresh();
+      }
+      var issues = (res.data.issues || []).map(function (issue) {
+        return issue.code + " " + issue.message;
+      }).join("；");
+      say("接受提案 " + (proposal.id || "") + " 被拒（" + res.status + "）："
+        + (res.data.message || "未知原因") + (issues ? "　拒因：" + issues : ""), "err");
+    }).catch(function (err) {
+      button.disabled = false;
+      button.textContent = "接受（POST /soul/proposal）";
+      say("接受提案失败：" + err, "err");
+    });
+  }
+
+  function rejectProposal(proposal, row) {
+    rejected[proposal.id] = true;
+    row.className = "proposal rejected";
+    if (!row.querySelector(".rejected-note")) {
+      var note = node("p", "muted rejected-note", "已拒绝（只记在这一页，没有发请求、没有落盘）");
+      row.appendChild(note);
+    }
+    say("拒绝提案 " + (proposal.id || "") + "：只在这一页记一条，不发请求、不留痕", "err");
+  }
+
+  el("recall-btn").addEventListener("click", function () { recall(); });
+  el("retry-btn").addEventListener("click", function () { refresh(); });
+  el("recall-q").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") { event.preventDefault(); recall(); }
   });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") { refresh(); }
+  });
+
+  // 页脚那一行：核自己报「跑的是哪一版」。源码在它脚下被改过时红字提醒——重启即变。
+  function showBuild() {
+    call("GET", "/healthz").then(function (res) {
+      var node = el("build");
+      if (res.status !== 200 || !res.data || res.data.ok !== true) {
+        node.textContent = "核版本取不到（HTTP " + res.status + "）：面板照常可用，但看不出跑的是旧是新。";
+        node.className = "build bad";
+        return;
+      }
+      var d = res.data;
+      var line = "核 " + d.git_head + " · 启动 " + d.started_at + " · 源码 " + d.source_digest
+        + "（进程 " + d.pid + "）";
+      if (d.stale) {
+        node.textContent = "⚠ 进程旧了：" + line + " —— 磁盘上现在是 " + d.source_digest_now
+          + "，" + d.advice;
+        node.className = "build bad";
+      } else {
+        node.textContent = line + " —— " + d.advice;
+        node.className = "build";
+      }
+    }).catch(function (err) {
+      var node = el("build");
+      node.textContent = "核版本取不到：" + err;
+      node.className = "build bad";
+    });
+  }
+
+  refresh().then(startPoll);
+  showBuild();
 })();
 </script>
 </body>
