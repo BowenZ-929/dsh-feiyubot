@@ -86,6 +86,7 @@ def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
 
 def recall(query: str, today_entries: Sequence[Dict[str, Any]],
            longterm_entries: Sequence[Dict[str, Any]],
+           hot_entries: Optional[Sequence[Dict[str, Any]]] = None,
            who: Optional[str] = None) -> Dict[str, Any]:
     """回想：时间词路由 → 字面打分 → 装包（分桶配额 + 预算 + 每项 cap）。"""
     q = (query or "").strip()
@@ -99,6 +100,8 @@ def recall(query: str, today_entries: Sequence[Dict[str, Any]],
         candidates.extend(_candidate(entry, "today") for entry in today_entries)
     if route in ("longterm", "both"):
         candidates.extend(_candidate(entry, "longterm") for entry in longterm_entries)
+    if route in ("hot", "both"):
+        candidates.extend(_candidate(entry, "hot") for entry in (hot_entries or []))
 
     scored: List[Dict[str, Any]] = []
     for entry in candidates:

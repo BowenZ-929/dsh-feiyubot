@@ -18,12 +18,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import edges as edges_mod
 from . import people as people_mod
 from . import proposals as proposals_mod
 from . import recall as recall_mod
+from . import retention as retention_mod
 from .model import (ALPHA_DEFAULT, BETA_DEFAULT, SOURCE_LIVED,
-                    SOURCE_SCHEDULED, STATUS_ACTIVE, STATUS_STALE,
-                    day_key, limits, now_iso)
+                    SOURCE_SCHEDULED, STATUS_ACTIVE, STATUS_ARCHIVED,
+                    STATUS_STALE, day_key, limits, now_iso)
 
 TODAY_FILE = "today.json"
 LONGTERM_FILE = "longterm.jsonl"
@@ -31,6 +33,26 @@ PEOPLE_FILE = "people.json"
 SELF_FILE = "selfnarration.jsonl"
 PROPOSALS_FILE = "proposals.json"
 PROPOSAL_LOG_FILE = "proposal_log.jsonl"
+TIERS_FILE = "tiers.json"
+RETENTION_FILE = "retention.json"
+TOPICS_FILE = "topics.json"
+HOT_FILE = "hot.json"
+EDGES_FILE = "edges.json"
+EVICTIONS_FILE = "evictions.jsonl"
+TOPIC_CANDIDATES_FILE = "topic_candidates.json"
+PEOPLE_CARD_HISTORY = "people_card_history.jsonl"
+CARD_FIELDS = {"称呼": "display", "雷点": "prefs", "备注": "notes", "照片说明": "photo_note"}
+
+TIERS_DEFAULT = {"today_max": 60, "today_demote_count": 20, "hot_max": 20, "hot_lines_max": 3}
+RETENTION_DEFAULT = {
+    "decay_rate_normal": 0.35, "decay_rate_owner": 0.12,
+    "owner_ids": ["主人", "1000001"], "recall_cap": 12,
+    "recency_bonus_recent_days": 7, "recency_bonus_recent": 18,
+    "recency_bonus_mentioned_days": 2, "recency_bonus_mentioned": 8,
+    "threshold": 0.08, "idle_days": 30,
+    "clarity_vivid_above": 1.0, "clarity_clear_above": 0.5,
+    "clarity_fuzzy_above": 0.2, "fuzzy_chars": 42, "title_chars": 12,
+}
 
 
 def _read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -82,6 +104,49 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+class BrainReadError(Exception):
+    """脑数据读不到/读坏：端点要如实报错，不许折叠成 0 条。"""
+
+
+def _read_json_strict(path: Path) -> Dict[str, Any]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise BrainReadError("读不到 %s：%s" % (path.name, exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise BrainReadError("%s 不是合法 JSON：%s" % (path.name, exc)) from exc
+    if not isinstance(data, dict):
+        raise BrainReadError("%s 必须是 JSON 对象" % path.name)
+    return data
+
+
+def _read_jsonl_strict(path: Path) -> List[Dict[str, Any]]:
+    path = Path(path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise BrainReadError("读不到 %s：%s" % (path.name, exc)) from exc
+    rows: List[Dict[str, Any]] = []
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise BrainReadError("%s 第 %d 行不是合法 JSON：%s"
+                                 % (path.name, number, exc)) from exc
+        if not isinstance(row, dict):
+            raise BrainReadError("%s 第 %d 行不是对象" % (path.name, number))
+        rows.append(row)
+    return rows
+
+
+def _short(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    text = " ".join(text.split())
+    return text[:40] + "…" if len(text) > 40 else text
+
+
 def _new_id(prefix: str, taken: set) -> str:
     while True:
         candidate = prefix + uuid.uuid4().hex[:12]
@@ -116,6 +181,8 @@ def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
     if "evidence_key" not in row:
         # 亲历的原话出处就是这一行自己；日程模拟没有真实出处，留空 → 无记录背书
         row["evidence_key"] = row["id"] if row.get("source_type") == SOURCE_LIVED else ""
+    row.setdefault("recall_count", 0)
+    row.setdefault("last_recalled_at", "")
     return row
 
 
@@ -131,14 +198,28 @@ class BrainStore:
         return self._root
 
     def _init_files(self) -> None:
-        for name in (TODAY_FILE, PEOPLE_FILE, PROPOSALS_FILE):
+        defaults: Dict[str, Dict[str, Any]] = {
+            TODAY_FILE: {"day": "", "entries": [], "last_closed_day": ""},
+            PEOPLE_FILE: {"people": {}},
+            PROPOSALS_FILE: {"night_of": "", "proposals": []},
+            TIERS_FILE: dict(TIERS_DEFAULT),
+            RETENTION_FILE: dict(RETENTION_DEFAULT),
+            TOPICS_FILE: {"医院": ["住院", "医院", "病"]},
+            HOT_FILE: {"rows": []},
+            EDGES_FILE: {"nodes": {}, "edges": []},
+        }
+        for name, default in defaults.items():
             path = self._root / name
-            if path.is_file():
-                continue
-            default: Dict[str, Any] = {"day": "", "entries": [], "last_closed_day": ""} if name == TODAY_FILE else \
-                ({"people": {}} if name == PEOPLE_FILE else {"night_of": "", "proposals": []})
-            _atomic_write_json(path, default)
-        for name in (LONGTERM_FILE, SELF_FILE, PROPOSAL_LOG_FILE):
+            if not path.is_file():
+                _atomic_write_json(path, default)
+        path = self._root / TOPIC_CANDIDATES_FILE
+        if not path.is_file():
+            _atomic_write_json(path, {
+                "candidates": [],
+                "_note": "未接 NLP：回想到的未登录词（按整句暂存）进候选池，人在面板上收进 topics.json",
+            })
+        for name in (LONGTERM_FILE, SELF_FILE, PROPOSAL_LOG_FILE, EVICTIONS_FILE,
+                     PEOPLE_CARD_HISTORY):
             path = self._root / name
             if not path.is_file():
                 path.write_text("", encoding="utf-8")
@@ -180,16 +261,44 @@ class BrainStore:
         return self._today, archived
 
     def today_entries(self, now_ts: Optional[str] = None) -> List[Dict[str, Any]]:
-        """今日在役条目：status 进查询条件，forgotten 的不给。"""
+        """今日在役条目：status 进查询条件；读时触发条数降级（不挂时钟）。"""
         now_ts = now_ts or now_iso()
         self._ensure_today(now_ts)
+        self._demote_today(now_ts)
         return [entry for entry in (self._today.get("entries") or [])
                 if entry.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
 
     def today_view(self, now_ts: Optional[str] = None) -> Dict[str, Any]:
         now_ts = now_ts or now_iso()
         self._ensure_today(now_ts)
-        return {"day": self._today.get("day"), "entries": self.today_entries(now_ts)}
+        entries = [self._annotate_retention(dict(entry), now_ts)
+                   for entry in self.today_entries(now_ts)]
+        return {"day": self._today.get("day"), "entries": entries}
+
+    def _annotate_retention(self, entry: Dict[str, Any], now_ts: str) -> Dict[str, Any]:
+        """读时现算 retention 与 clarity，不写盘；与 _settle_retention 同一套参数。"""
+        params = self._retention_params()
+        value = retention_mod.retention(entry, params, now_ts)
+        entry["retention"] = value
+        entry["clarity"] = retention_mod.clarity(value, params)
+        return entry
+
+    def _recent_memories_for(self, who: str, now_ts: str,
+                             limit: int = 5) -> List[Dict[str, Any]]:
+        """某人的最近 3–5 条在役记忆，带 ts / retention / clarity，供人物页显示日期。"""
+        rows: List[Dict[str, Any]] = []
+        for entry in self.today_entries(now_ts):
+            if entry.get("who") == who:
+                row = dict(entry)
+                row["source"] = "today"
+                rows.append(row)
+        for entry in self.longterm_active_entries():
+            if entry.get("who") == who:
+                row = dict(entry)
+                row["source"] = "longterm"
+                rows.append(row)
+        rows.sort(key=lambda row: row.get("ts", ""), reverse=True)
+        return [self._annotate_retention(row, now_ts) for row in rows[:limit]]
 
     def _taken_ids(self) -> set:
         taken = {entry.get("id", "") for entry in (self._today.get("entries") or [])}
@@ -197,6 +306,329 @@ class BrainStore:
             if row.get("id"):
                 taken.add(row["id"])
         return taken
+
+    # —— 四档参数（读数据文件，代码里不写 magic number） ————————————————
+    def _tiers(self) -> Dict[str, Any]:
+        return _read_json(self._root / TIERS_FILE, dict(TIERS_DEFAULT))
+
+    def _retention_params(self) -> Dict[str, Any]:
+        return _read_json(self._root / RETENTION_FILE, dict(RETENTION_DEFAULT))
+
+    def _topics(self) -> Dict[str, Any]:
+        return _read_json(self._root / TOPICS_FILE, {})
+
+    # —— 热（薄索引） ————————————————————————————————
+    def _hot(self) -> Dict[str, Any]:
+        return _read_json(self._root / HOT_FILE, {"rows": []})
+
+    def _write_hot(self, data: Dict[str, Any]) -> None:
+        _atomic_write_json(self._root / HOT_FILE, data)
+
+    def hot_rows(self) -> List[Dict[str, Any]]:
+        return list(self._hot().get("rows", []))
+
+    def _record_eviction(self, reason: str, now_ts: str, **fields: Any) -> None:
+        record = {"reason": reason, "ts": now_ts}
+        record.update(fields)
+        _append_jsonl(self._root / EVICTIONS_FILE, record)
+
+    def evictions(self) -> List[Dict[str, Any]]:
+        return _read_jsonl(self._root / EVICTIONS_FILE)
+
+    def _line_for(self, who: str, count: int, text: str) -> str:
+        short = (text or "")[:12]
+        return "%s · %d条 · %s…" % (who, count, short)
+
+    def _build_hot_rows(self, entries: Sequence[Dict[str, Any]], now_ts: str) -> List[Dict[str, Any]]:
+        """把一批今日条目压成 ≤ hot_lines_max 行薄索引：只记'有什么可查'，不含全文。"""
+        tiers = self._tiers()
+        by_who: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in entries:
+            by_who.setdefault(entry.get("who", ""), []).append(entry)
+        groups = sorted(by_who.items(), key=lambda pair: len(pair[1]), reverse=True)
+        rows: List[Dict[str, Any]] = []
+        taken = {row.get("id", "") for row in self.hot_rows()}
+        for who, group in groups[: tiers.get("hot_lines_max", 3)]:
+            source_ids = [entry.get("id", "") for entry in group]
+            rows.append({
+                "id": _new_id("h-", taken),
+                "line": self._line_for(who, len(group), group[0].get("text", "")),
+                "source_ids": source_ids,
+                "created_at": now_ts,
+                "last_hit_at": None,
+                "hit_count": 0,
+            })
+            taken.add(rows[-1]["id"])
+        return rows
+
+    def _demote_today(self, now_ts: str) -> Dict[str, Any]:
+        """今日 > today_max：最旧 today_demote_count 条全文进长期档，压成 ≤N 行薄索引进热。
+        只在写入/读取时触发，不挂时钟。"""
+        tiers = self._tiers()
+        entries = self._today.get("entries") or []
+        if len(entries) <= tiers.get("today_max", 60):
+            self._evict_hot_if_needed(now_ts)
+            return {"ok": True, "demoted": 0}
+        count = min(tiers.get("today_demote_count", 20), len(entries))
+        oldest = entries[:count]
+        longterm_rows = []
+        for entry in oldest:
+            row = _normalize_row({
+                "id": entry.get("id", ""),
+                "ts": entry.get("ts", ""),
+                "day": entry.get("day", ""),
+                "who": entry.get("who", ""),
+                "text": entry.get("text", ""),
+                "count": entry.get("count", 1),
+                "source": "today",
+                "kind": "fact",
+                "status": STATUS_ACTIVE,
+                "source_type": entry.get("source_type", SOURCE_LIVED),
+                "alpha": entry.get("alpha", ALPHA_DEFAULT),
+                "beta": entry.get("beta", BETA_DEFAULT),
+                "evidence_key": entry.get("evidence_key", ""),
+                "recall_count": 0,
+                "last_recalled_at": "",
+            }, entry_id=entry.get("id", ""))
+            longterm_rows.append(row)
+        self._append_longterm(longterm_rows)
+        hot_rows = self._build_hot_rows(oldest, now_ts)
+        if hot_rows:
+            hot = self._hot()
+            hot.setdefault("rows", []).extend(hot_rows)
+            self._write_hot(hot)
+        self._record_eviction("today_over_60", now_ts,
+                              demoted_ids=[e.get("id", "") for e in oldest],
+                              demoted_lines=[row["line"] for row in hot_rows],
+                              demoted_count=len(oldest))
+        self._today["entries"] = entries[count:]
+        _atomic_write_json(self._root / TODAY_FILE, self._today)
+        self._evict_hot_if_needed(now_ts)
+        return {"ok": True, "demoted": len(oldest), "hot_rows": len(hot_rows)}
+
+    def _evict_hot_if_needed(self, now_ts: str) -> Dict[str, Any]:
+        """热满 hot_max：挤最久未命中那条进长期库（全文早已在长期档），并记录被挤掉的是什么。"""
+        tiers = self._tiers()
+        hot = self._hot()
+        rows = hot.get("rows", [])
+        if len(rows) <= tiers.get("hot_max", 20):
+            return {"ok": True, "evicted": 0}
+        victim = min(rows, key=lambda row: row.get("last_hit_at") or row.get("created_at") or "")
+        hot["rows"] = [row for row in rows if row.get("id") != victim.get("id")]
+        self._write_hot(hot)
+        self._record_eviction("hot_full", now_ts,
+                              evicted_hot_id=victim.get("id"),
+                              evicted_line=victim.get("line"),
+                              source_ids=victim.get("source_ids", []))
+        return {"ok": True, "evicted": 1, "victim": victim}
+
+    def hot_expand(self, hot_id: str, now_ts: Optional[str] = None) -> Dict[str, Any]:
+        """命中薄索引后展开正文：全文去长期档按 source_ids 读，命中计数 +1。"""
+        now_ts = now_ts or now_iso()
+        hot = self._hot()
+        for row in hot.get("rows", []):
+            if row.get("id") == hot_id:
+                row["hit_count"] = int(row.get("hit_count", 0)) + 1
+                row["last_hit_at"] = now_ts
+                self._write_hot(hot)
+                full_texts = []
+                for source_id in row.get("source_ids", []):
+                    found = self._latest_longterm(source_id)
+                    if found:
+                        full_texts.append(found)
+                return {"ok": True, "line": row.get("line"),
+                        "source_ids": row.get("source_ids", []),
+                        "full_texts": full_texts}
+        return {"ok": False, "message": "没有这行热索引：%s" % hot_id}
+
+    def _latest_longterm(self, entry_id: str) -> Optional[Dict[str, Any]]:
+        latest = None
+        for row in _read_jsonl(self._root / LONGTERM_FILE):
+            if row.get("id") == entry_id:
+                latest = row
+        return latest
+
+    # —— 遗忘曲线（读时结算）与冷仓 ————————————————————————————————
+    def _settle_retention(self, now_ts: str) -> List[Dict[str, Any]]:
+        """谁读到谁算：retention 低于阈值且闲置超限 → 标 archived（落冷仓），原文仍留盘。
+
+        只在真的有行要归档时才写盘；已归档的行不重复追加（并发下账本不脏）。
+        """
+        params = self._retention_params()
+        threshold = params.get("threshold", 0.08)
+        idle_days = params.get("idle_days", 30)
+        to_archive: List[Dict[str, Any]] = []
+        for entry in self.longterm_active_entries():
+            value = retention_mod.retention(entry, params, now_ts)
+            last = entry.get("last_recalled_at") or entry.get("last_accessed_at") or entry.get("ts")
+            idle = retention_mod.days_between(now_ts, last)
+            if value < threshold and (idle is None or idle >= idle_days):
+                archived_row = dict(entry)
+                archived_row["status"] = STATUS_ARCHIVED
+                archived_row["retention"] = value
+                archived_row["clarity"] = retention_mod.clarity(value, params)
+                to_archive.append(archived_row)
+        for archived_row in to_archive:
+            latest = self._latest_longterm(archived_row.get("id", ""))
+            if latest and latest.get("status") == STATUS_ARCHIVED:
+                continue   # 已经归档过，不重复追加
+            _append_jsonl(self._root / LONGTERM_FILE, archived_row)
+        return to_archive
+
+    def cold_entries(self) -> List[Dict[str, Any]]:
+        rows = _read_jsonl(self._root / LONGTERM_FILE)
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if row.get("id"):
+                latest[row["id"]] = row
+        return [row for row in latest.values() if row.get("status") == STATUS_ARCHIVED]
+
+    def cold_lookup(self, entry_id: str) -> Optional[Dict[str, Any]]:
+        """冷仓可捞：按 id 读回原文（不看过期状态）。"""
+        return self._latest_longterm(entry_id)
+
+    def tiers_summary(self, now_ts: Optional[str] = None,
+                      recent: int = 3) -> Dict[str, Any]:
+        """四档各多少条 + 每档最近几条。数据读不到/读坏就报错，不许折叠成 0 条。"""
+        now_ts = now_ts or now_iso()
+        today = _read_json_strict(self._root / TODAY_FILE)
+        hot = _read_json_strict(self._root / HOT_FILE)
+        rows = _read_jsonl_strict(self._root / LONGTERM_FILE)
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if row.get("id"):
+                latest[row["id"]] = row
+        active = [row for row in latest.values()
+                  if row.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
+        cold = [row for row in latest.values() if row.get("status") == STATUS_ARCHIVED]
+
+        def recent_of(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            ordered = sorted(items, key=lambda row: row.get("ts", ""), reverse=True)
+            return [self._annotate_retention(dict(row), now_ts)
+                    for row in ordered[:recent]]
+
+        today_entries = [e for e in today.get("entries", [])
+                         if e.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
+        return {
+            "today": {"count": len(today_entries), "recent": recent_of(today_entries)},
+            "hot": {"count": len(hot.get("rows", [])),
+                    "recent": hot.get("rows", [])[-recent:]},
+            "longterm": {"count": len(active), "recent": recent_of(active)},
+            "cold": {"count": len(cold), "recent": recent_of(cold)},
+        }
+
+    def cold_page(self, cursor: Optional[str] = None,
+                  limit: int = 20) -> Dict[str, Any]:
+        """冷仓分页：空就是空数组；读不到/读坏要报错，不许折叠成 0 条。"""
+        rows = _read_jsonl_strict(self._root / LONGTERM_FILE)
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if row.get("id"):
+                latest[row["id"]] = row
+        cold = [row for row in latest.values() if row.get("status") == STATUS_ARCHIVED]
+        cold.sort(key=lambda row: row.get("ts", ""), reverse=True)
+        if cursor:
+            cold = [row for row in cold if row.get("ts", "") < cursor]
+        page = cold[:limit]
+        next_cursor = page[-1].get("ts") if len(page) == limit else None
+        return {"items": page, "next_cursor": next_cursor}
+
+    # —— 边（星图地基） ————————————————————————————————
+    def _edges(self) -> Dict[str, Any]:
+        return edges_mod.load_graph(self._root)
+
+    def _write_edges(self, graph: Dict[str, Any]) -> None:
+        edges_mod.save_graph(self._root, graph)
+
+    def _add_edges_for(self, entry: Dict[str, Any]) -> None:
+        topics = edges_mod.extract_topics(entry.get("text", ""), self._topics())
+        if not topics:
+            return
+        graph = self._edges()
+        edges_mod.add_event_edges(graph, entry.get("id", ""), entry.get("who", ""),
+                                  topics, entry.get("ts", ""))
+        self._write_edges(graph)
+
+    def _invalidate_edges_for(self, entry_id: str) -> int:
+        graph = self._edges()
+        node_id = entry_id
+        if ":" not in node_id and ("event:" + node_id) in graph.get("nodes", {}):
+            node_id = "event:" + node_id
+        changed = edges_mod.invalidate_edges(graph, node_id)
+        if changed:
+            self._write_edges(graph)
+        return changed
+
+    def neighbors(self, node_id: str) -> Dict[str, Any]:
+        graph = self._edges()
+        if ":" not in node_id and ("event:" + node_id) in graph.get("nodes", {}):
+            node_id = "event:" + node_id
+        return {"node": node_id, "neighbors": edges_mod.neighbors(graph, node_id)}
+
+    def explain_recall(self, items: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """给一次回想结果，说清这几条是怎么连上的（人—事、事—话题）。"""
+        graph = self._edges()
+        explained = []
+        for item in items:
+            explained.append({
+                "id": item.get("id", ""),
+                "text": item.get("full_text", item.get("text", "")),
+                "neighbors": edges_mod.neighbors(graph, item.get("id", "")),
+            })
+        return {"items": explained}
+
+    def edge_health(self) -> Dict[str, Any]:
+        return edges_mod.edge_health(self._edges())
+
+    # —— 话题候选池（词表能长） ————————————————————————————————
+    def _topic_candidates(self) -> Dict[str, Any]:
+        return _read_json(self._root / TOPIC_CANDIDATES_FILE,
+                          {"candidates": [], "_note": "未接 NLP"})
+
+    def _write_topic_candidates(self, data: Dict[str, Any]) -> None:
+        _atomic_write_json(self._root / TOPIC_CANDIDATES_FILE, data)
+
+    def topic_candidates(self) -> List[Dict[str, Any]]:
+        return list(self._topic_candidates().get("candidates", []))
+
+    def _add_topic_candidates(self, items: Sequence[Dict[str, Any]], now_ts: str) -> None:
+        """回想到的长期/热条目里，词表没盖住的整句进候选池；人之后在面板收进词表。"""
+        topics = self._topics()
+        data = self._topic_candidates()
+        candidates = data.setdefault("candidates", [])
+        known_texts = {c.get("text", "") for c in candidates}
+        changed = False
+        for item in items:
+            if item.get("source") not in ("longterm", "hot"):
+                continue
+            text = item.get("full_text", item.get("text", ""))
+            if not text or text in known_texts:
+                continue
+            if edges_mod.extract_topics(text, topics):
+                continue   # 词表已经盖住，不进候选
+            candidates.append({"text": text, "from": item.get("id", ""), "ts": now_ts})
+            known_texts.add(text)
+            changed = True
+        if changed:
+            self._write_topic_candidates(data)
+
+    def promote_topic_candidate(self, label: str, text: str) -> Dict[str, Any]:
+        """人把候选收进词表：topics[label] 增加 text 关键词，并从候选池移除该句。"""
+        label = (label or "").strip()
+        text = (text or "").strip()
+        if not label or not text:
+            return _reject("label 与 text 不能为空")
+        topics = self._topics()
+        keywords = topics.setdefault(label, [])
+        if text not in keywords:
+            keywords.append(text)
+        _atomic_write_json(self._root / TOPICS_FILE, topics)
+        data = self._topic_candidates()
+        data["candidates"] = [c for c in data.get("candidates", [])
+                              if c.get("text") != text]
+        self._write_topic_candidates(data)
+        return {"ok": True, "label": label, "keyword": text,
+                "topics": topics.get(label)}
 
     def ingest(self, who: str, text: str, mood: Optional[Any] = None,
                display: Optional[str] = None, ts: Optional[str] = None,
@@ -242,6 +674,9 @@ class BrainStore:
             entries.append(entry)
             entry["evidence_key"] = entry["id"] if entry["source_type"] == SOURCE_LIVED else ""
         _atomic_write_json(self._root / TODAY_FILE, self._today)
+        if not merged:
+            self._add_edges_for(entries[-1])
+        self._demote_today(ts)
         person = self.interact(who, display=display, ts=ts)
         return {"ok": True, "merged": merged, "entry": dict(entries[-1]),
                 "archived_count": len(archived), "person": person}
@@ -279,6 +714,7 @@ class BrainStore:
             if "day" not in normalized or not normalized.get("day"):
                 normalized["day"] = day_key(normalized["ts"])
             _append_jsonl(self._root / LONGTERM_FILE, normalized)
+            self._add_edges_for(normalized)
             imported += 1
         return {"ok": True, "imported": imported}
 
@@ -319,12 +755,14 @@ class BrainStore:
             if entry.get("id") == entry_id:
                 entry["status"] = status
                 _atomic_write_json(self._root / TODAY_FILE, self._today)
+                self._invalidate_edges_for(entry_id)
                 return {"ok": True, "id": entry_id, "status": status,
                         "where": "today", "ts": ts}
         _append_jsonl(self._root / LONGTERM_FILE, {
             "id": entry_id, "status": status, "ts": ts,
             "who": "", "text": "", "count": 0, "source": "status", "day": "",
         })
+        self._invalidate_edges_for(entry_id)
         return {"ok": True, "id": entry_id, "status": status,
                 "where": "longterm", "ts": ts}
 
@@ -409,6 +847,8 @@ class BrainStore:
         now_ts = now_ts or now_iso()
         people = self._people_data().get("people", {})
         views = [self._person_view(person, now_ts) for person in people.values()]
+        for view in views:
+            view["memories"] = self._recent_memories_for(view.get("id", ""), now_ts, 5)
         views.sort(key=lambda item: (item["familiarity"], item.get("last_interaction", "")), reverse=True)
         return views
 
@@ -485,13 +925,99 @@ class BrainStore:
         self._write_people(data)
         return {"ok": True, "person": self._person_view(keep, now_iso())}
 
+    # —— 名片（人可写字段；熟稔是读数，绝不收） ————————————————————————————————
+    def _people_card(self, person_id: str) -> Optional[Dict[str, Any]]:
+        person = self._people_data().get("people", {}).get(person_id)
+        if person is None:
+            return None
+        return {"id": person.get("id", ""),
+                "display": person.get("display", ""),
+                "prefs": list(person.get("prefs", [])),
+                "notes": list(person.get("notes", [])),
+                "photo_note": person.get("photo_note", "")}
+
+    def card_view(self, person_id: str) -> Optional[Dict[str, Any]]:
+        card = self._people_card(person_id)
+        if card is None:
+            return None
+        card["history"] = self.card_history(person_id)
+        return card
+
+    def card_history(self, person_id: str) -> List[Dict[str, Any]]:
+        return [row for row in _read_jsonl(self._root / PEOPLE_CARD_HISTORY)
+                if row.get("person_id") == person_id]
+
+    def patch_card(self, person_id: str, actor: str,
+                   fields: Dict[str, Any]) -> Dict[str, Any]:
+        """人写名片：只收白名单字段（称呼/雷点/备注/照片说明）；不收熟稔；写进历史。"""
+        person_id = (person_id or "").strip()
+        actor = (actor or "").strip()
+        if not person_id or not actor:
+            return _reject("person_id 与 actor 不能为空")
+        if not isinstance(fields, dict):
+            return _reject("fields 必须是 JSON 对象")
+        unknown = [key for key in fields if key not in CARD_FIELDS]
+        if unknown:
+            return _reject("只收白名单字段（称呼/雷点/备注/照片说明），收到：%s"
+                           % "/".join(unknown))
+        data = self._people_data()
+        person = data.get("people", {}).get(person_id)
+        if person is None:
+            return _reject("人名录里没有 %s" % person_id)
+        history_lines = []
+        for label, key in CARD_FIELDS.items():
+            if label not in fields:
+                continue
+            old_value = person.get(key, "")
+            person[key] = fields[label]
+            line = {"ts": now_iso(), "actor": actor, "person_id": person_id,
+                    "field": label, "old_summary": _short(old_value),
+                    "new_summary": _short(fields[label])}
+            _append_jsonl(self._root / PEOPLE_CARD_HISTORY, line)
+            history_lines.append(line)
+        self._write_people(data)
+        return {"ok": True, "card": self._people_card(person_id),
+                "history_lines": history_lines}
+
     # —— 回想 ————————————————————————————————
     def recall(self, query: str, who: Optional[str] = None,
                now_ts: Optional[str] = None) -> Dict[str, Any]:
-        """回想：只用 status 在役的条目；装包（分桶配额 + 预算 + 每项 cap）在 recall_mod 里。"""
+        """回想：读时结算遗忘曲线 → 今日/热/长期三路字面检索 → 装包；命中回写想起次数。"""
         now_ts = now_ts or now_iso()
-        return recall_mod.recall(query, self.today_entries(now_ts),
-                                 self.longterm_active_entries(), who=who)
+        self._settle_retention(now_ts)
+        today = self.today_entries(now_ts)
+        hot_candidates: List[Dict[str, Any]] = []
+        for row in self.hot_rows():
+            if recall_mod.literal_score(query, row.get("line", "")) > 0:
+                for source_id in row.get("source_ids", []):
+                    found = self._latest_longterm(source_id)
+                    if found and found.get("status") == STATUS_ACTIVE:
+                        hot_candidates.append(found)
+        result = recall_mod.recall(query, today, self.longterm_active_entries(),
+                                   hot_entries=hot_candidates, who=who)
+        self._write_back_hits(result.get("items", []), now_ts)
+        self._add_topic_candidates(result.get("items", []), now_ts)
+        return result
+
+    def _write_back_hits(self, items: Sequence[Dict[str, Any]], now_ts: str) -> None:
+        """命中回写：长期/热条目想起次数 +1、最后想起时间更新（遗忘曲线靠它）。"""
+        for item in items:
+            entry_id = item.get("id", "")
+            source = item.get("source", "")
+            if source == "hot":
+                hot = self._hot()
+                for row in hot.get("rows", []):
+                    if entry_id in row.get("source_ids", []):
+                        row["hit_count"] = int(row.get("hit_count", 0)) + 1
+                        row["last_hit_at"] = now_ts
+                self._write_hot(hot)
+            if source in ("longterm", "hot"):
+                found = self._latest_longterm(entry_id)
+                if found:
+                    updated = dict(found)
+                    updated["recall_count"] = int(updated.get("recall_count", 0)) + 1
+                    updated["last_recalled_at"] = now_ts
+                    _append_jsonl(self._root / LONGTERM_FILE, updated)
 
     def vector_rerank(self, query: str,
                       candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:

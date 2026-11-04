@@ -12,9 +12,9 @@ class StatusWritersTest(unittest.TestCase):
         self.assertEqual({STATUS_ACTIVE, STATUS_STALE, STATUS_ARCHIVED}, set(rows))
         self.assertTrue(rows[STATUS_ACTIVE]["wired"])
         self.assertTrue(rows[STATUS_STALE]["wired"])
-        self.assertFalse(rows[STATUS_ARCHIVED]["wired"],
-                         "archived 写者未接线：等「日子」线的冷仓/遗忘曲线")
-        self.assertIsNone(rows[STATUS_ARCHIVED]["writer"])
+        self.assertTrue(rows[STATUS_ARCHIVED]["wired"],
+                        "第三轮已接线：读时结算的遗忘曲线写 archived")
+        self.assertIn("settle_retention", rows[STATUS_ARCHIVED]["writer"])
 
     def test_writer_names_point_to_real_functions(self):
         from organs.brain import BrainStore
@@ -22,6 +22,7 @@ class StatusWritersTest(unittest.TestCase):
         self.assertIn("retire", rows[STATUS_STALE]["writer"])
         self.assertIn("ingest", rows[STATUS_ACTIVE]["writer"])
         self.assertTrue(hasattr(BrainStore, "retire"))
+        self.assertTrue(hasattr(BrainStore, "_settle_retention"))
 
 
 if __name__ == "__main__":

@@ -3,9 +3,11 @@
 handle(method, path, body, store, query=None, brain=None) -> (status, payload)，payload 可直接 json.dumps。
 path 可以带查询串（"?"后段由 handle 自己解），也可以把解好的 query 映射直接传进来。
 
-路由按器官拆开：魂在 soul.py、脑在 brain.py、只读页与静态页在 pages.py。
-这里只做两件事——把三张表汇总成一张 ROUTES（同名键直接抛，不许两条线各自注册同一个端点），
-以及按表分发。导入顺序：本模块要汇总器官表，必须最先导入（api.api / devserver / panel 都已如此）。
+路由按器官拆开：魂在 soul.py、脑在 brain.py、心在 heart.py、嘴在 mouth.py、家在 home.py，
+静态页名单在 pages.py。心的七条只读端点由 heart.py 全权接管——"只读页只是占位"那个
+概念随心线落地一起删掉了，只读语义现在由 HEART_ROUTES + 405 分支承担。
+这里只做两件事——把各器官表汇总成一张 ROUTES（同名键直接抛，不许两条线各自注册同
+一个端点），以及按表分发。导入顺序：本模块要汇总器官表，必须最先导入（api.api / devserver / panel 都已如此）。
 """
 from __future__ import annotations
 
@@ -32,11 +34,6 @@ def _failed(status: int, message: str, issues: Sequence[model.Issue] = ()) -> Re
     return status, {"ok": False, "message": message, "issues": _issues(issues)}
 
 
-def _readonly(route: str) -> Result:
-    """心的只读页：这一层还没有代码，如实报「未接入」+ 只读。"""
-    return 200, {"status": "未接入", "readonly": True, "agent": READONLY_PAGES[route]}
-
-
 def _merge(*tables: Mapping[str, str]) -> Dict[str, str]:
     """合并器官路由表；同一个路径被两条线各登记了一次就当场炸，不静默覆盖。"""
     merged: Dict[str, str] = {}
@@ -49,11 +46,13 @@ def _merge(*tables: Mapping[str, str]) -> Dict[str, str]:
 
 
 # 器官文件要 import 上面的公共件，所以汇总放最后：否则 core 还没定义完就被回头拿走。
-from . import brain as brain_api, mouth as mouth_api, pages as page_api, soul as soul_api  # noqa: E402
+from . import brain as brain_api, heart as heart_api, home as home_api  # noqa: E402
+from . import mouth as mouth_api, pages as page_api, soul as soul_api  # noqa: E402
+from . import version as version_api  # noqa: E402
 
 ROUTES = _merge(soul_api.SOUL_ROUTES, brain_api.BRAIN_ROUTES, page_api.PAGE_ROUTES,
-                mouth_api.MOUTH_ROUTES)
-READONLY_PAGES = page_api.READONLY_PAGES
+                mouth_api.MOUTH_ROUTES, home_api.HOME_ROUTES, heart_api.HEART_ROUTES,
+                version_api.VERSION_ROUTES)
 
 
 def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
@@ -62,10 +61,17 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
     method = method.upper()
     route, _, raw_query = path.partition("?")
     params = dict(query) if query else _parse_query(raw_query)
+    if route.startswith("/brain/people/") and route.endswith("/card"):
+        return brain_api.dispatch_card(method, route, body, brain)
     if route not in ROUTES:
         return 404, {"ok": False, "message": "没有这个端点：%s" % route}
     if method != ROUTES[route]:
-        if route in READONLY_PAGES or route in brain_api.BRAIN_ROUTES:
+        if route in heart_api.HEART_ROUTES:
+            # 心与脑都只有 GET；心的措辞单独一条：这一层是她的读数，人碰不到。
+            return 405, {"ok": False,
+                         "message": "%s 是心的只读端点：只收 GET，POST/PUT/DELETE 一律 405"
+                                    "（人不能改心）" % route}
+        if route in brain_api.BRAIN_ROUTES:
             return 405, {"ok": False,
                          "message": "%s 是只读页：只收 GET，POST/PUT/DELETE 一律 405（人不能改心与脑）"
                                     % route}
@@ -73,11 +79,20 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
             return 405, {"ok": False,
                          "message": "%s 是嘴的干跑端点：只读，只收 GET，POST/PUT/DELETE 一律 405"
                                     "（干跑只算不发，不落盘）" % route}
+        if route in home_api.HOME_ROUTES:
+            return 405, {"ok": False,
+                         "message": "%s 只收 %s：家有十条路由，只有 POST /home/write 这一条是写，"
+                                    "其余九条只读，方法不对一律 405（写权限也看这张表，不看 UI）"
+                                    % (route, ROUTES[route])}
         return 405, {"ok": False, "message": "%s 只收 %s" % (route, ROUTES[route])}
-    if route in READONLY_PAGES:
-        return _readonly(route)
+    if route in heart_api.HEART_ROUTES:
+        return heart_api.dispatch(route, params, store, brain)
     if route in brain_api.BRAIN_ROUTES:
         return brain_api.dispatch(route, params, brain)
     if route in mouth_api.MOUTH_ROUTES:
         return mouth_api.dispatch(route, params, store, brain)
+    if route in home_api.HOME_ROUTES:
+        return home_api.dispatch(route, params, store, brain, body)
+    if route in version_api.VERSION_ROUTES:
+        return version_api.dispatch(route)
     return soul_api.dispatch(route, params, body, store)

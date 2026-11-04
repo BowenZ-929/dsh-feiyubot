@@ -19,6 +19,8 @@ BRAIN_ROUTES = {
     "/brain/recall": "GET",
     "/brain/selfnarration": "GET",
     "/brain/proposals": "GET",
+    "/brain/tiers": "GET",
+    "/brain/cold": "GET",
 }
 
 
@@ -58,4 +60,44 @@ def dispatch(route: str, params: Mapping[str, str], brain: Any) -> Result:
     if route == "/brain/selfnarration":
         return 200, {"latest": brain.selfnarration_latest(),
                      "versions": brain.selfnarration_versions()}
+    if route == "/brain/tiers":
+        try:
+            return 200, brain.tiers_summary()
+        except Exception as exc:  # noqa: BLE001 - 读不到要报错，不许折叠成 0 条
+            return 500, {"ok": False, "message": "脑数据读不到：%s" % exc}
+    if route == "/brain/cold":
+        cursor = params.get("cursor") or None
+        try:
+            limit = int(params["limit"]) if params.get("limit") else 20
+        except ValueError:
+            return 400, {"ok": False, "message": "limit 必须是整数"}
+        try:
+            return 200, brain.cold_page(cursor=cursor, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - 读不到要报错
+            return 500, {"ok": False, "message": "冷仓读不到：%s" % exc}
     return 200, brain.proposals()
+
+
+def dispatch_card(method: str, route: str, body: Any, brain: Any) -> Result:
+    """PATCH /brain/people/<id>/card：名片白名单字段人可写，熟稔不收；GET 读名片+历史。"""
+    if brain is None:
+        return 503, {"ok": False, "message": "脑未载入：先起脑的数据目录（devserver --brain-root）"}
+    person_id = route[len("/brain/people/"):-len("/card")]
+    if not person_id:
+        return 404, {"ok": False, "message": "没有这个端点：%s" % route}
+    if method == "GET":
+        card = brain.card_view(person_id)
+        if card is None:
+            return 404, {"ok": False, "message": "人名录里没有 %s" % person_id}
+        return 200, card
+    if method == "PATCH":
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "message": "body 必须是 JSON 对象"}
+        actor = body.get("actor", "").strip()
+        fields = body.get("fields")
+        if not actor or not isinstance(fields, dict):
+            return 400, {"ok": False, "message": "需要 actor 与 fields（JSON 对象）"}
+        result = brain.patch_card(person_id, actor, fields)
+        return (200 if result.get("ok") else 400), result
+    return 405, {"ok": False,
+                 "message": "%s 只收 GET/PATCH（名片字段人可写，熟稔只读）" % route}

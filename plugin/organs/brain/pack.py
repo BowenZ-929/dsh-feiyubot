@@ -9,14 +9,14 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .model import PackLimits, pack_limits
 
-BUCKETS = ("today", "longterm", "outline")
+BUCKETS = ("today", "hot", "longterm", "outline")
 
 
 def _bucket_of(candidate: Dict[str, Any]) -> str:
     if candidate.get("kind") == "outline":
         return "outline"
     source = candidate.get("source", "longterm")
-    return source if source in ("today", "longterm") else "longterm"
+    return source if source in ("today", "hot", "longterm") else "longterm"
 
 
 def _cap_text(text: str, cap: int) -> str:
@@ -31,8 +31,8 @@ def pack(candidates: Sequence[Dict[str, Any]],
          query: str = "") -> Dict[str, Any]:
     """候选 → 装好的包：quota 分桶、预算内装填、每项 cap、超预算跳过并记录。"""
     limits = limits or pack_limits
-    quotas = {"today": limits.today_quota, "longterm": limits.longterm_quota,
-              "outline": limits.outline_quota}
+    quotas = {"today": limits.today_quota, "hot": limits.hot_quota,
+              "longterm": limits.longterm_quota, "outline": limits.outline_quota}
     used: Dict[str, int] = {bucket: 0 for bucket in BUCKETS}
     items: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []

@@ -24,6 +24,7 @@ class PackLimits:
     slots: int = 6                      # 总名额预算：一条纲占 1 个名额，普通条目 1 条占 1 个名额
     per_item_cap: int = 160             # 每项字符上限，超过截断；超预算的项整条跳过
     today_quota: int = 3                # 今日桶配额
+    hot_quota: int = 3                  # 热桶配额（薄索引命中后展开的正文）
     longterm_quota: int = 3             # 长期桶配额
     outline_quota: int = 1              # 纲桶配额（纲还没有产出，桶先留）
 
@@ -33,16 +34,16 @@ pack_limits = PackLimits()
 
 STATUS_ACTIVE = "active"        # 在役：进查询
 STATUS_STALE = "stale"          # 已退役：不进回想，但保留在盘上（可恢复）
-# 写者未接线：等「日子」线的冷仓/遗忘曲线；在此之前它不会出现。
 # 判据：每个状态枚举值必须有生产者——谁能把它置成这个值。
-STATUS_ARCHIVED = "archived"    # 已归档（冷仓/遗忘曲线落位后才有写者）
+# 写者为 _settle_retention（读时结算：retention 低于阈值且闲置超限 → 落冷仓）。
+STATUS_ARCHIVED = "archived"    # 已归档（落冷仓；原文仍在盘上可捞）
 STATUS_RETIRED = (STATUS_STALE, STATUS_ARCHIVED)
 
 # 状态 → 写者函数（谁负责把它置成这个值）。None = 未接线：只有读路径、没有任何写路径。
 STATUS_WRITERS = {
     STATUS_ACTIVE: "BrainStore.ingest / BrainStore.import_rows（默认落盘）",
     STATUS_STALE: "BrainStore.retire / BrainStore.forget",
-    STATUS_ARCHIVED: None,
+    STATUS_ARCHIVED: "BrainStore._settle_retention（读时结算：retention 低于阈值且闲置超限落冷仓）",
 }
 
 

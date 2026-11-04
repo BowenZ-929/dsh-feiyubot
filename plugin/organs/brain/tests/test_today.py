@@ -59,15 +59,20 @@ class TodayTest(unittest.TestCase):
         view = store.today_view("2026-11-04T05:01:00+00:00")
         self.assertEqual("2026-11-04", view["day"])
 
-    def test_no_hot_demotion_while_hot_shape_is_pending(self):
-        """热记忆形状待定（docs/plan.md §3）：本轮今日不降级进热，只记录不删除。"""
+    def test_today_over_60_demotes_oldest_20_into_hot(self):
+        """第三轮：今日 >60 条时，最旧 20 条全文进长期档、压成 ≤3 行薄索引进热，并记录被挤掉的是什么。"""
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         for index in range(65):
             ingest(store, "群友%d" % index, "第 %d 句" % index,
                    "2026-11-03T12:00:00+00:00")
-        self.assertEqual(65, len(store.today_entries("2026-11-03T13:00:00+00:00")))
-        self.assertEqual(0, len(store.longterm_entries()))
+        self.assertEqual(45, len(store.today_entries("2026-11-03T13:00:00+00:00")))
+        self.assertEqual(20, len(store.longterm_active_entries()))
+        self.assertLessEqual(len(store.hot_rows()), 3)
+        evictions = store.evictions()
+        self.assertEqual(1, len(evictions))
+        self.assertEqual("today_over_60", evictions[0]["reason"])
+        self.assertEqual(20, len(evictions[0]["demoted_ids"]))
 
 
 if __name__ == "__main__":

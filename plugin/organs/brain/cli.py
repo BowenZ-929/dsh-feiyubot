@@ -64,6 +64,11 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
     sub.add_parser("three-arm", help="三臂对照：冷启动 / 朴素字面基线 / 我们的方案（跑 fixture）")
     sub.add_parser("status-writers", help="状态枚举 → 写者断言：未接线的会打印「未接线」")
+    sub.add_parser("check", help="结构边守卫 + 状态写者断言")
+    neighbors_p = sub.add_parser("neighbors", help="给一个节点查邻居（人—事—话题边）")
+    neighbors_p.add_argument("--node", required=True)
+    cold_p = sub.add_parser("cold", help="冷仓读回：按 id 取原文（不看过期状态）")
+    cold_p.add_argument("--id", required=True)
     return parser.parse_args(argv)
 
 
@@ -113,6 +118,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for row in status_writer_report():
             writer = row["writer"] if row["wired"] else "None（未接线）"
             print("%s -> %s" % (row["status"], writer))
+    elif args.cmd == "check":
+        health = store.edge_health()
+        print("结构边守卫: %s" % ("通过" if health["ok"] else "FAIL"))
+        print("边: total=%d by_type=%s structural_ratio=%s"
+              % (health["total"], health["by_type"], health["structural_ratio"]))
+        from .model import status_writer_report
+
+        for row in status_writer_report():
+            writer = row["writer"] if row["wired"] else "None（未接线）"
+            print("%s -> %s" % (row["status"], writer))
+    elif args.cmd == "neighbors":
+        _print(store.neighbors(args.node))
+    elif args.cmd == "cold":
+        _print(store.cold_lookup(args.id))
     return 0
 
 
