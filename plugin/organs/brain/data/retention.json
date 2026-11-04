@@ -1,0 +1,17 @@
+{
+  "decay_rate_normal": 0.35,
+  "decay_rate_owner": 0.12,
+  "owner_ids": ["主人", "1000001"],
+  "recall_cap": 12,
+  "recency_bonus_recent_days": 7,
+  "recency_bonus_recent": 18,
+  "recency_bonus_mentioned_days": 2,
+  "recency_bonus_mentioned": 8,
+  "threshold": 0.08,
+  "idle_days": 30,
+  "clarity_vivid_above": 1.0,
+  "clarity_clear_above": 0.5,
+  "clarity_fuzzy_above": 0.2,
+  "fuzzy_chars": 42,
+  "title_chars": 12
+}

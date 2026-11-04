@@ -1,0 +1,6 @@
+{
+  "today_max": 60,
+  "today_demote_count": 20,
+  "hot_max": 20,
+  "hot_lines_max": 3
+}
