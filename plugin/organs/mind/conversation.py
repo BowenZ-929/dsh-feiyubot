@@ -189,6 +189,16 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
     instruction = reply.get("instruction")
     if not isinstance(instruction, str):
         raise ValueError("reply.instruction 要一段字：%s" % where)
+    banned_conf = _check_banned(data.get("banned"), where)
+    action_conf = _check_action(data.get("action"), where)
+    # 禁令窗口必须比配额窗口长一轮：配额放行的那一轮，禁令里得还看得见它——
+    # 否则同一条动作会在「配额刚好重置」的那一轮重生（两个窗口同时把它挤出去）。
+    want = action_conf["quota"]["window"] + 1
+    if banned_conf["rounds"] != want:
+        raise ValueError(
+            "banned.rounds 要等于 action.quota.window + 1（%d），现在是 %d："
+            "短一轮会让被放行的动作从禁令窗口滑出去，长一轮白读旧动作（%s）"
+            % (want, banned_conf["rounds"], where))
     return {
         "order": [key.strip() for key in order],
         "sections": checked,
@@ -199,8 +209,8 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
                   "format_blocked": _check_rules(reply.get("format_blocked"),
                                                  "format_blocked", where)},
         "recent": _check_recent(data.get("recent"), where),
-        "banned": _check_banned(data.get("banned"), where),
-        "action": _check_action(data.get("action"), where),
+        "banned": banned_conf,
+        "action": action_conf,
         "anchors": _check_anchors(data.get("anchors"), where),
     }
 

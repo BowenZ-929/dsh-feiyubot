@@ -515,6 +515,26 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual([head for head, _count in repeat.tally(heads)], read["openings"],
                          "开场不是 usage.opening 的那个口径（去标点 + 前 N 字，再各自去重）")
 
+    def test_ban_window_is_exactly_one_longer_than_the_quota_window(self):
+        """配额放行的那一轮，禁令里还得看得见它：banned.rounds == quota.window + 1。
+
+        窗口取相等时（历史事故）：Q01 的动作在 Q08 同时滑出两个窗口 → 配额重置、
+        禁令也空 → 同一条动作重生，实测相似度只降到 0.357。多一轮才盖得住。
+        """
+        conf = conversation.load_assembly()
+        self.assertEqual(conf["action"]["quota"]["window"] + 1, conf["banned"]["rounds"],
+                         "禁令窗口与配额窗口的关系断了（要么缝里重生，要么白读旧动作）")
+        ok = conversation.load_assembly()
+        ok["action"]["quota"]["window"] = 4
+        ok["banned"]["rounds"] = 5
+        self.assertEqual(5, conversation._check_assembly(ok, "test")["banned"]["rounds"])
+        bad = conversation.load_assembly()
+        bad["action"]["quota"]["window"] = 4
+        bad["banned"]["rounds"] = 6
+        with self.assertRaises(ValueError) as ctx:
+            conversation._check_assembly(bad, "test")
+        self.assertIn("action.quota.window + 1", str(ctx.exception))
+
     def test_banned_window_keeps_only_the_latest_rounds(self):
         """窗口外的更早轮不该出现在禁令里：轮数从数据现读，造 N+1 轮。"""
         rounds = conversation.load_assembly()["banned"]["rounds"]

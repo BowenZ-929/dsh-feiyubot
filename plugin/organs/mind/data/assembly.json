@@ -79,7 +79,7 @@
     "notice": "更早还有 {omitted} 轮没有加载"
   },
   "banned": {
-    "rounds": 6,
+    "rounds": 7,
     "opening_chars": 6,
     "note": "这一轮不许再用下面这些"
   },
