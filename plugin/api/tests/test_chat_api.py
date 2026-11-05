@@ -54,7 +54,10 @@ LONG_REPLY = ("你问医院那回事，我记得的，是陪你妈去复查对�
               "周末要是不下雨，我陪你去一趟，顺便把上次落下的检查补上。") * 2
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
-                 "assembly", "continuity", "llm", "anchors", "guard", "memory"}
+                 "assembly", "continuity", "banned", "action", "llm", "anchors",
+                 "guard", "memory"}
+BANNED_KEYS = {"rounds", "action_lines", "openings"}
+ACTION_KEYS = {"pool", "rule"}
 GUARD_KEYS = {"window", "threshold", "min_rounds", "rounds", "hits", "rate",
               "over", "injected", "available"}
 
@@ -159,6 +162,36 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(CONFIG["model"], capture[0]["model"])
         self.assertEqual(["system", "user"],
                          [item["role"] for item in capture[0]["messages"]])
+
+    def test_banned_and_action_ride_along_in_the_success_body(self):
+        """防抄自己那两块也要随成功体出去：禁令读三键、动作池读两键，形状对外冻结。"""
+        conf = conversation.load_assembly()
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        banned = payload["banned"]
+        action = payload["action"]
+        self.assertEqual(BANNED_KEYS, set(banned), "banned 的键不是契约那一份：%s" % sorted(banned))
+        self.assertEqual(ACTION_KEYS, set(action), "action 的键不是契约那一份：%s" % sorted(action))
+        self.assertEqual(conf["banned"]["rounds"], banned["rounds"])
+        self.assertIsInstance(banned["rounds"], int)
+        self.assertIsInstance(banned["action_lines"], list)
+        self.assertIsInstance(banned["openings"], list)
+        for row in banned["action_lines"]:
+            self.assertEqual({"text", "count"}, set(row))
+            self.assertTrue(row["text"])
+            self.assertGreaterEqual(row["count"], 1)
+        for head in banned["openings"]:
+            self.assertIsInstance(head, str)
+            self.assertTrue(head)
+        self.assertEqual(conf["action"]["pool"], action["pool"], "池子该照抄 assembly.json")
+        self.assertEqual(conf["action"]["rule"], action["rule"])
+        # 两段真的进了提示词（不是只在回包里挂个空壳）
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn("[%s]" % conf["sections"]["banned"]["label"], system,
+                      "近轮禁用那一节没进提示词")
+        self.assertIn("[%s]" % conf["sections"]["action"]["label"], system,
+                      "动作池那一节没进提示词")
 
     def test_recalled_carries_real_evidence_from_brain(self):
         entry = self.brain.ingest(who="主人", text=MEMORY_TEXT)

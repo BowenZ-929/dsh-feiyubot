@@ -1,9 +1,11 @@
 {
-  "_note": "装配说明书：先后、每段字数上限、提示词模板、回复预算全在这里——改这一份就改装配，代码里一个数都不写死。读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先，没有才读这份出厂默认（organ/mind/data/assembly.json）。order 里 anchors 与 recent 两段可以缺（缺 anchors 就是「未配锚句」），sections 里对应的那一节必须还在。",
+  "_note": "装配说明书：先后、每段字数上限、提示词模板、回复预算全在这里——改这一份就改装配，代码里一个数都不写死。读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先，没有才读这份出厂默认（organ/mind/data/assembly.json）。order 里 anchors 与 recent 两段可以缺（缺 anchors 就是「未配锚句」），sections 里对应的那一节必须还在。banned 与 action 两节是防她抄自己：banned 只抽她那一侧最近 rounds 轮的动作行与开场（opening_chars 用 usage.opening 的口径），action 给出这一轮换部位的池子与规矩；两块的数都在本文件里，代码里一个部位词都没有。",
   "order": [
     "soul",
     "anchors",
     "recent",
+    "banned",
+    "action",
     "memory",
     "heart",
     "mouth"
@@ -20,6 +22,14 @@
     "recent": {
       "label": "最近几轮",
       "cap": 2400
+    },
+    "banned": {
+      "label": "近轮禁用",
+      "cap": 300
+    },
+    "action": {
+      "label": "动作池",
+      "cap": 200
     },
     "memory": {
       "label": "脑装包",
@@ -58,6 +68,23 @@
     "turns": 12,
     "cap": 200,
     "notice": "更早还有 {omitted} 轮没有加载"
+  },
+  "banned": {
+    "rounds": 3,
+    "opening_chars": 6,
+    "note": "这一轮不许再用下面这些"
+  },
+  "action": {
+    "pool": [
+      "尾巴",
+      "鳍",
+      "耳",
+      "手",
+      "呼吸",
+      "目光",
+      "肩膀"
+    ],
+    "rule": "这一轮换一个部位，别重复前几轮用过的。"
   },
   "anchors": {
     "label": "锚句",

@@ -23,6 +23,11 @@
     2 条半句，其余在 anchors.skipped 里点名；命中率低就五条全给。guard 的八/九键对
     页面冻结、值全来自 assembly.json 的 anchors.guard（改数据 → 读数跟着变）。
     这一轮说出口之后账本多一行（hit 与回话开头一致）；被闸弃掉的轮账本不增行。
+13. **近轮禁用**：另起一节，只抽她那一侧最近 N 轮的动作行与开场；重复三次只列一条并标
+    「重复 3 次」；人的原话一个字都不进这一节；最近几轮的原文段一个字都不删；
+    窗口外的更早轮不算禁令；返回体 banned{rounds, action_lines, openings} 与历史对得上。
+14. **动作给池子**：action 段的规矩与部位池逐项来自 assembly.json（改数据 → 提示词跟着变），
+    代码里一个部位词都没有；banned / action 两块缺键或类型不对一律 ValueError。
 
 全部注入假 transport：一个字节都不发真网络。心 / 嘴 / 装配的临时根都经环境变量切走，
 仓库里的真数据一个字节不写。
@@ -48,7 +53,7 @@ from organs.heart import model as heart_model
 from organs.heart import mood, sleep
 from organs.home import anchors as home_anchors
 from organs.home import cards
-from organs.mind import conversation, llm, recent, usage
+from organs.mind import conversation, llm, recent, repeat, usage
 from organs.soul import load as load_soul
 
 PLUGIN = Path(__file__).resolve().parents[3]
@@ -82,6 +87,13 @@ def _transport(reply: str, captured: list = None, status: int = 200):
         body = {"choices": [{"message": {"content": reply}}]}
         return status, json.dumps(body, ensure_ascii=False).encode("utf-8")
     return send
+
+
+def _section(text: str, label: str) -> str:
+    """提示词里某一节的正文：从「[标题]」到下一个空行分节为止（段与段之间是空行）。"""
+    head = text.index("[%s]" % label) + len(label) + 2
+    tail = text.find("\n\n[", head)
+    return text[head:tail] if tail >= 0 else text[head:]
 
 
 class ConversationAnswerTest(unittest.TestCase):
@@ -436,6 +448,134 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn(conversation.NO_TURNS, system, "一条历史都没有时 recent 段是空白")
         self.assertEqual(0, got["continuity"]["turns_loaded"])
         self.assertEqual("", got["continuity"]["notice"])
+
+    # —— 13) 近轮禁用与动作池 ————————————————————————
+
+    HER_ACTION = "（尾巴尖在水里慢慢蜷了一下）"
+    HUMAN_WORDS = "我昨天在小卖部看见一只猫"
+
+    def _her_history(self, replies, name: str) -> Path:
+        """造一份历史：每轮的 reply 按给定顺序落盘（said 是人的原话，用来查泄漏）。"""
+        root = self.tmp / name
+        for index, reply in enumerate(replies):
+            recent.append({"ts": _at(index), "who": "主人",
+                           "said": "%s（第%d轮）" % (self.HUMAN_WORDS, index),
+                           "reply": reply}, root=root)
+        return root
+
+    def _banned_block(self, got_capture, conf=None):
+        """提示词里近轮禁用那一节的正文（标题从数据读，不写死中文名）。"""
+        label = (conf or conversation.load_assembly())["sections"]["banned"]["label"]
+        return _section(got_capture[0]["messages"][0]["content"], label)
+
+    def test_banned_section_bans_her_action_line_and_never_the_human_words(self):
+        """三轮同一个动作行 → 只列一条 + 重复 3 次；人的原话一个字都不进来。"""
+        replies = ["%s\n\n……这个啊。" % self.HER_ACTION,
+                   "%s\n\n……是。有过。" % self.HER_ACTION,
+                   "%s\n\n……是。有过。" % self.HER_ACTION]
+        root = self._her_history(replies, "banned3")
+        capture = []
+        got = self._answer(captured=capture, recent_root=root)
+        system = capture[0]["messages"][0]["content"]
+        conf = conversation.load_assembly()
+        block = self._banned_block(capture, conf)
+
+        self.assertIn(conf["banned"]["note"], block, "那句禁令没进提示词")
+        self.assertIn(repeat.REPEAT % 3, block, "三条一样的动作行没有标「重复 3 次」")
+        self.assertEqual(1, block.count(self.HER_ACTION),
+                         "同一个动作行在禁令里出现了不止一次：%r" % (block,))
+        self.assertNotIn(self.HUMAN_WORDS, block, "人的原话进了禁令：%r" % (block,))
+        self.assertNotIn(self.HUMAN_WORDS, str(got["banned"]),
+                         "人的原话进了返回体的禁令：%r" % (got["banned"],))
+        self.assertIn("……这个啊。", system, "最近几轮的原文段被动了（原文一个字都不许删）")
+        label_banned = conf["sections"]["banned"]["label"]
+        self.assertLess(system.index("[%s]" % conf["sections"]["recent"]["label"]),
+                        system.index("[%s]" % label_banned), "禁令该在最近几轮之后")
+        self.assertLess(system.index("[%s]" % label_banned),
+                        system.index("[%s]" % conf["sections"]["action"]["label"]),
+                        "动作池该在禁令之后")
+        self.assertLess(system.index("[%s]" % conf["sections"]["action"]["label"]),
+                        system.index("[%s]" % conf["sections"]["memory"]["label"]),
+                        "动作池该在脑装包之前")
+
+    def test_banned_read_matches_the_history(self):
+        """返回体 banned 的三个键与盘上那几轮对得上（页面与验收照它核对）。"""
+        replies = ["%s\n\n……这个啊。" % self.HER_ACTION,
+                   "%s\n\n……是。有过。" % self.HER_ACTION,
+                   "%s\n\n……是。有过。" % self.HER_ACTION]
+        root = self._her_history(replies, "banned_read")
+        got = self._answer(recent_root=root)
+        conf = conversation.load_assembly()["banned"]
+        read = got["banned"]
+        self.assertEqual({"rounds", "action_lines", "openings"}, set(read), "banned 的键对外冻结")
+        self.assertEqual(conf["rounds"], read["rounds"])
+        self.assertEqual([{"text": self.HER_ACTION, "count": 3}], read["action_lines"])
+        heads = [usage.opening(repeat.without_actions(reply), conf["opening_chars"])
+                 for reply in replies]
+        self.assertEqual([head for head, _count in repeat.tally(heads)], read["openings"],
+                         "开场不是 usage.opening 的那个口径（去标点 + 前 N 字，再各自去重）")
+
+    def test_banned_window_keeps_only_the_latest_rounds(self):
+        """4 轮历史、N=3：被挤出窗口的那条动作行不该出现在禁令里。"""
+        oldest = "(最早那一轮的动作)"
+        replies = [oldest, "%s\n\n一。" % self.HER_ACTION,
+                   "%s\n\n二。" % self.HER_ACTION, "%s\n\n三。" % self.HER_ACTION]
+        root = self._her_history(replies, "banned_window")
+        capture = []
+        got = self._answer(captured=capture, recent_root=root)
+        block = self._banned_block(capture)
+        self.assertNotIn(oldest, block, "窗口外的更早轮进了禁令：%r" % (block,))
+        self.assertIn(repeat.REPEAT % 3, block, "最近 3 轮的那条动作行没标重复 3 次")
+        self.assertEqual([{"text": self.HER_ACTION, "count": 3}], got["banned"]["action_lines"])
+
+    def test_banned_sees_nothing_when_there_is_no_history(self):
+        """一条历史都没有：这一节写一句实话，不留白（空白会被她读成「随便用」）。"""
+        capture = []
+        got = self._answer(captured=capture)
+        block = self._banned_block(capture)
+        self.assertIn(conversation.load_assembly()["banned"]["note"], block)
+        self.assertIn(conversation.BANNED_EMPTY, block)
+        self.assertEqual({"rounds": conversation.load_assembly()["banned"]["rounds"],
+                          "action_lines": [], "openings": []}, got["banned"])
+
+    def test_action_pool_and_rule_come_from_the_data_file(self):
+        """规矩与池子逐项来自 assembly.json：改数据 → 提示词跟着变，代码里没有部位词。"""
+        conf = conversation.load_assembly()
+        label = conf["sections"]["action"]["label"]
+        capture = []
+        self._answer(assembly=conf, captured=capture)
+        block = _section(capture[0]["messages"][0]["content"], label)
+        self.assertIn(conf["action"]["rule"], block, "换部位的规矩没进提示词")
+        for part in conf["action"]["pool"]:
+            self.assertIn(part, block, "池子里的 %r 没进提示词" % (part,))
+
+        conf["action"] = {"pool": ["左耳", "右耳"], "rule": "这一轮只用耳边那些声响。"}
+        changed = []
+        got = self._answer(assembly=conf, captured=changed)
+        block2 = _section(changed[0]["messages"][0]["content"], label)
+        self.assertIn("这一轮只用耳边那些声响。", block2)
+        self.assertIn("左耳", block2)
+        self.assertNotIn("尾巴", block2, "换了池子还带着旧部位：%r" % (block2,))
+        self.assertEqual({"pool": ["左耳", "右耳"], "rule": "这一轮只用耳边那些声响。"},
+                         got["action"])
+
+    def test_broken_banned_and_action_data_is_reported_not_defaulted(self):
+        """banned / action 缺键、类型不对 → ValueError，且指名道姓（代码里没有兜底默认值）。"""
+        cases = ((lambda conf: conf["banned"].pop("rounds"), "banned.rounds"),
+                 (lambda conf: conf["banned"].__setitem__("opening_chars", "六"),
+                  "banned.opening_chars"),
+                 (lambda conf: conf["banned"].__setitem__("note", ""), "banned.note"),
+                 (lambda conf: conf.__setitem__("action", None), "action"),
+                 (lambda conf: conf["action"].__setitem__("pool", []), "action.pool"),
+                 (lambda conf: conf["action"].__setitem__("pool", ["尾巴", ""]), "action.pool"),
+                 (lambda conf: conf["action"].pop("rule"), "action.rule"))
+        for mutate, needle in cases:
+            conf = conversation.load_assembly()
+            mutate(conf)
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn(needle, str(caught.exception),
+                          "数据坏在 %s 时没有指名报错：%s" % (needle, caught.exception))
 
     # —— 9) 温度两档 ————————————————————————————
 

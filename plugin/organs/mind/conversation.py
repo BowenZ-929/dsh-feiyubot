@@ -3,11 +3,13 @@
 这是**全仓唯一的装配点**：QQ 通道将来直接调 answer()，不再自己拼第二遍。装配的规矩
 一个数都不写在本文件里，全在 organs/mind/data/assembly.json：
 
-  order      各段拼装的先后（soul / anchors / recent / memory / heart / mouth）
+  order      各段拼装的先后（soul / anchors / recent / banned / action / memory / heart / mouth）
   sections   {key: {"label": 段落标题, "cap": 字数上限}}
   prompt     system / user 两段模板（占位符见下）
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
   recent     turns（读几轮）/ cap（每侧截多少字）/ notice（「更早还有 N 轮」那句模板）
+  banned     rounds（抽她最近几轮）/ opening_chars（开场取几个字）/ note（那句禁令怎么说）
+  action     {"pool": 部位池, "rule": 换部位的规矩}：动作给池子，不给自由
   anchors    {"label", "cap", "room", "name"}：锚句从家·哪一间房的哪一张卡读
 读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先（存在才读），否则读
 出厂 organs/mind/data/assembly.json。
@@ -34,6 +36,9 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
   anchors 家·仓库里那张锚句卡（organs.home.cards.read_item 的公开 API，不绕过家的 access 闸）；
           没配 / 卡不在 / 读不出来一律写「未配锚句」，不静默跳过——那一格空着她会以为没有过
   recent  organs/mind/recent.py：最近几轮原文；omitted > 0 时把「更早还有 N 轮」放在段尾
+  banned  organs/mind/repeat.py：只抽**她那一侧**最近几轮的动作行与开场，去重计次列成禁令——
+          最近几轮那段原文一个字都不删，禁令另起一节；人的话一个字都不许进来
+  action  部位池与「这一轮换一个部位」的规矩，两项都来自 assembly.json（代码里没有部位词）
   memory  brain.recall(query=text, who=who or None)：既进提示词，也原样进返回体
           recalled[]（页面要显示「想起了什么 + 证据指针」）
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
@@ -83,6 +88,7 @@ from ..mouth import warehouse
 from ..mouth.split import split as split_text
 from . import llm
 from . import recent
+from . import repeat
 from . import usage
 
 ASSEMBLY_NAME = "assembly.json"          # 装配说明书的文件名（实盘 / 出厂各一份）
@@ -95,6 +101,8 @@ NO_TURNS = "还没有更早的对话"                # 盘上一条历史都没�
 ANCHORS_MISSING = "未配锚句"                  # 没配 / 卡不在 / 读不出来，三态同一句话
 ANCHORS_HINT = "锚句由人写，程序不替她造。"
 SEED_SEP = "|"                            # 节奏的种子：who 与时刻拼起来，同一轮两次调用得到同一组间隔
+POOL_SEP = "／"                            # 动作池进提示词时部位之间的分隔（全角斜杠，与标点同一套）
+BANNED_EMPTY = "最近几轮没有可禁用的动作行与开场。"   # 一条都抽不出来时的实话（空白会被她读成「随便用」）
 
 
 # —— 装配说明书 ———————————————————————————————————
@@ -190,6 +198,8 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         "reply": {"budget_by_tier": clean_budgets, "default": default,
                   "instruction": instruction, "format": clean_format},
         "recent": _check_recent(data.get("recent"), where),
+        "banned": _check_banned(data.get("banned"), where),
+        "action": _check_action(data.get("action"), where),
         "anchors": _check_anchors(data.get("anchors"), where),
     }
 
@@ -212,6 +222,41 @@ def _check_recent(spec: Any, where: str) -> Dict[str, Any]:
                          % (recent.NOTE_SLOT, where))
     clean["notice"] = template
     return clean
+
+
+def _check_banned(spec: Any, where: str) -> Dict[str, Any]:
+    """近轮禁用那一格：抽她最近几轮、开场取几个字、那句禁令怎么说——三个都在数据里。"""
+    if not isinstance(spec, dict):
+        raise ValueError("装配说明缺 banned（rounds / opening_chars / note）：%s" % where)
+    clean: Dict[str, Any] = {}
+    for name in ("rounds", "opening_chars"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("banned.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    note = spec.get("note")
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError("banned.note 要一句非空的禁令：%s" % where)
+    clean["note"] = note.strip()
+    return clean
+
+
+def _check_action(spec: Any, where: str) -> Dict[str, Any]:
+    """动作池那一格：池子与规矩都在数据里，代码里一个部位词都不许写死。"""
+    if not isinstance(spec, dict):
+        raise ValueError("装配说明缺 action（pool / rule）：%s" % where)
+    pool = spec.get("pool")
+    if not isinstance(pool, list) or not pool:
+        raise ValueError("action.pool 要一份非空的部位列表：%s" % where)
+    clean_pool: List[str] = []
+    for item in pool:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("action.pool 里有一项不是部位名：%r（%s）" % (item, where))
+        clean_pool.append(item.strip())
+    rule = spec.get("rule")
+    if not isinstance(rule, str) or not rule.strip():
+        raise ValueError("action.rule 要一句话（换部位的规矩，人能改）：%s" % where)
+    return {"pool": clean_pool, "rule": rule.strip()}
 
 
 def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
@@ -304,6 +349,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
       continuity{turns_loaded, omitted, notice} /
+      banned{rounds, action_lines[{text,count}], openings[开场前 N 字]} / action{pool, rule} /
       llm{model, temperature, temperature_tier} /
       anchors{configured, count, available, injected, instruction, items[实际注入的],
       skipped[没注入的 scene]|note} /
@@ -333,6 +379,10 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     omitted = int(loaded.get("omitted") or 0)
     note = recent.notice(omitted, conf["recent"]["notice"])
     recent_text = _recent_text(loaded.get("turns") or [], note, conf)
+    # 近轮禁用：原文段一个字都不删，禁令另起一节，只抽她那一侧（store 里她的自称就是她）
+    her_name = store.snapshot().identity.display
+    banned_text, banned_read = _banned_text(loaded.get("turns") or [], conf["banned"], her_name)
+    action_text = _action_text(conf)
     # 口癖护栏：先读**这一轮之前**的滚动窗口，再定这一轮注入几条（先记后算会自己踩自己）。
     # 家现行台词读一次，注入按 guard 裁，口癖统计仍看全量——两件事各用各的那一份。
     anchors_rows = _anchor_rows()
@@ -360,6 +410,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     reply_rule = "\n".join([conf["reply"]["instruction"]] + list(conf["reply"]["format"]))
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
+                "banned": banned_text, "action": action_text,
                 "memory": memory_text, "heart": heart_text, "mouth": mouth_text}
     blocks: List[str] = []
     sections: List[Dict[str, Any]] = []
@@ -427,6 +478,8 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
         },
         "continuity": {"turns_loaded": len(loaded.get("turns") or []),
                        "omitted": omitted, "notice": note},
+        "banned": banned_read,
+        "action": {"pool": list(conf["action"]["pool"]), "rule": conf["action"]["rule"]},
         "llm": {"model": call_conf["model"], "temperature": temperature,
                 "temperature_tier": temperature_tier},
         "anchors": anchor_read,
@@ -456,6 +509,39 @@ def _recent_text(turns: List[Mapping[str, Any]], note: str,
         return note[:cap]
     head = body if len(body) <= room else body[:room]
     return head + "\n" + note
+
+
+def _banned_text(turns: List[Mapping[str, Any]], conf: Mapping[str, Any],
+                 her_name: str) -> Tuple[str, Dict[str, Any]]:
+    """近轮禁用这一段进提示词的样子：那句禁令 + 逐条列出她刚用过的动作行与开场。
+
+    只抽她那一侧（repeat.her_texts），去重计次，重复几遍照实标出来——「用了一次」与
+    「用了三次」是她这一轮该躲的两件事。开场是 usage.opening 的口径（去标点后前 N 字），
+    本层不另写一套去标点。
+
+    读出来的那一份原样交回调用方进返回体（页面与验收要看它到底禁了什么）；
+    一条都抽不出来时写一句实话，不留白——空白她会读成「随便用」。
+    """
+    got = repeat.banned(turns, conf, her_name)
+    lines = [str(conf["note"])]
+    for row in got["action_lines"]:
+        mark = repeat.REPEAT % row["count"] if row["count"] > 1 else ""
+        lines.append("- %s%s%s" % (repeat.ACTION_PREFIX, row["text"], mark))
+    for head in got["openings"]:
+        lines.append("- %s%s" % (repeat.OPENING_PREFIX, head))
+    if len(lines) == 1:
+        lines.append(BANNED_EMPTY)
+    return "\n".join(lines), got
+
+
+def _action_text(conf: Mapping[str, Any]) -> str:
+    """动作池这一段进提示词的样子：规矩与池子，两项都照抄 assembly.json。
+
+    这一段存在的理由：只说「写她自己的身体」，她就一直用尾巴；给了池子与「换一个部位」的
+    规矩，她才得挑。代码里一个部位词都没有——改数据就改装配。
+    """
+    spec = conf["action"]
+    return "%s\n可用部位：%s" % (spec["rule"], POOL_SEP.join(spec["pool"]))
 
 
 def _anchor_rows() -> List[Mapping[str, Any]]:
