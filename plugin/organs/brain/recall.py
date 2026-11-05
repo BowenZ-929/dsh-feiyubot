@@ -90,6 +90,8 @@ def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
         "beta": beta,
         "testimony": testimony,
         "side": side,
+        "scene": entry.get("scene", "unknown"),
+        "audience": entry.get("audience", "当事人"),
         "display_text": display_text,
         "note": note,
         "note_full": note,

@@ -69,6 +69,9 @@ def pack(candidates: Sequence[Dict[str, Any]],
             "full_text": raw_text,   # 判定用完整正文；cap 只截注入文本，不参与判定
             "display_text": candidate.get("display_text", raw_text),
             "side": candidate.get("side", ""),
+            "scene": candidate.get("scene", "unknown"),
+            "audience": candidate.get("audience", "当事人"),
+            "retellable": True,
             "capped": len(candidate.get("text", "")) > limits.per_item_cap,
             "score": candidate.get("score"),
             "slot": 1,   # 纲与普通条目都占 1 个名额

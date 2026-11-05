@@ -23,10 +23,12 @@ from . import people as people_mod
 from . import proposals as proposals_mod
 from . import recall as recall_mod
 from . import retention as retention_mod
-from .model import (ALPHA_DEFAULT, BETA_DEFAULT, PLACEHOLDER_WHOS,
-                    SIDE_OTHER, SIDE_SELF, SIDE_TYPES, SOURCE_LIVED,
-                    SOURCE_SCHEDULED, SOURCE_TYPES, STATUS_ACTIVE,
-                    STATUS_ARCHIVED, STATUS_STALE, day_key, limits, now_iso)
+from .model import (ALPHA_DEFAULT, AUDIENCE_PARTIES, AUDIENCE_TYPES,
+                    BETA_DEFAULT, PLACEHOLDER_WHOS, SCENE_GROUP,
+                    SCENE_PRIVATE, SCENE_TYPES, SCENE_UNKNOWN, SIDE_OTHER,
+                    SIDE_SELF, SIDE_TYPES, SOURCE_LIVED, SOURCE_SCHEDULED,
+                    SOURCE_TYPES, STATUS_ACTIVE, STATUS_ARCHIVED,
+                    STATUS_STALE, day_key, limits, now_iso)
 
 TODAY_FILE = "today.json"
 LONGTERM_FILE = "longterm.jsonl"
@@ -209,6 +211,14 @@ def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
         row["note"] = ""
     row.setdefault("unclear", False)
     row.setdefault("side", SIDE_OTHER)
+    if "scene" not in row:
+        row["scene"] = SCENE_UNKNOWN   # 拿不到就留空标 unknown，不许猜
+    if row.get("scene") not in SCENE_TYPES:
+        row["scene"] = SCENE_UNKNOWN
+    if "audience" not in row:
+        row["audience"] = AUDIENCE_PARTIES   # 默认当事人；只有明确私密才标私密
+    if row.get("audience") not in AUDIENCE_TYPES:
+        row["audience"] = AUDIENCE_PARTIES
     if "beta_note" not in row:
         # β 只给 quote 满分；note 另记一档（beta 降一档）。空 note 不记 beta_note。
         row["beta_note"] = (int(row.get("beta", BETA_DEFAULT)) - 1) if row.get("note") else None
@@ -278,6 +288,8 @@ class BrainStore:
                     "unclear": entry.get("unclear", False),
                     "beta_note": entry.get("beta_note"),
                     "side": entry.get("side", SIDE_OTHER),
+                    "scene": entry.get("scene", SCENE_UNKNOWN),
+                    "audience": entry.get("audience", AUDIENCE_PARTIES),
                     "count": entry.get("count", 1),
                     "source": "today",
                     "kind": "fact",
@@ -418,6 +430,8 @@ class BrainStore:
                 "unclear": entry.get("unclear", False),
                 "beta_note": entry.get("beta_note"),
                 "side": entry.get("side", SIDE_OTHER),
+                "scene": entry.get("scene", SCENE_UNKNOWN),
+                "audience": entry.get("audience", AUDIENCE_PARTIES),
                 "count": entry.get("count", 1),
                 "source": "today",
                 "kind": "fact",
@@ -700,7 +714,8 @@ class BrainStore:
                display: Optional[str] = None, ts: Optional[str] = None,
                source_type: str = SOURCE_LIVED, alpha: int = ALPHA_DEFAULT,
                beta: int = BETA_DEFAULT, note: Optional[str] = None,
-               unclear: bool = False, side: str = SIDE_OTHER) -> Dict[str, Any]:
+               unclear: bool = False, side: str = SIDE_OTHER,
+               scene: Optional[str] = None, audience: Optional[str] = None) -> Dict[str, Any]:
         """一条消息进：今日追加或合并一条 + 人名录认人更新。
 
         text 就是 quote（对方原话）；note 是她的理解，可为空——空 note 是正常状态。
@@ -723,8 +738,17 @@ class BrainStore:
             last = entries[-1]
             if last.get("who") == who and _within_merge_window(last, ts):
                 last["text"] = text
+                last["quote"] = text
                 last["last_ts"] = ts
                 last["count"] = int(last.get("count", 1)) + 1
+                last["scene"] = scene if scene in SCENE_TYPES else SCENE_UNKNOWN
+                last["audience"] = audience if audience in AUDIENCE_TYPES else AUDIENCE_PARTIES
+                last["side"] = side if side in SIDE_TYPES else SIDE_OTHER
+                if note is not None:
+                    last["note"] = note
+                    last["beta_note"] = (int(last.get("beta", BETA_DEFAULT)) - 1) if note else None
+                if unclear:
+                    last["unclear"] = True
                 if mood is not None:
                     last["mood"] = mood
                 merged = True
@@ -745,6 +769,8 @@ class BrainStore:
                 "unclear": bool(unclear),
                 "beta_note": (int(beta) - 1) if note else None,
                 "side": side if side in SIDE_TYPES else SIDE_OTHER,
+                "scene": scene if scene in SCENE_TYPES else SCENE_UNKNOWN,
+                "audience": audience if audience in AUDIENCE_TYPES else AUDIENCE_PARTIES,
                 "evidence_key": "",   # 创建后再补：亲历指向自己这行原话，日程模拟留空
             }
             if mood is not None:
@@ -1187,7 +1213,8 @@ class BrainStore:
 
     # —— 回想 ————————————————————————————————
     def recall(self, query: str, who: Optional[str] = None,
-               now_ts: Optional[str] = None) -> Dict[str, Any]:
+               now_ts: Optional[str] = None,
+               scene: Optional[str] = None) -> Dict[str, Any]:
         """回想：读时结算遗忘曲线 → 今日/热/长期三路字面检索 → 装包；命中回写想起次数。"""
         now_ts = now_ts or now_iso()
         self._settle_retention(now_ts)
@@ -1207,6 +1234,12 @@ class BrainStore:
                                    hot_entries=hot_candidates, who=who)
         self._write_back_hits(result.get("items", []), now_ts)
         self._add_topic_candidates(result.get("items", []), now_ts)
+        # 出口判断用：群里不当众复述"私密"条目。只打 retellable 标记，不过滤召回。
+        if scene == SCENE_GROUP:
+            for item in result.get("items", []):
+                if item.get("audience") == "私密":
+                    item["retellable"] = False
+                    item["retell_note"] = "私密：不当众复述"
         return result
 
     def _record_hit(self, entry_id: str, now_ts: str) -> None:
