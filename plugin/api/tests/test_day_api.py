@@ -144,6 +144,61 @@ class DayApiTest(unittest.TestCase):
         self.assertEqual("failed", payload["steps"]["brain_decay"]["status"])
         self.assertEqual("ok", payload["steps"]["heart_settle"]["status"])
 
+    def test_tick_break_step_keeps_the_plan_pending(self):
+        """验收注入 break_step 从 tick 透传：失败的那次不下账，返回体里看得见 retried。"""
+        status, payload = self._call("POST", "/day/tick",
+                                     query={"now": at("2026-11-05T03:31:00"),
+                                            "heart_root": str(self.heart), "break_step": 2})
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["night"]["executed"])
+        self.assertEqual(1, len(payload["night"]["retried"]))
+        self.assertEqual(["brain_decay"], payload["night"]["retried"][0]["failed_steps"])
+        self.assertEqual([], payload["night"]["never_ran"])
+        status, plan_payload = self._call("GET", "/day/plan")
+        self.assertEqual(1, len(plan_payload["pending"]))
+        self.assertEqual(0, plan_payload["pending"][0]["night"]["attempts"])
+        self.assertEqual([], plan_payload["consumed"], "失败的那次不许静默 consume")
+
+    def test_plan_route_exposes_the_never_ran_column(self):
+        """/day/plan 的第五栏：试满 4 次后那条进 never_ran，之后再 tick 条数不变。"""
+        query = {"now": at("2026-11-05T03:31:00"), "heart_root": str(self.heart),
+                 "break_step": 2}
+        for _ in range(4):
+            status, _ = self._call("POST", "/day/tick", query=query)
+            self.assertEqual(200, status)
+        status, plan_payload = self._call("GET", "/day/plan")
+        self.assertEqual(200, status)
+        self.assertIn("never_ran", plan_payload)
+        self.assertEqual([], plan_payload["pending"])
+        self.assertEqual(1, len(plan_payload["never_ran"]))
+        self.assertIn("brain_decay", plan_payload["never_ran"][0]["reason"])
+        self.assertIn("4 次尝试", plan_payload["never_ran"][0]["reason"])
+        status, again = self._call("POST", "/day/tick", query=query)
+        self.assertEqual(200, status)
+        self.assertEqual(plan_payload["counts"], again["counts"])
+        self.assertEqual(plan_payload["plan_ids"], again["plan_ids"])
+        self.assertEqual(1, len(self._call("GET", "/day/plan")[1]["never_ran"]))
+
+    def test_schedule_takes_now_and_writes_nothing(self):
+        """只读端点：?now= 跟着注入时刻走（day / slot 都变），不结算心、不落日志。"""
+        before = sorted(path.name for path in self.root.iterdir())
+        status, morning = self._call("GET", "/day/schedule",
+                                     query={"now": at("2026-11-05T09:30:00")})
+        self.assertEqual(200, status)
+        status, evening = self._call("GET", "/day/schedule",
+                                     query={"now": at("2026-11-05T23:30:00")})
+        self.assertEqual(200, status)
+        status, next_day = self._call("GET", "/day/schedule",
+                                      query={"now": at("2026-11-06T05:00:00")})
+        self.assertEqual(200, status)
+        self.assertEqual("2026-11-05", morning["day"])
+        self.assertEqual("2026-11-05", evening["day"], "23:30 还没到 04:00 换日点")
+        self.assertEqual("2026-11-06", next_day["day"], "05:00 已经是新的一天")
+        self.assertEqual(at("2026-11-05T09:30:00"), morning["now"])
+        self.assertNotEqual(morning["slot"], evening["slot"], "slot 跟着注入时刻走")
+        self.assertEqual(before, sorted(path.name for path in self.root.iterdir()),
+                         "GET /day/schedule 不落任何文件")
+
     def test_bad_now_is_400_and_points_at_the_plus_trap(self):
         status, payload = self._call("POST", "/day/tick", query={"now": "2026-11-05T09:00:00 09:00"})
         self.assertEqual(400, status)

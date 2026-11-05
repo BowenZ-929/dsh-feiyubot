@@ -1,7 +1,9 @@
 """rhythm：tick 先排当天（幂等）再数到点、换日只数一次、下一次是纯算术、线程唯一且默认关。"""
 from __future__ import annotations
 
+import json
 import unittest
+from typing import Any
 
 from organs.day import night, plan, rhythm
 from organs.day.tests.helpers import at, brain, candidates, temp_root
@@ -71,8 +73,8 @@ class TickTest(unittest.TestCase):
         """kinds 空着就不自动排：这时 tick 只数到点、不造任何计划。"""
         payload = rhythm.tick(at(NOW), root=self.root, config=NO_KINDS)
         self.assertEqual([], payload["plan_ids"])
-        self.assertEqual({"pending": 0, "consumed": 0, "blocked": 0, "expired": 0, "total": 0},
-                         payload["counts"])
+        self.assertEqual({"pending": 0, "consumed": 0, "blocked": 0, "expired": 0,
+                          "never_ran": 0, "total": 0}, payload["counts"])
         self.assertIsNone(payload["next_at"])
 
     def test_first_tick_only_remembers_today(self):
@@ -177,14 +179,152 @@ class NightLoopTest(unittest.TestCase):
         self.assertEqual(1, len(plan.listing(self.root)["pending"]),
                          "被跳过的计划留在 pending，等下一 tick")
 
-    def test_no_execution_without_brain_still_consumes_and_reports(self):
-        """没有脑也照跑（第 1 步记 failed），并如实 consume：不许留死账。"""
+    def test_no_execution_without_brain_stays_pending_not_consumed(self):
+        """没有脑也照跑（第 1 步记 failed），但**不下账**：留 pending 等重试，不许静默 consume。"""
         payload = rhythm.tick(at("2026-11-05T03:31:00"), root=self.root,
                               heart_root=self.heart)
+        self.assertEqual([], payload["night"]["executed"], "失败的那次不许算跑过")
+        self.assertEqual(1, len(payload["night"]["retried"]))
+        retried = payload["night"]["retried"][0]
+        self.assertFalse(retried["ok"])
+        self.assertEqual(["brain_compact"], retried["failed_steps"])
+        self.assertEqual(0, retried["attempt"])
+        self.assertEqual(1, retried["next_attempt"])
+        listing = plan.listing(self.root)
+        self.assertEqual([], listing["consumed"])
+        self.assertEqual(1, len(listing["pending"]))
+        self.assertEqual(0, listing["pending"][0]["night"]["attempts"])
+        self.assertEqual(["brain_compact"], listing["pending"][0]["night"]["failed_steps"])
+
+
+class NightRetryTest(unittest.TestCase):
+    """失败的那次不下账：留 pending、只重跑失败步、试满次数进 never_ran 并写审计。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        self.heart = temp_root(self)
+        self.brain = brain(self.root)
+        self.addCleanup(rhythm.stop, 2.0)
+
+    def _tick(self, now: str = "2026-11-05T03:31:00", break_step: Any = 2, **kwargs):
+        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
+                  "break_step": break_step}
+        params.update(kwargs)
+        return rhythm.tick(at(now), **params)
+
+    def _lines(self):
+        target = self.root / "night_log.jsonl"
+        if not target.exists():
+            return []
+        return [json.loads(text) for text in target.read_text(encoding="utf-8").splitlines()
+                if text.strip()]
+
+    def test_first_failure_keeps_pending_and_logs_the_step(self):
+        payload = self._tick()
+        self.assertEqual([], payload["night"]["executed"])
+        self.assertEqual(1, len(payload["night"]["retried"]))
+        row = plan.listing(self.root)["pending"][0]
+        self.assertEqual(plan.STATUS_PENDING, row["status"])
+        self.assertEqual(0, row["night"]["attempts"], "首跑失败：用掉 0 次重试")
+        self.assertEqual(["brain_decay"], row["night"]["failed_steps"])
+        self.assertEqual({"brain_compact": "ok", "brain_decay": "failed",
+                          "home_diary": "stubbed", "heart_settle": "ok"},
+                         {name: item["status"] for name, item in row["night"]["steps"].items()})
+        lines = self._lines()
+        self.assertEqual(1, len(lines), "一次尝试一行夜日志")
+        self.assertEqual(0, lines[0]["attempt"])
+        self.assertEqual(list(night.STEPS), lines[0]["retried_steps"], "首跑四步都跑")
+        self.assertEqual(["brain_decay"], lines[0]["failed"])
+        self.assertNotIn("event", lines[0], "跑过的那一行不是审计行")
+
+    def test_retry_only_reruns_the_failed_step_and_keeps_other_results(self):
+        self._tick()
+        first = plan.listing(self.root)["pending"][0]["night"]["steps"]
+        payload = self._tick()
+        self.assertEqual(1, len(payload["night"]["retried"]))
+        row = plan.listing(self.root)["pending"][0]
+        self.assertEqual(1, row["night"]["attempts"], "第二次 tick 用掉 1 次重试")
+        lines = self._lines()
+        self.assertEqual(1, lines[1]["attempt"])
+        self.assertEqual(["brain_decay"], lines[1]["retried_steps"], "只重跑失败的那一步")
+        self.assertEqual(["brain_decay"], lines[1]["failed"])
+        for name in ("brain_compact", "home_diary", "heart_settle"):
+            self.assertEqual(first[name], lines[1]["steps"][name],
+                             "%s 沿用上一次的结果，不重跑也不重写" % name)
+        self.assertEqual(first["brain_compact"]["detail"],
+                         row["night"]["steps"]["brain_compact"]["detail"])
+
+    def test_two_attempts_then_success_consumes_with_all_four_steps(self):
+        self._tick()
+        payload = self._tick(break_step=None)      # 第二次尝试治好，四步全成
         self.assertEqual(1, len(payload["night"]["executed"]))
-        self.assertFalse(payload["night"]["executed"][0]["ok"])
-        self.assertEqual(["brain_compact"], payload["night"]["executed"][0]["summary"]["failed"])
-        self.assertEqual(1, len(plan.listing(self.root)["consumed"]))
+        listing = plan.listing(self.root)
+        self.assertEqual([], listing["pending"])
+        self.assertEqual(1, len(listing["consumed"]))
+        self.assertEqual(set(night.STEPS), set(listing["consumed"][0]["result"]["steps"]))
+        self.assertEqual({"ok": 2, "stubbed": 2},
+                         listing["consumed"][0]["result"]["statuses"])
+
+    def test_four_attempts_then_never_ran_with_one_audit_line(self):
+        for _ in range(3):
+            self._tick()
+        last = self._tick()
+        self.assertEqual(1, len(last["night"]["never_ran"]))
+        self.assertEqual([], last["night"]["executed"])
+        listing = plan.listing(self.root)
+        self.assertEqual([], listing["pending"], "试满次数不再留 pending")
+        self.assertEqual(1, len(listing["never_ran"]))
+        row = listing["never_ran"][0]
+        self.assertEqual(plan.STATUS_NEVER_RAN, row["status"])
+        self.assertEqual(3, row["night"]["attempts"])
+        self.assertIn("brain_decay", row["reason"])
+        self.assertIn("4 次尝试", row["reason"])
+        audit = [line for line in self._lines() if line.get("event") == "never_ran"]
+        self.assertEqual(1, len(audit), "never-ran 只写一条审计，不另开第二个文件")
+        self.assertEqual(["brain_decay"], audit[0]["failed_steps"])
+        self.assertEqual(3, audit[0]["attempt"])
+        self.assertIn("brain_decay", audit[0]["reason"])
+        self.assertEqual(5, len(self._lines()), "四次尝试四行 + 一条 never_ran")
+
+    def test_after_never_ran_the_next_tick_runs_nothing(self):
+        for _ in range(4):
+            self._tick()
+        before = plan.listing(self.root)
+        lines = len(self._lines())
+        again = self._tick()
+        self.assertEqual([], again["night"]["retried"])
+        self.assertEqual([], again["night"]["never_ran"])
+        self.assertEqual([], again["due"])
+        after = plan.listing(self.root)
+        self.assertEqual(before["plan_ids"], after["plan_ids"])
+        self.assertEqual(before["counts"], after["counts"])
+        self.assertEqual(1, len(after["never_ran"]), "同一天不许再排第二条夜")
+        self.assertEqual(lines, len(self._lines()), "不再跑夜就不再写日志")
+
+    def test_retry_budget_comes_from_limits_not_from_code(self):
+        config = {"tick_seconds": 60, "min_gap_minutes": 10, "daily_cap": 12,
+                  "day_cutover_hour": 4, "kinds": {"night": {"at": "03:30"}},
+                  "night": {"max_retries": 1}}
+        first = self._tick(config=config)
+        self.assertEqual(1, len(first["night"]["retried"]))
+        second = self._tick(config=config)
+        self.assertEqual(1, len(second["night"]["never_ran"]), "max_retries=1：两次就试满")
+        self.assertIn("2 次尝试", plan.listing(self.root)["never_ran"][0]["reason"])
+
+    def test_stale_pending_with_attempts_expires_not_never_ran(self):
+        self._tick()
+        lines = len(self._lines())
+        later = self._tick(now="2026-11-08T03:31:00")
+        expired = later["night"]["expired"]
+        self.assertTrue(expired, "换日点已过的那条仍标 expired")
+        self.assertIn("过期不补", expired[0]["reason"])
+        self.assertEqual([], [line for line in self._lines() if line.get("event")],
+                         "过期那条不补跑、也不写 never-ran")
+        self.assertEqual(lines + 1, len(self._lines()), "只多了今天那条夜的日志")
+        listing = plan.listing(self.root)
+        self.assertEqual([], listing["never_ran"])
+        self.assertEqual(1, len([row for row in listing["expired"]
+                                 if row["night"]["attempts"] == 0]))
 
 
 class ThreadTest(unittest.TestCase):

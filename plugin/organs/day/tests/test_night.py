@@ -81,6 +81,64 @@ class NightRunTest(unittest.TestCase):
         self.assertTrue(again["steps"]["brain_compact"]["rerun"])
 
 
+class NightRetryScopeTest(unittest.TestCase):
+    """重试只重跑指定的步骤：其余原样沿用上一次的结果，日志里看得出这一次跑了哪几步。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        self.heart = self.root / "heart"
+        self.heart.mkdir()
+        self.brain = brain(self.root)
+
+    def _run(self, **kwargs):
+        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart}
+        params.update(kwargs)
+        return night.run(at(NOW), **params)
+
+    def test_only_reruns_listed_steps_and_carries_the_rest(self):
+        first = self._run(break_step=2)
+        second = self._run(break_step=2, only=["brain_decay"], carry=first["steps"],
+                           attempt=1)
+        self.assertEqual(list(night.STEPS), list(second["steps"]), "四步名单与顺序不变")
+        self.assertEqual(["brain_decay"], second["retried_steps"])
+        self.assertEqual(1, second["attempt"])
+        for name in ("brain_compact", "home_diary", "heart_settle"):
+            self.assertEqual(first["steps"][name], second["steps"][name],
+                             "%s 不重跑：结果原样沿用" % name)
+        self.assertEqual("failed", second["steps"]["brain_decay"]["status"])
+
+    def test_carried_step_without_a_previous_record_is_not_faked(self):
+        payload = self._run(only=["heart_settle"], carry={})
+        self.assertEqual(night.STATUS_CARRIED, payload["steps"]["brain_compact"]["status"])
+        self.assertIn("没跑", payload["steps"]["brain_compact"]["detail"])
+        self.assertEqual("ok", payload["steps"]["heart_settle"]["status"])
+
+    def test_each_attempt_is_one_log_line_with_attempt_and_retried_steps(self):
+        first = self._run(break_step=2)
+        self._run(break_step=2, only=["brain_decay"], carry=first["steps"], attempt=1)
+        rows = log_lines(self.root)
+        self.assertEqual(2, len(rows))
+        self.assertEqual(0, rows[0]["attempt"])
+        self.assertEqual(list(night.STEPS), rows[0]["retried_steps"])
+        self.assertEqual(1, rows[1]["attempt"])
+        self.assertEqual(["brain_decay"], rows[1]["retried_steps"])
+        self.assertEqual(["brain_decay"], rows[1]["failed"])
+
+    def test_never_ran_audit_is_one_line_in_the_same_log(self):
+        self._run()
+        out = night.audit_never_ran(at(NOW), root=self.root, day="2026-11-05", attempt=3,
+                                   failed_steps=["brain_decay"],
+                                   reason="该跑没跑成：brain_decay 在 4 次尝试里都没成功")
+        rows = log_lines(self.root)
+        self.assertEqual(2, len(rows), "审计与夜跑共用 night_log.jsonl，不另开文件")
+        line = rows[-1]
+        self.assertEqual("never_ran", line["event"])
+        self.assertEqual(3, line["attempt"])
+        self.assertEqual(["brain_decay"], line["failed_steps"])
+        self.assertIn("brain_decay", line["reason"])
+        self.assertEqual(out["log_path"], str(self.root / "night_log.jsonl"))
+
+
 class NightLogTest(unittest.TestCase):
     def setUp(self) -> None:
         self.root = temp_root(self)

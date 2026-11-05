@@ -14,14 +14,23 @@
    **恰有一条** pending（已有就一条不新增），跨天自然重排。本期 kinds 只有 night
    （03:30，min_gap 10 分钟、每天 1 条）。日程**不进**计划：这一期由 /day/schedule/draw
    手工触发，等壳线有心/嘴的意愿再接计划。
-5. 计划有四种结局，分四栏存，不许混：pending（还没到点/还没跑）、consumed（跑过了，
-   带 result 摘要）、blocked（被闸门拦下，带 reason）、expired（关机错过，**不补跑**）。
+5. 计划有五种结局，分五栏存，不许混：pending（还没到点/还没跑）、consumed（跑过了，
+   带 result 摘要）、blocked（被闸门拦下，带 reason）、expired（关机错过，**不补跑**）、
+   never_ran（到了点、该跑，但首跑 + 重试都没跑成，带 reason 与重试快照）。
    expired 不占 min_gap / daily_cap：它本来没发生，占名额会把当天那条挤掉。
+   never_ran 与 expired 一样算"已处理"：同一天不许再排第二条夜（它也是没跑成，不重排）。
+   blocked 是"闸门拦的"，never_ran 是"该跑却没跑成"——两种没落地不能叠成一个桶。
+6. 失败的那次**不下账**：那条留在 pending，行里带夜间快照 night（第几次尝试、四步各自
+   结果、哪几步没成功），下一 tick 照快照只重跑没成功的那几步。
 
 账的形状（plans.json，不许悄悄加顶层键）：
-    {"version": 1, "pending": [行], "consumed": [行], "blocked": [行]}
+    {"version": 1, "pending": [行], "consumed": [行], "blocked": [行],
+     "expired": [行], "never_ran": [行]}
     行：{id, kind, at, day, status, note, created_at, consumed_at}
     blocked 行：{id, kind, at, day, reason, message, blocked_at}
+    never_ran 行：/ expired 行 = 原行 + {status, reason, expired_at|never_ran_at}
+    pending 行里的夜间快照：night = {"attempts": 0..n, "steps": {名字: {status, detail}},
+                                      "failed_steps": [名字]}
 """
 from __future__ import annotations
 
@@ -46,6 +55,11 @@ KINDS_KEY = "kinds"
 # 到期没执行的计划不补跑，标这一栏：它不进 pending（没人会再去执行它），
 # 也不占 min_gap / daily_cap（它本来就没发生）。
 STATUS_EXPIRED = "expired"
+# 到了点、该跑，但首跑 + 重试都没跑成：第五栏。与 expired 并列而不是并进 blocked——
+# blocked 是闸门拦的（根本没该它跑），never_ran 是真去试了、试满次数仍然没成了。
+STATUS_NEVER_RAN = "never_ran"
+# 计划行里的夜间快照：下一 tick 靠它决定"只重跑哪几步、沿用哪几步的结果"
+NIGHT_KEY = "night"
 
 
 class PlanError(ValueError):
@@ -61,7 +75,8 @@ def path(root: Any = None) -> Path:
 
 
 def _empty() -> Dict[str, Any]:
-    return {"version": VERSION, "pending": [], "consumed": [], "blocked": [], "expired": []}
+    return {"version": VERSION, "pending": [], "consumed": [], "blocked": [],
+            "expired": [], "never_ran": []}
 
 
 def load(root: Any = None) -> Dict[str, Any]:
@@ -76,7 +91,7 @@ def load(root: Any = None) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise PlanError("计划账顶层要是对象：%s" % target)
     data = _empty()
-    for key in ("pending", "consumed", "blocked", "expired"):
+    for key in ("pending", "consumed", "blocked", "expired", "never_ran"):
         rows = raw.get(key)
         data[key] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
         for row in data[key]:
@@ -114,22 +129,31 @@ def plan_ids(data: Dict[str, Any]) -> List[str]:
 
 
 def counts(data: Dict[str, Any]) -> Dict[str, int]:
+    """五栏各自几条 + total（真跑过或还没跑的那几条）。never_ran 与 expired / blocked
+    一样单独数：账上不数它，就等于"没跑成"在计数里看不见。"""
     return {"pending": len(data["pending"]), "consumed": len(data["consumed"]),
             "blocked": len(data["blocked"]), "expired": len(data["expired"]),
+            "never_ran": len(data["never_ran"]),
             "total": len(data["pending"]) + len(data["consumed"])}
 
 
 def listing(root: Any = None) -> Dict[str, Any]:
-    """GET /day/plan：pending / consumed / blocked / expired 四栏分开。
+    """GET /day/plan：pending / consumed / blocked / expired / never_ran 五栏分开。
 
     混一栏等于看不出"拦没拦""跑没跑"：blocked 是闸门拦下的，expired 是关机错过的，
-    consumed 是真跑过的——三种没落地的原因不能叠成一个桶。
+    never_ran 是该跑却没跑成的，consumed 是真跑过的——四种没落地的原因不能叠成一个桶。
     """
     data = load(root)
     return {"ok": True, "root": str(model.day_root(root)), "pending": data["pending"],
             "consumed": data["consumed"], "blocked": data["blocked"],
-            "expired": data["expired"],
+            "expired": data["expired"], "never_ran": data["never_ran"],
             "counts": counts(data), "plan_ids": plan_ids(data)}
+
+
+def night_of(row: Dict[str, Any]) -> Dict[str, Any]:
+    """计划行里的夜间快照；没有就返回空字典（＝这一步还没试过，下一次是首跑）。"""
+    snap = row.get(NIGHT_KEY)
+    return snap if isinstance(snap, dict) else {}
 
 
 def _now(now_ts: Any = None) -> datetime:
@@ -268,6 +292,10 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
         # 过期的计划不再重排（它就是那一条，重排等于偷偷补跑），但也不占闸门：
         # 它本来没发生，占着名额就等于把今天的那条挤掉。
         taken[str(row.get("id", ""))] = STATUS_EXPIRED
+    for row in data["never_ran"]:
+        # 试满次数也没跑成的那条与 expired 一样算"已处理"：同一天不许再排第二条夜。
+        # 但同样不占闸门——它没成功，占名额只是把明天那条挤掉。
+        taken[str(row.get("id", ""))] = STATUS_NEVER_RAN
     blocked_index = {str(row.get("id", "")): row for row in data["blocked"]}
 
     added: List[Dict[str, Any]] = []
@@ -374,3 +402,61 @@ def consume(ids: Iterable[str], *, root: Any = None, now_ts: Any = None,
         save(data, root)
     return {"ok": True, "consumed": moved, "missing": missing,
             "counts": counts(data), "plan_ids": plan_ids(data)}
+
+
+def note_night(ids: Iterable[str], *, root: Any = None, now_ts: Any = None,
+               nights: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """把这一次尝试的快照写进那条 pending：**状态不动、不下账**。
+
+    失败的那次留在 pending 等下一 tick——"记一行、继续、consume"等于假装跑过了，
+    那一夜的东西就被静默丢掉。快照同时是下一 tick 的输入：只重跑没成功的那几步。
+    """
+    data = load(root)
+    wanted = set(str(item) for item in (ids or []))
+    payloads = nights or {}
+    touched: List[Dict[str, Any]] = []
+    for row in data["pending"]:
+        pid = str(row.get("id"))
+        if pid in wanted and isinstance(payloads.get(pid), dict):
+            row[NIGHT_KEY] = dict(payloads[pid])
+            touched.append(row)
+    missing = sorted(wanted - {str(row.get("id")) for row in touched})
+    if touched:
+        save(data, root)
+    return {"ok": True, "noted": touched, "missing": missing, "counts": counts(data)}
+
+
+def never_ran(ids: Iterable[str], *, root: Any = None, now_ts: Any = None,
+              reasons: Optional[Dict[str, str]] = None,
+              nights: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """把试满次数的 pending 划进 never_ran（第五栏）：不补跑、不留死账、理由写进那一条。
+
+    与 expire 同一套手法：换状态、留原因、把重试快照一并带过去——事后看账就能回答
+    "哪一步、试了几次"。
+    """
+    at = model.iso(now_ts) if now_ts is not None else model.now_iso()
+    data = load(root)
+    wanted = set(str(item) for item in (ids or []))
+    reasons = reasons or {}
+    payloads = nights or {}
+    moved: List[Dict[str, Any]] = []
+    keep: List[Dict[str, Any]] = []
+    for row in data["pending"]:
+        pid = str(row.get("id"))
+        if pid in wanted:
+            gone = dict(row)
+            gone["status"] = STATUS_NEVER_RAN
+            gone["never_ran_at"] = at
+            gone["reason"] = str(reasons.get(pid, ""))
+            if isinstance(payloads.get(pid), dict):
+                gone[NIGHT_KEY] = dict(payloads[pid])
+            data["never_ran"].append(gone)
+            moved.append(gone)
+        else:
+            keep.append(row)
+    data["pending"] = keep
+    missing = sorted(wanted - {str(row.get("id")) for row in moved})
+    if moved:
+        save(data, root)
+    return {"ok": True, "never_ran": moved, "missing": missing,
+            "counts": counts(data)}

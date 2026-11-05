@@ -10,6 +10,10 @@
    到点这一段是闭环：调 night.run（四步固定顺序，每步自己兜错）→ 写夜日志 →
    把那条计划标 consumed 并带上四步状态摘要。不留给别人一条永远没人执行的死账。
    过期的那条（关机错过的夜）标 expired，**不补跑**——补跑结算的是别人的一天。
+   **失败的那次不下账**：计划留 pending，行里写下这一次的夜间快照（第几次尝试、四步
+   各自结果、哪几步没成功），下一 tick 只重跑没成功的那几步、其余沿用上次结果。
+   首跑 1 次 + 最多重试 max_retries 次（limits.json 的 night.max_retries，默认 3），
+   试满仍失败 → 进 never_ran 第五栏 + 一条 never_ran 审计，**不许静默 consume**。
    单飞：进程内 NIGHT_LOCK 非阻塞抢，抢不到就 skipped="night_running"，同一晚不跑两遍。
    **不生成任何内容**：排的只是配置里写好的钟点，日程内容归 schedule，夜的四步归 night。
 3. 换日只看 model.day_key 这一处：day_key(now) 与上次记下的不同 → rollovers + 1 并记下
@@ -35,6 +39,9 @@ STATE_FILE = "rhythm.json"
 VERSION = 1
 THREAD_NAME = "day-rhythm"
 NIGHT_KIND = "night"
+# 兜底：真正的取值在 limits.json 的 night.max_retries（首跑 1 次 + 重试这么多次）。
+# 代码里只留这一份兜底，别处不许再写第二份阈值。
+DEFAULT_MAX_RETRIES = 3
 
 # 夜只能一个人跑：tick 线程与手工 POST /day/tick 可能同时到点。
 # 非阻塞抢锁，抢不到就跳过（night.skipped = "night_running"）——同一晚绝不跑两遍。
@@ -90,6 +97,16 @@ def _save_state(data: Dict[str, Any], root: Any = None) -> Path:
 # ---- 到点之后：夜真跑并结账 ------------------------------------------------
 
 
+def max_retries(config: Optional[Dict[str, Any]]) -> int:
+    """夜最多重试几次：limits.json 的 night.max_retries，读不到就用兜底值。"""
+    entry = (config or {}).get(NIGHT_KIND)
+    entry = entry if isinstance(entry, dict) else {}
+    try:
+        return max(0, int(entry.get("max_retries", DEFAULT_MAX_RETRIES)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RETRIES
+
+
 def _night_summary(result: Dict[str, Any]) -> Dict[str, Any]:
     """夜跑完的摘要：四步各自 status + 状态计数 + failed + 落了几行。"""
     steps = result.get("steps") or {}
@@ -100,19 +117,53 @@ def _night_summary(result: Dict[str, Any]) -> Dict[str, Any]:
             "written": int(result.get("written") or 0)}
 
 
-def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
-                  brain: Any = None, heart_root: Any = None) -> Dict[str, Any]:
-    """到点的夜里：过期的那条标 expired（**不跑**），当天的那条真跑并 consume。
+def _snapshot(attempt: int, steps: Dict[str, Any], failed: List[str]) -> Dict[str, Any]:
+    """这一次尝试的夜间快照：下一次就靠它只重跑没成功的那几步、其余沿用结果。
 
-    返回 {"executed": [...], "expired": [...], "skipped": "night_running"|None}。
+    steps 里存的是那一步的**整份结果**（至少有 status / detail，外加各步自己的
+    value / tier / proposals 之类）：沿用要真的原样，砍成两栏就等于重试时把上次
+    的读数丢了。
     """
-    out: Dict[str, Any] = {"executed": [], "expired": [], "skipped": None}
+    return {"attempts": int(attempt),
+            "steps": {name: dict(item) for name, item in steps.items()},
+            "failed_steps": list(failed)}
+
+
+def _never_ran_reason(failed: List[str], attempt: int, steps: Dict[str, Any]) -> str:
+    """never-ran 的理由：哪一步、试了几次、最后一次错在哪——一句话说清。"""
+    detail = str((steps.get(failed[0]) or {}).get("detail") or "") if failed else ""
+    reason = ("该跑没跑成：%s 在 %d 次尝试（首跑 1 + 重试 %d）里都没成功"
+              % ("、".join(failed), attempt + 1, attempt))
+    if detail:
+        reason += "（最后一次：%s）" % detail
+    return reason + "；不补跑、不静默 consume（审计见 night_log.jsonl 的 never_ran 行）"
+
+
+def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
+                  brain: Any = None, heart_root: Any = None,
+                  config: Optional[Dict[str, Any]] = None,
+                  break_step: Optional[int] = None) -> Dict[str, Any]:
+    """到点的夜里：过期的那条标 expired（**不跑**），当天的那条跑并按下场决定去留。
+
+    一次尝试之后只有三种去向（都不许静默）：
+    - 全部成功 → consume（带四步摘要）；
+    - 有失败、还有重试额度（attempt < max_retries）→ **留 pending**，写下夜间快照，
+      下一 tick 只重跑没成功的那几步；
+    - 有失败、额度用完 → never_ran 第五栏 + 一条 never_ran 审计（不补跑、不假装跑过）。
+
+    返回 {"executed": [...], "retried": [...], "never_ran": [...], "expired": [...],
+          "skipped": "night_running"|None}。
+    """
+    limit = max_retries(config)
+    out: Dict[str, Any] = {"executed": [], "retried": [], "never_ran": [],
+                           "expired": [], "skipped": None}
     rows = [row for row in due_rows if row.get("kind") == NIGHT_KIND]
     if not rows:
         return out
     today = model.day_key(at)
     stale = [row for row in rows if str(row.get("day") or model.day_key(row["at"])) < today]
     for row in stale:
+        # 过期优先：换日点已过的那条不补跑、也不写 never-ran——补跑结算的是别人的一天。
         gone = plan.expire(
             [row["id"]], root=root, now_ts=at,
             reason=("过期不补：这条属于 %s，现在已经是 %s（关机错过的夜不补跑，"
@@ -128,11 +179,41 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
         return out
     try:
         for row in fresh:
-            result = night.run(at, root=root, brain=brain, heart_root=heart_root)
-            summary = _night_summary(result)
-            plan.consume([row["id"]], root=root, now_ts=at, results={row["id"]: summary})
-            out["executed"].append({"id": row["id"], "at": row["at"],
-                                    "ok": bool(result.get("ok")), "summary": summary})
+            snap = plan.night_of(row)
+            tried = bool(snap)
+            attempt = int(snap.get("attempts") or 0) + 1 if tried else 0
+            # 快照说"没成功的那几步"就只重跑它们；空着就当没有快照、四步都跑一遍——
+            # 宁可多跑一步，也不许凭一条空列表假装跑过。
+            only = (list(snap.get("failed_steps") or []) or None) if tried else None
+            carry = (snap.get("steps") or {}) if tried else {}
+            result = night.run(at, root=root, brain=brain, heart_root=heart_root,
+                               break_step=break_step, only=only, carry=carry,
+                               attempt=attempt)
+            failed = list(result.get("failed") or [])
+            if not failed:
+                summary = _night_summary(result)
+                plan.consume([row["id"]], root=root, now_ts=at, results={row["id"]: summary})
+                out["executed"].append({"id": row["id"], "at": row["at"], "attempt": attempt,
+                                        "ok": True, "summary": summary})
+                continue
+            snapshot = _snapshot(attempt, result.get("steps") or {}, failed)
+            if attempt < limit:
+                plan.note_night([row["id"]], root=root, now_ts=at,
+                                nights={row["id"]: snapshot})
+                out["retried"].append({"id": row["id"], "at": row["at"], "attempt": attempt,
+                                       "ok": False, "failed_steps": failed,
+                                       "next_attempt": attempt + 1,
+                                       "max_retries": limit,
+                                       "failed": _night_summary(result)})
+                continue
+            reason = _never_ran_reason(failed, attempt, result.get("steps") or {})
+            plan.never_ran([row["id"]], root=root, now_ts=at,
+                           reasons={row["id"]: reason}, nights={row["id"]: snapshot})
+            night.audit_never_ran(at, root=root,
+                                  day=str(row.get("day") or model.day_key(row["at"])),
+                                  attempt=attempt, failed_steps=failed, reason=reason)
+            out["never_ran"].append({"id": row["id"], "at": row["at"], "attempt": attempt,
+                                     "failed_steps": failed, "reason": reason})
     finally:
         NIGHT_LOCK.release()
     return out
@@ -143,11 +224,13 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
 
 def tick(now_ts: Any = None, *, root: Any = None,
          config: Optional[Dict[str, Any]] = None, brain: Any = None,
-         heart_root: Any = None) -> Dict[str, Any]:
+         heart_root: Any = None, break_step: Optional[int] = None) -> Dict[str, Any]:
     """一次 tick：排当天（幂等）→ 数到点 → 到点的夜真跑并结账 → 算下一次 → 换日记账。
 
-    "到夜按固定顺序调四步"就是这一条路：tick 自己排、自己执行、自己 consume。
+    "到夜按固定顺序调四步"就是这一条路：tick 自己排、自己执行、自己下账。
     brain / heart_root 是注入给 night.run 的那两个根（缺省由各器官走自己的默认根）。
+    break_step 与 night.run 的同名参数同义，**只给验收用**（让第 N 步当场抛错，
+    看失败的那次是不是留 pending、下一 tick 是不是只重跑那一步）。
     """
     cfg = config or model.load_limits()
     at = model.iso(now_ts) if now_ts is not None else model.now_iso()
@@ -164,7 +247,8 @@ def tick(now_ts: Any = None, *, root: Any = None,
     scheduled = plan.ensure(at, root=root, config=cfg)
     ledger = plan.load(root)
     due_rows = plan.due(at, root=root, data=ledger)
-    nightly = _settle_night(due_rows, at, root=root, brain=brain, heart_root=heart_root)
+    nightly = _settle_night(due_rows, at, root=root, brain=brain, heart_root=heart_root,
+                            config=cfg, break_step=break_step)
     ledger = plan.load(root)   # 夜跑完账变了（consumed / expired），重读一遍再算
     ahead = plan.next_at(at, root=root, data=ledger)
     every = int(cfg["tick_seconds"])
@@ -178,7 +262,8 @@ def tick(now_ts: Any = None, *, root: Any = None,
         "interval_seconds": every,
         "due": [row.get("id", "") for row in due_rows],
         "due_plans": due_rows,
-        # 到点的夜怎么处置了：executed（真跑完并 consume）/ expired（过期不补）/ skipped（有人在跑）
+        # 到点的夜怎么处置了：executed（跑成了并 consume）/ retried（失败了，留 pending 等重试）/
+        # never_ran（试满次数仍失败，进第五栏 + 一条审计）/ expired（过期不补）/ skipped（有人在跑）
         "night": nightly,
         "next_at": ahead,
         # 没有待办就不是"没有下一次"，而是"下一次按节律再问一遍"：纯算术，不猜内容

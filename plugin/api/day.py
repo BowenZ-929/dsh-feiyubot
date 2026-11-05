@@ -100,6 +100,20 @@ def _now(params: Mapping[str, str]) -> Optional[str]:
     return text
 
 
+def _break_step(params: Mapping[str, str], body: Mapping[str, Any]) -> Optional[int]:
+    """验收注入：?break_step=N（或 body 里的同名键）让夜的第 N 步当场抛错。
+
+    与 night.run 的 break_step 同义，**只给验收用**：真跑时永远不传。坏值当没传。
+    """
+    raw = _value(body, params, "break_step")
+    if raw is None:
+        return None
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 def _int(params: Mapping[str, str], key: str, default: Optional[int] = None) -> Optional[int]:
     """整数参数；坏值回默认，不炸。"""
     raw = (params or {}).get(key)
@@ -198,17 +212,21 @@ def unconnected_routes() -> List[str]:
 def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
     """/day/tick：手工 tick 一次（幂等；支持 ?now=）。
 
-    到点的夜在这里真跑（四步固定顺序）并 consume 那条计划：手工触发与节律线程
-    走同一条路，单飞锁挡住"同一晚跑两遍"。
+    到点的夜在这里真跑（四步固定顺序）并结账：手工触发与节律线程走同一条路，
+    单飞锁挡住"同一晚跑两遍"。失败的那次不下账（留 pending 等下一 tick 只重跑失败步），
+    试满次数仍失败的进 never_ran 栏——返回体的 night 段里 executed / retried /
+    never_ran 三个列表都摆出来，任何"没跑成"的路都看得见。
+    ?break_step=N 只给验收用（与 night.run 的同名参数同义）。
     """
     roots = _roots(params)
     payload = rhythm_mod.tick(_now(params), root=roots["root"], brain=brain,
-                              heart_root=roots["heart_root"])
+                              heart_root=roots["heart_root"],
+                              break_step=_break_step(params, body))
     return 200, payload
 
 
 def _plan(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
-    """/day/plan：pending / consumed / blocked / expired 四栏分开。"""
+    """/day/plan：pending / consumed / blocked / expired / never_ran 五栏分开。"""
     return 200, plan_mod.listing(_root(params))
 
 
@@ -229,7 +247,11 @@ def _log(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Resu
 
 
 def _schedule(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
-    """/day/schedule：今日日程（懒导入 organs.day.schedule.today）。"""
+    """/day/schedule：今日日程（懒导入 organs.day.schedule.today）。
+
+    只读：?now= 与其它器官的只读端点一样可注入时刻（day / slot 都跟着这个时刻走），
+    它不结算心、不落日志——要把这一抽定下来走 POST /day/schedule/draw。
+    """
     module = _module("organs.day.schedule")
     roots = _roots(params)
     return 200, dict(_invoke(module, "today", now_ts=_now(params), **roots))

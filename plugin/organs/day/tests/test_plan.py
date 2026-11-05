@@ -272,5 +272,68 @@ class EnsureTest(unittest.TestCase):
         self.assertEqual(0, out["counts"]["total"])
 
 
+class NeverRanTest(unittest.TestCase):
+    """never_ran 是第五栏：该跑却没跑成，与 expired 一样算"已处理"，但不占闸门。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+
+    def _night_row(self):
+        plan.add([{"kind": "night", "at": at("2026-11-05T03:30:00")}], root=self.root,
+                 now_ts=at("2026-11-05T03:00:00"))
+        return plan.listing(self.root)["pending"][0]
+
+    def test_note_night_keeps_the_row_pending(self):
+        row = self._night_row()
+        snap = {"attempts": 0, "steps": {"brain_decay": {"status": "failed", "detail": "boom"}},
+                "failed_steps": ["brain_decay"]}
+        out = plan.note_night([row["id"]], root=self.root, now_ts=at("2026-11-05T03:31:00"),
+                              nights={row["id"]: snap})
+        self.assertEqual(1, len(out["noted"]))
+        listing = plan.listing(self.root)
+        self.assertEqual(1, len(listing["pending"]), "失败的那次不下账")
+        self.assertEqual([], listing["consumed"])
+        kept = listing["pending"][0]
+        self.assertEqual(plan.STATUS_PENDING, kept["status"])
+        self.assertEqual(snap, plan.night_of(kept))
+        self.assertEqual(["brain_decay"], kept["night"]["failed_steps"])
+
+    def test_never_ran_moves_the_row_to_the_fifth_column_with_its_reason(self):
+        row = self._night_row()
+        snap = {"attempts": 3, "steps": {}, "failed_steps": ["brain_decay"]}
+        plan.never_ran([row["id"]], root=self.root, now_ts=at("2026-11-05T03:40:00"),
+                       reasons={row["id"]: "该跑没跑成：brain_decay 在 4 次尝试里都没成功"},
+                       nights={row["id"]: snap})
+        listing = plan.listing(self.root)
+        self.assertIn("never_ran", listing, "第五栏要出现在 /day/plan 的返回里")
+        self.assertEqual([], listing["pending"])
+        self.assertEqual([], listing["blocked"], "never_ran 不是 blocked：它不是闸门拦的")
+        self.assertEqual(1, len(listing["never_ran"]))
+        gone = listing["never_ran"][0]
+        self.assertEqual(plan.STATUS_NEVER_RAN, gone["status"])
+        self.assertTrue(gone["never_ran_at"])
+        self.assertIn("brain_decay", gone["reason"])
+        self.assertIn("4 次尝试", gone["reason"])
+        self.assertEqual(snap, plan.night_of(gone))
+
+    def test_never_ran_row_is_not_scheduled_again(self):
+        row = self._night_row()
+        plan.never_ran([row["id"]], root=self.root, reasons={row["id"]: "没跑成"})
+        again = plan.add([{"kind": "night", "at": at("2026-11-05T03:30:00")}],
+                         root=self.root, now_ts=at("2026-11-05T04:00:00"))
+        self.assertEqual([], again["added"], "同一天不许再排第二条夜")
+        self.assertEqual([row["id"]], again["duplicates"])
+        self.assertEqual(1, len(plan.listing(self.root)["never_ran"]))
+
+    def test_never_ran_does_not_take_a_slot_or_a_gap(self):
+        row = self._night_row()
+        plan.never_ran([row["id"]], root=self.root, reasons={row["id"]: "没跑成"})
+        other = plan.add([{"kind": "night", "at": at("2026-11-05T03:35:00")}],
+                         root=self.root, now_ts=at("2026-11-05T04:00:00"),
+                         config={"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 1,
+                                 "kinds": {"night": {"at": "03:30", "daily_cap": 1}}})
+        self.assertEqual(1, len(other["added"]), "没跑成的那条不占名额：明天那条照排")
+
+
 if __name__ == "__main__":
     unittest.main()
