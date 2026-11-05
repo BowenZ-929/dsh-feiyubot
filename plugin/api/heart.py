@@ -1,7 +1,7 @@
-"""心的十条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
+"""心的十一条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
 
 判据（architecture §9.2：心与脑只能看）：
-- 十条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
+- 十一条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
 - 合成只有一处：/heart/effective 的三块（mood / axes / voice）由
   organs/heart/effective.py 出；/heart/overview 的 effective 块、/heart/mood 的
   两个数与档位词、/heart/engage 的 mood_now 都从那里取，本模块不自己换算档位。
@@ -36,6 +36,7 @@ from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
 from organs.heart import ports as ports_module
+from organs.heart import refuse as refuse_module
 from organs.heart import sleep as sleep_module
 
 from .core import Result
@@ -51,6 +52,7 @@ HEART_ROUTES = {
     "/heart/effective": "GET",
     "/heart/pending": "GET",
     "/heart/sleep": "GET",
+    "/heart/refusals": "GET",
 }
 
 # /heart/offset 每轴对外只承诺这四个键；offset 模块以后多出来的键原样透传。
@@ -127,6 +129,22 @@ def _flag(params: Mapping[str, str], key: str) -> bool:
     """0/1 这类开关；只有明确写成真才算真。"""
     raw = (params or {}).get(key)
     return str(raw).strip().lower() in TRUTHY if raw is not None else False
+
+
+def _topics(params: Mapping[str, str]) -> List[str]:
+    """params["topics"]：逗号分隔的话题名，空串 = 一个话题都不查。
+
+    中文逗号也认（同一个参数两种写法是人手会打的差异，不是两件事）；顺序照人给的，
+    重复的只留第一次——同一个话题查两遍读的是同一行，没有第二份答案。
+    """
+    raw = (params or {}).get("topics")
+    text = str(raw) if raw is not None else ""
+    names: List[str] = []
+    for piece in text.replace("，", ",").split(","):
+        name = piece.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _who(params: Mapping[str, str]) -> str:
@@ -270,7 +288,22 @@ def _baseline_payload(root: Optional[Path], now: Optional[str]) -> Dict[str, Any
     }
 
 
-# ---- 十个端点 ------------------------------------------------------------
+def _refusals_block(root: Optional[Path], now: Optional[str]) -> Dict[str, Any]:
+    """overview 的 refusals 块：额度 + 冷却中的话题（每条带剩余分钟）。
+
+    话题只能从共用词表枚举：refuse 对外的读口只有 check(topics)，它按"你问的那些"
+    逐个作答，没有"把在冷却的话题都列出来"的第二个入口。而拒过的话题本来就必须取自
+    脑的词表（ingest 就是这么拦的），所以词表枚举 = 全部可能被拒过的话题。
+    记录里没有的不在 cooling 里，已经到期的不在 cooling 里——这一块只留冷却中的那几条，
+    整本 refusals 一个字节都不搬上面板（"她拒过什么"是账，不是面板上的清单）。
+    """
+    readout = refuse_module.check(refuse_module.vocabulary(), root=root, now=now)
+    cooling = [item for item in readout["items"] if item["cooling"]]
+    return {"quota": readout["quota"], "cooling": list(readout["cooling"]),
+            "items": cooling}
+
+
+# ---- 十一个端点 ----------------------------------------------------------
 
 
 def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
@@ -301,6 +334,8 @@ def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
     # 精力也复用上面那一份读数——同一个数，不各读各的。
     payload["intents"] = _intents(root, now, ports_module.from_brain(brain), who,
                                   energy_read)
+    # 拒绝记录块：额度 + 冷却中的话题与剩余分钟（纯读，check 一个字段都不写盘）。
+    payload["refusals"] = _refusals_block(root, now)
     return 200, payload
 
 
@@ -393,6 +428,21 @@ def _sleep_route(params: Mapping[str, str]) -> Result:
     return 200, payload
 
 
+def _refusals_route(params: Mapping[str, str]) -> Result:
+    """/heart/refusals：这些话题冷不冷、还差几分钟、今天额度还剩几次。**纯读。**
+
+    只调 refuse.check：冷却只比 until 与 now 的先后，不读 mood、不读 energy，也没有
+    "心情好了就提前解除"的参数（拒绝过就是拒绝过，时间到了才算完）。
+    topics 为空时 items=[]，cooling 也跟着空（没问的话题没有答案），但 quota 照给：
+    额度是今天的账，不靠查询串才有。
+    """
+    root, now = _root(params), _now(params)
+    payload = refuse_module.check(_topics(params), root=root, now=now)
+    payload.update({"ok": True, "readonly": True, "agent": "heart",
+                    "status": STATUS_CONNECTED})
+    return 200, payload
+
+
 def _engage(params: Mapping[str, str], brain: Any) -> Result:
     """/heart/engage：干跑一次判决——只调 engage.decide，不写日志、不说话。
 
@@ -443,7 +493,7 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
 
 def dispatch(route: str, params: Mapping[str, str],
              store: Any = None, brain: Any = None) -> Result:
-    """心的十条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
+    """心的十一条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
 
     只收 ValueError 这一种：查询串里的时间戳坏了一个（now / interrupted）就走 400，
     把坏值原样带出来——失败必须响，但响成一条能读的 400，不是一条 traceback。
@@ -478,4 +528,6 @@ def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Resul
         return _pending_route(params)
     if route == "/heart/sleep":
         return _sleep_route(params)
+    if route == "/heart/refusals":
+        return _refusals_route(params)
     return 404, {"ok": False, "message": "没有这个端点：%s" % route}

@@ -57,6 +57,8 @@ REQUIRED_ROUTES = (
     ("GET", "/heart/pending"),
     # 第四轮接线段：/heart/sleep 把睡眠账搬上端点（谁加路由谁登记）
     ("GET", "/heart/sleep"),
+    # 第五轮接线段：/heart/refusals 给拒绝记录开了一条只读查询（谁加路由谁登记）
+    ("GET", "/heart/refusals"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
@@ -266,6 +268,12 @@ class PanelApiTest(unittest.TestCase):
             self.assertIn(key, payload, "/heart 少了读数：%s" % key)
         for method in ("POST", "PUT", "DELETE"):
             self.assertEqual(405, self._call(method, "/heart", {})[0], "%s /heart" % method)
+        # 拒绝记录的查询侧也是只读：写方法一律 405，措辞沿用心专属那一句。
+        for method in ("POST", "PUT", "DELETE"):
+            status, payload = self._call(method, "/heart/refusals", {})
+            self.assertEqual(405, status, "%s /heart/refusals" % method)
+            self.assertIn("只收 GET", payload["message"])
+            self.assertIn("人不能改心", payload["message"])
 
         status, payload = self._call("GET", "/brain")
         self.assertEqual(200, status)

@@ -1,7 +1,13 @@
-"""嘴的四个只读干跑端点：把三批的库（切分+节奏、称呼、语气档、闸）接到 HTTP 上。
+"""嘴的四个只读干跑端点：把三批的库（切分+节奏、称呼、语气档、闸、拒绝、长度）接到 HTTP 上。
 
-四条全是 GET，而且**只干跑**：算一遍给人看，不发出去、不落盘。本文件没有任何写盘路径，
-也没有 POST/PUT/DELETE 分支——非 GET 由 core.handle 统一回 405，措辞说明「嘴的干跑端点只读」。
+四条全是 GET，而且**只干跑**：算一遍给人看，不发出去。没有 POST/PUT/DELETE 分支——
+非 GET 由 core.handle 统一回 405，措辞说明「嘴的干跑端点只读」。
+
+**干跑也会记账**（写在明处，别让下一个人以为 GET 一定没有副作用）：三本账的写盘全在
+organs/mouth 的 record 里（drops.record / refusal.record / style.record），本文件只是那股
+「时刻 + 路径」的供应方——路径口径三处一致（MOUTH_TRACE_DIR > 包内 trace/），时刻一律取
+datetime.now()（库层一个都不取时钟）。本文件自己不碰文件：没有 open 调用、没有 mkdir、
+没有 JSON 写盘，所以账本写不进去时的 500 一定是那三处 record 抛上来的。
 
 /mouth/address 与 /mouth/tone 还要认一个新查询参数 rename=<新叫法>：这一轮本人要求换个叫法，
 称呼**当场就换**（退到中性等于没听人话），返回里加 renamed 与 memory_draft 那一节——
@@ -20,6 +26,13 @@ mood/energy/engage/offset 不给就是 None，返回里的 heart_source 会如�
 本轮**没有重写器**：/mouth/gate 命中就弃（decision="dropped"），api 层不伪造一次改写，
 也不把命中的句子当 pass 放出去。
 
+/mouth/gate 这一轮扩了四个**可选**参数（inject / refuse / tier / hard_cap），**没有新端点**：
+不给就与从前逐字一致（只多一节 audit）。判的顺序钉死并写进 _gate 的 docstring：
+**拒绝 → 闸（含照抄审计）→ 目标长度**——先决定说不说、再决定这么说行不行、最后才管长短。
+三节各自交代：audit 恒在（status 为 audit-unavailable 时原样透出，不许显示成通过）、
+refusal 只在给了 refuse 时有、style 只在给了 tier 时有（这一轮没有重写器，超目标只能如实报
+「改不了、放行并记账」，rewrites 恒为 0）。
+
 弃言不再是「发了个空串就没了」：闸把「谁拦的、为什么」交给 api 注入的 sink，api 把它记进
 organs/mouth/drops.py 的账本（时刻在这里给，写盘只在 drops 里），返回里固定带一节 drops。
 **pass 的那次也带**——人要能看见「今天已经弃过几次」，而不是只有被弃那次才看得见；
@@ -31,10 +44,11 @@ store=None 时 /mouth/tone 也回未接入——不 500，也不假装有读数�
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
-from organs.mouth import address, drops, gate, pace, tone, warehouse
+from organs.mouth import address, audit, drops, gate, pace, refusal, style, tone, warehouse
 from organs.mouth import PolicyMiss, WarehouseBroken, WarehouseMiss
 from organs.mouth.split import split as split_text
 from organs.soul import SoulLoadError
@@ -49,6 +63,19 @@ MOUTH_ROUTES = {
 }
 AGENT = "mouth"
 SEED_FALLBACK = "dry-run"   # 没给 seed 时的兜底种子：只为「同一请求两次拿到同一组间隔」，不是数值
+
+INJECT_HINT = "inject 要一个 JSON 数组（URL 编码），形如 [{\"kind\": \"魂\", \"text\": \"…\"}]"
+
+# /mouth/gate 的那句 note：第一段与从前逐字相同（不给新参数时返回照旧），第二段只在给了新参数时追加。
+GATE_NOTE = ("这一轮没有重写器：命中就弃（decision=dropped），api 层不代写一次；"
+             "弃掉的 text 是空串，不会被当成 pass 发出去。drops 这一节是弃言账本的读数："
+             "today 是今天弃了几次（pass 的那次也照报），exists=false 表示账本还没建、"
+             "errors 是读不出来的坏行数；disabled_ids 是这次被停用、没参与匹配的条款。")
+GATE_NOTE_MORE = ("另外三节按「拒绝 → 闸（含照抄审计）→ 目标长度」的顺序判：audit 是照抄审计的读数"
+                  "（status 不是 ok 就是没真的比过，audit-unavailable 不许当成通过）；refusal 只在"
+                  "给了 refuse 时有，且 HTTP 这层没有心，所以 sent=false、事件照旧进 refuse.jsonl；"
+                  "style 只在给了 tier 时有，这一轮没有重写器，超目标只能如实报改不了。"
+                  "干跑也会记账：三本账（drops / refuse / style）都吃 MOUTH_TRACE_DIR。")
 
 
 def dispatch(route: str, params: Mapping[str, str], store: Any, brain: Any) -> Result:
@@ -164,26 +191,100 @@ def _tone(params: Mapping[str, str], store: Any, brain: Any) -> Result:
 
 
 def _gate(params: Mapping[str, str]) -> Result:
-    """过闸干跑：命中返回那条条款与一句人话原因；这一轮没有重写器，命中就弃。
+    """过闸干跑：拒绝 → 闸（含照抄审计）→ 目标长度；命中就弃，三本账照记。
 
-    弃掉的那一句会留在账本里：闸只叫注入的 sink 报「谁拦的、为什么」，时刻与写盘都在这一层
-    （核里不取时钟）。所以返回里固定带一节 drops，**pass 的那次也带**——今天已经弃过几次、
-    最近一次命中哪条、账本在不在、有没有读不出来的坏行，四件事分开报。
-    账本写不进去就照实回 500（记账失败也是失败，不许当成「今天 0 次」）。
+    **顺序钉死**：先决定说不说（refuse）、再决定这么说行不行（闸 + 照抄审计）、最后才管长短
+    （style）。拒绝排在闸前面，是因为「这句要不要说」与「这样说合不合格」是两件事；长度垫在
+    最后，是因为一句被弃掉的话再短也没意义。
+
+    四个新参数都**可选**，都不给时返回与从前逐字一致（只多一节 audit）：
+
+    - inject：URL 编码的 JSON 数组 [{"kind": "魂", "text": "…"}]，交给照抄审计去比。
+      解析失败不是 500、也不静默当成「没给」：400 说清「inject 要一个 JSON 数组」；
+      数组里某一项的 kind 不认识由 audit 抛 AuditBroken，400 把库的报错原文带出来
+      （未知 kind 不许当成设定类静默从严）。
+    - refuse：topic / mood / nobody（数据里那三种形状；完整名 refused-topic 也认）。给了就走
+      拒绝这条路，说法取自 organs/mouth/data/refusal.json，**这句同样过闸**：命中即弃（弃了
+      text 是空串，照旧进弃言账本）。拒绝不要求 text——拒了就没有原文可言，那时 text 一概不看。
+    - tier：1..4，嘴的目标档位（与 /mouth/tone 的 tone.tier 同一套档）；hard_cap：核给的字数上限。
+      两个可以只给一个：只给 tier 就是「核没给上限」，上限取这句自己的字数（于是 over_hard_cap
+      恒为 false——不拿嘴的目标区间冒充核的上限）；**只给 hard_cap 不给 tier 是 400**：
+      没档位就没有目标区间，别猜。
+
+    三节各自交代：
+
+    - audit **恒在**：status 为 "audit-unavailable" 时原样透出，**不许显示成通过**——没拿到
+      注入原文就是没比过，「没比过」与「比过了、没在复述」是两件事，混一起就等于替她背了一次
+      没人做过的检查。
+    - refusal 只在给了 refuse 时有：{text, shape, full_name, event, sent, gate_decision, reason}。
+      **HTTP 这层没有心**，所以不往 refusal 里注入 refuse_sink（sent=False 如实报），但事件照旧
+      由 refusal.record 落进 refuse.jsonl：她拒了这件事，不因为出口还没有心就不记账。
+    - style 只在给了 tier 时有：{decision, target_lo, target_hi, chars, rewrites, over_hard_cap,
+      reason}。**这一轮没有重写器**（rewrite=None），所以超目标只能如实报「改不了、放行并记账」，
+      api 层不伪造一次改写（rewrites 恒为 0）；超硬上限也不截断，只把 over_hard_cap 举起来交给核。
+
+    弃言那一节 drops 与从前一样，**pass 的那次也带**（今天弃过几次、最近一次命中哪条、账本在不在、
+    有没有读不出来的坏行，四件事分开报）。
+
+    **干跑也会记账**，这是事实，不是可以忘掉的实现细节：drops 走闸的 sink、refuse 走
+    refusal.record、style 走 style.record，三本账都吃 MOUTH_TRACE_DIR。任何一处写不进去都照实回
+    500——记账失败也是失败，不许当成「今天 0 次」。
+
+    长度判的是**最后要发出去的那句**：闸弃掉时它已经是空串，长度那一节就按空串判（chars=0、
+    decision="pass" 是「空串没有超目标」的意思，不是「这句合格」）——长度这一层不替闸改口径。
     """
+    refuse = (params.get("refuse") or "").strip()
     text = _text(params)
-    if text is None:
+    if text is None and not refuse:
         return _missing_text("/mouth/gate")
+    try:
+        inject = _inject(params)
+    except ValueError as exc:
+        return _bad(str(exc))
+    tier = (params.get("tier") or "").strip()
+    try:
+        hard_cap = _whole(params.get("hard_cap"), "hard_cap")
+    except ValueError as exc:
+        return _bad(str(exc))
+    if hard_cap is not None and not tier:
+        return _bad("hard_cap 给了却没给 tier：没档位就没有目标区间，给 hard_cap 必须连 tier 一起给"
+                    "（两个都给，或者只给 tier）——档位不许猜")
     trace = drops.path_of()
     today = _day()
+    now = datetime.now()
+    refused = None
     try:
         clauses = warehouse.load("clauses").get("clauses")
-        verdict = gate.enforce(text, clauses, None, _sink(trace))   # rewrite=None：这一轮没有重写器
+        if refuse:
+            book = warehouse.load("refusal")
+            # 这一遍只取说法、事件与那句人话：不给 sink，所以不记账（记账归下面那一遍闸）
+            refused = refusal.enforce(refuse, table=book, clauses=clauses, rewrite=None,
+                                      refuse_sink=None, drop_sink=None, now=now)
+            spoken = refusal.say(refuse, table=book)
+        else:
+            spoken = text
+        # 唯一一遍闸：条款 + 照抄审计都在这，弃言也只在这里记一次
+        verdict = gate.enforce(spoken, clauses, None, _sink(trace), inject=inject)
+        if refused is not None:
+            refusal.record(refusal.path_of(), refused.event, False)   # sent=False：这一层没有心
         ledger = drops.report(trace, today)
+    except (audit.AuditBroken, refusal.RefusalBroken) as exc:
+        return _bad(str(exc))                 # 注入段与拒绝形状坏掉是调用方的事：400，不 500
     except (WarehouseMiss, WarehouseBroken, gate.ClauseBroken, OSError) as exc:
         return _broken(exc)
+    counted = None
+    if tier:
+        try:
+            target = warehouse.load("style_target")
+            counted = style.apply(verdict.text, tier,
+                                  len(verdict.text) if hard_cap is None else hard_cap,
+                                  table=target, rewrite=None, sink=_style_sink())
+        except style.StyleBroken as exc:
+            return _bad(str(exc))             # 档位不认识、上限不是数：同样是调用方的事
+        except (WarehouseMiss, WarehouseBroken, OSError) as exc:
+            return _broken(exc)
     hit = verdict.hits[0] if verdict.hits else None
-    return 200, {
+    payload = {
         "ok": True,
         "readonly": True,
         "agent": AGENT,
@@ -195,11 +296,16 @@ def _gate(params: Mapping[str, str]) -> Result:
         "rewriter": False,
         "disabled_ids": verdict.disabled,
         "drops": ledger,
-        "note": "这一轮没有重写器：命中就弃（decision=dropped），api 层不代写一次；"
-                "弃掉的 text 是空串，不会被当成 pass 发出去。drops 这一节是弃言账本的读数："
-                "today 是今天弃了几次（pass 的那次也照报），exists=false 表示账本还没建、"
-                "errors 是读不出来的坏行数；disabled_ids 是这次被停用、没参与匹配的条款。",
+        "note": GATE_NOTE,
+        "audit": _audit_section(verdict.audit),
     }
+    if refused is not None:
+        payload["refusal"] = _refusal_section(refused, verdict)
+    if counted is not None:
+        payload["style"] = _style_section(counted)
+    if inject is not None or refuse or tier:
+        payload["note"] = GATE_NOTE + GATE_NOTE_MORE
+    return 200, payload
 
 
 def _sink(trace: Any) -> Callable[[str, str], None]:

@@ -1,4 +1,4 @@
-"""心的人可读自检：python3 -m organs.heart.cli <card|energy-day|sleep|mood-praise3|gates|intent|pending|window|all>。
+"""心的人可读自检：python3 -m organs.heart.cli <card|…|refuse|all>（十段，见 SECTIONS）。
 
 只做演示与取证，不是产品入口：每条命令都把数据根指到 tempfile.mkdtemp() 的临时目录，
 第一行就把这个路径打印出来——**仓里的 data 一个字节都不碰**。
@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -26,10 +28,11 @@ from organs.heart import model
 from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
+from organs.heart import refuse as refuse_module
 from organs.heart import sleep as sleep_module
 
 SECTIONS = ("card", "energy-day", "sleep", "mood-praise3", "gates", "intent", "pending",
-            "window")
+            "window", "refuse")
 
 # 三连夸的期望值：写成字面量，不按公式现算——现算就等于拿实现给它自己判卷。
 PRAISE_EXPECTED = (64.0, 67.3, 70.1)
@@ -397,10 +400,85 @@ def demo_window(root: Path) -> None:
           % engage_module.WINDOW_MIN)
 
 
+# ---- refuse：三连拒 → 额度挡下第 4 次 → 心情升两档也不解除 ------------------
+
+
+def _cool_hours(got: Dict[str, Any]) -> float:
+    """这一次的冷却小时数：since → until（从头算，不叠在上一次的 until 上）。"""
+    return round(model.hours_between(got["since"], got["until"]), 1)
+
+
+def demo_refuse(root: Path) -> None:
+    """拒绝记录三幕：三连拒 → 第 4 次被额度挡下且文件一字未改 → 心情升两档也不解除。
+
+    ① 同一天拒同一个话题三次：count 逐次 +1，冷却按 growth 变长（12 / 18 / 27 小时，
+       都从头算、封顶 168 小时）；
+    ② 当天第 4 次：额度闸在写盘之前，回 quota-exhausted，refusals.json 的 sha256 未变
+       ——"今天拒不动了"这句话一个字节都不写；
+    ③ 心情先被两次冷落压到「偏冷」，再连投 praise 升两档到「偏热」：冷却一分不减，
+       只有 now 越过 until 才解除——冷却只由时间解除是设计，不是巧合。
+    """
+    _root_note(root)
+    topic = "医院"
+    state_path = root / refuse_module.REFUSALS_FILE
+    quota = int(refuse_module.DEFAULT_CONFIG["daily_quota"])
+    print("  ① 同一天拒同一个话题 %d 次（额度 %d 次/天；冷却 %g 小时 × 增长 %g，封顶 %g 小时）："
+          % (quota, quota, float(refuse_module.DEFAULT_CONFIG["cooldown_h"]),
+             float(refuse_module.DEFAULT_CONFIG["growth"]),
+             float(refuse_module.DEFAULT_CONFIG["max_cooldown_h"])))
+    last: Dict[str, Any] = {}
+    for index in range(quota):
+        at = _stamp(5, 9 + index)
+        last = refuse_module.ingest(topic, "refused-topic", root=root, now=at)
+        print("    第 %d 次 @ %s：ok=%s topic=%s count=%d until=%s → 冷却 %.1f 小时"
+              "（今日额度 %d/%d）"
+              % (index + 1, at, last["ok"], last["topic"], last["count"], last["until"],
+                 _cool_hours(last), last["used_today"], last["quota"]))
+
+    before_sha = hashlib.sha256(state_path.read_bytes()).hexdigest()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fourth = refuse_module.ingest(topic, "refused-topic", root=root,
+                                      now=_stamp(5, 12))
+    after_sha = hashlib.sha256(state_path.read_bytes()).hexdigest()
+    print("  ② 当天第 4 次 @ %s：ok=%s code=%s message=%s"
+          % (_stamp(5, 12), fourth["ok"], fourth["code"], fourth["message"]))
+    for item in caught:
+        print("     那一行 WARN：%s" % item.message)
+    print("     refusals.json sha256 %s… → %s…（未变=%s）"
+          % (before_sha[:16], after_sha[:16], before_sha == after_sha))
+
+    at = _stamp(5, 12, 30)
+    start = mood_module.read(root, at)
+    for who in ("甲", "乙"):
+        mood_module.apply_event("cold", root=root, now=at, who=who)
+    lowered = mood_module.read(root, at)
+    ladder: List[str] = []
+    for who in ("丙", "丁", "戊", "己", "庚", "辛", "壬", "癸", "子"):
+        got = mood_module.apply_event("praise", root=root, now=at, who=who)
+        ladder.append("%.1f(%s)" % (got["after"], got["tier"]))
+    raised = mood_module.read(root, at)
+    print("  ③ 心情先被两次冷落压下去（%s %.1f %s → %.1f %s），再连投 %d 次 praise："
+          % (at, start["now"], start["tier"], lowered["now"], lowered["tier"],
+             len(ladder)))
+    print("     %s" % " / ".join(ladder))
+    print("     档位升两档：%s → %s（mood 只写 mood 自己的账）"
+          % (lowered["tier"], raised["tier"]))
+
+    inside = refuse_module.check([topic], root=root, now=at)["items"][0]
+    print("  check @ %s（心情已经变了）：cooling=%s 剩余 %.1f 分钟，第 %d 次，理由 %s"
+          % (at, inside["cooling"], inside["remaining_min"], inside["count"],
+             inside["reason"]))
+    beyond = model.iso(model.parse_ts(last["until"]) + timedelta(minutes=1))
+    released = refuse_module.check([topic], root=root, now=beyond)["items"][0]
+    print("  now 越过 until（%s → %s）：cooling=%s 剩余 %.1f 分钟——冷却只由时间解除。"
+          % (last["until"], beyond, released["cooling"], released["remaining_min"]))
+
+
 DEMOS = {"card": demo_card, "energy-day": demo_energy_day,
          "sleep": demo_sleep, "mood-praise3": demo_mood_praise3,
          "gates": demo_gates, "intent": demo_intent,
-         "pending": demo_pending, "window": demo_window}
+         "pending": demo_pending, "window": demo_window, "refuse": demo_refuse}
 
 
 def _run_section(index: int, total: int, name: str) -> None:

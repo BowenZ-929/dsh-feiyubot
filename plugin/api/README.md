@@ -112,6 +112,26 @@ cd /Users/bowen/NewQQAgent/plugin && python3 -m api.devserver --root organs/soul
 
 **用终端跑，不要挂在别人（DSH 会话）的进程树下面**：把这条命令交给 DSH 里起的后台任务，宿主一重启就把核一起带走，面板随即变成 `核没有应答（127.0.0.1:8787）: ECONNREFUSED`。在自己终端里跑，它活到你自己关掉为止。
 
+### 核可以由人独立起，壳只在探活失败时才 spawn
+
+壳（`shell/src/core.ts`）**不抢人起的核**：启动时先 GET `/soul/check`，探到健康就一个进程都不起，只在日志里写一行「核已经在跑（人起的优先），壳不重复起」，然后继续每 5 秒探活。
+
+所以「核挂了宿主没把它拉起来」要看日志里有没有那一行，别一律当故障：
+
+| 壳日志 | 含义 | 该怎么办 |
+| --- | --- | --- |
+| 有「核已经在跑（人起的优先），壳不重复起」 | 情况二：壳正确地让位给人起的实例 | 正常，不用管 |
+| 有「核没在跑，壳起了一个」+ 之后还有退避重启行 | 情况一：壳在管，只是当时还在退避窗口 | 等一个探测节拍（≤5s + 退避） |
+| **一行都没有** | 壳根本没被宿主加载 | 查 profile 里还有没有 `qqagent-shell`（见下） |
+
+**壳没加载最隐蔽的一种**：`~/.dsh/profiles/<名字>/node_modules/qqagent-shell` 这个软链还在，但 `package.json` 的 `dependencies` 与 `dsh.profile.bundles` 里的条目被别的操作重写掉了——软链看着像「装着」，宿主实际不加载。查法：
+
+```bash
+grep -c qqagent ~/.dsh/profiles/desktop/package.json   # 0 = 没装进去
+```
+
+修法：`dsh plugin --profile desktop add <仓库>/shell`，然后**重启 DSH**（插件图只在启动时读）。
+
 面板空白/报错时按顺序查三样：
 
 1. `lsof -nP -i :8787 -sTCP:LISTEN` —— 有输出 = 核在

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ from organs.heart import events as events_module
 from organs.heart import intent as intent_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
+from organs.heart import refuse as refuse_module
 from organs.heart import sleep as sleep_module
 
 PLUGIN = Path(__file__).resolve().parents[2]
@@ -45,7 +47,7 @@ REAL_CARD = PLUGIN / "organs" / "heart" / "data" / "baseline-card.json"
 
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending", "/heart/sleep")
+                "/heart/pending", "/heart/sleep", "/heart/refusals")
 
 # 固定时刻：断言不看"现在几点"。09:00 / 23:00 分别避开与落进夜间窗口（23-8）。
 T0 = "2026-11-05T09:00:00+09:00"
@@ -777,6 +779,130 @@ class IntentRankingReachesTheEndpoints(HeartApiTest):
         # 阈值只改了「值不值得开口」那条线，排序与权重一个字不动
         self.assertEqual([row["weight"] for row in passed["intents"]["order"]],
                          [row["weight"] for row in blocked["intents"]["order"]])
+
+
+class RefusalsRoute(HeartApiTest):
+    """第五轮接线：拒绝记录开了一条只读查询（GET /heart/refusals）+ 总览里的一块。
+
+    三件事一起看住：
+    1. 空 topics 时 items=[]，但 cooling 与 quota 照给（额度不是"查了才有"的东西）；
+    2. 冷却中 / 没冷却各一次：cooling 只比 until 与 now 的先后，remaining_min 就是差的那几分钟；
+    3. 纯读：GET 前后 refusals.json 一个字节不变（额度与冷却都只读出来，不写回去）。
+    词表指到临时那份：真词表人会补词，测试不拿它当判据。
+    """
+
+    QUOTA = int(refuse_module.DEFAULT_CONFIG["daily_quota"])
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.topics = Path(self._tmp.name) / "topics.json"
+        self.topics.write_text(json.dumps({"医院": [], "猫": [], "工作": []},
+                                          ensure_ascii=False), encoding="utf-8")
+        old = os.environ.get(refuse_module.ENV_TOPICS_FILE)
+        os.environ[refuse_module.ENV_TOPICS_FILE] = str(self.topics)
+        self.addCleanup(self._restore_topics, old)
+
+    def _restore_topics(self, old: Any) -> None:
+        if old is None:
+            os.environ.pop(refuse_module.ENV_TOPICS_FILE, None)
+        else:
+            os.environ[refuse_module.ENV_TOPICS_FILE] = old
+
+    def _refuse(self, topic: str, now: str) -> Dict[str, Any]:
+        return refuse_module.ingest(topic, "refused-topic", root=self.root, now=now)
+
+    def _state_bytes(self) -> bytes:
+        return (self.root / refuse_module.REFUSALS_FILE).read_bytes()
+
+    def test_empty_topics_gives_quota_and_no_items(self):
+        status, payload = self.get("/heart/refusals", now=T0)
+        self.assertEqual(200, status)
+        for key in ("as_of", "items", "cooling", "quota", "ok", "readonly", "agent",
+                    "status"):
+            self.assertIn(key, payload, "/heart/refusals 少了 %s" % key)
+        self.assertEqual([], payload["items"], "空 topics 就不查任何话题")
+        self.assertEqual([], payload["cooling"])
+        self.assertEqual({"used_today": 0, "limit": self.QUOTA, "left": self.QUOTA},
+                         payload["quota"], "额度与查不查话题无关")
+        self.assertEqual(T0, payload["as_of"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("heart", payload["agent"])
+        self.assertEqual("已接入", payload["status"])
+
+    def test_cooling_and_not_cooling_topics(self):
+        self._refuse("医院", T0)
+        status, payload = self.get("/heart/refusals", topics="医院,猫", now=T0)
+        self.assertEqual(200, status)
+        self.assertEqual(["医院", "猫"], [item["topic"] for item in payload["items"]],
+                         "顺序照人给的")
+        for item in payload["items"]:
+            self.assertEqual({"topic", "known", "cooling", "remaining_min", "reason",
+                              "count"}, set(item))
+        hot, cold = payload["items"]
+        self.assertTrue(hot["cooling"])
+        self.assertEqual(720.0, hot["remaining_min"], "冷却 12 小时就是 720 分钟")
+        self.assertEqual(1, hot["count"])
+        self.assertEqual("refused-topic", hot["reason"])
+        self.assertTrue(hot["known"], "医院在共用词表里")
+        self.assertFalse(cold["cooling"], "没拒过的猫不在冷却里")
+        self.assertEqual(0.0, cold["remaining_min"])
+        self.assertEqual(0, cold["count"])
+        self.assertIsNone(cold["reason"])
+        self.assertEqual(["医院"], payload["cooling"])
+        self.assertEqual({"used_today": 1, "limit": self.QUOTA,
+                          "left": self.QUOTA - 1}, payload["quota"])
+
+    def test_cooling_is_released_by_time_and_nothing_else(self):
+        until = self._refuse("医院", T0)["until"]
+        before = heart_model.iso(heart_model.parse_ts(until) - timedelta(minutes=1))
+        inside = self.get("/heart/refusals", topics="医院", now=before)[1]["items"][0]
+        self.assertTrue(inside["cooling"], "差一分钟还在冷却里")
+        self.assertEqual(1.0, inside["remaining_min"])
+        on_the_dot = self.get("/heart/refusals", topics="医院", now=until)[1]["items"][0]
+        self.assertFalse(on_the_dot["cooling"], "到点那一刻就解除（不早不晚）")
+        self.assertEqual(0.0, on_the_dot["remaining_min"])
+        self.assertEqual(1, on_the_dot["count"], "解除的是冷却，不是记录：次数照旧留着")
+
+    def test_unknown_topic_is_reported_as_unknown(self):
+        item = self.get("/heart/refusals", topics="月亮", now=T0)[1]["items"][0]
+        self.assertFalse(item["known"], "词表里没有的话题要如实说不认识")
+        self.assertFalse(item["cooling"])
+        self.assertEqual(0, item["count"])
+
+    def test_topics_are_trimmed_deduped_and_full_width_commas_accepted(self):
+        items = self.get("/heart/refusals", topics=" 医院 ，猫,,医院 ", now=T0)[1]["items"]
+        self.assertEqual(["医院", "猫"], [item["topic"] for item in items])
+
+    def test_get_writes_nothing(self):
+        self._refuse("医院", T0)
+        before = self._state_bytes()
+        for _ in range(3):
+            self.get("/heart/refusals", topics="医院,猫", now=T0)
+        self.assertEqual(before, self._state_bytes(), "查询侧一个字节都不写盘")
+
+    def test_overview_carries_refusals_block_with_remaining(self):
+        self._refuse("医院", T0)
+        status, payload = self.get("/heart/overview", now=T0)
+        self.assertEqual(200, status)
+        block = payload["refusals"]
+        self.assertEqual({"quota", "cooling", "items"}, set(block),
+                         "refusals 块只有这三个键：额度 / 冷却中 / 逐条剩余")
+        self.assertEqual(["医院"], block["cooling"])
+        self.assertEqual(1, len(block["items"]), "只列冷却中的那几条，不倒整本记录")
+        item = block["items"][0]
+        self.assertEqual({"topic", "known", "cooling", "remaining_min", "reason",
+                          "count"}, set(item), "整本记录一个字段（since / until）都不搬上来")
+        self.assertEqual(720.0, item["remaining_min"])
+        self.assertEqual({"used_today": 1, "limit": self.QUOTA,
+                          "left": self.QUOTA - 1}, block["quota"])
+
+    def test_overview_leaves_expired_topics_out_of_the_block(self):
+        until = self._refuse("医院", T0)["until"]
+        later = heart_model.iso(heart_model.parse_ts(until) + timedelta(minutes=1))
+        block = self.get("/heart/overview", now=later)[1]["refusals"]
+        self.assertEqual([], block["cooling"], "过了 until 就不在冷却里")
+        self.assertEqual([], block["items"])
 
 
 if __name__ == "__main__":

@@ -36,6 +36,10 @@ CUSTOMER_SERVICE = "感谢您的理解，我们会尽快为您处理。"
 # 客服腔那两条条款的 id（结构性标签，不是台词）：拒绝说法一条都不许踩
 COURTESY_IDS = ("courtesy-open", "courtesy-close")
 
+# 说法自己的规矩（长度上下限、破折号、禁用词表）也在数据里：测试里一个阈值、一个词都不写死
+RULES = BOOK["style_rules"]
+PUNCT = load("policy")["visible"]["strip"]      # 去标点借现成那张可见字符表，不另造一份
+
 
 def _copy_book() -> dict:
     """把数据整份拷一份再改：验的是「读数据」，不是改内存里那个模块级 dict。"""
@@ -45,6 +49,11 @@ def _copy_book() -> dict:
 def _courtesy_clauses() -> list:
     """只留客服腔那两条条款的清单：专门问「这句像不像客服」，不问别的。"""
     return [dict(clause) for clause in CLAUSES if clause["id"] in COURTESY_IDS]
+
+
+def _body(shape: str) -> str:
+    """去掉标点后的说法本体：字长与开头两个字都按这个算（标点不算她说的内容）。"""
+    return "".join(ch for ch in refusal.say(shape, BOOK) if ch not in PUNCT)
 
 
 class ThreeShapesSayIt(unittest.TestCase):
@@ -84,6 +93,41 @@ class ThreeShapesSayIt(unittest.TestCase):
                      lambda: refusal.event("nope", "why", NOW, table=BOOK)):
             with self.assertRaises(RefusalBroken):
                 call()
+
+
+class SayingsAreNotOneMould(unittest.TestCase):
+    """回修钉死：三句不许是一个模具，也不许把「不是故障」塞进她嘴里自证。
+
+    上一版三句都长成「……——不是 X，是 Y」，并排一念就听出是一个厂出的；「不是听漏了」
+    「不是掉线」这类自证，等于把接口现实讲到她嘴里——「不是故障」这层归 note 与 event.why，
+    她本人只负责明确地不接。这一组钉四件事：没有破折号模具、字长在数据给的上下限里、
+    本体与开头两个字都两两不同、禁用词一个都不出现。规矩全在 refusal.json 的 style_rules 节。
+    """
+
+    def test_no_dash_mould(self):
+        self.assertTrue(RULES["dashes"])                        # 禁用表空着就等于没验
+        dashed = [shape for shape in SHAPES
+                  if any(dash in refusal.say(shape, BOOK) for dash in RULES["dashes"])]
+        self.assertEqual(dashed, [])                            # 含破折号的：0 条
+
+    def test_lengths_sit_between_the_limits(self):
+        for shape in SHAPES:
+            body = _body(shape)
+            self.assertGreaterEqual(len(body), RULES["say_len_min"], (shape, body))
+            self.assertLessEqual(len(body), RULES["say_len_max"], (shape, body))
+
+    def test_openings_and_bodies_are_all_different(self):
+        bodies = [_body(shape) for shape in SHAPES]
+        self.assertEqual(len(set(bodies)), len(SHAPES))         # 本体两两不同
+        openings = [body[:2] for body in bodies]
+        self.assertEqual(len(set(openings)), len(SHAPES))       # 开头两个字也互不相同
+
+    def test_no_banned_word(self):
+        banned = RULES["banned_words"]
+        self.assertTrue(banned)                                 # 空词表等于没验
+        for shape in SHAPES:
+            said = refusal.say(shape, BOOK)
+            self.assertEqual([word for word in banned if word in said], [], (shape, said))
 
 
 class RefusalStillPassesTheGate(unittest.TestCase):

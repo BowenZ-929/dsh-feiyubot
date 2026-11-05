@@ -29,7 +29,7 @@
     "quote_unmarked": "复述原话没标记"
   },
   "reason": {
-    "setting": "这一段是把「{seg_kind}」里的原文照搬过来的（连着 {lcs_len} 个字：「{matched}」），不是她这会儿说的话，弃掉不发。",
+    "setting": "这一段照搬了「{seg_kind}」那一类的原文（连着 {lcs_len} 个字：「{matched}」），不是她这会儿说的话，弃掉不发。",
     "quote_unmarked": "这一段复述的是「{seg_kind}」里的「{matched}」（连着 {lcs_len} 个字），前面 {window} 个字以内没有引述标记，读起来像抄的不像转述，弃掉不发。",
     "quote_marked": "这一段用的是「{seg_kind}」里的「{matched}」，前面有引述标记「{marker}」，算转述，照发。",
     "clear": "和注入的 {count} 段原文都比过了，最长只连着 {lcs_len} 个字（阈值 {threshold}），没在复述，照发。",

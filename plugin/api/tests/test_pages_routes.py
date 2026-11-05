@@ -37,7 +37,7 @@ WRITE_VERBS = ('"post"', '"put"', '"delete"', '"patch"')
 # 心页只许拉自己这十条：页面自检用（顺序无所谓，集合相等就够）
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending", "/heart/sleep")
+                "/heart/pending", "/heart/sleep", "/heart/refusals")
 
 
 def _text(name: str) -> str:
@@ -193,6 +193,28 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
                              ("block.pass", "排序块显示 pass"),
                              ("block.threshold", "排序块显示阈值"),
                              ("清醒度系数", "排序块显示清醒度系数")):
+            self.assertTrue(needle in self.text, "%s：页面上找不到 %r" % (note, needle))
+
+    def test_refusals_block_reads_its_own_keys(self):
+        """拒绝记录（GET /heart/refusals 的额度 + /heart 的 refusals 块）各读各的键。
+
+        只断言"没有写控件"的话，把这一块的取数删掉也照样是绿的——所以逐键点名：
+        额度三样（用了几次 / 上限 / 还剩几次）、冷却中的话题四样（话题 / 剩余分钟 /
+        第几次 / 理由），以及空着时那一句话。
+        """
+        for needle, note in (('fetch("/heart/refusals"', "额度来自 GET /heart/refusals"),
+                             ("data.quota", "/heart/refusals 的额度块"),
+                             ("refusalQuota.used_today", "额度显示今天用了几次"),
+                             ("refusalQuota.limit", "额度显示上限"),
+                             ("refusalQuota.left", "额度显示还剩几次"),
+                             ("renderRefusalCooling(data.refusals)",
+                              "冷却中的话题来自 /heart 的 refusals 块"),
+                             ("row.cooling", "只渲染冷却中的话题"),
+                             ("row.topic", "冷却中的话题要写出话题名"),
+                             ("row.remaining_min", "冷却中的话题要写剩余分钟"),
+                             ("row.count", "冷却中的话题要写拒过第几次"),
+                             ("row.reason", "冷却中的话题要写理由"),
+                             ("此刻没有在冷却的话题", "空时给一句话，不显示空白")):
             self.assertTrue(needle in self.text, "%s：页面上找不到 %r" % (note, needle))
 
     def test_axes_and_voice_come_from_the_effective_route(self):

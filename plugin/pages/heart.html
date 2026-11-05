@@ -104,6 +104,15 @@
       面板说的档与嘴上念的档不会分叉。</p>
   </section>
 
+  <section>
+    <h2>⑩ 拒绝记录（额度是刹车，不是一直拒的许可；冷却只由时间解除）</h2>
+    <p id="refusals">……</p>
+    <p class="legend">额度来自 GET /heart/refusals：今天用了几次 / 上限几次 / 还剩几次；
+      冷却中的话题与剩余分钟来自 GET /heart 的 refusals 块。冷却只比 until 与 now 的先后，
+      心情升两档、精力回满都不改它一个字节——时间到了才算完，谁也不许提前解除。
+      这一块没有输入框：面板只把账摊开给人看，不替人查话题。</p>
+  </section>
+
   <p class="back"><a href="..">← 回魂面板</a></p>
 </main>
 <script>
@@ -112,6 +121,8 @@
 
   var STATES = ["说", "少说", "不说"];
   var judged = [];
+  var refusalQuota = null;
+  var refusalCooling = [];
 
   function el(id) { return document.querySelector("#" + id); }
   function say(id, text) { el(id).textContent = text; }
@@ -310,6 +321,37 @@
       " · 清醒度系数 " + (block.clarity || {}).factor);
   }
 
+  function renderRefusals() {
+    var head = refusalQuota
+      ? "今日额度 用 " + refusalQuota.used_today + " 次 / 上限 " + refusalQuota.limit +
+        " 次 / 还剩 " + refusalQuota.left + " 次"
+      : "额度还没有读到（/heart/refusals 没有应答）";
+    if (!refusalCooling.length) {
+      say("refusals", head + "\n此刻没有在冷却的话题。");
+      return;
+    }
+    var lines = refusalCooling.map(function (row) {
+      return "· " + row.topic + " 还剩 " + row.remaining_min + " 分钟（第 " + row.count +
+        " 次，理由 " + row.reason + "）";
+    });
+    say("refusals", head + "\n冷却中的话题：\n" + lines.join("\n"));
+  }
+
+  function renderRefusalQuota(data) {
+    if (!data || data.ok !== true) {
+      say("refusals", "拒载：拒绝记录读不出来，额度与冷却一个都不给");
+      return;
+    }
+    refusalQuota = data.quota || null;
+    renderRefusals();
+  }
+
+  function renderRefusalCooling(block) {
+    var rows = (block && block.items) || [];
+    refusalCooling = rows.filter(function (row) { return row.cooling; });
+    renderRefusals();
+  }
+
   function renderGates() {
     var lines = judged.map(function (item) {
       var marks = STATES.map(function (state) {
@@ -347,6 +389,7 @@
   fetch("/heart").then(function (res) { return res.json(); }).then(function (data) {
     renderStatus(data);
     renderIntents(data.intents);
+    renderRefusalCooling(data.refusals);
   }).catch(fail);
 
   fetch("/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
@@ -366,6 +409,8 @@
   }).catch(fail);
 
   fetch("/heart/pending").then(function (res) { return res.json(); }).then(renderPending).catch(fail);
+
+  fetch("/heart/refusals").then(function (res) { return res.json(); }).then(renderRefusalQuota).catch(fail);
 
 }());
 </script>

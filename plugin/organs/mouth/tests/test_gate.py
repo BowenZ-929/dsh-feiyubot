@@ -16,7 +16,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from organs.mouth import audit as recitation
 from organs.mouth import gate
+from organs.mouth.audit import AuditBroken
 from organs.mouth.gate import ClauseBroken, Hit, Verdict, check, enforce
 from organs.mouth.warehouse import load
 
@@ -357,6 +359,74 @@ class DisabledClausesAreVisible(unittest.TestCase):
             check("随便一句", bad)
         self.assertIn("half-on", str(caught.exception))
         self.assertIn("enabled", str(caught.exception))
+
+
+class ReciteAuditRidesTheGate(unittest.TestCase):
+    """复述审计接在条款后面：同一条路（改一次还不行就弃），状态挂在 Verdict.audit 上。
+
+    素材与类别全从 data/audit.json 读：这里只验「接上了没有、判不了看得出来没有」。
+    """
+
+    AUDIT = load("audit")
+    SOUL = AUDIT["setting_kinds"][0]
+    VERDICT = AUDIT["verdicts"]["setting"]
+    LINE = "我嘴上不认，行动先到。"
+    INJECT = [{"kind": SOUL, "text": "嘴上不认，行动先到：拒绝的话说完，事已经做了"}]
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_clause_comes_first(self):
+        """条款先判（既有逻辑不动）：两边都撞时先报条款。"""
+        hit = check(SPEECH, CLAUSES, self.INJECT)
+        self.assertEqual("courtesy-open", hit.clause_id)
+
+    def test_check_sees_recitation(self):
+        hit = check(self.LINE, CLAUSES, self.INJECT)
+        self.assertIsInstance(hit, Hit)
+        self.assertEqual(self.VERDICT, hit.clause_id)       # 违规类别（数据里的说法）
+        self.assertEqual(self.SOUL, hit.kind)               # 来源段是哪一类
+        self.assertIn("嘴上不认", hit.matched)
+        self.assertIn(self.SOUL, hit.reason)
+
+    def test_without_rewriter_it_is_dropped(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.LINE, CLAUSES, None, sink, inject=self.INJECT)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)                   # 复述的那句一个字也不发
+        self.assertEqual(self.VERDICT, verdict.hits[0].clause_id)
+        self.assertEqual(1, len(seen))                       # 弃言照旧记一笔
+        self.assertEqual(self.VERDICT, seen[0][0])
+        self.assertEqual("ok", verdict.audit.status)
+
+    def test_rewrite_clears_it(self):
+        verdict = enforce(self.LINE, CLAUSES, lambda text: "我记下了。", inject=self.INJECT)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertIsNone(check(verdict.text, CLAUSES, self.INJECT))   # 改完真的不再复述
+        self.assertIsNotNone(verdict.audit.hit)              # 读数记的是进门那一段
+
+    def test_unavailable_is_visible_but_not_dropped(self):
+        """没给注入原文：不弃这句（缺料不拿她的沉默兜），但状态必须看得出来。"""
+        verdict = enforce(self.LINE, CLAUSES, None)
+        self.assertEqual("pass", verdict.decision)           # 决策与既有五种结局一字不变
+        self.assertEqual(self.LINE, verdict.text)
+        self.assertIsNotNone(verdict.audit)
+        self.assertEqual(recitation.STATUS_UNAVAILABLE, verdict.audit.status)
+        self.assertIsNone(verdict.audit.hit)
+        self.assertTrue(verdict.audit.reason)                # 有一句人话
+        self.assertEqual(self.AUDIT["threshold"], verdict.audit.threshold)
+        self.assertIsNone(check(self.LINE, CLAUSES))          # check 不承载状态，看 audit
+
+    def test_threshold_comes_from_policy(self):
+        policy = dict(self.AUDIT, threshold=self.AUDIT["threshold"] + 10)
+        self.assertIsNone(check(self.LINE, CLAUSES, self.INJECT, policy))
+        self.assertIsNone(enforce(self.LINE, CLAUSES, None, None, self.INJECT, policy).audit.hit)
+
+    def test_broken_inject_is_loud(self):
+        with self.assertRaises(AuditBroken) as caught:
+            enforce(self.LINE, CLAUSES, None, None, [{"kind": "没有这一类", "text": "随便一句"}])
+        self.assertIn("没有这一类", str(caught.exception))
 
 
 class GateStaysClean(unittest.TestCase):

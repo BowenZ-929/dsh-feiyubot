@@ -297,7 +297,7 @@
       if (out[4].status === 200) { showPin(out[4].data); }
       else { el("pin-text").textContent = "（读不到 pin）"; }
       if (out[5].status === 200) { showProposals(out[5].data); }
-      else { el("brain-proposals").textContent = "（读不到提案：脑未接入）"; }
+      else { el("brain-proposals").textContent = "（读不到提案：HTTP " + out[5].status + "）"; }
     }).catch(function (err) {
       say("连不上后端：" + err, "err");
     });
