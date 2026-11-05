@@ -555,5 +555,113 @@ class GateStaysClean(unittest.TestCase):
             self.assertNotIn(banned, self.source)
 
 
+class RepeatRidesTheGate(unittest.TestCase):
+    """内容去重接在动作括注后面、复述审计前面：同一条路（改一次还不行就弃），判没判挂在 repeat_status 上。
+
+    素材与名字全从 data/repeat.json 读：这里只验「接上了没有、拿不到历史看得出来没有」。
+    """
+
+    BOOK = load("repeat")
+    CLAUSE_ID = BOOK["hit"]["clause_id"]
+    KIND = BOOK["hit"]["kind"]
+    TAG = BOOK["tag"]
+    # 第 1 条是原句；第 2 条换了开场、动作行只差标点；第 3 条换了动作行、开场同第 1 条
+    FIRST = "主人回来啦，我把碗放桌上了。\n（尾巴尖蜷了一下）"
+    SECOND = "天有点凉了，你多穿点。\n（尾巴尖蜷了一下。）"
+    THIRD = "主人回来啦，灯我给你留着呢。"
+    CLEAN = "明天风大，我把窗关好了。"
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_check_reports_it(self):
+        hit = check(self.THIRD, CLAUSES, recent=[self.FIRST, self.SECOND])
+        self.assertIsInstance(hit, Hit)
+        self.assertEqual(self.CLAUSE_ID, hit.clause_id)       # 两个名字都取自数据，闸不自己造
+        self.assertEqual(self.KIND, hit.kind)
+        self.assertIn(self.TAG, hit.reason)                   # 弃言账靠这个记号认判据
+        self.assertIn(hit.matched, hit.reason)                # 人话里点名撞上的那几个字
+
+    def test_check_does_not_judge_without_history(self):
+        """recent 为 None 就整段不跑——但也不许把「没跑」说成「没问题」。"""
+        self.assertIsNone(check(self.THIRD, CLAUSES))
+        self.assertIsNone(check(self.CLEAN, CLAUSES, recent=[self.FIRST]))   # 给了历史也没命中
+
+    def test_clause_comes_first(self):
+        """条款先判（既有逻辑不动）：两边都撞时先报条款。"""
+        hit = check(SPEECH + self.THIRD, CLAUSES, recent=[self.FIRST])
+        self.assertEqual("courtesy-open", hit.clause_id)
+
+    def test_action_note_comes_before_repeat(self):
+        """判据顺序：条款 → 动作括注 → 内容去重。两边都撞时先报动作括注。"""
+        note = load("action_note")
+        line = "（尾巴尖在水里轻轻蜷了一下）"
+        hit = check(line, CLAUSES, action=note, recent=[line])
+        self.assertEqual(note["hit"]["clause_id"], hit.clause_id)
+
+    def test_first_line_with_empty_history_passes(self):
+        verdict = enforce(self.FIRST, CLAUSES, None, recent=[])
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.FIRST, verdict.text)
+        self.assertEqual("ok", verdict.repeat_status)          # 判过了
+        self.assertIn(self.BOOK["reason"]["clear"].format(rounds=self.BOOK["rounds"]),
+                      verdict.reason)                          # 放行要有据
+
+    def test_second_line_is_rewritten(self):
+        verdict = enforce(self.SECOND, CLAUSES, lambda text: self.CLEAN, recent=[self.FIRST])
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.CLEAN, verdict.text)
+        self.assertEqual(1, len(verdict.hits))
+        self.assertEqual(self.CLAUSE_ID, verdict.hits[0].clause_id)
+        self.assertIsNone(check(verdict.text, CLAUSES, recent=[self.FIRST]))   # 改完真的不再重复
+
+    def test_third_line_dropped_and_the_ledger_carries_the_tag(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.THIRD, CLAUSES, _same, sink, recent=[self.FIRST, self.SECOND])
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)                     # 命中句一个字也不许发出去
+        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
+                         [one.clause_id for one in verdict.hits])   # 两次命中都在，按发生顺序
+        self.assertEqual(1, len(seen), "一次弃言只记一笔")
+        self.assertEqual(self.CLAUSE_ID, seen[0][0])           # 账本里是数据里那个名字
+        self.assertIn(self.TAG, seen[0][1])                    # reason 里带着 repeat 记号
+        self.assertEqual(verdict.reason, seen[0][1])
+
+    def test_rewritten_text_is_judged_against_the_same_history(self):
+        """改写回来又撞上同一句：第二次照样拦（窗口没变，判据也没变）。"""
+        verdict = enforce(self.THIRD, CLAUSES, lambda text: self.FIRST, recent=[self.FIRST])
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+
+    def test_not_checked_is_not_the_same_as_checked_and_clean(self):
+        """验收 4：同一句、同一份结局，状态必须分得开——一个没比、一个比过没重复。"""
+        unchecked = enforce(self.CLEAN, CLAUSES, None)
+        checked = enforce(self.CLEAN, CLAUSES, None, recent=[])
+        self.assertEqual("pass", unchecked.decision)
+        self.assertEqual("pass", checked.decision)             # 结局一样：都放行
+        self.assertEqual("not-checked", unchecked.repeat_status)
+        self.assertEqual("ok", checked.repeat_status)           # 状态不一样
+        self.assertIn(load("repeat")["reason"]["clear"].format(rounds=self.BOOK["rounds"]),
+                      checked.reason)
+        self.assertNotIn(load("repeat")["reason"]["clear"].format(rounds=self.BOOK["rounds"]),
+                         unchecked.reason)
+
+    def test_unchecked_cannot_rescue_the_repeat(self):
+        """拿不到历史时按既有规矩放行（不替调用方做主），但给历史就拦得下来。"""
+        self.assertEqual("pass", enforce(self.THIRD, CLAUSES, None).decision)
+        self.assertEqual("dropped", enforce(self.THIRD, CLAUSES, None, recent=[self.FIRST]).decision)
+
+    def test_gate_source_has_no_repeat_word(self):
+        """去重的名字与说法也不许进闸：闸只接判据，不持判据。"""
+        source = Path(gate.__file__).read_text(encoding="utf-8")
+        book = load("repeat")
+        for word in (book["hit"]["clause_id"], book["hit"]["kind"], book["kinds"]["opening"],
+                     book["kinds"]["action_line"]):
+            self.assertNotIn(word, source)
+        for line in book["reason"].values():
+            self.assertNotIn(line.format(rounds=1, matched="", prev_no=1, tag="x"), source)
+
+
 if __name__ == "__main__":
     unittest.main()

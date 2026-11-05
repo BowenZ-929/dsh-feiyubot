@@ -17,13 +17,15 @@
 
 两道出口，缺一道都不算拦住：
 
-- check(text, clauses, inject=None, policy=None, action=None) -> Hit | None：命中返回一条 Hit，
+- check(text, clauses, inject=None, policy=None, action=None, recent=None, repeat_table=None) -> Hit | None：命中返回一条 Hit，
   里面带一句人话原因（含命中的那段原文）；没命中返回 None。**不返回布尔**——布尔说不出「为什么拦」，
   日志与面板也就没法复盘，只能再翻译一次。
-- enforce(text, clauses, rewrite, sink=None, inject=None, policy=None, action=None) -> Verdict：命中
-  一次 → 交给注入的 rewrite 改一次 → 再 check；还命中就 decision="dropped"、text 留空串，两次命中的
-  原因都按发生顺序留在 hits 里。Verdict.audit 是这一轮复述审计的读数（status / hit / lcs_len /
-  threshold），Verdict.action_status 是动作括注那一关判没判过（"ok" / "not-checked"）。
+- enforce(text, clauses, rewrite, sink=None, inject=None, policy=None, action=None, recent=None,
+  repeat_table=None) -> Verdict：命中一次 → 交给注入的 rewrite 改一次 → 再 check；还命中就
+  decision="dropped"、text 留空串，两次命中的原因都按发生顺序留在 hits 里。Verdict.audit 是这一轮
+  复述审计的读数（status / hit / lcs_len / threshold），Verdict.action_status 是动作括注那一关判没判过
+  （"ok" / "not-checked"），Verdict.repeat_status 是内容重复那一关判没判过（同样是 "ok" /
+  "not-checked"）。
 
 rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端：闸只管判，不改写。
 传 None 视为「改不了」，直接弃掉——**出口不许 fail-open**，改不了就别说这句。rewrite 自己抛错、
@@ -61,6 +63,14 @@ Verdict.action_status 上（"ok" 真的判过，"not-checked" 这一轮没给表
 命中走同一条路（改一次还不行就弃），Hit 里的 clause_id 与 kind 也取自数据，弃言账本里看到的因此
 是一个能指认的名字。判据表形状坏掉由 action_note 当场抛 ActionBroken，照实往上抛。
 
+**内容重复是第四道判据（这一轮加的）**：同一动作行、或同一开场在最近几轮里又回来一次，就是
+她在反复念那一条。判据与数值全在 organs/mouth/repeat.py 与 data/repeat.json，闸只把它当成一次
+普通命中接进来，顺序排在动作括注之后、复述审计之前（复述管「说的事是不是抄来的」，这一关管
+「这句话是不是又是我说的」——两件事都要判，先后只决定报哪一条）。recent 是她最近若干条输出的
+原文（旧的在先，由调用方给），**None 就是这一轮拿不到历史**；拿不到不许当成「没重复」，所以判没判
+挂在 Verdict.repeat_status 上（"ok" 真的比过，"not-checked" 这一轮没拿到），照 action_status 那个
+写法。闸不记账、不取时钟：谁记着她说过什么，是调用方的事。
+
 纯函数：入参只有一段文本与一张只读的条款清单，出参只有结构化数据；不碰时钟、不碰随机数、
 不联网、不碰宿主 IO（本文件不 import time / datetime / random），所以能离线预览，也能被单独替换。
 """
@@ -70,7 +80,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import action_note
+from . import action_note, repeat
 from .audit import AuditResult, audit as _audit
 
 __all__ = ["ClauseBroken", "Hit", "Verdict", "check", "enforce"]
@@ -116,24 +126,30 @@ class Verdict:
     # 动作括注那一关判没判过：action_note.STATUS_OK（真的判过）或 STATUS_NOT_CHECKED（没给判据表）。
     # 与 audit 同理——「没判」不是「判过没问题」，两件事必须分得开，所以默认就是 not-checked。
     action_status: str = action_note.STATUS_NOT_CHECKED
+    # 内容重复那一关判没判过：repeat.STATUS_OK（拿到了 recent，真的比过）或 STATUS_NOT_CHECKED
+    # （这一轮 recent 是 None，拿不到历史）。同理——「没比」不是「没重复」，默认就是 not-checked。
+    repeat_status: str = repeat.STATUS_NOT_CHECKED
 
 
 def check(text: str, clauses: Sequence[Mapping[str, Any]],
           inject: Any = None, policy: Optional[Mapping[str, Any]] = None,
-          action: Optional[Mapping[str, Any]] = None) -> Optional[Hit]:
-    """看这段字有没有踩条款、有没有在动作里带场景、有没有在复述注入的原文：命中给一条 Hit，否则 None。
+          action: Optional[Mapping[str, Any]] = None,
+          recent: Optional[Sequence[str]] = None,
+          repeat_table: Optional[Mapping[str, Any]] = None) -> Optional[Hit]:
+    """看这段字有没有踩条款、有没有在动作里带场景、有没有在反复念、有没有在复述注入的原文：命中给一条 Hit，否则 None。
 
     **返回的不是布尔。** Hit 里带一句人话原因，原因里含这次命中的那段原文，所以日志、面板、
     复盘都能直接用这句话，不必再翻译一遍。
 
-    顺序钉死：条款 → 动作括注 → 复述审计。条款按 clauses 的先后顺序逐条 re.search，返回第一条命中
-    的（顺序即优先级）；零宽正则也会命中，那种情况下原因里改说位置，免得出现一对空引号。动作括注
-    与条款一样是「怎么写」的形状判据，所以紧跟在条款后面；审计管的是「说的事是不是抄来的」，
-    仍是最后一关。
+    顺序钉死：条款 → 动作括注 → 内容重复 → 复述审计。条款按 clauses 的先后顺序逐条 re.search，
+    返回第一条命中的（顺序即优先级）；零宽正则也会命中，那种情况下原因里改说位置，免得出现一对
+    空引号。动作括注与条款一样是「怎么写」的形状判据，所以紧跟在条款后面；内容重复接着判「这句是
+    不是又是我说的」；审计管的是「说的事是不是抄来的」，仍是最后一关。
 
     **没给 inject 就整段不跑审计**：没有料可比的审计既不是通过、也不是拦住，而这个返回类型装不下
     第三种状态。要区分 ok 与 audit-unavailable，看 enforce 的 Verdict.audit 或直接调 audit()。
     **没给 action 同样整段不跑动作括注**，道理一样：没判不是通过，判没判看 Verdict.action_status。
+    **recent 为 None 同样整段不跑内容重复**：拿不到她最近说过什么就是判不了，而判不了不是「没重复」。
     """
     prepared, _disabled = _prepared(clauses)
     body = text or ""
@@ -143,6 +159,9 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
     noted = _noted(body, action)
     if noted is not None:
         return noted
+    repeated = _repeated(body, recent, repeat_table)
+    if repeated is not None:
+        return repeated
     return _recited(body, inject, policy)
 
 
@@ -150,7 +169,9 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             rewrite: Optional[Callable[[str], str]] = None,
             sink: Optional[Callable[[str, str], None]] = None,
             inject: Any = None, policy: Optional[Mapping[str, Any]] = None,
-            action: Optional[Mapping[str, Any]] = None) -> Verdict:
+            action: Optional[Mapping[str, Any]] = None,
+            recent: Optional[Sequence[str]] = None,
+            repeat_table: Optional[Mapping[str, Any]] = None) -> Verdict:
     """过闸：命中一次 → 用注入的 rewrite 改一次 → 再 check；还命中就弃掉这句。
 
     rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端。五种结局：
@@ -173,48 +194,68 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     动作括注（第三轮 B）同样接在这条路上，判在条款与审计之间：命中就当一次普通命中。给没给判据表
     看 action_status——"ok" 表示这一轮真的判过，"not-checked" 表示没给表、这一关没跑；**没跑不是
     通过**，两者在返回值里必须分得开（这也是它不肯塞一条假 Hit 进 check 的原因）。
+
+    内容重复接在动作括注后面、复述审计前面，走的也是同一条路：同一动作行或同一开场在最近几轮里
+    又回来一次，就当一次普通命中，改一次还不行就弃。给没给 recent 看 repeat_status——"ok" 表示这
+    一轮拿到了历史、真的比过，"not-checked" 表示 recent 是 None、这一关没跑；**没比不是没重复**，
+    两者同样必须分得开。
     """
     prepared, disabled = _prepared(clauses)
     body = text or ""
     found = _scan(prepared, body)
     seen = _audit(body, inject, policy)
     noted = _noted(body, action)
+    repeated = _repeated(body, recent, repeat_table)
     judged = action_note.STATUS_OK if _has_action(action) else action_note.STATUS_NOT_CHECKED
-    first = found if found is not None else (noted if noted is not None else _from_audit(seen))
+    deduped = repeat.STATUS_OK if _has_recent(recent) else repeat.STATUS_NOT_CHECKED
+    first = found if found is not None else (
+        noted if noted is not None else (
+            repeated if repeated is not None else _from_audit(seen)))
     if first is None:
         reason = "没命中任何条款，这句照发。"
         if _has_action(action):
             reason += action_note.clear_reason(action)     # 放行要有据：这一关查过了也要说出来
+        if _has_recent(recent):
+            reason += repeat.clear_reason(repeat_table)    # 这一关查过了，也要说出来
         return Verdict(text=body, decision="pass", hits=[], reason=reason,
-                       disabled=disabled, audit=seen, action_status=judged)
+                       disabled=disabled, audit=seen, action_status=judged,
+                       repeat_status=deduped)
     if rewrite is None:
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s也没给重写器，这句改不了，弃掉不发。" % _lead(first),
-                                disabled=disabled, audit=seen, action_status=judged), sink)
+                                disabled=disabled, audit=seen, action_status=judged,
+                                repeat_status=deduped), sink)
     try:
         again = rewrite(body)
     except Exception as exc:          # 重写失败只算「改不了」，出口不许抛错
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s重写时出了错（%s：%s），这句改不了，弃掉不发。"
                                        % (_lead(first), type(exc).__name__, exc),
-                                disabled=disabled, audit=seen, action_status=judged), sink)
+                                disabled=disabled, audit=seen, action_status=judged,
+                                repeat_status=deduped), sink)
     rewritten = again if isinstance(again, str) else ("" if again is None else str(again))
     if not rewritten.strip():
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s重写回来是空的，等于改不了，弃掉不发。" % _lead(first),
-                                disabled=disabled, audit=seen, action_status=judged), sink)
+                                disabled=disabled, audit=seen, action_status=judged,
+                                repeat_status=deduped), sink)
     retried = _scan(prepared, rewritten)
     again_noted = _noted(rewritten, action)
+    again_repeated = _repeated(rewritten, recent, repeat_table)
     second = retried if retried is not None else (
-        again_noted if again_noted is not None else _from_audit(_audit(rewritten, inject, policy)))
+        again_noted if again_noted is not None else (
+            again_repeated if again_repeated is not None
+            else _from_audit(_audit(rewritten, inject, policy))))
     if second is None:
         return Verdict(text=rewritten, decision="rewritten", hits=[first],
                        reason="%s改写一次后不再命中，发改写后的这句。" % _lead(first),
-                       disabled=disabled, audit=seen, action_status=judged)
+                       disabled=disabled, audit=seen, action_status=judged,
+                       repeat_status=deduped)
     return _dropped(Verdict(text="", decision="dropped", hits=[first, second],
                             reason="%s改了一次还是这样（第二次还是被条款 %r 拦下，命中「%s」），"
                                    "这句弃掉不发。" % (_lead(first), second.clause_id, second.matched),
-                            disabled=disabled, audit=seen, action_status=judged), sink)
+                            disabled=disabled, audit=seen, action_status=judged,
+                            repeat_status=deduped), sink)
 
 
 def _dropped(verdict: Verdict, sink: Optional[Callable[[str, str], None]]) -> Verdict:
@@ -272,6 +313,28 @@ def _noted(text: str, action: Any) -> Optional[Hit]:
 def _has_action(action: Any) -> bool:
     """给没给判据表：None 就是没给。别的形状一律当成给了，交给 action_note 去报错并指名缺哪一项。"""
     return action is not None
+
+
+def _repeated(text: str, recent: Any, table: Any) -> Optional[Hit]:
+    """内容重复这一关：判「这句是在反复念」就返回一条 Hit；recent 为 None 就整段不跑。
+
+    clause_id 与 kind 都取自判据表（repeat 带出来的那两个名字），闸不自己造名字——账本里看到的
+    因此是一个数据里能指认的名字。**没给 recent 就返回 None 不是放行**：这一关判没判挂在
+    Verdict.repeat_status 上（拿不到历史与「比过没重复」挤不进同一条通道，所以不塞假 Hit）。
+    recent 或判据表本身形状坏掉由 repeat 当场抛 RepeatBroken，照实往上抛。
+    """
+    if not _has_recent(recent):
+        return None
+    found = repeat.check(text, recent, table)
+    if found is None:
+        return None
+    clause_id, kind = repeat.names(table)
+    return Hit(clause_id=clause_id, kind=kind, matched=found.matched, reason=found.reason)
+
+
+def _has_recent(recent: Any) -> bool:
+    """给没给「她最近几条输出」：None 就是没给（拿不到历史）。空清单是给了、只是还没有历史，照样算判过。"""
+    return recent is not None
 
 
 def _has_inject(inject: Any) -> bool:
