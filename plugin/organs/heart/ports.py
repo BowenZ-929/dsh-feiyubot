@@ -10,6 +10,10 @@
   本模块只把 now 透传下去（None → model.now_iso()），不挂定时器、不缓存。
 - 读数缺失不许把心炸掉：brain=None 返回 0.0 / 0 的实现并 WARN 一行，
   脑某次读数抛异常也一样降级成 0——判 engage 时少两个数，不该让整个人停下。
+- 共用词表是唯一的例外，钉在明处：拒绝记录（refuse.py）要用话题名，话题名取自
+  <实盘>/organs/brain/topics.json 的顶层键——单独一个受限加载器只读这一个文件、
+  只取顶层键，见 refuse.vocabulary。**这是共用词表，不是脑的记忆；除此之外心仍
+  不碰脑存储**：不给它开第二条通路，也不许拿它当脑的读数用。
 """
 from __future__ import annotations
 

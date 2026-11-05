@@ -51,43 +51,28 @@ def home_root(root=None) -> Path:
        显式构造参数不查存在（调用方自己点过名），但门禁照样过。
     """
     if root is not None:
-        return _guard(Path(root), "构造参数")
-    env = os.environ.get(ENV_ROOT)
-    if env is not None:
-        if not env.strip():
-            raise StoreError("HOME_ROOT_EMPTY",
-                             "设了 %s 却是空的：要么给它一个已存在的实盘目录，"
-                             "要么干脆别设，用默认的 %s——空值不会被当成「用默认」悄悄放过去"
-                             % (ENV_ROOT, paths.organ_dir("home")))
-        return _guard(Path(env), ENV_ROOT, must_exist=True)
-    return _guard(paths.organ_dir("home"), "默认实盘根", must_exist=True)
+        return _guard(root, "构造参数", must_exist=False)
+    return _guard_env(os.environ.get(ENV_ROOT), ENV_ROOT, paths.organ_dir("home"), must_exist=True)
 
 
-def _guard(path: Path, origin: str, *, must_exist: bool = False) -> Path:
-    """门禁：仓库内的路径只认 <仓库>/home 底下；出厂默认参数目录永远不能当实盘。"""
-    raw = path.expanduser()
-    resolved = _resolve(raw)
-    hub = _resolve(paths.HOME)
-    repo = _resolve(paths.REPO_ROOT)
-    in_hub = resolved == hub or hub in resolved.parents
-    in_repo = resolved == repo or repo in resolved.parents
-    if in_repo and not in_hub:
-        raise StoreError("HOME_ROOT_IN_REPO",
-                         "%s 解析到 %s：那是出厂默认参数目录（只读），不是她的实盘。"
-                         "实盘必须在 %s 下，或者用 %s 指到仓库外一个已存在的目录。"
-                         % (origin, resolved, hub, ENV_ROOT))
-    if must_exist and not raw.is_dir():
-        raise StoreError("HOME_ROOT_MISSING",
-                         "%s 解析到 %s，可那个目录不存在：要么把它建好，要么把 %s 指到已存在的实盘。"
-                         "程序不替她造一个根——猜出来的根迟早和真源分叉。" % (origin, raw, ENV_ROOT))
-    return raw
+def _guard(path, origin: str, *, must_exist: bool = False) -> Path:
+    """把 `paths.guard_root` 的报错翻成本器官的 StoreError。
 
-
-def _resolve(path: Path) -> Path:
+    **判断与错误码都不在这里**——它们只长在 `organs/paths.py` 一处；这里只是把
+    `paths.PathError` 翻成 `StoreError`，别顺手把规矩再写一遍（那是分叉的起点）。
+    """
     try:
-        return path.resolve()
-    except OSError:      # 路径太怪／权限不够：按字面比，让门禁自己说话
-        return path
+        return paths.guard_root(path, origin, must_exist=must_exist)
+    except paths.PathError as exc:
+        raise StoreError(exc.code, exc.message) from exc
+
+
+def _guard_env(raw, origin: str, default, *, must_exist: bool = False) -> Path:
+    """同上，只是多一层环境变量覆盖：空串规则也在 paths 里，这里同样只做翻译。"""
+    try:
+        return paths.guard_root_env(raw, origin, default, must_exist=must_exist)
+    except paths.PathError as exc:
+        raise StoreError(exc.code, exc.message) from exc
 
 
 def factory_path(relative) -> Path:

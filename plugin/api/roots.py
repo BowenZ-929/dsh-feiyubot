@@ -27,13 +27,23 @@ FACTORY_ONLY = ("mouth",)
 SKIP_ON_SEED = (".gitignore",)
 
 
-class RootsError(Exception):
-    """根不对 / 魂没搬进来：这两种情况都必须拒绝启动，不能降级跑。"""
+#: 根不对就抛这个。**它只是 paths.PathError 的别名字**——门禁与错误码都长在 organs/paths.py，
+#: 这里不许再写判断（同一个错误出现过三次，每次都是两份标准分叉）。
+RootsError = paths.PathError
+HOME_ROOT_EMPTY = paths.HOME_ROOT_EMPTY
+HOME_ROOT_IN_REPO = paths.HOME_ROOT_IN_REPO
+HOME_ROOT_MISSING = paths.HOME_ROOT_MISSING
+#: 魂没搬进来：这不是「根不对」，是「根对了但里面没有她」——错误码分开，别混成一个
+SOUL_MISSING = "SOUL_MISSING"
 
 
 def home_root() -> Path:
-    """实盘器官目录（各器官目录的父）：QQAGENT_HOME > <仓库>/home/organs，且必须过门禁。"""
-    return _guard(paths.home_root())
+    """实盘器官目录（各器官目录的父）：QQAGENT_HOME > <仓库>/home/organs，且必须过门禁。
+
+    空串不当「用默认」：那是有人设了变量又没给值，放过去就是第二条标准。
+    """
+    return paths.guard_root_env(
+        os.environ.get(paths.ENV_HOME), paths.ENV_HOME, paths.ORGANS_HOME, must_exist=False)
 
 
 def organ_root(organ: str, explicit: Any = None) -> Path:
@@ -41,34 +51,13 @@ def organ_root(organ: str, explicit: Any = None) -> Path:
     if organ in FACTORY_ONLY:
         return factory_root(organ)
     if explicit is not None:
-        return _guard(explicit)
+        return paths.guard_root(explicit, "显式覆盖（--root）", must_exist=True)
     return home_root() / str(organ)
 
 
 def factory_root(organ: str) -> Path:
     """出厂默认目录：plugin/organs/<器官>/data。"""
     return paths.factory_dir(organ)
-
-
-def _guard(path: Any) -> Path:
-    """门禁：只认 <仓库>/home 底下的路径。"""
-    raw = Path(str(path)).expanduser()
-    resolved = _resolve(raw)
-    hub = _resolve(paths.HOME)
-    if resolved != hub and hub not in resolved.parents:
-        raise RootsError(
-            "她的实盘必须放在 %s 下，不能放在 plugin/、docs/ 或仓库外：现在解析到 %s。"
-            "（plugin/organs/<器官>/data 是出厂默认参数，只读，不是她的实盘；"
-            "把 QQAGENT_HOME 指回 %s，或者干脆别设它，用默认的 %s）"
-            % (hub, resolved, hub, paths.ORGANS_HOME))
-    return resolved
-
-
-def _resolve(path: Path) -> Path:
-    try:
-        return path.resolve()
-    except OSError:  # 路径太怪/权限不够：按字面比，让门禁自己说话
-        return path
 
 
 def seed(organ: str) -> List[Path]:
@@ -99,6 +88,7 @@ def bootstrap() -> Dict[str, Any]:
     soul = base / "soul"
     if not _has_any_file(soul):
         raise RootsError(
+            SOUL_MISSING,
             "魂还没搬进来：%s 里没有她的魂。魂只从她自己的实盘/备份搬，"
             "程序不会替她造一个——把魂放进 %s 再来。" % (soul, soul))
     seeded: Dict[str, int] = {}

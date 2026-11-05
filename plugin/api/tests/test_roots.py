@@ -71,12 +71,15 @@ class RootsTest(unittest.TestCase):
             roots.home_root()
         self.assertIn("docs/", str(caught.exception))
 
-    def test_rejects_outside_repo(self) -> None:
+    def test_allows_outside_repo(self) -> None:
+        """仓库外的已存在目录必须放行：部署把实盘放仓库外，家的测试也靠这条。
+
+        （门禁只拦「仓库内但不在 <仓库>/home 下」的路径——plugin/ 与 docs/ 是出厂默认与文档。）
+        """
         outside = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, outside, True)
         os.environ["QQAGENT_HOME"] = outside
-        with self.assertRaises(roots.RootsError):
-            roots.home_root()
+        self.assertEqual(Path(outside).expanduser(), roots.home_root())
 
     def test_explicit_root_also_gated(self) -> None:
         """--root 这种显式覆盖同样过门禁：兼容不等于开后门。"""
