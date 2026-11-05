@@ -119,6 +119,11 @@
 (function () {
   "use strict";
 
+  // 壳把本页挂在 /qqagent/panel/heart 下（iframe 的文档路径没有结尾斜杠），核自己挂在 /heart。
+  // 请求一律按当前挂载前缀补回去：绝对路径 "/heart/mood" 在 iframe 里会打到壳的根，那是 404。
+  var MOUNT = location.pathname.replace(/\/+$/, "");
+  var BASE = MOUNT.slice(-6) === "/heart" ? MOUNT.slice(0, -6) : "";
+
   var STATES = ["说", "少说", "不说"];
   var judged = [];
   var refusalQuota = null;
@@ -386,31 +391,33 @@
     if (data.window) { renderWindow(data.window); }
   }
 
-  fetch("/heart").then(function (res) { return res.json(); }).then(function (data) {
+  // 注意："/heart" 是**页面本身**（HTML），JSON 概览在 "/heart/overview"。
+  // 打错一处，整页会报"核 /heart 回的不是 JSON"。
+  fetch(BASE + "/heart/overview").then(function (res) { return res.json(); }).then(function (data) {
     renderStatus(data);
     renderIntents(data.intents);
     renderRefusalCooling(data.refusals);
   }).catch(fail);
 
-  fetch("/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
+  fetch(BASE + "/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
 
-  fetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
+  fetch(BASE + "/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
 
-  fetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(fail);
+  fetch(BASE + "/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(fail);
 
-  fetch("/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(fail);
+  fetch(BASE + "/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(fail);
 
-  fetch("/heart/engage").then(function (res) { return res.json(); }).then(function (data) {
+  fetch(BASE + "/heart/engage").then(function (res) { return res.json(); }).then(function (data) {
     renderEngage("被动", data);
   }).catch(fail);
 
-  fetch("/heart/engage?intent=proactive").then(function (res) { return res.json(); }).then(function (data) {
+  fetch(BASE + "/heart/engage?intent=proactive").then(function (res) { return res.json(); }).then(function (data) {
     renderEngage("主动", data);
   }).catch(fail);
 
-  fetch("/heart/pending").then(function (res) { return res.json(); }).then(renderPending).catch(fail);
+  fetch(BASE + "/heart/pending").then(function (res) { return res.json(); }).then(renderPending).catch(fail);
 
-  fetch("/heart/refusals").then(function (res) { return res.json(); }).then(renderRefusalQuota).catch(fail);
+  fetch(BASE + "/heart/refusals").then(function (res) { return res.json(); }).then(renderRefusalQuota).catch(fail);
 
 }());
 </script>
