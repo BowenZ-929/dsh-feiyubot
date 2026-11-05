@@ -55,6 +55,8 @@ REQUIRED_ROUTES = (
     ("GET", "/soul"), ("GET", "/soul/check"), ("GET", "/soul/history"),
     ("GET", "/soul/pin"), ("GET", "/soul/revisions"),
     ("GET", "/soul/render"), ("POST", "/soul/edit"), ("POST", "/soul/migrate"),
+    # 提案落状态（2026-11-06 三次）：清单从脑读出来，拒绝只写脑里的终态。
+    ("GET", "/soul/proposals"), ("POST", "/soul/proposal/reject"),
     ("POST", "/soul/proposal"), ("POST", "/soul/redline"), ("POST", "/soul/rollback"),
     ("POST", "/soul/acceptance"),
     # 口径变更（2026-11-05 心线落地）：心从占位页变成七条只读端点，全在这一张表里。
@@ -157,17 +159,19 @@ class PanelApiTest(unittest.TestCase):
         self.assertIn("【自称】", payload["text"])
         self.assertIn("【待人姿态】", payload["text"])
         chars = payload["chars"]
-        # 一件一套口径：六个 parts 一律四个键，不再区分 suggested/limit 两套键名
+        # 一件一套口径：七个 parts 一律四个键，不再区分 suggested/limit 两套键名
         for part in chars["parts"]:
             self.assertEqual({"name", "chars", "limit", "hard"}, set(part), part["name"])
-        self.assertEqual(["名字与自称", "形象", "三句自述", "怕什么", "待人姿态", "红线条目"],
+        self.assertEqual(["名字与自称", "形象", "三句自述", "怕什么", "喜欢什么",
+                          "待人姿态", "红线条目"],
                          [part["name"] for part in chars["parts"]])   # 顺序即渲染顺序
-        self.assertEqual(6, len(chars["parts"]))
+        self.assertEqual(7, len(chars["parts"]))
         self.assertEqual(sum(part["chars"] for part in chars["parts"]), chars["used"])
         self.assertEqual(1000, chars["limit"])          # 合计是硬线
         hard = [part for part in chars["parts"] if part["hard"]]
-        self.assertEqual(["形象", "怕什么"], [part["name"] for part in hard])  # 两件硬线
-        self.assertEqual([60, 60], [part["limit"] for part in hard])
+        self.assertEqual(["形象", "怕什么", "喜欢什么"],
+                         [part["name"] for part in hard])   # 三件硬线
+        self.assertEqual([60, 60, 80], [part["limit"] for part in hard])
         soft = [part for part in chars["parts"] if not part["hard"]]
         self.assertEqual(4, len(soft), "其余四件的 limit 只是建议值")
         self.assertTrue(all(part["limit"] < chars["limit"] for part in soft))
@@ -403,13 +407,15 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual({"/brain/judge"},
                          {path for path in brain if api.ROUTES[path] == "POST"},
                          "脑只有一条写路由：POST /brain/judge")
-        # 写入口六条：改值 / 换形状 / 提案 / 红线逐条加撤 / 回滚 / 验收探针。
-        # 前五条是「改她的魂」；探针是「写两次再写回」的验收路径，edit 上的 probe 键已关掉。
+        # 写入口七条：改值 / 换形状 / 提案 / 拒绝提案 / 红线逐条加撤 / 回滚 / 验收探针。
+        # 前五条是「改她的魂」；拒绝提案只落脑里的终态（不写魂、不产生 revision）；
+        # 探针是「写两次再写回」的验收路径，edit 上的 probe 键已关掉。
         # 整块替换仍然没有入口（edit 动 items 整表、migrate 碰 bounds 都一律拒）。
         self.assertEqual({"/soul/edit", "/soul/migrate", "/soul/proposal",
-                          "/soul/redline", "/soul/rollback", "/soul/acceptance"},
+                          "/soul/proposal/reject", "/soul/redline", "/soul/rollback",
+                          "/soul/acceptance"},
                          {path for path in soul if api.ROUTES[path] == "POST"},
-                         "魂的写入口：改值 / 换形状 / 提案 / 红线逐条 / 回滚 / 验收探针")
+                         "魂的写入口：改值 / 换形状 / 提案 / 拒绝提案 / 红线逐条 / 回滚 / 验收探针")
         self.assertEqual({"GET"}, {api.ROUTES[path] for path in rest},
                          "嘴的干跑端点都只有 GET")
         # 五组必须真的分区：两两不相交，并集就是整张表——没有端点落在分类之外
@@ -443,16 +449,22 @@ class PanelSourceTest(unittest.TestCase):
         所以现在固定按钮三个：改这一句 / 加这条红线 / 退回上一版；写请求五个：
         /soul/edit 一次、/soul/redline 两次（逐条加、逐条撤）、/soul/proposal 一次
         （接受提案，拒绝不发请求）、/soul/rollback 一次。撤线按钮仍由 JS 按条生成。
+
+        **2026-11-06 三次（提案落状态）**：拒绝不再是「页内说一句就散」——拒掉的提案必须
+        从待办里消失，所以多一个写请求 /soul/proposal/reject（只落脑里的终态，不写魂）。
+        固定按钮仍是四个：拒绝用 window.prompt 问原因，不新造按键。
         """
         text = PAGE.read_text(encoding="utf-8")
         self.assertNotIn("127.0.0.1", text, "界面上不写核的地址：那是工程细节")
-        # 两个文本框：待人姿态、新红线条目的禁令正文
-        self.assertEqual(2, text.count("<textarea"), "可编辑的只有这两处")
-        # 三个固定按钮：改这一句 / 加这条红线 / 退回上一版；撤线按钮与提案两钮都由 JS 生成
-        self.assertEqual(3, text.count("<button"), "固定提交按钮只剩这三个")
+        # 三个文本框：喜欢什么、待人姿态、新红线条目的禁令正文（第七件由人写、人可改）
+        self.assertEqual(3, text.count("<textarea"), "可编辑的只有这三处")
+        # 四个固定按钮：改这一句（喜欢什么）/ 改这一句（待人姿态）/ 加这条红线 / 退回上一版；
+        # 撤线按钮与提案两钮都由 JS 生成
+        self.assertEqual(4, text.count("<button"), "固定提交按钮只剩这四个")
         self.assertNotIn("<form", text)
-        # 五个写请求：/soul/edit 1、/soul/redline 2（加、撤）、/soul/proposal 1、/soul/rollback 1
-        self.assertEqual(5, text.count('call("POST"'), "全页只有五个写请求")
+        # 七个写请求：/soul/edit 2（喜欢什么、待人姿态）、/soul/redline 2（加、撤）、
+        # /soul/proposal 1、/soul/proposal/reject 1、/soul/rollback 1
+        self.assertEqual(7, text.count('call("POST"'), "全页只有七个写请求")
         self.assertNotIn("/soul/migrate", text, "换形状是坏卡状态的路，不给面板入口")
         self.assertIn("/soul/proposal", text, "接受提案的入口必须在页上（没有它她改不了自己）")
         self.assertIn("/soul/rollback", text, "整档回滚的入口必须在页上（改坏了能退是底线）")
@@ -509,7 +521,8 @@ class PanelSourceTest(unittest.TestCase):
 
     def test_panel_page_reads_five_blocks_and_budget(self):
         text = PAGE.read_text(encoding="utf-8")
-        for label in ("名字", "形象", "三句自述", "待人姿态", "红线", "合计"):
+        for label in ("名字", "形象", "三句自述", "怕什么", "喜欢什么", "待人姿态",
+                      "红线", "合计"):
             self.assertIn(label, text)
         self.assertIn('id="ro-appearance"', text)          # 只读展示
         self.assertNotIn("appearance-value", text)         # 本轮只读：没有编辑框

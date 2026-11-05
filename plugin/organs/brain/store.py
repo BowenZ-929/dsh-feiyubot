@@ -1256,6 +1256,31 @@ class BrainStore:
     def proposals(self) -> Dict[str, Any]:
         return _read_json(self._root / PROPOSALS_FILE, {"night_of": "", "proposals": []})
 
+    def mark_proposal(self, proposal_id: str, status: str, actor: str, ts: str,
+                      reason: str = "") -> Dict[str, Any]:
+        """人处理了一条提案：只在当前那份 proposals.json 里原地打终态。
+
+        只许 accepted / rejected 两个终态；找不到 id 就如实说不写盘（不新建、不改形状）。
+        其余字段逐字不动——提案正文由程序写，人只动「处理结果」这几个键。
+        reason 形参是**拒绝的理由**，落盘键是 decision_reason：条目里原有的 reason 是
+        「她为什么提」，那句话一个字都不许被人的处理结果盖掉。
+        """
+        if status not in ("accepted", "rejected"):
+            raise ValueError("status 只许 accepted / rejected，实际 %r" % (status,))
+        wanted = (proposal_id or "").strip()
+        batch = self.proposals()
+        for row in batch.get("proposals") or []:
+            if isinstance(row, dict) and row.get("id") == wanted:
+                row["status"] = status
+                row["actor"] = actor
+                row["ts"] = ts
+                if status == "rejected":
+                    row["decision_reason"] = reason
+                _atomic_write_json(self._root / PROPOSALS_FILE, batch)
+                return {"ok": True, "proposal_id": wanted, "status": status,
+                        "proposal": dict(row)}
+        return {"ok": False, "message": "没有这条提案：%s" % wanted}
+
     def run_night(self, now_ts: Optional[str] = None) -> Dict[str, Any]:
         """夜结算：换日降级 + 从刚结束的一天里提炼 0–2 条改基线提案。幂等。"""
         now_ts = now_ts or now_iso()

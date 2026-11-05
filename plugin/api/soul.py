@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any, Dict, Mapping, Optional
 
+from organs.brain.model import now_iso
 from organs.soul import SoulLoadError, model
 from organs.soul import pin as soul_pin
 from organs.soul import store as soul_store
@@ -35,7 +36,9 @@ SOUL_ROUTES = {
     "/soul/revisions": "GET",
     "/soul/edit": "POST",
     "/soul/migrate": "POST",
+    "/soul/proposals": "GET",
     "/soul/proposal": "POST",
+    "/soul/proposal/reject": "POST",
     "/soul/redline": "POST",
     "/soul/rollback": "POST",
     "/soul/acceptance": "POST",
@@ -43,13 +46,14 @@ SOUL_ROUTES = {
 EDIT_FIELDS = ("actor", "reason", "block", "path", "value")
 MIGRATE_FIELDS = ("actor", "reason", "block", "value", "expect_old_digest")
 PROPOSAL_FIELDS = ("actor", "proposal")
+PROPOSAL_REJECT_FIELDS = ("actor", "proposal_id", "reason")
 ROLLBACK_FIELDS = ("actor", "reason", "revision")
 REDLINE_FIELDS = ("actor", "reason", "op")
 ACCEPTANCE_FIELDS = ("actor", "reason", "block", "path", "value", "restore_value")
 
 
 def dispatch(route: str, params: Mapping[str, str], body: Optional[Dict[str, Any]],
-             store: Any) -> Result:
+             store: Any, brain: Any = None) -> Result:
     if route == "/soul":
         return _soul(store)
     if route == "/soul/check":
@@ -72,7 +76,11 @@ def dispatch(route: str, params: Mapping[str, str], body: Optional[Dict[str, Any
         return _redline(body, store)
     if route == "/soul/acceptance":
         return _acceptance(body, store)
-    return _proposal(body, store)
+    if route == "/soul/proposals":
+        return _proposals_query(params, brain)
+    if route == "/soul/proposal/reject":
+        return _proposal_reject(body, brain)
+    return _proposal(body, store, brain)
 
 
 def _soul(store: Any) -> Result:
@@ -108,7 +116,7 @@ def _history(store: Any) -> Result:
 
 
 def _chars(snapshot: Any) -> Dict[str, Any]:
-    """六件字数：limit 是这一件的线，hard 说明它是硬线还是建议值。
+    """七件字数：limit 是这一件的线，hard 说明它是硬线还是建议值。
 
     parts 一律四个键 {"name", "chars", "limit", "hard"}，不再按硬/软换键名：
     硬线那件的 limit 就是硬线值，其余是建议值（超了只 WARN，不拦）。合计硬线另给 limit。
@@ -179,8 +187,43 @@ def _migrate(body: Optional[Dict[str, Any]], store: Any) -> Result:
     return (200 if result.get("ok") else 400), result
 
 
-def _proposal(body: Optional[Dict[str, Any]], store: Any) -> Result:
-    """接受一份提案：校验、限额、写盘、追账全在 store 里，这里只搬字段。"""
+def _mark(brain: Any, proposal_id: str, status: str, actor: str, ts: str,
+          reason: str = "") -> Dict[str, Any]:
+    """把处理结果回写进脑的 proposals.json：回写失败如实返回，不许假装成功。
+
+    reason 只对 rejected 有意义，落盘键是 decision_reason（她原本的 reason 不动）。
+    """
+    if brain is None:
+        return {"ok": False, "message": "脑未载入：提案状态没处落（devserver --brain-root）"}
+    try:
+        return brain.mark_proposal(proposal_id, status, actor, ts, reason)
+    except Exception as exc:  # noqa: BLE001 - 回写失败要原样报给面板
+        return {"ok": False, "message": "提案状态回写失败：%s" % exc}
+
+
+def _proposal_handled(brain: Any, proposal_id: str) -> Optional[Dict[str, Any]]:
+    """这条提案在脑里是不是已经有终态了：重复点头时要看得见「已经处理过」。"""
+    if brain is None or not proposal_id:
+        return None
+    try:
+        rows = brain.proposals().get("proposals") or []
+    except Exception:  # noqa: BLE001 - 读不到就不多说一句
+        return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == proposal_id \
+                and row.get("status") in ("accepted", "rejected"):
+            return {"status": row["status"], "actor": row.get("actor", ""),
+                    "ts": row.get("ts", ""), "reason": row.get("reason", ""),
+                    "decision_reason": row.get("decision_reason", "")}
+    return None
+
+
+def _proposal(body: Optional[Dict[str, Any]], store: Any, brain: Any = None) -> Result:
+    """接受一份提案：校验、限额、写盘、追账全在 store 里，这里只搬字段 + 回写脑。
+
+    魂的写入是既成事实：脑那边 id 对不上或写不进去，接受照样算数，但响应里必须带
+    mark 的失败说明——不回写就等于面板永远显示「等她点头」。
+    """
     if not isinstance(body, dict):
         return 400, {"ok": False, "message": "body 必须是 JSON 对象"}
     missing = [field for field in PROPOSAL_FIELDS if field not in body]
@@ -189,12 +232,67 @@ def _proposal(body: Optional[Dict[str, Any]], store: Any) -> Result:
     limit = body.get("monthly_limit", model.PROPOSAL_MONTHLY_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool):
         return 400, {"ok": False, "message": "monthly_limit 必须是整数"}
+    proposal = body["proposal"]
+    proposal_id = str(proposal.get("id") or "").strip() if isinstance(proposal, dict) else ""
     try:
-        result = store.accept_proposal(actor=body["actor"], proposal=body["proposal"],
+        result = store.accept_proposal(actor=body["actor"], proposal=proposal,
                                        monthly_limit=limit)
     except SoulLoadError as exc:
         return _failed(400, "魂载入失败，先修卡", exc.issues)
-    return (200 if result.get("ok") else 400), result
+    if not result.get("ok"):
+        handled = _proposal_handled(brain, proposal_id)
+        if handled:
+            # 重复点头大多先撞演化五闸（同一格 7 天内动过 = GATE_COOLDOWN）：
+            # 拒因照旧带 issues，另外点名「这条已经处理过」，别让人以为点了没反应。
+            result["handled"] = handled
+            result["message"] = "%s（这条提案已经处理过：%s）" % (
+                result.get("message", ""), handled["status"])
+        return 400, result
+    ts = ((result.get("history_line") or {}).get("ts") or "")
+    result["mark"] = _mark(brain, proposal_id, "accepted", body["actor"], ts, "")
+    return 200, result
+
+
+def _proposal_reject(body: Optional[Dict[str, Any]], brain: Any) -> Result:
+    """拒绝一条提案：只落脑里的终态，不写魂、不产生 revision。"""
+    if not isinstance(body, dict):
+        return 400, {"ok": False, "message": "body 必须是 JSON 对象"}
+    missing = [field for field in PROPOSAL_REJECT_FIELDS if field not in body]
+    if missing:
+        return 400, {"ok": False, "message": "缺字段：%s" % "/".join(missing)}
+    actor = body["actor"] if isinstance(body["actor"], str) else ""
+    if not actor.strip():
+        return 400, {"ok": False, "message": "actor 不能为空：拒绝的是人的手，提案要记清是谁"}
+    proposal_id = str(body["proposal_id"] or "").strip()
+    if not proposal_id:
+        return 400, {"ok": False, "message": "proposal_id 不能为空：要拒哪一条"}
+    decision_reason = body["reason"] if isinstance(body["reason"], str) else ""
+    if not decision_reason.strip():
+        return 400, {"ok": False, "message": "reason 不能为空：拒绝要写清为什么"}
+    if brain is None:
+        return 503, {"ok": False, "message": "脑未载入：提案状态没处落（devserver --brain-root）"}
+    # 人的理由落 decision_reason；条目里原有的 reason 是「她为什么提」，一个字不动。
+    mark = _mark(brain, proposal_id, "rejected", actor.strip(), now_iso(),
+                 decision_reason.strip())
+    return (200 if mark.get("ok") else 400), mark
+
+
+def _proposals_query(params: Mapping[str, str], brain: Any) -> Result:
+    """提案清单：默认只看 pending（没有 status 或 status=='pending'），?status=all 看全部。"""
+    want = (params.get("status") or "pending").strip() or "pending"
+    if want not in ("pending", "all"):
+        return 400, {"ok": False, "message": "status 只许 pending / all，实际 %r" % want}
+    if brain is None:
+        return 503, {"ok": False, "message": "脑未载入：提案在脑里（devserver --brain-root）"}
+    try:
+        rows = brain.proposals().get("proposals") or []
+    except Exception as exc:  # noqa: BLE001 - 读不到要如实报，不许折叠成 0 条
+        return 500, {"ok": False, "message": "提案读不出来：%s" % exc}
+    rows = [row for row in rows if isinstance(row, dict)]
+    if want == "pending":
+        rows = [row for row in rows if row.get("status") in (None, "", "pending")]
+    return 200, {"proposals": rows}
+
 
 def _pin(store: Any) -> Result:
     """M4：压缩前要 pin 的那一份——每条红线「条目 id ｜ 禁令首句」，≤1200 字节。"""

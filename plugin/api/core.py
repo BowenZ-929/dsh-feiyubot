@@ -113,4 +113,4 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
         return day_api.dispatch(route, params, body, store, brain)
     if route in version_api.VERSION_ROUTES:
         return version_api.dispatch(route)
-    return soul_api.dispatch(route, params, body, store)
+    return soul_api.dispatch(route, params, body, store, brain)

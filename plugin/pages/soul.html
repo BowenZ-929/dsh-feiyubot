@@ -45,6 +45,11 @@
   .msg { margin: var(--gap-1) 0 0; color: var(--dim); }
   .msg.bad { color: var(--warn); }
   .msg.good { color: var(--fg); }
+  /* 缺这一格（降级载入）：格子显红 + 一行「这一栏还没写，请补上」；补齐提交后刷新即恢复。
+     颜色仍取宿主变量，跟 .msg.bad 同一支，不自造色板。 */
+  .missing { outline: 1px solid var(--warn); outline-offset: 2px; }
+  textarea.missing, input.missing { border-color: var(--warn); }
+  .miss { display: block; margin-top: 4px; color: var(--warn); font-size: .9rem; }
   dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr);
           gap: var(--gap-1); margin: 0; }
   dl.kv dt { color: var(--dim); }
@@ -110,6 +115,17 @@
     </section>
 
     <section class="card">
+      <div class="head"><h2>喜欢什么</h2><span class="who">人写的</span></div>
+      <p class="hint">她喜欢什么，一句话，逐字进注入。只有人写的那一句：她自己不会往这里长（她要长新的喜欢，写进自述与家·抽屉），也不许写成讨好人的话。改完下一回合就生效，不用重启。</p>
+      <label for="like-value">这一句话</label>
+      <textarea id="like-value" rows="3" spellcheck="false" placeholder="读取中…"></textarea>
+      <label for="like-reason">为什么改（必填，进改动记录）</label>
+      <input id="like-reason" type="text" autocomplete="off" placeholder="比如：她说想吃大白饭">
+      <button id="like-submit" type="button">改这一句</button>
+      <p class="msg" id="like-msg">读取中…</p>
+    </section>
+
+    <section class="card">
       <div class="head"><h2>待人姿态</h2><span class="who">人写</span></div>
       <p class="hint">她跟人打交道时的那股劲儿，一句话。改完下一回合就生效，不用重启。</p>
       <label for="say-value">这一句话</label>
@@ -143,9 +159,16 @@
 
     <section class="card">
       <div class="head"><h2>她提的改动</h2><span class="who">由程序写：她自己只能提，点头的是人</span></div>
-      <p class="hint">她夜里攒下的想法放在这儿，每条都带着依据的记忆。点头才落进她的魂，她自己是改不动自己的。</p>
+      <p class="hint">她夜里攒下的想法放在这儿，每条都带着依据的记忆。点头才落进她的魂，她自己是改不动自己的；摇头就只记下这次拒绝，她的魂一个字不动。</p>
       <ul class="rows" id="proposal-list"><li><span class="body">读取中…</span></li></ul>
       <p class="msg" id="proposal-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>已经处理过的提案</h2><span class="who">由程序写：谁在什么时候点了头或摇了头，程序自己记</span></div>
+      <p class="hint">点头进魂的那几条、被人拒掉的几条都留在这一块，带着谁处理的、什么时候、为什么拒。刷新可见，重启仍在。</p>
+      <ul class="rows" id="proposal-done-list"><li><span class="body">读取中…</span></li></ul>
+      <p class="msg" id="proposal-done-msg"></p>
     </section>
 
     <section class="card">
@@ -219,16 +242,70 @@
     return text ? text.slice(0, 16).replace("T", " ") : "时间没记";
   }
 
+  // —— 缺这一格（降级载入）：格子显红 + 一行提示 ——————————————
+  // 码对格：缺哪一格由核报的 Issue 决定，页面不自己猜。补齐提交后刷新，红框与提示一起消失。
+  var MISSING_CELLS = {
+    IDENTITY_DISPLAY_MISSING: "ro-name",
+    IDENTITY_SYNONYMS_MISSING: "ro-name",
+    IDENTITY_APPEARANCE_MISSING: "ro-appearance",
+    IDENTITY_FEARS_MISSING: "ro-fears",
+    IDENTITY_LIKES_MISSING: "like-value"
+  };
+
+  function missingCells(issues) {
+    var found = {};
+    (issues || []).forEach(function (issue) {
+      // 只看降级载入的（blocking=false）：写错了的卡根本载不进来，那是另一条路。
+      var id = issue.blocking === false ? MISSING_CELLS[issue.code] : "";
+      if (id) { found[id] = true; }
+    });
+    return found;
+  }
+
+  function markMissing(id, on) {
+    var target = el(id);
+    if (!target) { return; }
+    var hint = target.querySelector(".miss");
+    target.classList.remove("missing");
+    if (hint) { hint.parentNode.removeChild(hint); }
+    if (!on) { return; }
+    target.classList.add("missing");
+    // 只读的格子上不并排写「（这一栏还没写）」再加一句提示：留提示就够了，
+    // 占位本来就在下面「她此刻会被注入的样子」里逐字看得见。
+    if (target.tagName !== "TEXTAREA" && target.tagName !== "INPUT") { target.textContent = ""; }
+    target.appendChild(node("span", "miss", "这一栏还没写，请补上"));
+  }
+
+  function applyMissing(found) {
+    var seen = {};
+    Object.keys(MISSING_CELLS).forEach(function (code) {
+      var id = MISSING_CELLS[code];
+      if (seen[id]) { return; }
+      seen[id] = true;
+      markMissing(id, !!found[id]);
+    });
+  }
+
   // —— 她是谁（只读） ——————————————————————————————
   function showSoul(soul) {
     var id = soul.identity || {};
+    var missing = missingCells(soul.issues || []);
     var synonyms = id.synonyms && id.synonyms.length ? "（也叫 " + id.synonyms.join("、") + "）" : "";
     el("ro-name").textContent = String(id.display || "没写名字") + synonyms;
     el("ro-appearance").textContent = String(id.appearance || "还没写形象");
     el("ro-statements").textContent = (id.self_statements || []).length
       ? id.self_statements.join("\n") : "还没写自述";
     el("ro-fears").textContent = String(id.fears || "还没写怕什么");
-    say("identity-msg", "这四样不在这一页改：这一页只动待人姿态与红线。");
+    applyMissing(missing);
+    say("identity-msg", "这四样不在这一页改：这一页动喜欢什么、待人姿态与红线。");
+    // 喜欢什么：只有人写的那一句。框里已有字就不覆盖——人正在改的那一行不许被刷新清掉；
+    // 缺这一格时也不把占位填进去：那正是要人补的那一格。
+    if (!missing["like-value"] && id.likes && !el("like-value").value) {
+      el("like-value").value = id.likes;
+    }
+    if (el("like-msg").textContent === "读取中…") {
+      say("like-msg", "上面框里是她现在这一句；改了要写原因，改完下一回合生效。");
+    }
     var stance = (soul.manner || {}).stance;
     if (stance && !el("say-value").value) { el("say-value").value = stance; }
     if (el("say-msg").textContent === "读取中…") {
@@ -327,7 +404,9 @@
   }
 
   // —— 她提的改动（她只能提，点头的是人） ————————————————
-  // 页面不给自己造提案：一条一条原样来自程序。接受才写魂，拒绝连请求都不发。
+  // 页面不给自己造提案：一条一条原样来自程序。接受写魂并回写终态，拒绝只落终态。
+  var PROPOSAL_STATUS_TEXT = { accepted: "已接受", rejected: "已拒绝" };
+
   function targetText(target) {
     return TARGET_TEXT[String(target || "")] || "她的某一块";
   }
@@ -389,25 +468,90 @@
     say("proposal-msg", "正在接受…");
     call("POST", "/soul/proposal", { actor: ACTOR, proposal: proposal })
       .then(function (res) {
-        if (res.status === 200 && (res.data || {}).ok !== false) {
+        var data = res.data || {};
+        if (res.status === 200 && data.ok !== false) {
+          var mark = data.mark || {};
           // 说话要在刷新之后：refresh() 会重画提案列表并写上条数，先说就被盖掉。
           return refresh().then(function () {
+            if (mark.ok === false) {
+              say("proposal-msg", "接受了，但提案状态没回写：" + (mark.message || "没给原因")
+                + "——下次刷新它还挂在待办里。", "bad");
+              return;
+            }
             say("proposal-msg", "接受了。她的「" + targetText(proposal.target)
-              + "」换成这一句，改动记录里多了一行。", "good");
+              + "」换成这一句，改动记录里多了一行；这条挪进了「已经处理过的提案」。", "good");
           });
+        }
+        // 重复点头：拒因（多半是 GATE_COOLDOWN）照旧显示，但要看得出「这条已经处理过」。
+        if (data.handled) {
+          say("proposal-msg", "这条已经处理过了（"
+            + (PROPOSAL_STATUS_TEXT[data.handled.status] || data.handled.status)
+            + "），没再动她：" + reasonOf(res), "bad");
+          return;
         }
         say("proposal-msg", "没接受成：" + reasonOf(res), "bad");
       })
       .catch(function (err) { say("proposal-msg", "连不上核：" + err, "bad"); });
   }
 
-  // 拒绝不发任何请求：她那边一个字不动，账上也不留痕——页内这一行说完就散。
+  // 拒绝只落脑里的终态：她的魂一个字不动，也不产生新版本；原因必填。
   function rejectProposal(proposal) {
-    say("proposal-msg", "没点头，这一条作废（她的魂一个字没动，也没记账）。");
-    // 只把这一行点灰，好让人知道刚才否的是哪一条——页面之外不留任何痕迹。
-    var button = el("proposal-reject-" + STATE.proposals.indexOf(proposal));
-    var row = button && button.parentNode && button.parentNode.parentNode;
-    if (row) { row.className = "retired"; }
+    var reason = window.prompt("为什么拒这一条？（必填，记进提案）", "");
+    if (reason === null) { return; }
+    reason = String(reason).trim();
+    if (!reason) {
+      say("proposal-msg", "拒绝要写原因：这一条要记清为什么没点头。", "bad");
+      return;
+    }
+    say("proposal-msg", "正在记下这次拒绝…");
+    call("POST", "/soul/proposal/reject",
+         { actor: ACTOR, proposal_id: proposal.id, reason: reason })
+      .then(function (res) {
+        if (res.status === 200 && (res.data || {}).ok !== false) {
+          return refresh().then(function () {
+            say("proposal-msg", "拒了。这一条挪进了「已经处理过的提案」，她的魂一个字没动。",
+                "good");
+          });
+        }
+        say("proposal-msg", "没记下这次拒绝：" + reasonOf(res), "bad");
+      })
+      .catch(function (err) { say("proposal-msg", "连不上核：" + err, "bad"); });
+  }
+
+  // 已处理：只读，按终态列出来（谁处理的、什么时候）。
+  // 拒绝要并排两行：她为什么提（reason）与人的拒绝理由（decision_reason）都留着，
+  // 后者是处理结果，不许盖掉前者。
+  function showDone(batch) {
+    var list = el("proposal-done-list");
+    clear(list);
+    var rows = ((batch || {}).proposals || []).filter(function (row) {
+      return row.status === "accepted" || row.status === "rejected";
+    });
+    if (!rows.length) {
+      list.appendChild(node("li", "msg", "还没有处理过的提案。"));
+      say("proposal-done-msg", "点头或拒掉的提案会留在这一块：谁处理的、什么时候。");
+      return;
+    }
+    rows.forEach(function (row) {
+      var li = node("li");
+      var cell = node("div");
+      cell.appendChild(node("div", "body",
+        (PROPOSAL_STATUS_TEXT[row.status] || row.status) + "：想把「" + targetText(row.target)
+        + "」改成「" + String(row.value || "") + "」"));
+      cell.appendChild(node("div", "meta",
+        "谁：" + (row.actor || "没记") + " · " + shortTime(row.ts)
+        + (row.status === "accepted" ? " 接受" : " 拒绝")));
+      if (row.reason) {
+        cell.appendChild(node("div", "meta", "她提的理由：" + row.reason));
+      }
+      if (row.status === "rejected") {
+        cell.appendChild(node("div", "meta",
+          "拒绝理由：" + (row.decision_reason || "没记")));
+      }
+      li.appendChild(cell);
+      list.appendChild(li);
+    });
+    say("proposal-done-msg", "共 " + rows.length + " 条已经处理过。");
   }
 
   // —— 退回上一版（整档回滚） ————————————————————————
@@ -486,8 +630,9 @@
       call("GET", "/soul/render"),
       call("GET", "/soul/history"),
       call("GET", "/soul/check"),
-      call("GET", "/brain/proposals"),
-      call("GET", "/soul/revisions")
+      call("GET", "/soul/revisions"),
+      call("GET", "/soul/proposals?status=pending"),
+      call("GET", "/soul/proposals?status=all")
     ]).then(function (out) {
       if (out[0].status === 200) { showSoul(out[0].data || {}); }
       else {
@@ -503,14 +648,16 @@
       else { say("history-msg", "改动记录读不到：" + reasonOf(out[2]), "bad"); }
       if (out[3].status === 200) { showIssues((out[3].data || {}).issues || []); }
       else { say("issues-msg", "自检跑不起来：" + reasonOf(out[3]), "bad"); }
-      if (out[4].status === 200) { showProposals(out[4].data || {}); }
-      else { say("proposal-msg", "她提的改动读不到：" + reasonOf(out[4]), "bad"); }
       if (out[5].status === 200) { showRevisions(out[5].data || {}); }
       else {
         STATE.previous = null;
         renderRevision();
         say("rollback-msg", "版本清单读不到，退回上一版先别点：" + reasonOf(out[5]), "bad");
       }
+      if (out[6].status === 200) { showProposals(out[6].data || {}); }
+      else { say("proposal-msg", "她提的改动读不到：" + reasonOf(out[6]), "bad"); }
+      if (out[7].status === 200) { showDone(out[7].data || {}); }
+      else { say("proposal-done-msg", "处理过的提案读不到：" + reasonOf(out[7]), "bad"); }
     }).catch(function (err) {
       say("identity-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
     });
@@ -537,6 +684,30 @@
     }).catch(function (err) {
       button.disabled = false;
       say("say-msg", "连不上核：" + err, "bad");
+    });
+  });
+
+  el("like-submit").addEventListener("click", function () {
+    var value = el("like-value").value.trim();
+    var reason = el("like-reason").value.trim();
+    if (!value) { say("like-msg", "这一句不能空着。", "bad"); return; }
+    if (!reason) { say("like-msg", "原因不能空着：改动记录要写清为什么改。", "bad"); return; }
+    var button = el("like-submit");
+    button.disabled = true;
+    say("like-msg", "正在写…");
+    call("POST", "/soul/edit", {
+      actor: ACTOR, reason: reason, block: "identity", path: "likes", value: value
+    }).then(function (res) {
+      button.disabled = false;
+      if (res.status === 200 && (res.data || {}).ok !== false) {
+        el("like-reason").value = "";
+        say("like-msg", "改好了。下一回合她就按这一句喜欢。", "good");
+        return refresh();
+      }
+      say("like-msg", "没改成：" + reasonOf(res), "bad");
+    }).catch(function (err) {
+      button.disabled = false;
+      say("like-msg", "连不上核：" + err, "bad");
     });
   });
 

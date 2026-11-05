@@ -75,16 +75,22 @@ class EveryClickableHasARoute(unittest.TestCase):
         「改坏了能退」的底线（命令行能用不等于页面能用）。新增四条——
         读 /brain/proposals（她提的改动从哪来）、读 /soul/revisions（上一版是哪一版）、
         写 /soul/proposal（接受；拒绝不发请求）、写 /soul/rollback（整档回滚）。
+
+        **十条 → 十二条（2026-11-06 三次，提案落状态）**：「接受成功、面板照旧显示
+        等人点头」是真 bug——魂写了，脑没回写，刷新还是那一条，再点又撞 GATE_COOLDOWN。
+        所以提案的取数改用 GET /soul/proposals（pending 与 all 两次取，同一条路由），
+        拒绝也真的发请求：POST /soul/proposal/reject 只落脑里的终态，不写魂。
         """
         text = _text("soul.html")
         calls = CALL_RE.findall(text)
         self.assertEqual(
             {("GET", "/soul"), ("GET", "/soul/render"), ("GET", "/soul/history"),
-             ("GET", "/soul/check"), ("GET", "/brain/proposals"), ("GET", "/soul/revisions"),
+             ("GET", "/soul/check"), ("GET", "/soul/revisions"), ("GET", "/soul/proposals"),
              ("POST", "/soul/edit"), ("POST", "/soul/redline"), ("POST", "/soul/proposal"),
-             ("POST", "/soul/rollback")},
+             ("POST", "/soul/proposal/reject"), ("POST", "/soul/rollback")},
             {(method, path.partition("?")[0]) for method, path in calls},
-            "魂页的取数与写就这十条：六条只读 + 四条写（改一句、红线加/撤、接受提案、退回上一版）")
+            "魂页的取数与写就这些：六条只读 + 五条写（改一句、红线加/撤、接受提案、"
+            "拒绝提案、退回上一版）")
         for method, path in calls:
             route = path.partition("?")[0]
             self.assertIn(route, api.ROUTES, "页面在打一条不存在的路由：%s" % route)
@@ -106,7 +112,8 @@ class EveryClickableHasARoute(unittest.TestCase):
         # 「加这条红线」；撤线按钮仍由 JS 按条生成（下一条用例单独看它）。
         # 再次改动（2026-11-06 二次）：两个 → 三个，「退回上一版」是静态按钮（回滚不靠
         # 现造按钮，页底部那颗一直在）。提案的「接受」「拒绝」仍由 JS 按条生成。
-        self.assertEqual(len(ids), 3, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
+        # 第七件（喜欢什么）：三个 → 四个——它和待人姿态一样是「人改一句」的静态按钮。
+        self.assertEqual(len(ids), 4, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
         for button_id in ids:
             self.assertIn('el("%s").addEventListener' % button_id, text,
                           "按钮 %s 没有绑定任何事件" % button_id)
@@ -128,7 +135,8 @@ class SoulProposalAndRollbackButtons(unittest.TestCase):
     - 「接受」是她想改自己唯一的通路。她只能提、不能自己改；没有接受按钮，
       「魂只有人能改」就只堵了一半——人看得到提案，却只能去命令行点头。
     - 「退回上一版」是底线：改坏了能退。命令行能用不等于页面能用。
-    - 「拒绝」反过来不许有请求：拒绝是人的沉默，不写账、不动魂。
+    - 「拒绝」也要落状态（2026-11-06 三次）：拒掉的提案不写魂、不产生 revision，
+      但它必须从「等她点头」里消失——所以它走自己的一条 POST，只写脑里的终态。
     """
 
     def setUp(self) -> None:
@@ -136,7 +144,7 @@ class SoulProposalAndRollbackButtons(unittest.TestCase):
         self.code = _code_only(self.text)
 
     def test_proposal_buttons_are_bound_and_accept_hits_the_route(self):
-        """"接受"按 id 绑定，并且打的是一条真路由；"拒绝"一个字都不发。"""
+        """"接受"按 id 绑定，打的是一条真路由；"拒绝"打自己那条只落终态的 POST。"""
         # 两个按钮都是 JS 按条造的，绑法仍是 el(id).addEventListener（不是死按钮）
         self.assertIn('el("proposal-accept-" + index).addEventListener', self.code,
                       "「接受」没有绑事件：点了不会有任何反应")
@@ -145,10 +153,13 @@ class SoulProposalAndRollbackButtons(unittest.TestCase):
         self.assertIn('call("POST", "/soul/proposal"', self.code,
                       "「接受」要打 POST /soul/proposal")
         self.assertEqual("POST", api.ROUTES.get("/soul/proposal"))
-        # 拒绝只记一行本地话：不许有请求（有的话就是「拒绝也会留痕」，与判据相反）
+        # 拒绝真的发一次请求：不写魂，但要把「已拒绝」落进脑，否则这条永远躺在待办里
         reject_body = self.code.split("function rejectProposal", 1)[1].split("\n  }", 1)[0]
-        self.assertNotIn("call(", reject_body, "拒绝不该发任何请求：她的魂一个字都不动")
-        self.assertNotIn("panelFetch", reject_body, "拒绝不该发任何请求")
+        self.assertIn('call("POST", "/soul/proposal/reject"', reject_body,
+                      "拒绝要打 POST /soul/proposal/reject")
+        self.assertEqual("POST", api.ROUTES.get("/soul/proposal/reject"))
+        self.assertIn("proposal_id: proposal.id", reject_body, "拒绝要指名拒的是哪一条")
+        self.assertIn("reason", reject_body, "拒绝要带原因（服务端空原因 400）")
         self.assertIn("say(", reject_body, "拒绝要在页内记一行")
 
     def test_rollback_button_is_bound_and_hits_the_route(self):
@@ -165,13 +176,19 @@ class SoulProposalAndRollbackButtons(unittest.TestCase):
                       "回滚要带上「上一版」的版本号，不许让服务端猜")
 
     def test_the_two_blocks_read_from_real_gets(self):
-        """两个块的取数各来自一条真 GET：提案来自脑、上一版来自魂的版本清单。"""
-        self.assertIn('call("GET", "/brain/proposals"', self.code,
-                      "「她提的改动」要读 GET /brain/proposals")
+        """两个块的取数各来自一条真 GET：提案来自脑（经魂那条只读口）、上一版来自魂的版本清单。"""
+        self.assertIn('call("GET", "/soul/proposals?status=pending"', self.code,
+                      "「她提的改动」只列 pending：读 GET /soul/proposals?status=pending")
+        self.assertIn('call("GET", "/soul/proposals?status=all"', self.code,
+                      "「已经处理过的提案」要读全部：GET /soul/proposals?status=all")
         self.assertIn('call("GET", "/soul/revisions"', self.code,
                       "「退回上一版」要知道上一版是几：读 GET /soul/revisions")
-        self.assertEqual("GET", api.ROUTES.get("/brain/proposals"))
+        self.assertEqual("GET", api.ROUTES.get("/soul/proposals"))
         self.assertEqual("GET", api.ROUTES.get("/soul/revisions"))
+        # 已处理那一块是只读列表：不许出现按钮，也不许有第二套写路径
+        done = self.code.split("function showDone", 1)[1].split("\n  }", 1)[0]
+        self.assertNotIn("call(", done, "「已经处理过的提案」是只读列表：一个字都不写")
+        self.assertIn("proposal-done-list", self.text, "已处理列表的容器不见了")
         # 版本号只有一个来源：GET /soul 的 revision（页面不许自己数）
         self.assertIn("STATE.current = (soul.revision", self.code,
                       "当前版本号要读 GET /soul 给的 revision")
