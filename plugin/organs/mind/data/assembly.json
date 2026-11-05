@@ -57,11 +57,10 @@
   "anchors": {
     "label": "锚句",
     "cap": 200,
-    "room": "仓库",
-    "name": "锚句",
     "inject": {
       "fraction": 0.5,
       "suffix": "……"
-    }
+    },
+    "instruction": "动作只写她自己的身体（尾巴、鳍、脸、眼神），不写她对外做的动作。"
   }
 }

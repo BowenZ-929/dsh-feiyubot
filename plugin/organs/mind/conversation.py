@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from .. import paths
 from ..brain import model as brain_model
 from ..home import access as home_access
+from ..home import anchors as home_anchors
 from ..home import cards
 from ..home import store as home_store
 from ..heart import card as card_module
@@ -199,17 +200,20 @@ def _check_recent(spec: Any, where: str) -> Dict[str, Any]:
 
 
 def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
-    """锚句那一格：**可以没有**（没有就是「未配锚句」），写了就要写全。"""
+    """锚句那一格：**可以没有**（没有就是「未配锚句」），写了就要写全。
+
+    来源固定是家·仓库那五张台词卡（organs.home.anchors 的公开读口）：这一格不再认
+    room / name —— 认了就成第二处「台词从哪来」的真源。
+    """
     if spec is None:
         return None
     if not isinstance(spec, dict):
-        raise ValueError("anchors 要一份对象（label / cap / room / name）：%s" % where)
+        raise ValueError("anchors 要一份对象（label / cap / inject / instruction）：%s" % where)
     clean: Dict[str, Any] = {}
-    for name in ("label", "room", "name"):
-        value = spec.get(name)
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("anchors.%s 要一段非空的字：%s" % (name, where))
-        clean[name] = value.strip()
+    label = spec.get("label")
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("anchors.label 要一段非空的字：%s" % where)
+    clean["label"] = label.strip()
     cap = spec.get("cap")
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         raise ValueError("anchors.cap 要正整数：%s" % where)
@@ -224,6 +228,10 @@ def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
     if not isinstance(suffix, str) or not suffix.strip():
         raise ValueError("anchors.inject.suffix 要一段非空的字（半句后面接什么）：%s" % where)
     clean["inject"] = {"fraction": float(fraction), "suffix": suffix}
+    instruction = spec.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise ValueError("anchors.instruction 要一句话（注入给她的行为规矩，人能改）：%s" % where)
+    clean["instruction"] = instruction.strip()
     return clean
 
 
@@ -397,19 +405,33 @@ def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     if not isinstance(spec, Mapping):
         return _anchors_missing()
     try:
-        got = cards.read_item(None, room=str(spec["room"]), name=str(spec["name"]))
-    except (cards.CardError, home_access.AccessDenied, home_store.StoreError, OSError):
+        got = home_anchors.read_all()
+    except (home_anchors.AnchorError, home_access.AccessDenied,
+            home_store.StoreError, OSError):
         return _anchors_missing()
-    body = got.get("body")
-    if not isinstance(body, str) or not body.strip():
+    rows = got.get("anchors") or []
+    if not got.get("file_exists") or not rows:
         return _anchors_missing()
-    inject = spec["inject"]
-    cut = int(math.ceil(len(body) * float(inject["fraction"])))
-    cut = min(max(cut, 1), len(body))
-    injected = body if cut >= len(body) else body[:cut] + str(inject["suffix"])
-    return injected, {"configured": True, "chars": len(body),
-                      "injected": injected, "body": body,
-                      "room": str(spec["room"]), "name": str(spec["name"])}
+    fraction = float(spec["inject"]["fraction"])
+    suffix = str(spec["inject"]["suffix"])
+    items: List[Dict[str, str]] = []
+    for row in rows:
+        say = str(row.get("say") or "").strip()
+        if not say:
+            continue
+        cut = min(max(int(math.ceil(len(say) * fraction)), 1), len(say))
+        items.append({
+            "say": say,
+            "injected": say if cut >= len(say) else say[:cut] + suffix,
+            "body": str(row.get("body") or ""),
+            "scene": str(row.get("scene") or ""),
+        })
+    if not items:
+        return _anchors_missing()
+    instruction = str(spec["instruction"])
+    text = '\n'.join([instruction] + ["- " + item["injected"] for item in items])
+    return text, {"configured": True, "count": len(items),
+                  "instruction": instruction, "items": items}
 
 
 def _anchors_missing() -> Tuple[str, Dict[str, Any]]:

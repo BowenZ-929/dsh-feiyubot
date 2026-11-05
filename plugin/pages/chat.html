@@ -401,15 +401,18 @@
   function anchorsText(anchors) {
     var conf = anchors || {};
     if (conf.configured === true) {
-      var chars = conf.chars;
-      var head = "已配（" + ((chars === undefined || chars === null)
-        ? "没给字数"
-        : String(chars) + " 字") + "）";
-      var injected = conf.injected
-        ? "注入：「" + String(conf.injected) + "」（只给半句，她自己补）"
+      var items = conf.items || [];
+      var count = (conf.count === undefined || conf.count === null) ? items.length : conf.count;
+      var head = "已配（" + String(count) + " 条）";
+      var halves = items.length
+        ? "注入：" + items.map(function (item) { return "「" + String(item.injected) + "」"; }).join("")
         : "注入：没给";
-      var full = conf.body ? "全文：「" + String(conf.body) + "」" : "全文：没给";
-      return head + "｜" + injected + "｜" + full;
+      var rule = conf.instruction ? "规矩：" + String(conf.instruction) : "规矩：没给";
+      var rows = items.map(function (item, index) {
+        var body = item.body ? String(item.body) : "（没给 body）";
+        return (index + 1) + "「" + String(item.say) + "」→ body：" + body;
+      });
+      return head + "｜" + halves + "｜" + rule + (rows.length ? "｜" + rows.join("；") : "");
     }
     if (conf.configured === false) {
       return conf.note ? String(conf.note) : "未配锚句";

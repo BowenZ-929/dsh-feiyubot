@@ -299,9 +299,12 @@ class ReadoutsAreVisible(unittest.TestCase):
         self.assertIn("conf.configured === false", body, "缺「未配」这一支")
         self.assertIn("未配锚句", body, "没配要照后端那句话写「未配锚句」")
         self.assertIn("没给", body, "整个字段都没有时如实写「没给」")
-        self.assertIn("conf.injected", body, "要显示注入的那半句")
-        self.assertIn("只给半句", body, "半句这件事要写在页上，别人一看就懂")
-        self.assertIn("conf.body", body, "全文也要显示（半句是给她看的，全文是给人看的）")
+        self.assertIn("conf.items", body, "要逐条显示家·仓库的台词卡")
+        self.assertIn("item.injected", body, "注入的是半句")
+        self.assertIn("item.say", body, "全文要显示（人得能核对）")
+        self.assertIn("item.body", body, "body 要显示（效果示例只给人看）")
+        self.assertIn("body：", body, "body 要带标签")
+        self.assertIn("规矩：", body, "注入的行为规矩要写明")
 
     def test_three_readouts_are_written_with_textcontent_only(self):
         body = _between(_text(), "function renderReadouts", "function send")

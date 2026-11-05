@@ -42,6 +42,7 @@ from organs.brain import BrainStore
 from organs.heart import energy
 from organs.heart import model as heart_model
 from organs.heart import mood, sleep
+from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.mind import conversation, llm, recent
 from organs.soul import load as load_soul
@@ -470,9 +471,29 @@ class ConversationAnswerTest(unittest.TestCase):
                              "预算 %d / recalled %r 时的档位与数据里的判据不符"
                              % (budget, bool(got["recalled"])))
 
-    # —— 10) 锚句 ————————————————————————————
+    # —— 10) 锚句（家·仓库的五张台词卡） ————————————————
+
+    FIVE = (
+        {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
+        {"scene": "被关心", "say": "行了行了，我又不是玻璃做的。", "body": "别开头、脸微微发红"},
+        {"scene": "不想聊", "say": "这个啊……以后再说吧。", "body": ""},
+        {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
+        {"scene": "你要走", "say": "你忙你的，我在这儿。", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
+    )
+
+    def _anchors_home(self, rows=None):
+        """造一份只有台词库的家：HOME_ROOT 指到临时根，写卡走家自己的公开写口。"""
+        home = self.tmp / ("house-%d" % len(os.listdir(self.tmp)))
+        (home / "仓库").mkdir(parents=True, exist_ok=True)
+        patch = mock.patch.dict(os.environ, {"HOME_ROOT": str(home)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        if rows:
+            home_anchors.append_anchors(root=home, role="human", by="人", anchors=list(rows))
+        return home
 
     def test_missing_anchor_is_said_out_loud(self):
+        self._anchors_home()
         capture = []
         got = self._answer(captured=capture)
         system = capture[0]["messages"][0]["content"]
@@ -480,6 +501,11 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn(conversation.ANCHORS_MISSING, system, "锚句没配却什么都没写")
         self.assertEqual({"configured": False, "note": conversation.ANCHORS_MISSING},
                          got["anchors"])
+
+    def test_empty_anchors_file_is_not_configured(self):
+        home = self._anchors_home()
+        (home / "仓库" / "anchors.jsonl").write_text("", encoding="utf-8")
+        self.assertFalse(self._answer()["anchors"]["configured"], "空文件也算配了？")
 
     def test_no_anchors_section_is_also_not_silently_skipped(self):
         conf = conversation.load_assembly()
@@ -489,56 +515,40 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn(conversation.ANCHORS_MISSING, capture[0]["messages"][0]["content"])
         self.assertFalse(got["anchors"]["configured"])
 
-    def test_configured_anchor_text_reaches_the_prompt(self):
-        """家里那张卡写好之后，锚句正文进提示词——只走 cards 的公开 API，不直接读文件。"""
-        body = "我把这句留在这儿：夜里说的话，天亮再算。"
-        home = self.tmp / "home_cards"
-        source = self.tmp / "anchor.md"
-        source.write_text(body, encoding="utf-8")
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        with mock.patch.dict(os.environ, {"HOME_ROOT": str(home)}):
-            cards.append_cards(None, role="human", by="人", cards=[{
-                "kind": "物件", "room": "仓库", "name": "锚句", "path": str(source),
-                "sha256": digest, "bytes": source.stat().st_size, "chars": len(body),
-            }])
-            capture = []
-            got = self._answer(captured=capture)
+    def test_five_halves_go_in_and_no_full_line_no_body(self):
+        """五条半句全注入、不按场合挑；整句与 body 一个字都不许进提示词。"""
+        self._anchors_home(list(self.FIVE))
+        capture = []
+        got = self._answer(captured=capture)
         system = capture[0]["messages"][0]["content"]
-        self.assertEqual("仓库", got["anchors"]["room"])
-        self.assertEqual("锚句", got["anchors"]["name"])
-        self.assertTrue(got["anchors"]["configured"], "卡在家·仓库里，却没读到：%r" % (got["anchors"],))
-        self.assertEqual(len(body), got["anchors"]["chars"])
-        self.assertEqual(body, got["anchors"]["body"], "全文要原样给回来（人要看整句）")
-        inject = conversation.load_assembly()["anchors"]["inject"]
-        cut = int(math.ceil(len(body) * inject["fraction"]))
-        expected = body[:cut] + inject["suffix"]
-        self.assertEqual(expected, got["anchors"]["injected"])
-        self.assertIn(expected, system, "半句没进提示词")
-        self.assertNotIn(body, system, "整句进了提示词，她就会照着念")
-        self.assertNotIn(conversation.ANCHORS_MISSING, system)
+        conf = conversation.load_assembly()["anchors"]
+        self.assertTrue(got["anchors"]["configured"])
+        self.assertEqual(5, got["anchors"]["count"], "五条全给，不按场合挑")
+        self.assertIn(conf["instruction"], system, "行为规矩没进提示词")
+        for want in self.FIVE:
+            cut = int(math.ceil(len(want["say"]) * conf["inject"]["fraction"]))
+            half = want["say"][:cut] + conf["inject"]["suffix"]
+            self.assertIn(half, system, "半句没装上：%s" % want["scene"])
+            self.assertNotIn(want["say"], system, "整句进了提示词：%s" % want["scene"])
+            if want["body"]:
+                self.assertNotIn(want["body"], system,
+                                 "body 进了提示词（那是在等着被照抄）：%s" % want["scene"])
+        items = {item["scene"]: item for item in got["anchors"]["items"]}
+        self.assertEqual(len(self.FIVE), len(items))
+        for want in self.FIVE:
+            self.assertEqual(want["say"], items[want["scene"]]["say"], "全文要回给人核对")
+            self.assertEqual(want["body"], items[want["scene"]]["body"], "body 要回给人核对")
 
-    def test_anchor_is_injected_as_half_a_sentence(self):
-        """人定的规矩：整句给她她就念，给半句她才得自己补完。
-
-        「哼，才知道啊。」要注入成「哼，才知……」，body 全文另给。
-        """
-        body = "哼，才知道啊。"
-        home = self.tmp / "home_half"
-        source = self.tmp / "anchor_half.md"
-        source.write_text(body, encoding="utf-8")
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        with mock.patch.dict(os.environ, {"HOME_ROOT": str(home)}):
-            cards.append_cards(None, role="human", by="人", cards=[{
-                "kind": "物件", "room": "仓库", "name": "锚句", "path": str(source),
-                "sha256": digest, "bytes": source.stat().st_size, "chars": len(body),
-            }])
-            capture = []
-            got = self._answer(captured=capture)
+    def test_half_line_keeps_its_shape(self):
+        """人给的样子：「哼，才知道啊。」注入成「哼，才知……」。"""
+        self._anchors_home([{"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"}])
+        capture = []
+        got = self._answer(captured=capture)
         system = capture[0]["messages"][0]["content"]
-        self.assertEqual("哼，才知……", got["anchors"]["injected"])
-        self.assertEqual(body, got["anchors"]["body"])
+        self.assertEqual("哼，才知……", got["anchors"]["items"][0]["injected"])
         self.assertIn("哼，才知……", system)
-        self.assertNotIn(body, system)
+        self.assertNotIn("哼，才知道啊。", system)
+        self.assertNotIn("尾巴翘起来晃了两下", system)
 
     # —— 11) 落账 ————————————————————————————
 

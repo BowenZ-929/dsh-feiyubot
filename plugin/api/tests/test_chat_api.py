@@ -28,6 +28,7 @@ import hashlib
 from api import api
 from api.tests.helpers import copy_fixture
 from organs.brain import BrainStore
+from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.mind import conversation, llm, recent
 from organs.soul import load
@@ -82,7 +83,9 @@ class ChatApiTest(unittest.TestCase):
             "QQAGENT_HOME": str(self.tmp / "home"),
             "HEART_ROOT": str(self.tmp / "heart"),
             "MOUTH_TRACE_DIR": str(self.tmp / "trace"),
+            "HOME_ROOT": str(self.tmp / "house"),
         })
+        (self.tmp / "house" / "仓库").mkdir(parents=True, exist_ok=True)
         patches.start()
         self.addCleanup(patches.stop)
         # 本机 <仓库>/home/.env 里可能真有 key：把 llm 认的那个 home 钉到临时目录，
@@ -304,7 +307,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(capture[0]["temperature"], payload["llm"]["temperature"],
                          "回包里的温度与真发出去的那个不一致")
 
-        self.assertFalse(payload["anchors"]["configured"], "仓库里没有锚句卡，却报成配了")
+        self.assertFalse(payload["anchors"]["configured"], "家·仓库里没有台词库，却报成配了")
         self.assertEqual(conversation.ANCHORS_MISSING, payload["anchors"]["note"])
 
     def test_fifteen_rounds_show_the_omitted_notice_over_http(self):
@@ -332,24 +335,27 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("", payload["continuity"]["notice"])
 
     def test_configured_anchor_arrives_at_the_endpoint(self):
-        """家·仓库里写一张锚句卡：端点的回包报成配了，字数与房间照实给。"""
-        body = "夜里说的话，天亮再算。"
-        home = self.tmp / "cards-home"
-        source = self.tmp / "anchor.md"
-        source.write_text(body, encoding="utf-8")
-        with mock.patch.dict(os.environ, {"HOME_ROOT": str(home)}):
-            cards.append_cards(None, role="human", by="人", cards=[{
-                "kind": "物件", "room": "仓库", "name": "锚句", "path": str(source),
-                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                "bytes": source.stat().st_size, "chars": len(body),
-            }])
-            status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
+        """家·仓库里登记两张台词卡：端点报成配了，全文与 body 都回给人核对，body 不进提示词。"""
+        home = Path(os.environ["HOME_ROOT"])
+        home_anchors.append_anchors(root=home, role="human", by="人", anchors=[
+            {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
+            {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
+        ])
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
-        inject = conversation.load_assembly()["anchors"]["inject"]
-        cut = int(math.ceil(len(body) * inject["fraction"]))
-        self.assertEqual({"configured": True, "chars": len(body),
-                          "injected": body[:cut] + inject["suffix"], "body": body,
-                          "room": "仓库", "name": "锚句"}, payload["anchors"])
+        anchors = payload["anchors"]
+        self.assertEqual({"configured", "count", "instruction", "items"}, set(anchors))
+        self.assertTrue(anchors["configured"])
+        self.assertEqual(2, anchors["count"])
+        self.assertEqual(conversation.load_assembly()["anchors"]["instruction"],
+                         anchors["instruction"])
+        by_scene = {item["scene"]: item for item in anchors["items"]}
+        self.assertEqual("尾巴翘起来晃了两下", by_scene["被夸"]["body"])
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn(by_scene["被夸"]["injected"], system)
+        self.assertNotIn("尾巴翘起来晃了两下", system, "body 进了提示词")
+        self.assertNotIn("哼，才知道啊。", system, "整句进了提示词")
 
     # —— 只有一份装配 ————————————————————————
 
