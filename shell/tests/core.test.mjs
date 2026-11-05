@@ -114,19 +114,24 @@ test('端口读环境变量：QQAGENT_CORE_PORT 推 UPSTREAM，QQAGENT_CORE_DIR 
   console.log('默认:', JSON.stringify(fallback));
   console.log('覆盖:', JSON.stringify(custom));
 
+  // 默认**不给** --root：核自己解析 <仓库>/home 的实盘根。
+  // 过去默认传 plugin/organs/soul/data（出厂默认），搬家后会被核的门禁拒绝启动（退出码 2）。
   assert.deepEqual(fallback, {
     port: 8787,
     coreDir: '/repo/plugin',
-    root: '/repo/plugin/organs/soul/data',
+    root: undefined,
     upstream: 'http://127.0.0.1:8787',
   });
   assert.deepEqual(custom, {
     port: 8899,
     coreDir: '/tmp/core',
-    root: '/tmp/core/organs/soul/data',
+    root: undefined,
     upstream: 'http://127.0.0.1:8899',
   });
-  assert.deepEqual(spawnArgs(custom), ['-m', 'api.devserver', '--root', '/tmp/core/organs/soul/data', '--port', '8899']);
+  assert.deepEqual(spawnArgs(custom), ['-m', 'api.devserver', '--port', '8899']);
+  // 显式覆盖仍然生效（QQAGENT_SOUL_ROOT），但要由核的门禁复核它落在 home 下。
+  const explicit = coreSettings({ QQAGENT_SOUL_ROOT: '/repo/home/organs/soul' }, SHELL_ROOT);
+  assert.deepEqual(spawnArgs(explicit), ['-m', 'api.devserver', '--port', '8787', '--root', '/repo/home/organs/soul']);;
   assert.throws(() => coreSettings({ QQAGENT_CORE_PORT: 'haha' }, SHELL_ROOT), /QQAGENT_CORE_PORT/);
   assert.throws(() => coreSettings({ QQAGENT_CORE_PORT: '70000' }, SHELL_ROOT), /QQAGENT_CORE_PORT/);
 });
@@ -162,7 +167,7 @@ test('没人应答就先起一个：python3 -m api.devserver 在核目录里、�
   console.log('起的进程:', child.command, JSON.stringify(child.args), 'cwd=' + child.options.cwd);
   assert.equal(spawner.children.length, 1);
   assert.equal(child.command, 'python3');
-  assert.deepEqual(child.args, ['-m', 'api.devserver', '--root', '/repo/plugin/organs/soul/data', '--port', '8899']);
+  assert.deepEqual(child.args, ['-m', 'api.devserver', '--port', '8899']);
   assert.equal(child.options.cwd, '/repo/plugin');
   await supervisor.stop();
 });

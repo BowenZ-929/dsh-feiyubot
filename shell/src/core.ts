@@ -34,8 +34,8 @@ export interface CoreSettings {
   port: number;
   /** 核的工作目录（python3 -m api.devserver 的 cwd）。 */
   coreDir: string;
-  /** 魂的数据目录，--root 的值。 */
-  root: string;
+  /** 魂的实盘目录：**只是兼容用的显式覆盖**。默认不给——让核自己解析 `<仓库>/home`。 */
+  root?: string;
   /** 由端口推出来的核地址，例如 http://127.0.0.1:8787。 */
   upstream: string;
 }
@@ -49,11 +49,18 @@ export function coreSettings(env: Record<string, string | undefined> = process.e
   }
   const rawDir = env.QQAGENT_CORE_DIR?.trim();
   const coreDir = rawDir === undefined || rawDir === '' ? resolve(shellRoot, '..', 'plugin') : resolve(rawDir);
-  return { port, coreDir, root: resolve(coreDir, 'organs', 'soul', 'data'), upstream: `http://127.0.0.1:${port}` };
+  const rawSoulRoot = env.QQAGENT_SOUL_ROOT?.trim();
+  const root = rawSoulRoot === undefined || rawSoulRoot === '' ? undefined : resolve(rawSoulRoot);
+  return { port, coreDir, root, upstream: `http://127.0.0.1:${port}` };
 }
 
 export function spawnArgs(settings: CoreSettings): string[] {
-  return ['-m', 'api.devserver', '--root', settings.root, '--port', String(settings.port)];
+  const args = ['-m', 'api.devserver', '--port', String(settings.port)];
+  // 默认**不传** --root：核自己解析 `<仓库>/home` 的实盘根。
+  // 壳过去默认传 plugin/organs/soul/data，那是「出厂默认」，会被核的门禁拒绝启动（退出码 2）——
+  // 搬家之后这条路就断了，所以改成只有显式给了 QQAGENT_SOUL_ROOT 才传。
+  if (settings.root) args.push('--root', settings.root);
+  return args;
 }
 
 export interface CoreChild {

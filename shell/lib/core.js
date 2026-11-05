@@ -35,10 +35,18 @@ export function coreSettings(env = process.env, shellRoot = SHELL_ROOT) {
     }
     const rawDir = env.QQAGENT_CORE_DIR?.trim();
     const coreDir = rawDir === undefined || rawDir === '' ? resolve(shellRoot, '..', 'plugin') : resolve(rawDir);
-    return { port, coreDir, root: resolve(coreDir, 'organs', 'soul', 'data'), upstream: `http://127.0.0.1:${port}` };
+    const rawSoulRoot = env.QQAGENT_SOUL_ROOT?.trim();
+    const root = rawSoulRoot === undefined || rawSoulRoot === '' ? undefined : resolve(rawSoulRoot);
+    return { port, coreDir, root, upstream: `http://127.0.0.1:${port}` };
 }
 export function spawnArgs(settings) {
-    return ['-m', 'api.devserver', '--root', settings.root, '--port', String(settings.port)];
+    const args = ['-m', 'api.devserver', '--port', String(settings.port)];
+    // 默认**不传** --root：核自己解析 `<仓库>/home` 的实盘根。
+    // 壳过去默认传 plugin/organs/soul/data，那是「出厂默认」，会被核的门禁拒绝启动（退出码 2）——
+    // 搬家之后这条路就断了，所以改成只有显式给了 QQAGENT_SOUL_ROOT 才传。
+    if (settings.root)
+        args.push('--root', settings.root);
+    return args;
 }
 /** 默认计时器：都 unref，壳不该因为一个探活节拍把宿主留住。 */
 const nodeTimers = {

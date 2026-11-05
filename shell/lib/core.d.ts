@@ -15,8 +15,8 @@ export interface CoreSettings {
     port: number;
     /** 核的工作目录（python3 -m api.devserver 的 cwd）。 */
     coreDir: string;
-    /** 魂的数据目录，--root 的值。 */
-    root: string;
+    /** 魂的实盘目录：**只是兼容用的显式覆盖**。默认不给——让核自己解析 `<仓库>/home`。 */
+    root?: string;
     /** 由端口推出来的核地址，例如 http://127.0.0.1:8787。 */
     upstream: string;
 }
