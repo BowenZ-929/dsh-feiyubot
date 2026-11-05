@@ -59,7 +59,7 @@ from .gate import enforce as gate_enforce
 from .warehouse import load
 
 __all__ = ["RefusalBroken", "RefusalVerdict", "SoftVerdict", "enforce", "event", "say",
-           "path_of", "record", "soft_scan"]
+           "path_of", "record", "soft_scan", "soft_shape", "topic_in"]
 
 TRACE_DIR = Path(__file__).resolve().parent / "trace"   # 包内痕迹目录（家里的仓库做出来前的临时落脚点）
 ENV_VAR = "MOUTH_TRACE_DIR"                             # 环境变量：换一个痕迹根目录，不动代码
@@ -204,6 +204,31 @@ def soft_scan(answer: Any, asked: Any,
                        redirect=redirect, question=back,
                        reason=_fill(str(cfg["reasons"]["plain"]), "soft.reasons.plain",
                                     opener=opener, marker=marker, answered=answered))
+
+
+def soft_shape(table: Optional[Mapping[str, Any]] = None) -> str:
+    """软转向记事件时用哪个形状：取自 data/refusal.json 的 soft.event_shape，代码里不留这个名字。
+
+    /mouth/gate 的干跑与 /chat 的真实投递都认这一个名字：分成两份，迟早有一份忘改。
+    数据缺这一节、缺这个键、或四张词表里混进非字符串，照样抛 RefusalBroken（缺键不补默认值）。
+    """
+    return str(_soft_cfg(table if isinstance(table, Mapping) else load("refusal"))["event_shape"])
+
+
+def topic_in(text: Any, names: Any) -> Optional[str]:
+    """从一段话里认出话题名：只在给的词表里按顺序找，一个都不中就回 None（不猜、不造分类）。
+
+    做的是「这段字里有没有出现过某个话题名」，不分词、不认同义词——词表本来就是一串人写的话题名，
+    认不出就说认不出，比替心猜一个话题、把它记进冷却账要诚实得多。
+
+    词表由调用方交进来（心那份共用词表 heart.refuse.vocabulary()）：本文件不 import 心，
+    嘴只认「说话」这件事，不认心存在哪儿；干跑与真实投递也因此认的是同一份词表。
+    """
+    body = text if isinstance(text, str) else ""
+    for name in names or []:
+        if isinstance(name, str) and name and name in body:
+            return name
+    return None
 
 
 def say(shape: str, table: Optional[Mapping[str, Any]] = None) -> str:

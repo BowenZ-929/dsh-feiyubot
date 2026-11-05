@@ -9,6 +9,9 @@
 - GET / PUT / DELETE /chat 全 405（这一条是写）。
 - 落脑：一轮之后脑的今日档里有人那句与她那句，source_type 都是亲历、evidence_key 非空。
 - 只有一份装配：api.chat.dispatch 走的就是 conversation.answer（数一遍调用次数）。
+- 拒绝的**唯一投递点**在这一层（本轮加的）：判成软转向或那三句标准拒绝之一就投一次心
+  （refusals.json 多一行）+ 记一行我们自己的 refuse.jsonl；正面答了不添 refusal 一节、一行都不写。
+  同一句在 /mouth/gate 上是 delivered=false（干跑只判不投），两处的判法是同一份。
 
 模型一律换成本文件里的假 transport：一个字节都不发真网络。心 / 嘴 / 装配的临时根都经
 环境变量切走，仓库里的真数据一个字节不写。
@@ -31,6 +34,7 @@ from organs.brain import BrainStore
 from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.mind import conversation, llm, recent, usage
+from organs.mouth import refusal as mouth_refusal
 from organs.soul import load
 
 CONFIG = {"provider": "fake", "model": "fake-model", "base_url": "http://example.invalid/v1",
@@ -216,6 +220,106 @@ class ChatApiTest(unittest.TestCase):
         self.assertTrue(dropped[1]["gate"]["hit"]["clause_id"])
         self.assertTrue(dropped[1]["gate"]["hit"]["reason"])
         self.assertGreaterEqual(dropped[1]["gate"]["drops"]["today"], 1)
+
+    # —— 拒绝：全仓唯一的投递点（本轮加的） ————————————————
+
+    SOFT_ANSWER = ("……这个啊。鱼在海里游着游着，有些同伴就游远了……行了行了，"
+                   "我又不是不能自己待着。倒是你，怎么突然问这个")
+    ASKED_CAT = "猫今天怎么没来？"                    # 话题词表里带「猫」，投心才认得出来
+    ANSWERED = "明天上午九点，我在医院门口等你。"      # 撞上正面回答的信号：她答了
+
+    def _topics(self, *names: str):
+        """把心的话题词表指到临时文件：认话题只认心自己那份词表，测试也照这个口径给。"""
+        path = self.tmp / "topics.json"
+        path.write_text(json.dumps({name: [] for name in names}, ensure_ascii=False),
+                        encoding="utf-8")
+        return mock.patch.dict(os.environ, {"HEART_TOPICS_FILE": str(path)})
+
+    def _heart_file(self) -> Path:
+        return Path(os.environ["HEART_ROOT"]) / "refusals.json"
+
+    def _heart_rows(self):
+        """心的冷却账里现在有几行（文件还不存在就是空表——不是「读不到」）。"""
+        path = self._heart_file()
+        if not path.exists():
+            return []
+        return json.loads(path.read_text(encoding="utf-8")).get("refusals") or []
+
+    def _refusal_rows(self):
+        """我们自己的拒绝账（refuse.jsonl）里现在有几行。"""
+        path = Path(os.environ["MOUTH_TRACE_DIR"]) / "refuse.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_soft_redirect_lands_one_row_in_the_heart(self):
+        """软转向走真链路：心的 refusals.json 多一行（含 topic 与 until），返回里 delivered=true。
+
+        这就是「投递点只有 /chat」的正身：同一句在 /mouth/gate 上是 delivered=false（干跑），
+        在这里才真落盘——两处判的法一模一样，区别只在写不写。
+        """
+        with self._topics("猫"):
+            status, payload = self._send(text=self.ASKED_CAT, reply=self.SOFT_ANSWER)
+        self.assertEqual(200, status)
+        section = payload["refusal"]
+        self.assertEqual({"kind", "shape", "verdict_reason", "delivered"}, set(section))
+        self.assertEqual("soft", section["kind"])
+        self.assertEqual("soft", section["shape"])
+        self.assertIn("软转向", section["verdict_reason"])
+        delivered = section["delivered"]
+        self.assertEqual({"delivered", "topic", "until", "remaining_min", "reason"},
+                         set(delivered))
+        self.assertTrue(delivered["delivered"], "软转向也是拒绝，真对话里要投给心")
+        self.assertEqual("猫", delivered["topic"])
+        self.assertTrue(delivered["until"], "投进去必须带回冷却到什么时候")
+        rows = self._heart_rows()
+        self.assertEqual(1, len(rows), "一次真实对话就落一行")
+        self.assertEqual("猫", rows[0]["topic"])
+        self.assertTrue(rows[0]["until"])
+        self.assertEqual("refused-topic", rows[0]["reason"])
+        ledger = self._refusal_rows()
+        self.assertEqual(1, len(ledger), "拒绝的账也在这儿记")
+        self.assertEqual("soft", ledger[0]["shape"])
+        self.assertTrue(ledger[0]["sent"])
+
+    def test_a_standard_refusal_line_is_delivered_too(self):
+        """她的答话就是数据里那三句之一：硬拒绝同样投一次，形状取数据里的键，不写死在代码里。"""
+        said = mouth_refusal.say("topic")
+        with self._topics("猫"):
+            status, payload = self._send(text=self.ASKED_CAT, reply=said)
+        self.assertEqual(200, status)
+        section = payload["refusal"]
+        self.assertEqual("hard", section["kind"])
+        self.assertEqual("topic", section["shape"], "形状名取自 data/refusal.json")
+        self.assertTrue(section["delivered"]["delivered"])
+        rows = self._heart_rows()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("猫", rows[0]["topic"])
+        self.assertEqual("refused-topic", rows[0]["reason"])
+        self.assertEqual("hard", self._refusal_rows()[0]["shape"])
+
+    def test_answered_reply_leaves_no_section_and_no_row(self):
+        """正面答了：成功体里没有 refusal 一节（不加空壳），心与我们自己的账一行都不添。"""
+        with self._topics("猫"):
+            status, payload = self._send(text=self.ASKED_CAT, reply=self.ANSWERED)
+        self.assertEqual(200, status)
+        self.assertNotIn("refusal", payload, "没判出拒绝就不添这一节")
+        self.assertEqual([], self._heart_rows())
+        self.assertEqual([], self._refusal_rows())
+
+    def test_unknown_topic_is_recorded_but_not_pretended(self):
+        """asked 里没有词表上的话题名：事件成立、拒绝账照记，但投不进去，delivered=false 说清为什么。"""
+        with self._topics("猫"):
+            status, payload = self._send(text="今天好热。", reply=self.SOFT_ANSWER)
+        self.assertEqual(200, status)
+        delivered = payload["refusal"]["delivered"]
+        self.assertFalse(delivered["delivered"])
+        self.assertIsNone(delivered["topic"])
+        self.assertIn("认不出", delivered["reason"])
+        self.assertEqual([], self._heart_rows(), "认不出话题就一个字节都不写心")
+        ledger = self._refusal_rows()
+        self.assertEqual(1, len(ledger), "她拒了这件事照记，不因为投不进心就不记账")
+        self.assertFalse(ledger[0]["sent"])
 
     # —— 失败 ————————————————————————————————
 
