@@ -1,11 +1,14 @@
 """六轴卡真源只有一个——实盘（store.default_root()/baseline-card.json）。
 
+**测试绝不许写出厂卡**：它是 seed 料、有版本，改坏了整条线红给你看；要改就改临时拷贝。
+
 出厂那份 `card.SEED_CARD_PATH` 只是 seed 料：只给新机器播种与测试用，改它不影响任何一次
 真实读取。三条断言照家的 `organs/home/tests/test_anchors.py` 那套（`read_seed()` vs
 `read_all()` + 「真源只有一个：实盘」）：① 缺省读取经实盘根；② 改实盘读跟着变；
 ③ 改出厂那份读不变。另加一条边界：实盘没有卡时回退 seed 并 WARN 一行。
 
-改出厂那份/实盘那张都必须**字节级还原**——seed 就在代码树里，脏了会连累所有人。
+②③ 动的是 setUp 拷到临时目录的那份**拷贝**（`card.SEED_CARD_PATH` 被 patch 指过去），
+仓里的出厂卡一个字节都不碰；每条用例收尾再按 sha 复核一遍它没被动过。
 """
 from __future__ import annotations
 
@@ -17,9 +20,14 @@ import unittest
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from unittest import mock
 
 from organs.heart import card, model, store
 from organs.heart.tests import helpers
+
+#: 仓里那张出厂卡的**真实**位置：写死成模块常量，任何 patch 都改不到它，
+#: 只用来在每条用例收尾时复核「它没被写过」。
+FACTORY_CARD_PATH = Path(__file__).resolve().parents[1] / "data" / card.CARD_FILE
 
 #: 实盘那张的「可区分值」：出厂 seed 里没有这组数，读到哪组数就是读了哪份的证据。
 LIVE_PAIRS: Dict[str, Tuple[int, int]] = {
@@ -55,6 +63,15 @@ class CardSourceTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.base = Path(self._tmp.name)
+        # 出厂卡只拷不写：这个用例要改 seed，改的只能是这份拷贝。
+        self._factory_sha = sha256_of(FACTORY_CARD_PATH)
+        self.addCleanup(self._assert_factory_card_untouched)
+        self.seed = self.base / "seed" / card.CARD_FILE
+        self.seed.parent.mkdir(parents=True, exist_ok=True)
+        self.seed.write_bytes(FACTORY_CARD_PATH.read_bytes())
+        patcher = mock.patch.object(card, "SEED_CARD_PATH", self.seed)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.root = helpers.make_root(self.base)
         self.live = self.root / card.CARD_FILE
         self.live.write_text(json.dumps(card_data(), ensure_ascii=False, indent=2),
@@ -62,6 +79,11 @@ class CardSourceTest(unittest.TestCase):
         self._old_env: Optional[str] = os.environ.get(store.ENV_ROOT)
         os.environ[store.ENV_ROOT] = str(self.root)
         self.addCleanup(self.restore_env)
+
+    def _assert_factory_card_untouched(self) -> None:
+        """收尾复核：测试结束出厂卡 sha 不变（改坏了整条线都会红）。"""
+        self.assertEqual(self._factory_sha, sha256_of(FACTORY_CARD_PATH),
+                         "测试结束出厂卡 sha 必须不变：它是 seed 料、有版本，测试不许写它")
 
     def restore_env(self) -> None:
         """复原 HEART_ROOT：用例怎么改的，就怎么还回去。"""
@@ -87,9 +109,9 @@ class CardSourceTest(unittest.TestCase):
             card.load_card()          # 实盘在就不许 WARN：回退只是边界，不是常态
 
     def test_live_copy_is_the_source_of_truth(self) -> None:
-        """② 改实盘 → 读跟着变（档位也变）；出厂那份一个字节都不许被碰。"""
+        """② 改实盘 → 读跟着变（档位也变）；seed（临时拷贝）一个字节都不许被碰。"""
         original = self.live.read_bytes()
-        seed_before = card.SEED_CARD_PATH.read_bytes()
+        seed_before = self.seed.read_bytes()
         try:
             self.assertEqual(1, card.tier_of(card.load_card().axes["服气"].inner, 0, 100))
             self.live.write_text(json.dumps(card_data({"服气": (77, 79)}), ensure_ascii=False,
@@ -103,13 +125,11 @@ class CardSourceTest(unittest.TestCase):
             self.live.write_bytes(original)
             self.restore_env()
         self.assertEqual(original, self.live.read_bytes(), "验完必须把实盘那张还原成原样")
-        self.assertEqual(seed_before, card.SEED_CARD_PATH.read_bytes(), "改实盘不许改到出厂那份")
+        self.assertEqual(seed_before, self.seed.read_bytes(), "改实盘不许改到 seed 拷贝")
 
     def test_seed_corruption_does_not_affect_reads(self) -> None:
-        """③ 改出厂那份 → 读实盘完全不受影响；这是「真源只有一个」的机器证明。"""
-        seed = card.SEED_CARD_PATH
-        if not seed.exists():
-            self.skipTest("这台机器上没有出厂 seed 那份")
+        """③ 改 seed 拷贝 → 读实盘完全不受影响；这是「真源只有一个」的机器证明。"""
+        seed = self.seed
         before_sha = sha256_of(seed)
         original = seed.read_bytes()
         try:
