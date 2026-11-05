@@ -39,15 +39,17 @@ from organs.heart import events as events_module
 from organs.heart import intent as intent_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
+from organs.heart import proactive as proactive_module
 from organs.heart import refuse as refuse_module
 from organs.heart import sleep as sleep_module
+from organs.heart import store as store_module
 
 PLUGIN = Path(__file__).resolve().parents[2]
 REAL_CARD = PLUGIN / "organs" / "heart" / "data" / "baseline-card.json"
 
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending", "/heart/sleep", "/heart/refusals")
+                "/heart/pending", "/heart/sleep", "/heart/refusals", "/heart/proactive")
 
 # 固定时刻：断言不看"现在几点"。09:00 / 23:00 分别避开与落进夜间窗口（23-8）。
 T0 = "2026-11-05T09:00:00+09:00"
@@ -903,6 +905,122 @@ class RefusalsRoute(HeartApiTest):
         block = self.get("/heart/overview", now=later)[1]["refusals"]
         self.assertEqual([], block["cooling"], "过了 until 就不在冷却里")
         self.assertEqual([], block["items"])
+
+
+class ProactiveRoute(HeartApiTest):
+    """/heart/proactive：主动开口的反馈闭环（config + streak + 静音 + 最近 5 条 history）。
+
+    三条口径：
+    - 它是**纯读**：GET 一次不许长出 proactive.json（sent / outcome 才落笔）；
+    - 静音到期在端点里现算：同一个文件、now 推过 muted_until → muted=False；
+    - 与 /heart/engage 第 6 道软门读的是同一份读数：静音时 proactive 判不说、
+      passive 照常判，两个对照必须同时成立。
+    """
+
+    MUTED_UNTIL = "2026-11-05T11:00:00+09:00"
+
+    def _mute(self) -> None:
+        """造一份"连续 3 次没人理、静音到 11:00"的账（T0 是 09:00）。"""
+        store_module.write_json(
+            self.root / proactive_module.PROACTIVE_FILE,
+            {"version": 1, "config": {"mute_after": 3, "mute_hours": 12}, "streak": 3,
+             "muted_until": self.MUTED_UNTIL, "last_sent_at": _stamp(5, 8, 30),
+             "history": [{"at": _stamp(5, 8, 0), "outcome": "ignored"},
+                         {"at": _stamp(5, 8, 15), "outcome": "ignored"},
+                         {"at": _stamp(5, 8, 30), "outcome": "ignored"}]},
+        )
+
+    def test_route_is_a_get_with_the_readonly_envelope(self) -> None:
+        self.assertEqual("GET", api.ROUTES["/heart/proactive"])
+        status, payload = self.get("/heart/proactive", now=T0)
+        self.assertEqual(200, status, payload)
+        for key in ("ok", "readonly", "agent", "status", "config", "streak", "muted",
+                    "remaining_min", "muted_until", "last_sent_at", "pending", "history"):
+            self.assertIn(key, payload, "/heart/proactive 少了 %s" % key)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("heart", payload["agent"])
+        self.assertEqual("已接入", payload["status"])
+        self.assertEqual({"mute_after": 3, "mute_hours": 12}, payload["config"])
+        self.assertFalse(payload["muted"])
+
+    def test_it_is_a_pure_read(self) -> None:
+        status, payload = self.get("/heart/proactive", now=T0)
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["history"])
+        self.assertFalse((self.root / proactive_module.PROACTIVE_FILE).exists(),
+                         "/heart/proactive 是纯读：不许凭空落一个 proactive.json")
+
+    def test_the_mute_is_visible_and_expires_by_the_clock(self) -> None:
+        self._mute()
+        status, payload = self.get("/heart/proactive", now=T0)
+        self.assertEqual(200, status)
+        self.assertTrue(payload["muted"])
+        self.assertEqual(120.0, payload["remaining_min"])
+        self.assertEqual(3, payload["streak"])
+        later, expired = self.get("/heart/proactive", now="2026-11-05T11:00:01+09:00")
+        self.assertEqual(200, later)
+        self.assertFalse(expired["muted"])
+        self.assertEqual(0.0, expired["remaining_min"])
+        self.assertIsNone(expired["muted_until"])
+
+    def test_overview_carries_the_same_block(self) -> None:
+        self._mute()
+        status, payload = self.get("/heart/overview", now=T0)
+        self.assertEqual(200, status)
+        self.assertIn("proactive", payload, "overview 要带 proactive 这一块")
+        status, route = self.get("/heart/proactive", now=T0)
+        self.assertEqual(200, status)
+        for key in ("config", "streak", "muted", "remaining_min", "muted_until",
+                    "last_sent_at", "pending", "history", "at"):
+            self.assertEqual(route[key], payload["proactive"][key],
+                             "overview 的 proactive 块与 /heart/proactive 不许分叉：%s" % key)
+
+    def test_engage_gate_sees_the_same_mute_and_passive_is_untouched(self) -> None:
+        brain = _WarmBrain()
+        status, before = self.get("/heart/engage", intent="passive", now=T0, brain=brain)
+        self.assertEqual(200, status, before)
+        self._mute()
+        status, muted_proactive = self.get("/heart/engage", intent="proactive", now=T0,
+                                          brain=brain)
+        self.assertEqual(200, status, muted_proactive)
+        self.assertEqual("不说", muted_proactive["state"])
+        self.assertIn(heart_model.REASON_PROACTIVE_MUTED, muted_proactive["hits"])
+        status, muted_passive = self.get("/heart/engage", intent="passive", now=T0, brain=brain)
+        self.assertEqual(200, status, muted_passive)
+        self.assertEqual(before["state"], muted_passive["state"], "被叫了就得答：静音不动被动")
+        self.assertEqual(before["hits"], muted_passive["hits"])
+        self.assertNotIn(heart_model.REASON_PROACTIVE_MUTED, muted_passive["hits"])
+        self.assertTrue(muted_passive["dry_run"])
+
+    def test_engage_without_a_mute_judges_proactive_as_usual(self) -> None:
+        brain = _WarmBrain()
+        status, proactive_read = self.get("/heart/engage", intent="proactive", now=T0,
+                                         brain=brain)
+        self.assertEqual(200, status, proactive_read)
+        status, passive_read = self.get("/heart/engage", intent="passive", now=T0, brain=brain)
+        self.assertEqual(200, status, passive_read)
+        self.assertEqual(passive_read["state"], proactive_read["state"],
+                         "没有静音时，主动与被动过的是同一套门")
+        self.assertNotIn(heart_model.REASON_PROACTIVE_MUTED, proactive_read["hits"])
+
+    def test_engage_is_still_a_dry_run_over_the_proactive_file(self) -> None:
+        self._mute()
+        before = (self.root / proactive_module.PROACTIVE_FILE).read_bytes()
+        status, payload = self.get("/heart/engage", intent="proactive", now=T0)
+        self.assertEqual(200, status)
+        self.assertEqual(before, (self.root / proactive_module.PROACTIVE_FILE).read_bytes(),
+                         "干跑不许动 proactive 账本")
+        self.assertFalse((self.root / engage_module.LOG_FILE).exists(),
+                         "干跑不写判决日志")
+
+    def test_write_methods_are_405_with_the_heart_wording(self) -> None:
+        for method in ("POST", "PUT", "DELETE"):
+            status, payload = api.handle(method, "/heart/proactive", {}, None)
+            self.assertEqual(405, status, method)
+            self.assertIn("只收 GET", payload["message"])
+            self.assertIn("/heart/proactive", payload["message"])
+            self.assertIn("人不能改心", payload["message"])
 
 
 if __name__ == "__main__":

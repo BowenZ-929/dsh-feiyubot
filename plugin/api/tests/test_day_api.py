@@ -217,7 +217,7 @@ class DayApiTest(unittest.TestCase):
         status, payload = self._call("GET", "/day/plan")
         self.assertEqual(200, status)
         self.assertEqual([True, False], [row["required"] for row in payload["pending"]])
-        self.assertEqual(["quota_optional"], [row["reason"] for row in payload["blocked"]])
+        self.assertEqual(["fuse-tripped"], [row["reason"] for row in payload["blocked"]])
         self.assertEqual([False], [row["required"] for row in payload["blocked"]])
 
     def test_bad_now_is_400_and_points_at_the_plus_trap(self):

@@ -74,6 +74,16 @@
         font: .95rem/1.6 ui-monospace, Menlo, monospace;
         white-space: pre-wrap; overflow-wrap: anywhere; }
 
+  /* 提案那一行右侧：接受 / 拒绝竖着摞，别把两列网格挤成三格 */
+  .actions { display: grid; gap: 6px; align-content: start; }
+  .actions button { margin: 0; }
+
+  /* 改动记录底部那一条：版本号与「退回上一版」并排，窄屏时竖着落 */
+  .rollback { display: flex; flex-wrap: wrap; gap: var(--gap-1); align-items: center;
+              margin: var(--gap-1) 0 0; padding-top: var(--gap-1);
+              border-top: 1px solid var(--line); }
+  .rollback .who { margin: 0; }
+
   /* 网格不许出现「某一行只填一列」的空洞：跨列的整块明确 span 满宽，末尾落单的那张也铺满 */
   @media (min-width: 60rem) {
     main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
@@ -132,9 +142,21 @@
     </section>
 
     <section class="card">
+      <div class="head"><h2>她提的改动</h2><span class="who">由程序写：她自己只能提，点头的是人</span></div>
+      <p class="hint">她夜里攒下的想法放在这儿，每条都带着依据的记忆。点头才落进她的魂，她自己是改不动自己的。</p>
+      <ul class="rows" id="proposal-list"><li><span class="body">读取中…</span></li></ul>
+      <p class="msg" id="proposal-msg"></p>
+    </section>
+
+    <section class="card">
       <div class="head"><h2>改动记录</h2><span class="who">由程序写：每次改一句、加撤红线，程序自己记一行</span></div>
       <ul class="rows" id="history-list"><li><span class="body">读取中…</span></li></ul>
       <p class="msg" id="history-msg"></p>
+      <div class="rollback">
+        <button id="rollback-btn" type="button" class="slim">退回上一版</button>
+        <span class="who" id="revision-now">版本读取中…</span>
+      </div>
+      <p class="msg" id="rollback-msg"></p>
     </section>
 
     <section class="card">
@@ -153,6 +175,10 @@
   var ACTOR_TEXT = { panel: "人（面板）", "总览": "总览" };
   // 块名翻成人话：账本上的块名不进界面。
   var BLOCK_TEXT = { identity: "名字与形象", manner: "待人姿态", bounds: "红线" };
+  // 提案指针向的也是人话：账本上的 manner.stance 不进界面。
+  var TARGET_TEXT = { "manner.stance": "待人姿态" };
+  // 三样都是读回来的，写的时候只认这里：提案那一条原样回传，回滚认版本号。
+  var STATE = { proposals: [], current: null, previous: null };
 
   function el(id) { return document.getElementById(id); }
   function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
@@ -209,6 +235,9 @@
       say("say-msg", "上面框里是她现在这一句；改了要写原因，改完下一回合生效。");
     }
     showRedlines(soul.bounds || {});
+    // 版本号只有这一个来源：魂自报的 revision。上一版由 showRevisions 补。
+    STATE.current = (soul.revision === undefined ? null : soul.revision);
+    renderRevision();
   }
 
   // —— 红线（逐条加、逐条撤） ————————————————————————
@@ -276,6 +305,9 @@
     if (row.old_summary !== undefined || row.new_summary !== undefined) {
       change = "「" + (row.old_summary || "空") + "」→「" + (row.new_summary || "空") + "」";
     }
+    // 账本里回滚那一行写的是「回到 revision 6（…）」：那是记在盘上的原话，
+    // 界面上不许露字段名，这里只把那个词翻成人话，数字与时间一个字不动。
+    change = change.replace(/revision (\d+)/g, "第 $1 版");
     var who = row.actor ? "记作 " + (ACTOR_TEXT[row.actor] || row.actor) : "没记谁改的";
     var why = row.reason ? "为什么：" + row.reason : "没写原因";
     return shortTime(row.ts) + " · " + what + (change ? " · " + change : "") + " · " + why + " · " + who;
@@ -292,6 +324,144 @@
       list.appendChild(node("li", "", historyLine(row)));
     });
     say("history-msg", "共 " + rows.length + " 次改动，最新的一行在上面。");
+  }
+
+  // —— 她提的改动（她只能提，点头的是人） ————————————————
+  // 页面不给自己造提案：一条一条原样来自程序。接受才写魂，拒绝连请求都不发。
+  function targetText(target) {
+    return TARGET_TEXT[String(target || "")] || "她的某一块";
+  }
+
+  function proposalRow(list, proposal, index) {
+    // 先把这一行落进 DOM：下面 el("proposal-accept-N") 要按 id 取回来才绑得上事件。
+    var row = node("li");
+    list.appendChild(row);
+    var cell = node("div");
+    cell.appendChild(node("div", "body",
+      "想把「" + targetText(proposal.target) + "」改成「" + String(proposal.value || "") + "」"));
+    if (proposal.reason) { cell.appendChild(node("div", "meta", "为什么：" + proposal.reason)); }
+    var evidence = proposal.evidence || [];
+    cell.appendChild(node("div", "meta", evidence.length
+      ? "依据的三条记忆：" : "这条没带依据（不该出现，报告它）"));
+    evidence.forEach(function (item) {
+      cell.appendChild(node("div", "meta", "· " + String(item)));
+    });
+    row.appendChild(cell);
+
+    // 两个按钮同占第三行右侧那一列（ul.rows 是两列网格），竖着摞。
+    var actions = node("div", "actions");
+    row.appendChild(actions);
+    // 两个按钮都按 id 绑事件：先落进 DOM，再 el(id) 取回来绑——和静态按钮同一种绑法。
+    var accept = node("button", "slim", "接受");
+    accept.type = "button";
+    accept.id = "proposal-accept-" + index;
+    actions.appendChild(accept);
+    el("proposal-accept-" + index).addEventListener("click", function () {
+      acceptProposal(proposal);
+    });
+
+    var reject = node("button", "slim", "拒绝");
+    reject.type = "button";
+    reject.id = "proposal-reject-" + index;
+    actions.appendChild(reject);
+    el("proposal-reject-" + index).addEventListener("click", function () {
+      rejectProposal(proposal);
+    });
+  }
+
+  function showProposals(batch) {
+    var list = el("proposal-list");
+    clear(list);
+    var proposals = (batch || {}).proposals || [];
+    STATE.proposals = proposals;
+    if (!proposals.length) {
+      list.appendChild(node("li", "msg", "这一夜她没提改动"));
+      say("proposal-msg", "她提了会摆在这儿：改成什么、为什么、依据哪三条记忆。");
+      return;
+    }
+    proposals.forEach(function (proposal, index) {
+      proposalRow(list, proposal, index);
+    });
+    say("proposal-msg", "共 " + proposals.length + " 条等她被人点头。");
+  }
+
+  function acceptProposal(proposal) {
+    say("proposal-msg", "正在接受…");
+    call("POST", "/soul/proposal", { actor: ACTOR, proposal: proposal })
+      .then(function (res) {
+        if (res.status === 200 && (res.data || {}).ok !== false) {
+          // 说话要在刷新之后：refresh() 会重画提案列表并写上条数，先说就被盖掉。
+          return refresh().then(function () {
+            say("proposal-msg", "接受了。她的「" + targetText(proposal.target)
+              + "」换成这一句，改动记录里多了一行。", "good");
+          });
+        }
+        say("proposal-msg", "没接受成：" + reasonOf(res), "bad");
+      })
+      .catch(function (err) { say("proposal-msg", "连不上核：" + err, "bad"); });
+  }
+
+  // 拒绝不发任何请求：她那边一个字不动，账上也不留痕——页内这一行说完就散。
+  function rejectProposal(proposal) {
+    say("proposal-msg", "没点头，这一条作废（她的魂一个字没动，也没记账）。");
+    // 只把这一行点灰，好让人知道刚才否的是哪一条——页面之外不留任何痕迹。
+    var button = el("proposal-reject-" + STATE.proposals.indexOf(proposal));
+    var row = button && button.parentNode && button.parentNode.parentNode;
+    if (row) { row.className = "retired"; }
+  }
+
+  // —— 退回上一版（整档回滚） ————————————————————————
+  function renderRevision() {
+    var text = el("revision-now");
+    var button = el("rollback-btn");
+    if (STATE.current === null || STATE.current === undefined) {
+      text.textContent = "版本读取中…";
+      button.disabled = true;
+      return;
+    }
+    if (STATE.previous === null || STATE.previous === undefined) {
+      text.textContent = "当前 r" + STATE.current + "；还没存下上一版";
+      button.disabled = true;
+      return;
+    }
+    text.textContent = "当前 r" + STATE.current + "；上一版 r" + STATE.previous;
+    button.disabled = false;
+  }
+
+  function showRevisions(data) {
+    var revisions = (data || {}).revisions || [];
+    STATE.previous = revisions.length ? revisions[0].revision : null;
+    renderRevision();
+  }
+
+  function rollback() {
+    if (STATE.previous === null || STATE.previous === undefined) {
+      say("rollback-msg", "上一版还没存下，现在退不了。", "bad");
+      return;
+    }
+    var ok = window.confirm("确认退回上一版（r" + STATE.previous + "）？当前 r" + STATE.current);
+    if (!ok) { return; }
+    var reason = window.prompt("为什么退回去？（进改动记录；留空就记「面板退回上一版」）",
+                               "面板退回上一版");
+    if (reason === null) { return; }
+    reason = String(reason).trim() || "面板退回上一版";
+    var button = el("rollback-btn");
+    button.disabled = true;
+    say("rollback-msg", "正在退回到 r" + STATE.previous + "…");
+    call("POST", "/soul/rollback",
+         { actor: ACTOR, reason: reason, revision: STATE.previous })
+      .then(function (res) {
+        button.disabled = false;
+        if (res.status === 200 && (res.data || {}).ok !== false) {
+          say("rollback-msg", "退回去了。改动记录里多了一行，再点一次能回来。", "good");
+          return refresh();
+        }
+        say("rollback-msg", "没退成：" + reasonOf(res), "bad");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        say("rollback-msg", "连不上核：" + err, "bad");
+      });
   }
 
   // —— 自检（只读） ————————————————————————————————
@@ -315,7 +485,9 @@
       call("GET", "/soul"),
       call("GET", "/soul/render"),
       call("GET", "/soul/history"),
-      call("GET", "/soul/check")
+      call("GET", "/soul/check"),
+      call("GET", "/brain/proposals"),
+      call("GET", "/soul/revisions")
     ]).then(function (out) {
       if (out[0].status === 200) { showSoul(out[0].data || {}); }
       else {
@@ -331,6 +503,14 @@
       else { say("history-msg", "改动记录读不到：" + reasonOf(out[2]), "bad"); }
       if (out[3].status === 200) { showIssues((out[3].data || {}).issues || []); }
       else { say("issues-msg", "自检跑不起来：" + reasonOf(out[3]), "bad"); }
+      if (out[4].status === 200) { showProposals(out[4].data || {}); }
+      else { say("proposal-msg", "她提的改动读不到：" + reasonOf(out[4]), "bad"); }
+      if (out[5].status === 200) { showRevisions(out[5].data || {}); }
+      else {
+        STATE.previous = null;
+        renderRevision();
+        say("rollback-msg", "版本清单读不到，退回上一版先别点：" + reasonOf(out[5]), "bad");
+      }
     }).catch(function (err) {
       say("identity-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
     });
@@ -359,6 +539,8 @@
       say("say-msg", "连不上核：" + err, "bad");
     });
   });
+
+  el("rollback-btn").addEventListener("click", rollback);
 
   el("redline-submit").addEventListener("click", function () {
     var rule = el("redline-rule").value.trim();

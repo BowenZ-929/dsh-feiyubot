@@ -44,7 +44,12 @@ TARGET_RE = re.compile(
 #: 2026-11-06 前端重做：多三张有取数的页——魂（4 读 + 2 写）、今天（3 条只读）、
 #: 记忆（4 条只读）；「关于他」只有一条能扫到的固定地址（/brain/people），
 #: 名片那条路径带人名、扫不出来，由下面 PagesWithDynamicPaths 单独看住（不许因此放宽判据）。
-MIN_TARGETS = {"soul.html": 6, "heart.html": 8, "brain.html": 6,
+#:
+#: 2026-11-06 二次：脑那页整页退役，从这张表里删掉——它没了，扫不出目标不是「漏看」
+#: 而是「没有对象」，留着会让 test_every_page_yields_targets 直接 FileNotFoundError。
+#: 它原来那四条只读取数（名片 / 四档 / 冷仓 / 改理解）已经搬到 about.html 与 memory.html，
+#: 那两页的 MIN_TARGETS 照旧看住它们；魂页同时从 6 涨到 10（补回提案与回滚两条读写）。
+MIN_TARGETS = {"soul.html": 10, "heart.html": 8,
                "home.html": 9, "chat.html": 1, "panel.html": 0,
                "day.html": 3, "settings.html": 0,
                "about.html": 1, "memory.html": 4}

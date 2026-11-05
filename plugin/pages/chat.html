@@ -137,6 +137,7 @@
         <dt>命中条款</dt><dd id="gate-hit">无</dd>
         <dt>咽回的话</dt><dd id="gate-drops">无</dd>
         <dt>这次过闸</dt><dd id="gate-line">还没说话</dd>
+        <dt>她在拒绝</dt><dd id="refusal-line">还没说话</dd>
       </dl>
     </section>
     <section class="card" id="assembly-card">
@@ -333,6 +334,22 @@
     el("gate-line").textContent = gateLineText(gate);
   }
 
+  // 冷却那一行：心说这个话题还在冷却里，她就主动拒——回包的 refusal 节带着一句现成的人话。
+  // 这一格只转述 refusal.line，不在这里拼话题、理由、还剩多久：那三样与两个单位（小时 / 分钟）
+  // 全在后端数据里。cooling 为 false 就写「没在拒绝」，缺字段写「没给」——留白与编一句话都不许。
+  function refusalLineText(refusal) {
+    var conf = refusal || {};
+    if (conf.cooling === true) {
+      return conf.line ? String(conf.line) : "在拒绝 · 那句人话没给";
+    }
+    if (conf.cooling === false) { return "没在拒绝"; }
+    return "没给";
+  }
+
+  function renderRefusal(refusal) {
+    el("refusal-line").textContent = refusalLineText(refusal);
+  }
+
   // 装配结果：逐段显示中文名与 chars/cap（超了标「超限」）；不认识的 key 照实显示，不静默丢。
   var SECTION_TEXT = { soul: "魂六件", anchors: "锚句", recent: "最近几轮",
                        banned: "近轮禁用", action: "动作池",
@@ -401,6 +418,7 @@
   }
 
   // 连续性：「最近 12 轮 / 更早还有 3 轮没有加载」；一轮都没省就写「没有更早的对话」。
+  // 后面再接一段补记读数：哪几轮是事后从脑回填的，人得看得出来（不许混成原话）。
   function continuityText(continuity) {
     var conf = continuity || {};
     var loaded = conf.turns_loaded;
@@ -409,7 +427,29 @@
       : "最近 " + String(loaded) + " 轮";
     var notice = conf.notice;
     var tail = (typeof notice === "string" && notice !== "") ? notice : "没有更早的对话";
-    return head + " / " + tail;
+    return head + " / " + tail + " / " + reconciledText(conf);
+  }
+
+  // 补记：fidelity 为 reconciled 的那几轮逐轮点名；没有补记就明说没有，缺字段写「没给」。
+  function reconciledText(conf) {
+    var count = conf.reconciled;
+    if (count === undefined || count === null) {
+      return "补记没给";
+    }
+    if (!count) {
+      return "没有补记";
+    }
+    var rounds = conf.rounds || [];
+    var marks = [];
+    for (var index = 0; index < rounds.length; index++) {
+      var row = rounds[index] || {};
+      if (row.fidelity === "reconciled") {
+        marks.push("第 " + String(index + 1) + " 轮（补记）");
+      }
+    }
+    return marks.length
+      ? "补记 " + String(count) + " 轮：" + marks.join("、")
+      : "补记 " + String(count) + " 轮";
   }
 
   // 锚句：配了就写清几个字，没配就照后端那句话写「未配锚句」——不许留白。
@@ -493,6 +533,7 @@
       renderRecall(data.recalled || []);
       renderHeart(data.heart || {});
       renderGate(data.gate || {});
+      renderRefusal(data.refusal || {});
       renderAssembly(data.assembly || {});
       renderReadouts(data);
     }, function () {

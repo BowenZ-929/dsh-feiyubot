@@ -43,6 +43,7 @@ from organs.brain import BrainStore
 from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.home import residents as home_residents
+from organs.heart import refuse as heart_refuse
 from organs.mind import conversation, llm, recent, usage
 from organs.mouth import address as mouth_address
 from organs.mouth import audit as mouth_audit
@@ -95,7 +96,7 @@ ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
-                 "guard", "memory", "addressed", "borrow"}
+                 "guard", "memory", "addressed", "borrow", "refusal"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
 ACTION_KEYS = {"pool", "rule", "quota"}
 QUOTA_KEYS = {"window", "max", "used", "blocked", "stripped", "kept_because_empty"}
@@ -690,7 +691,9 @@ class ChatApiTest(unittest.TestCase):
             status, payload = self._send(text=self.ASKED_CAT, reply=self.SOFT_ANSWER)
         self.assertEqual(200, status)
         section = payload["refusal"]
-        self.assertEqual({"kind", "shape", "verdict_reason", "delivered"}, set(section))
+        self.assertEqual({"kind", "shape", "verdict_reason", "delivered",
+                          "cooling", "topic", "note"}, set(section))
+        self.assertFalse(section["cooling"], "没在冷却：这一格要如实写 false，不躲不省")
         self.assertEqual("soft", section["kind"])
         self.assertEqual("soft", section["shape"])
         self.assertIn("软转向", section["verdict_reason"])
@@ -727,11 +730,13 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("hard", self._refusal_rows()[0]["shape"])
 
     def test_answered_reply_leaves_no_section_and_no_row(self):
-        """正面答了：成功体里没有 refusal 一节（不加空壳），心与我们自己的账一行都不添。"""
+        """正面答了：refusal 只剩「没在冷却」这一格（那四样不加空壳），两本账一行都不添。"""
         with self._topics("猫"):
             status, payload = self._send(text=self.ASKED_CAT, reply=self.ANSWERED)
         self.assertEqual(200, status)
-        self.assertNotIn("refusal", payload, "没判出拒绝就不添这一节")
+        section = payload["refusal"]
+        self.assertEqual({"cooling", "topic", "note"}, set(section),
+                         "没判出拒绝就不添那四样，冷却那一格照写")
         self.assertEqual([], self._heart_rows())
         self.assertEqual([], self._refusal_rows())
 
@@ -748,6 +753,100 @@ class ChatApiTest(unittest.TestCase):
         ledger = self._refusal_rows()
         self.assertEqual(1, len(ledger), "她拒了这件事照记，不因为投不进心就不记账")
         self.assertFalse(ledger[0]["sent"])
+
+    # —— 冷却里主动拒（这一轮加的） ————————————————
+
+    ASKED_HOSPITAL = "医院那事怎么样了？"
+
+    @contextlib.contextmanager
+    def _cooling(self, name: str = "医院"):
+        """在临时心根里真造一次冷却：词表指到临时文件、ingest 一次；退出时词表补丁自动还原。
+
+        心那边收话题要先认词表，所以「指词表」与「记一次拒绝」必须在同一个环境补丁里做。
+        全程只碰 setUp 里那两个临时根：真实心根、真实家根一个字节都不写。
+        """
+        with self._topics(name):
+            heart_refuse.ingest(name, "refused-topic")
+            yield
+
+    def test_a_cooling_topic_is_refused_without_asking_the_model(self):
+        """冷却里的話題：她说 refusal 那一句，模型**一次都没调**，两本账一行都不添。
+
+        四件事一起断言，缺一条这条短路就不成立：说的是数据里那句拒绝；refusal 节带 topic /
+        remaining_min / line；假 transport 的调用计数是 0；心与我们自己的账行数前后不变（已在冷却，
+        再投一次就是重复记账）。
+        """
+        said = mouth_refusal.say("refused-topic")
+        with self._cooling():
+            heart_before = len(self._heart_rows())
+            capture = []
+            status, payload = self._post({"text": self.ASKED_HOSPITAL},
+                                         _body(LONG_REPLY, capture))
+            heart_after = len(self._heart_rows())
+        self.assertEqual(200, status)
+        self.assertEqual(said, payload["reply"], "冷却里说的是 refusal 那一句，不是模型那句")
+        section = payload["refusal"]
+        self.assertTrue(section["cooling"], "refusal.cooling 要如实写 true")
+        self.assertEqual("医院", section["topic"])
+        self.assertEqual("refused-topic", section["reason"])
+        self.assertIsInstance(section["remaining_min"], float)
+        self.assertGreater(section["remaining_min"], 0.0, "还剩多久要有数")
+        self.assertIn("医院", section["line"], "面板那一句要带上话题名")
+        self.assertIn("还剩", section["line"])
+        self.assertEqual(said, section["say"])
+        self.assertIsNone(section["event"], "冷却里不投事件：这一格必须是 null")
+        self.assertEqual([], capture, "冷却里一次模型都不调（验收那一格：调用计数为 0）")
+        self.assertEqual(heart_before, heart_after, "心那边的 refusals.json 行数不变")
+        self.assertEqual([], self._refusal_rows(), "我们自己的 refuse.jsonl 也不添一行")
+        self.assertEqual(said, "".join(one["text"] for one in payload["chunks"]),
+                         "chunks 仍走 split + pace：拼回去就是那一句原文")
+
+    def test_the_cooled_refusal_still_goes_through_the_gate(self):
+        """那一句拒绝仍过八股闸：条款判了；复述审计没跑（audit-unavailable）；重写一次请求都不发。"""
+        with self._cooling():
+            capture = []
+            status, payload = self._post({"text": self.ASKED_HOSPITAL},
+                                         _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        gate = payload["gate"]
+        self.assertEqual("pass", gate["decision"])
+        self.assertEqual(gate["in_parts"], gate["out_parts"])
+        self.assertIn("冷却", gate["note"])
+        for part in gate["parts"]:
+            self.assertEqual("audit-unavailable", part["audit"]["status"],
+                             "没有装配就没有可比的原话：判不了，不是通过")
+            self.assertIn(part["rewrite"]["status"], ("not-tried", "failed"),
+                          "这一轮一次重写请求都不发：没命中就是 not-tried，命中就是留原话的 failed")
+        self.assertEqual([], capture, "连重写那一次也没发")
+
+    def test_the_same_question_outside_the_cooldown_answers_normally(self):
+        """同一句、不在冷却里：照常装配与调模型（一次），refusal 节如实写「没在冷却」。"""
+        with self._topics("医院"):
+            capture = []
+            status, payload = self._post({"text": self.ASKED_HOSPITAL},
+                                         _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual(LONG_REPLY, payload["reply"])
+        self.assertEqual(1, len(capture), "这一轮真问了模型一次")
+        section = payload["refusal"]
+        self.assertFalse(section["cooling"], "没在冷却要说 false，不许省掉这一格")
+        self.assertEqual("医院", section["topic"], "认得出话题就报出来")
+        self.assertNotIn("kind", section, "没判出拒绝就不添那四样")
+        self.assertEqual([], self._heart_rows())
+
+    def test_an_unrecognised_topic_is_not_judged(self):
+        """抽不到话题（词表里没有那句里的字）：冷却这一关不判，照常说话，topic 如实 null。"""
+        with self._topics("猫"):
+            capture = []
+            status, payload = self._post({"text": "今天天气不错。"},
+                                         _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual(LONG_REPLY, payload["reply"])
+        self.assertEqual(1, len(capture))
+        section = payload["refusal"]
+        self.assertFalse(section["cooling"])
+        self.assertIsNone(section["topic"], "认不出就是 null，不替她猜一个话题")
+        self.assertEqual([], self._heart_rows())
 
     # —— 失败 ————————————————————————————————
 
@@ -837,10 +936,14 @@ class ChatApiTest(unittest.TestCase):
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
 
-        self.assertEqual({"turns_loaded", "omitted", "notice"}, set(payload["continuity"]))
+        # 四个旧键一个都不许动，只许多出 reconciled 与 rounds（补记读数对页面也冻结）
+        self.assertEqual({"turns_loaded", "omitted", "notice", "reconciled", "rounds"},
+                         set(payload["continuity"]))
         self.assertEqual(0, payload["continuity"]["turns_loaded"])
         self.assertEqual(0, payload["continuity"]["omitted"])
         self.assertEqual("", payload["continuity"]["notice"], "没省任何一轮时 notice 该是空串")
+        self.assertEqual(0, payload["continuity"]["reconciled"], "一轮都没补，却报成补了")
+        self.assertEqual([], payload["continuity"]["rounds"], "没有历史，rounds 该是空数组")
 
         self.assertEqual({"model", "temperature", "temperature_tier"}, set(payload["llm"]))
         self.assertEqual(CONFIG["model"], payload["llm"]["model"])
@@ -861,6 +964,9 @@ class ChatApiTest(unittest.TestCase):
         continuity = payload["continuity"]
         self.assertEqual(12, continuity["turns_loaded"])
         self.assertEqual(3, continuity["omitted"])
+        self.assertEqual(12, len(continuity["rounds"]), "rounds 要为装进提示词的每一轮给一行")
+        self.assertEqual({"ts", "fidelity", "msg_id"}, set(continuity["rounds"][0]))
+        self.assertEqual(0, continuity["reconciled"], "造出来的 12 轮都是亲历，不该有补记")
         notice = conversation.load_assembly()["recent"]["notice"].replace(recent.NOTE_SLOT, "3")
         self.assertEqual(notice, continuity["notice"])
         self.assertIn(notice, capture[0]["messages"][0]["content"], "提示词里没有那句「更早还有」")
@@ -874,6 +980,19 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(5, payload["continuity"]["turns_loaded"])
         self.assertEqual(0, payload["continuity"]["omitted"])
         self.assertEqual("", payload["continuity"]["notice"])
+
+    def test_a_round_the_ledger_missed_is_backfilled_over_http(self):
+        """脑里今日记了、最近几轮没落的一条：装配前补进来，回包里说清补了几条。"""
+        self.brain.ingest(who="主人", text="我上周把片子落在诊室了")   # 今日在役，账上没有
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        continuity = payload["continuity"]
+        self.assertEqual(1, continuity["reconciled"], "补了一条却没在回包里说")
+        self.assertEqual(recent.RECONCILED, continuity["rounds"][0]["fidelity"],
+                         "rounds 里那一轮没标 reconciled")
+        self.assertIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"],
+                      "提示词里没有「（补记）」，模型会把补的当原话")
 
     def test_configured_anchor_arrives_at_the_endpoint(self):
         """家·仓库里登记两张台词卡：端点报成配了，全文与 body 都回给人核对，body 不进提示词。"""

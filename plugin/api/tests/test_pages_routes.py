@@ -8,8 +8,10 @@ UI 承诺了不存在的能力，刷新即失效。
    且方法对得上（POST 端点不能被页面当 GET 用，反之亦然）；
 2. 页面上每个静态按钮都必须有 JS 绑定（没有绑定的按钮点了什么都不发生 = 死按钮）；
 3. pages/heart.html 的可点元素全部列出并逐一断言：只有一条回跳链接，没有任何按钮、
-   输入框、表单，也没有任何写动词——「人不能改心」不只是口头承诺。（脑页另算：
-   它有一条写（接受提案，写魂不写脑），判据在 tests/test_pages_brain.py。）
+   输入框、表单，也没有任何写动词——「人不能改心」不只是口头承诺。
+   （脑那页已于 2026-11-06 整页退役，它的三条判据随文件一起删；原来那条
+   「接受提案」的写入口搬到了魂页「她提的改动」块，判据在本文件与
+   tests/test_pages_fetch_targets.py 的 SoulProposalAndRollbackButtons 里。）
 
 **这是静态回归测试，不是审计。** 它比对的是源码里的页面与路由表，防的是以后有人改了页面
 却不改路由（或反过来）。审计要打「当前正在跑的进程」（CONTRIBUTING §1.3）——本项目踩过：
@@ -67,14 +69,22 @@ class EveryClickableHasARoute(unittest.TestCase):
         口径变更（2026-11-06 前端重做）：魂页按「一页一个主操作」重切，取数四条
         （她是谁 / 注入面 / 改动记录 / 自检）、写两条（改一句、红线加与撤走同一条端点）。
         原来那条「>=8 次」的数数断言换成集合相等——多一条少一条都得在这里说清楚。
+
+        **六条 → 十条（2026-11-06 二次）**：被砍掉的两个人人可见的能力补回来了，
+        不是口味：接受提案是她「想改自己只能提、不能自己改」的唯一通路；退回上一版是
+        「改坏了能退」的底线（命令行能用不等于页面能用）。新增四条——
+        读 /brain/proposals（她提的改动从哪来）、读 /soul/revisions（上一版是哪一版）、
+        写 /soul/proposal（接受；拒绝不发请求）、写 /soul/rollback（整档回滚）。
         """
         text = _text("soul.html")
         calls = CALL_RE.findall(text)
         self.assertEqual(
             {("GET", "/soul"), ("GET", "/soul/render"), ("GET", "/soul/history"),
-             ("GET", "/soul/check"), ("POST", "/soul/edit"), ("POST", "/soul/redline")},
+             ("GET", "/soul/check"), ("GET", "/brain/proposals"), ("GET", "/soul/revisions"),
+             ("POST", "/soul/edit"), ("POST", "/soul/redline"), ("POST", "/soul/proposal"),
+             ("POST", "/soul/rollback")},
             {(method, path.partition("?")[0]) for method, path in calls},
-            "魂页的取数与写就这六条：四条只读 + 两条写（改一句、红线加/撤）")
+            "魂页的取数与写就这十条：六条只读 + 四条写（改一句、红线加/撤、接受提案、退回上一版）")
         for method, path in calls:
             route = path.partition("?")[0]
             self.assertIn(route, api.ROUTES, "页面在打一条不存在的路由：%s" % route)
@@ -94,7 +104,9 @@ class EveryClickableHasARoute(unittest.TestCase):
         ids = BUTTON_ID_RE.findall(text)
         # 口径变更（2026-11-06 前端重做）：静态按钮从四个收到两个——「改这一句」与
         # 「加这条红线」；撤线按钮仍由 JS 按条生成（下一条用例单独看它）。
-        self.assertEqual(len(ids), 2, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
+        # 再次改动（2026-11-06 二次）：两个 → 三个，「退回上一版」是静态按钮（回滚不靠
+        # 现造按钮，页底部那颗一直在）。提案的「接受」「拒绝」仍由 JS 按条生成。
+        self.assertEqual(len(ids), 3, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
         for button_id in ids:
             self.assertIn('el("%s").addEventListener' % button_id, text,
                           "按钮 %s 没有绑定任何事件" % button_id)
@@ -107,6 +119,62 @@ class EveryClickableHasARoute(unittest.TestCase):
         self.assertIn('call("POST", "/soul/redline"', text, "动态按钮要打 /soul/redline")
         self.assertIn("/soul/redline", api.ROUTES)
         self.assertEqual(api.ROUTES["/soul/redline"], "POST")
+
+
+class SoulProposalAndRollbackButtons(unittest.TestCase):
+    """魂页补回来的两个入口：按钮 → 路由，一对一对得上，而且都真绑了事件。
+
+    为什么用判据而不是口味（这两块是被砍过一轮又补回来的）：
+    - 「接受」是她想改自己唯一的通路。她只能提、不能自己改；没有接受按钮，
+      「魂只有人能改」就只堵了一半——人看得到提案，却只能去命令行点头。
+    - 「退回上一版」是底线：改坏了能退。命令行能用不等于页面能用。
+    - 「拒绝」反过来不许有请求：拒绝是人的沉默，不写账、不动魂。
+    """
+
+    def setUp(self) -> None:
+        self.text = _text("soul.html")
+        self.code = _code_only(self.text)
+
+    def test_proposal_buttons_are_bound_and_accept_hits_the_route(self):
+        """"接受"按 id 绑定，并且打的是一条真路由；"拒绝"一个字都不发。"""
+        # 两个按钮都是 JS 按条造的，绑法仍是 el(id).addEventListener（不是死按钮）
+        self.assertIn('el("proposal-accept-" + index).addEventListener', self.code,
+                      "「接受」没有绑事件：点了不会有任何反应")
+        self.assertIn('el("proposal-reject-" + index).addEventListener', self.code,
+                      "「拒绝」没有绑事件：点了不会有任何反应")
+        self.assertIn('call("POST", "/soul/proposal"', self.code,
+                      "「接受」要打 POST /soul/proposal")
+        self.assertEqual("POST", api.ROUTES.get("/soul/proposal"))
+        # 拒绝只记一行本地话：不许有请求（有的话就是「拒绝也会留痕」，与判据相反）
+        reject_body = self.code.split("function rejectProposal", 1)[1].split("\n  }", 1)[0]
+        self.assertNotIn("call(", reject_body, "拒绝不该发任何请求：她的魂一个字都不动")
+        self.assertNotIn("panelFetch", reject_body, "拒绝不该发任何请求")
+        self.assertIn("say(", reject_body, "拒绝要在页内记一行")
+
+    def test_rollback_button_is_bound_and_hits_the_route(self):
+        """「退回上一版」是静态按钮：id、绑事件、路由三样都在。"""
+        self.assertIn('id="rollback-btn"', self.text, "页底部那颗按钮不见了")
+        self.assertIn('el("rollback-btn").addEventListener', self.code,
+                      "「退回上一版」没有绑事件：死按钮")
+        self.assertIn('call("POST", "/soul/rollback"', self.code,
+                      "「退回上一版」要打 POST /soul/rollback")
+        self.assertEqual("POST", api.ROUTES.get("/soul/rollback"))
+        # 先弹确认再动手：连确认都没有的回滚等于没有回滚
+        self.assertIn("window.confirm(", self.code, "回滚前要弹确认")
+        self.assertIn("revision: STATE.previous", self.code,
+                      "回滚要带上「上一版」的版本号，不许让服务端猜")
+
+    def test_the_two_blocks_read_from_real_gets(self):
+        """两个块的取数各来自一条真 GET：提案来自脑、上一版来自魂的版本清单。"""
+        self.assertIn('call("GET", "/brain/proposals"', self.code,
+                      "「她提的改动」要读 GET /brain/proposals")
+        self.assertIn('call("GET", "/soul/revisions"', self.code,
+                      "「退回上一版」要知道上一版是几：读 GET /soul/revisions")
+        self.assertEqual("GET", api.ROUTES.get("/brain/proposals"))
+        self.assertEqual("GET", api.ROUTES.get("/soul/revisions"))
+        # 版本号只有一个来源：GET /soul 的 revision（页面不许自己数）
+        self.assertIn("STATE.current = (soul.revision", self.code,
+                      "当前版本号要读 GET /soul 给的 revision")
 
 
 class EveryLinkPointsSomewhere(unittest.TestCase):
@@ -123,9 +191,10 @@ class EveryLinkPointsSomewhere(unittest.TestCase):
 class HeartHasNoWriteEntry(unittest.TestCase):
     """「人不能改心」的机器证据：把心页的可点元素全部列出来，一个一个过。
 
-    脑不再跟心同一条断言：脑页要「接受提案」（POST /soul/proposal，写的是魂不是脑），
-    判据因此从「一个按钮都没有」换成 test_pages_brain.py 那三条——写只有一条、其余全 GET
-    且都登记在路由表里、没有任何改熟稔/改记忆的控件。
+    脑不再跟心同一条断言：脑页当年要「接受提案」（POST /soul/proposal，写的是魂不是脑），
+    判据因此从「一个按钮都没有」换成「写只有一条、其余全 GET 且都登记在路由表里」。
+    2026-11-06 脑页退役（内容搬去 /about 与 /memory），那条写随「她提的改动」块回到魂页——
+    判据也回到这里，见下面的 SoulProposalAndRollbackButtons。
     """
 
     def test_clickable_elements_are_only_the_back_link(self):

@@ -12,8 +12,11 @@ iframe 的地址；/panel 发聚合页 panel.html，"/" 仍是魂页（直开核
 
 导航重切（2026-11-06，人拍板）：六项 = 魂 · 关于他 · 记忆 · 聊天 · 今天 · 设置。
 心（/heart）与家（/home）仍是可用页，但不占导航位——它们是同一批只读面，
-入口收在「设置」页里那两条链接上。脑（/brain）同理：内容已分到「关于他」与「记忆」，
-页还在，只是导航不再指向它。
+入口收在「设置」页里那两条链接上。
+
+脑页退场（2026-11-06）：原来那张只读脑页的内容已被「关于他」（/about）与「记忆」（/memory）
+整块接走，留着就是第二份会走味的副本——所以那一页整个删掉，/brain 从 PAGE_FILES 里移除，
+地址回到 api/brain.py 的 JSON 端点 GET /brain（它本来就在，只是过去被静态页挡在前面）。
 """
 from __future__ import annotations
 
@@ -29,14 +32,15 @@ PAGE_ROUTES: Dict[str, str] = {}
 #（壳里只有一个席位，iframe 指向它）。/day、/settings 是占位页——没有真实页面的
 # 导航项也要点得开，这是本项目的硬规矩：点不到真实路由的按钮要删，不留死按钮。
 PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "panel.html",
-                              "/heart": "heart.html", "/brain": "brain.html",
+                              "/heart": "heart.html",
                               "/home": "home.html",
                               "/day": "day.html",
                               "/settings": "settings.html",
                               # 2026-11-06 信息架构重切（人拍板）：导航六项
                               #（魂 · 关于他 · 记忆 · 聊天 · 今天 · 设置），
                               # 两页新文件从脑页里分出来——「关于他」只放人名录与名片，
-                              #「记忆」只放四个抽屉与冷库。脑页 /brain 仍可用，只是不占导航位。
+                              #「记忆」只放四个抽屉与冷库。脑那页因此退役（2026-11-06）：
+                              # 内容搬完就删页，/brain 交回 JSON 端点，不留第二份副本。
                               "/about": "about.html",
                               "/memory": "memory.html",
                               # 说话页：GET /chat 发这一页的字节，POST /chat 走 api.handle

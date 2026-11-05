@@ -14,7 +14,7 @@ import re
 import unittest
 from pathlib import Path
 
-from api import api, version
+from api import api, devserver, version
 
 PAGES = Path(__file__).resolve().parents[2] / "pages"
 BUILD_RE = re.compile(r'<footer[^>]*\bid="build"', re.S)
@@ -69,12 +69,25 @@ class FooterShowsVersion(unittest.TestCase):
     """页脚那一行不是装饰：它得真去读 /healthz，并且分得出新旧两态。"""
 
     def test_pages_have_a_build_footer_that_calls_healthz(self):
-        for page in ("home.html", "brain.html"):
+        # 脑那页已删除（2026-11-06 脑页退场，内容搬去 about/memory），但它那条页脚
+        # 判据没有跟着消失：能从 /about 或 /memory 里读同一行就算数——见下一个用例。
+        # 这里只留还在的那张家页，删掉的页不再出现在名单里（不是放宽，是对象没了）。
+        for page in ("home.html",):
             text = (PAGES / page).read_text(encoding="utf-8")
             self.assertRegex(text, BUILD_RE, "%s 没有页脚 build 节点" % page)
             self.assertIn('call("GET", "/healthz")', text, "%s 的页脚没有去读 /healthz" % page)
             self.assertIn("stale", text, "%s 的页脚分不出进程新旧" % page)
             self.assertIn("进程旧了", text, "%s 没有「进程旧了」的红字分支" % page)
+
+    def test_brain_page_is_really_gone(self):
+        """名字从上面的名单里划掉，得有个看得见的凭据：文件真的没了。
+
+        2026-11-06：脑那页整页删除（内容搬去 /about 与 /memory，/brain 回到 JSON 端点）。
+        留着这条，是为了下次谁想「先把名字删了再说」时，这里会先红。
+        """
+        self.assertNotIn("brain", {path.stem for path in PAGES.glob("*.html")},
+                         "脑那页应已删除（按目录现状断言，不写死文件名）")
+        self.assertNotIn("/brain", devserver.PAGE_ROUTES, "/brain 不该还挂在静态页名单上")
 
 
 if __name__ == "__main__":

@@ -14,14 +14,20 @@ POST /chat 端到端画出来的页面。所以判据钉在四件事上：
    hit.clause_id·reason 都在页上；renderHeart 里没有任何数值换算（toFixed / Number /
    Math / parseFloat），整页也不出现 mood.now、mood.value、energy 这类读数。
 5. **三个读数也看得见**：本次温度与档位（「温度 0.5 · 事实档」）、连续性（「最近 12 轮 /
-   更早还有 N 轮没有加载」，N=0 时是「没有更早的对话」）、锚句（已配（N 字）/ 未配锚句）
-   都落在页上；三格各用一次 textContent，缺字段时如实写「没给」，不留白。
+   更早还有 N 轮没有加载」，N=0 时是「没有更早的对话」，再接一段补记读数）、锚句
+   （已配（N 字）/ 未配锚句）都落在页上；三格各用一次 textContent，缺字段时如实写「没给」。
+   补记那一轮必须看得出来：连续性那格里写清「补记 N 轮：第 2 轮（补记）」——
+   人得知道自己读到的是补的，不许混成原话。
 6. **过闸那一行**（本轮加的）：命中门那块里的 id="gate-line" 读回包 gate 节的 in_parts /
    out_parts / blocked，文案是「这次过闸：3 泡进 / 2 泡出 / 反复读」，一条都没拦时写「没拦」；
    缺字段时如实写「泡数没给」，留白与编一个 0 都不许。
 7. **口癖护栏那一行**：id="guard-line" 在读数区，文案是「口癖命中率 12%（滚动 50 · 阈值
    30%）· 注入 5 条/共 5 条」；over 时同一句后面接「已降到 2 条」并给这一行加 class warn
    （黄色取 var(--warn) 兜底）。class 只经 classList 切一次加、一次不加；缺字段写「没给」。
+8. **冷却那一行**（本轮加的）：命中门那块里的 id="refusal-line" 读回包 refusal 节——
+   cooling 为 true 时原样转述 refusal.line（「她在拒绝「医院」，理由 refused-topic，还剩 4.0 小时」），
+   cooling 为 false 写「没在拒绝」，缺字段写「没给」。**页面不拼那一句**：话题、理由、还剩多久与
+   两个单位都在后端数据（organs/mouth/data/cooldown.json）里，页面拼一份就是第二处真源。
 
 **这是静态回归测试，不是审计。** 它比对源码里的页面与路由表；活体验收（真 devserver +
 真模型）的原始输出在交付回报里。断言 api.ROUTES["/chat"] == "POST" 的那条依赖并行
@@ -304,6 +310,22 @@ class ReadoutsAreVisible(unittest.TestCase):
         self.assertIn("conf.notice", body, "后半句是后端给的 notice 原文")
         self.assertIn("没有更早的对话", body, "notice 是空串（omitted 为 0）时要写这一句")
         self.assertIn("没给轮数", body, "连轮数都没有时也要写一句")
+        self.assertIn("conf.reconciled", body, "补记条数要从回包的 continuity 里读")
+        self.assertIn("reconciledText", body, "补记读数要单独一段，不塞进前半句")
+        self.assertIn("补记", body, "页上看不出哪几轮是补的")
+        self.assertIn("没给", body, "缺字段时要如实写「没给」")
+
+    def test_reconciled_rounds_are_named_one_by_one(self):
+        """补记那一段：逐轮点名（fidelity === reconciled），没有补记就明说没有。"""
+        body = _between(_text(), "function reconciledText", "function anchorsText")
+        self.assertIn("conf.reconciled", body, "补记条数没读")
+        self.assertIn('"补记没给"', body, "缺 reconciled 字段时要写「没给」")
+        self.assertIn("没有补记", body, "一条补记都没有时也要说清楚")
+        self.assertIn("conf.rounds", body, "要按 rounds 逐轮看")
+        self.assertIn('"reconciled"', body, "逐轮判据是 fidelity 等于 reconciled")
+        self.assertIn("（补记）", body, "补的那一轮要在页上标出来")
+        self.assertIn("第 ", body, "点名要带轮次")
+        self.assertNotIn("innerHTML", body, "只许用 textContent 写这一格")
 
     def test_anchors_line_has_both_states(self):
         body = _between(_text(), "function anchorsText", "function renderReadouts")
@@ -411,6 +433,41 @@ class GateLineIsOnThePage(unittest.TestCase):
     def test_the_reply_body_reaches_it(self):
         self.assertIn("renderGate(data.gate || {})", _text(),
                       "回包里的 gate 没交给 renderGate")
+
+
+class RefusalLineIsOnThePage(unittest.TestCase):
+    """冷却那一行：心说这个话题还在冷却里，她就主动拒——页面只转述回包 refusal.line。
+
+    静态回归：这一格的 id、标签、初值、挨着谁，以及 JS 只读 refusal.cooling / refusal.line 这两处。
+    那一句人话本身（模板、小时 / 分钟怎么显示）在后端数据里，页面一个词都不拼。
+    """
+
+    def test_the_line_sits_next_to_the_gate_cells(self):
+        text = _text()
+        self.assertIn('id="refusal-line"', text, "命中门那块缺「她在拒绝」这一格")
+        self.assertIn("她在拒绝", text, "缺那一行的中文标签")
+        self.assertLess(text.index('id="gate-line"'), text.index('id="refusal-line"'),
+                        "这一行该挨着「这次过闸」")
+
+    def test_the_line_reads_the_refusal_section(self):
+        body = _between(_text(), "function refusalLineText", "function renderRefusal")
+        for needle, note in (("function refusalLineText(refusal)", "这一格接的是 refusal 节"),
+                             ("conf.cooling", "在不在冷却取自回包的 refusal.cooling"),
+                             ("conf.line", "那一句人话取自 refusal.line"),
+                             ("没在拒绝", "没在冷却时写「没在拒绝」"),
+                             ("没给", "缺字段时如实写「没给」，不留白")):
+            self.assertIn(needle, body, "%s：页面上找不到 %r" % (note, needle))
+        self.assertNotIn("还剩", body, "还剩多久这句要在后端数据里拼，页面不拼")
+
+    def test_the_line_is_written_with_textcontent_only(self):
+        body = _between(_text(), "function renderRefusal", "function sectionText")
+        self.assertIn('el("refusal-line").textContent = refusalLineText(refusal);', body,
+                      "这一行没接进 renderRefusal")
+        self.assertNotIn("innerHTML", body)
+
+    def test_the_reply_body_reaches_it(self):
+        self.assertIn("renderRefusal(data.refusal || {})", _text(),
+                      "回包里的 refusal 没交给 renderRefusal")
 
 
 class ThreeStatesArePresent(unittest.TestCase):
