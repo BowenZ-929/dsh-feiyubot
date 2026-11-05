@@ -962,7 +962,8 @@ def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
         wrote.append(_wrote_row(human))
     if dropped or not reply:
         return wrote
-    hers = brain.ingest(who=store.snapshot().identity.display, text=reply, ts=at)
+    hers = brain.ingest(who=store.snapshot().identity.display, text=reply, ts=at,
+                          side=brain_model.SIDE_SELF)
     if hers.get("ok"):
         wrote.append(_wrote_row(hers))
     return wrote

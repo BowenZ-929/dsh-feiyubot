@@ -516,17 +516,20 @@ class ConversationAnswerTest(unittest.TestCase):
                          "开场不是 usage.opening 的那个口径（去标点 + 前 N 字，再各自去重）")
 
     def test_banned_window_keeps_only_the_latest_rounds(self):
-        """4 轮历史、N=3：被挤出窗口的那条动作行不该出现在禁令里。"""
+        """窗口外的更早轮不该出现在禁令里：轮数从数据现读，造 N+1 轮。"""
+        rounds = conversation.load_assembly()["banned"]["rounds"]
         oldest = "(最早那一轮的动作)"
-        replies = [oldest, "%s\n\n一。" % self.HER_ACTION,
-                   "%s\n\n二。" % self.HER_ACTION, "%s\n\n三。" % self.HER_ACTION]
+        replies = [oldest] + ["%s\n\n第%d轮。" % (self.HER_ACTION, index)
+                             for index in range(1, rounds + 1)]
         root = self._her_history(replies, "banned_window")
         capture = []
         got = self._answer(captured=capture, recent_root=root)
         block = self._banned_block(capture)
         self.assertNotIn(oldest, block, "窗口外的更早轮进了禁令：%r" % (block,))
-        self.assertIn(repeat.REPEAT % 3, block, "最近 3 轮的那条动作行没标重复 3 次")
-        self.assertEqual([{"text": self.HER_ACTION, "count": 3}], got["banned"]["action_lines"])
+        self.assertIn(repeat.REPEAT % rounds, block,
+                      "最近 %d 轮的那条动作行没标重复 %d 次" % (rounds, rounds))
+        self.assertEqual([{"text": self.HER_ACTION, "count": rounds}],
+                         got["banned"]["action_lines"])
 
     def test_banned_sees_nothing_when_there_is_no_history(self):
         """一条历史都没有：这一节写一句实话，不留白（空白会被她读成「随便用」）。"""
