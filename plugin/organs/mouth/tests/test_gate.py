@@ -663,5 +663,175 @@ class RepeatRidesTheGate(unittest.TestCase):
             self.assertNotIn(line.format(rounds=1, matched="", prev_no=1, tag="x"), source)
 
 
+class QuotaOverruns(unittest.TestCase):
+    """第 5 组判据：装配标了「本轮不许写动作」，动作行就必须走干净。
+
+    验收 1/2/3/4/5/6 全在这一组里。判据与说法一个字都不写在这份文件里：名字与模板从
+    organs/mouth/data/quota.json 读（走 warehouse），这里只出现 id、kind 这类结构性标签。
+    """
+
+    BOOK = load("quota")
+    ACTION = "（尾巴在水里晃了一下）可爱归可爱，那也不是胖。"
+    BODY = "可爱归可爱，那也不是胖。"
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_quota_is_judged_before_action_note(self):
+        """验收 1 的顺序前提：两边都撞时先报配额，不是动作括注——否则这句整条丢了。"""
+        hit = check(self.ACTION, CLAUSES, action=load("action_note"), quota="forbid")
+        self.assertEqual(self.BOOK["hit"]["clause_id"], hit.clause_id)
+        self.assertEqual(self.BOOK["hit"]["kind"], hit.kind)
+        self.assertIn("action-over-quota", hit.reason)
+
+    def test_without_a_rewriter_the_action_line_is_stripped(self):
+        """验收 1：没有重写器也必须剥行成功，正文一个字不差，账本记一笔。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.ACTION, CLAUSES, None, sink, quota="forbid")
+        self.assertEqual(self.BODY, verdict.text)              # 一个字不多、不少
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertEqual("ok", verdict.quota_status)
+        self.assertEqual([self.BOOK["hit"]["clause_id"]],
+                         [one.clause_id for one in verdict.hits])
+        self.assertIn("action-over-quota", verdict.hits[0].reason)
+        self.assertEqual(1, len(seen), "救回来也记一笔，不然看不出闸动过手")
+        self.assertEqual(self.BOOK["hit"]["clause_id"], seen[0][0])
+        self.assertIn("action-over-quota", seen[0][1])
+        self.assertEqual(verdict.reason, seen[0][1])
+
+    def test_second_quota_hit_is_stripped_not_dropped(self):
+        """验收 1 的另一种走法：给了重写器但改回来还是带动作 → 剥行，不丢整句。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.ACTION, CLAUSES, _same, sink, quota="forbid")
+        self.assertEqual(self.BODY, verdict.text)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertEqual([self.BOOK["hit"]["clause_id"], self.BOOK["hit"]["clause_id"]],
+                         [one.clause_id for one in verdict.hits])   # 两次命中都在
+        self.assertIn("action-over-quota", seen[0][1])
+
+    def test_unmarked_is_untouched_and_not_checked(self):
+        """验收 2：没标 → 一个字节都不改，状态是 not-checked（不是 allow）。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.ACTION, CLAUSES, None, sink)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.ACTION, verdict.text)
+        self.assertFalse(verdict.salvaged)
+        self.assertEqual("not-checked", verdict.quota_status)
+        self.assertEqual([], verdict.hits)
+        self.assertEqual([], seen, "没标就没这一关，也没有账可记")
+
+    def test_marked_strips_while_unmarked_leaves_it_alone(self):
+        """验收 2 的对照：同一句、同一份判据，标了才剥、没标原样。"""
+        self.assertEqual(self.BODY, enforce(self.ACTION, CLAUSES, None, quota="forbid").text)
+        self.assertEqual(self.ACTION, enforce(self.ACTION, CLAUSES, None).text)
+
+    def test_allow_is_checked_and_lets_action_note_judge(self):
+        """验收 3：标了 allow 一律不命中（状态 ok），这才轮到动作括注去判它写没写场景。"""
+        allowed = enforce(self.ACTION, CLAUSES, None, quota="allow")
+        self.assertEqual("pass", allowed.decision)
+        self.assertEqual(self.ACTION, allowed.text)
+        self.assertEqual("ok", allowed.quota_status)
+        self.assertIn(self.BOOK["reason"]["clear"], allowed.reason)      # 放行要有据
+        note = load("action_note")
+        hit = check(self.ACTION, CLAUSES, action=note, quota="allow")
+        self.assertEqual(note["hit"]["clause_id"], hit.clause_id)        # 轮到动作括注拦它
+        self.assertEqual("dropped", enforce(self.ACTION, CLAUSES, None, action=note,
+                                            quota="allow").decision)
+
+    def test_unmarked_is_not_the_same_as_allowed(self):
+        """验收 3 的反面：allow 是判过、没标是没跑，两件事在状态与理由上都必须分得开。"""
+        unchecked = enforce(self.BODY, CLAUSES, None)
+        checked = enforce(self.BODY, CLAUSES, None, quota="allow")
+        self.assertEqual("not-checked", unchecked.quota_status)
+        self.assertEqual("ok", checked.quota_status)
+        self.assertNotIn(self.BOOK["reason"]["clear"], unchecked.reason)
+        self.assertIn(self.BOOK["reason"]["clear"], checked.reason)
+
+    def test_action_only_leaves_nothing_and_is_dropped(self):
+        """验收 4：纯动作行没有正文 → 剥完只剩空白 → 整句弃掉。"""
+        seen, sink = self._spy()
+        verdict = enforce("（尾巴晃了一下）", CLAUSES, None, sink, quota="forbid")
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertFalse(verdict.salvaged)
+        self.assertEqual(self.BOOK["hit"]["clause_id"], seen[0][0])
+        self.assertIn("action-over-quota", seen[0][1])
+
+    def test_inline_bracket_is_not_stripped(self):
+        """验收 5：行内括号是台词里夹的一个字，正文不许被剥掉。"""
+        line = "他说（笑）就走了"
+        verdict = enforce(line, CLAUSES, None, quota="forbid")
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(line, verdict.text)
+
+    def test_stripped_body_still_runs_the_other_criteria(self):
+        """验收 6：剥过不等于放行——正文里还有动作带场景，动作括注照样拦下。
+
+        正文不能以身体部位开头（那样的整行本身就是动作，会被一起剥掉），所以用一句以场景词
+        开头、身体部位在后的话：剥得掉的只有前面那个动作，正文留在那儿，再由动作括注判它。
+        """
+        seen, sink = self._spy()
+        note = load("action_note")
+        verdict = enforce("（尾巴晃了一下）外面下雨了，尾巴都翘起来了。", CLAUSES, None, sink,
+                          action=note, quota="forbid")
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual(note["hit"]["clause_id"], verdict.hits[-1].clause_id)
+        self.assertEqual(note["hit"]["clause_id"], seen[0][0])   # 账本记的是剥行后拦下它的那条
+        self.assertIn("action-over-quota", verdict.reason)
+
+    def test_stripped_body_still_runs_the_clauses(self):
+        """验收 6：剥完的正文再扫一遍条款——用一个「只从行首开始算」的条款把这件事钉住。
+
+        真条款用的都是 re.search（哪儿命中都算），剥掉行首的动作不可能让它从「不中」变成
+        「中」；要证明「正文确实又被扫了一遍」，只能拿一条锚在行首的条款来验。这条条款只活在
+        这份测试里，不进数据。
+        """
+        anchored = {"id": "starts-with-cute", "kind": "可判废", "pattern": "^可爱",
+                    "reason": "一开口就是套话开场，像在念稿子"}
+        clauses = list(CLAUSES) + [anchored]
+        self.assertIsNone(check(self.ACTION, clauses))          # 原句行首是括注，不中
+        seen, sink = self._spy()
+        verdict = enforce(self.ACTION, clauses, None, sink, quota="forbid")
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual(anchored["id"], verdict.hits[-1].clause_id)
+        self.assertEqual(anchored["id"], seen[0][0])
+        self.assertIn("action-over-quota", verdict.reason)
+
+    def test_customer_service_speech_in_the_body_is_never_sent(self):
+        """验收 6 的现实版：正文里有客服腔，这句一个字也发不出去（这次是条款先拦下）。"""
+        line = "（尾巴晃了一下）" + SPEECH
+        verdict = enforce(line, CLAUSES, None, quota="forbid")
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual("courtesy-open", verdict.hits[-1].clause_id)
+
+    def test_other_criteria_still_drop_the_whole_sentence(self):
+        """别的判据第二次命中仍照旧弃整句（旧行为一个字节都不许变）。"""
+        note = load("action_note")
+        verdict = enforce("（尾巴在水里晃了一下）", CLAUSES, _same, action=note)   # 没标配额
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertFalse(verdict.salvaged)
+        self.assertEqual(note["hit"]["clause_id"], verdict.hits[-1].clause_id)
+
+    def test_broken_quota_is_loud(self):
+        """认不出的写法当场响：不许猜成 allow 放行。"""
+        from organs.mouth.quota import QuotaBroken
+        with self.assertRaises(QuotaBroken):
+            enforce(self.ACTION, CLAUSES, None, quota="随便写的")
+
+    def test_gate_source_has_no_quota_word(self):
+        """配额的名字与说法也不许进闸：闸只接判据，不持判据。"""
+        source = Path(gate.__file__).read_text(encoding="utf-8")
+        self.assertNotIn(self.BOOK["hit"]["clause_id"], source)
+        for line in self.BOOK["reason"].values():
+            self.assertNotIn(line.split("{")[0], source)
+
+
 if __name__ == "__main__":
     unittest.main()

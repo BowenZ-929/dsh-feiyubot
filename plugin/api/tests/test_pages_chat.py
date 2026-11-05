@@ -16,7 +16,10 @@ POST /chat 端到端画出来的页面。所以判据钉在四件事上：
 5. **三个读数也看得见**：本次温度与档位（「温度 0.5 · 事实档」）、连续性（「最近 12 轮 /
    更早还有 N 轮没有加载」，N=0 时是「没有更早的对话」）、锚句（已配（N 字）/ 未配锚句）
    都落在页上；三格各用一次 textContent，缺字段时如实写「没给」，不留白。
-6. **口癖护栏那一行**：id="guard-line" 在读数区，文案是「口癖命中率 12%（滚动 50 · 阈值
+6. **过闸那一行**（本轮加的）：命中门那块里的 id="gate-line" 读回包 gate 节的 in_parts /
+   out_parts / blocked，文案是「这次过闸：3 泡进 / 2 泡出 / 反复读」，一条都没拦时写「没拦」；
+   缺字段时如实写「泡数没给」，留白与编一个 0 都不许。
+7. **口癖护栏那一行**：id="guard-line" 在读数区，文案是「口癖命中率 12%（滚动 50 · 阈值
    30%）· 注入 5 条/共 5 条」；over 时同一句后面接「已降到 2 条」并给这一行加 class warn
    （黄色取 var(--warn) 兜底）。class 只经 classList 切一次加、一次不加；缺字段写「没给」。
 
@@ -370,6 +373,44 @@ class ReadoutsAreVisible(unittest.TestCase):
         self.assertIn("renderReadouts(data)", text, "回包里那三块没交给渲染")
         for key in ("data.llm", "data.continuity", "data.anchors"):
             self.assertIn(key, text, "回包里的 %s 没被读到" % key)
+
+
+class GateLineIsOnThePage(unittest.TestCase):
+    """过闸那一行：几泡进、几泡出、拦了什么（clause_id 逐个列出，没有就写「没拦」）。
+
+    静态回归：只比对源码里有没有这一行、读的是不是回包 gate 节的那三个字段、文案的每一段在不在。
+    活体（真链路跑出来的 gate 节）在 api/tests/test_chat_api.py 与交付回报里。
+    """
+
+    def test_the_line_sits_next_to_the_other_gate_cells(self):
+        text = _text()
+        self.assertIn('id="gate-line"', text, "命中门那块缺「这次过闸」这一格")
+        self.assertIn("这次过闸", text, "缺那一行的中文标签")
+        self.assertIn("还没说话", text, "这一格也要有「还没说话」的初值")
+        self.assertLess(text.index('id="gate-drops"'), text.index('id="gate-line"'),
+                        "这一行该挨着「咽回的话」")
+
+    def test_the_line_reads_the_gate_section(self):
+        body = _between(_text(), "function gateLineText", "function renderGate")
+        for needle, note in (("gate.in_parts", "泡数取自回包的 gate.in_parts"),
+                             ("gate.out_parts", "出闸的泡数取自 gate.out_parts"),
+                             ("gate.blocked", "拦了什么取自 gate.blocked"),
+                             (" 泡进 / ", "文案要有「N 泡进 /」"),
+                             (" 泡出 / ", "文案要有「M 泡出 /」"),
+                             ("没拦", "一条都没拦时写「没拦」"),
+                             ("泡数没给", "缺字段时如实写一句，不留白"),
+                             ('join("、")', "多个 clause_id 用顿号连起来")):
+            self.assertIn(needle, body, "%s：页面上找不到 %r" % (note, needle))
+
+    def test_the_line_is_written_with_textcontent_only(self):
+        body = _between(_text(), "function renderGate", "function sectionText")
+        self.assertIn('el("gate-line").textContent = gateLineText(gate);', body,
+                      "这一行没接进 renderGate")
+        self.assertNotIn("innerHTML", body)
+
+    def test_the_reply_body_reaches_it(self):
+        self.assertIn("renderGate(data.gate || {})", _text(),
+                      "回包里的 gate 没交给 renderGate")
 
 
 class ThreeStatesArePresent(unittest.TestCase):

@@ -251,6 +251,44 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 `delivered.delivered:false` 并说明为什么——拒绝事件照样在 `refuse.jsonl` 记一行（`sent:false`），
 她拒了这件事与这一笔有没有落到心上是两件事。
 
+**闸在 `/chat` 生效（这一轮加的）**：`conversation.answer()` 返回之后、组装响应之前，把 `chunks`
+里的**每一泡单独过一遍闸**（条款 → 动作括注 → 内容重复 → 复述审计）。命中就改一次、改不了就弃那一泡：
+
+- `rewritten`：用闸给的 `Verdict.text` 换掉那一泡（`gap_before` 沿用原来的）；
+- `dropped`：把那一泡从 `chunks` 里删掉，剩下的按原来的间隔**重排 `send_at`**（不留洞）；
+- 全被弃掉：`chunks=[]`、`reply=""`，每一泡弃言各记一行 `organs/mouth/drops.py` 的账；
+- 一泡都没被改时 `chunks` 与不接闸时**逐字相同**；判据读不动（缺件坏件）时整轮弃掉，**不 fail-open**。
+
+注入复述审计的原文按 type 分段，六段各按本来的来源取（取不到就**如实少一段**，不拿别的东西凑）：
+魂取 `store.raw` 的 identity / manner 卡正文；锚句取回包里**真的注进去的半句**
+（`anchors.items[*].injected`）；记忆原文取 `recalled[*].text`；心档位词取 `heart` 里那几档词；
+规矩句取装配说明的 `reply.instruction` 与格式要求；对方原话就是入站那句 `text`。
+一段都取不到时交给审计的是 `None`，审计如实报 `audit-unavailable`——**不是通过**。
+「她最近几条回话」只读 `mind/recent_turns.jsonl` 里她自己那一侧（`reply`），条数取
+`data/repeat.json` 的 `rounds`（不写死），**在 `answer()` 之前读**（`answer()` 最后一步会写入本轮，
+之后再读她这句就会跟自己比一次）；读不动就是 `None`，闸会把它记成 `repeat_status=not-checked`。
+
+`gate` 节因此除了既有的 `decision` / `hit` / `drops`，还多五样（顶层键一个都不新增）：
+
+| 字段 | 是什么 |
+| --- | --- |
+| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,hit,lcs_len,threshold}, action_status, repeat_status, quota_status}` |
+| `in_parts` / `out_parts` | 进闸的泡数 / 出闸（真发出去）的泡数 |
+| `blocked[]` | 这次拦下过她的 `clause_id`（去重、按出现顺序），一条都没拦就是空表 |
+| `quota` | 这一轮交给闸的动作配额写法：`forbid`（装配标了本轮不许写动作）/ `allow`（标了放行）/ `null`（装配没标——闸记 `quota_status=not-checked`，**没标不是 allow**） |
+| `note` | 这一节怎么读的说明 |
+
+**动作配额从装配传进闸**：`answer()` 回包里的 `action.quota.blocked`（装配按
+`organs/mind/data/assembly.json` 的 `action.quota` 数最近几轮算出来的那个布尔）为真就传 `forbid`、
+为假传 `allow`，装配里没有这一项才传 `None`——**不许猜成 allow**：没标是这一关没跑，放行是真的判过。
+配额命中是闸里唯一一条不丢整句的路：它把动作行剥掉、正文接着过其余判据（`quota.strip`），
+所以那一泡是 `rewritten` 而不是 `dropped`，账本里那一行的 `reason` 带 `action-over-quota`。
+
+四样「判没判」的读数**不许折叠**：`audit.status` 不是 `ok` 就是没真的比过，
+`action_status` / `repeat_status` / `quota_status` 的 `not-checked` 是**这一关没跑**，不是「查过没问题」。
+`pages/chat.html` 的「命中门」那块因此多一行 `gate-line`：「这次过闸：N 泡进 / M 泡出 / 拦了什么」
+（`blocked` 里的 `clause_id` 用顿号连起来，一条都没有就写「没拦」；泡数缺了就写「泡数没给」）。
+
 两处跨端点的字段：
 
 - **`disabled_ids`**（`/mouth/gate`）：清单里 `enabled:false` 因而被跳过的条款 id。跳过**不静默**——返回里看得见，免得「没命中」被当成「闸变松了」。全部条款都被停用时抛 `ClauseBroken`（HTTP 500 明说没有生效条款），不当没命中放行。

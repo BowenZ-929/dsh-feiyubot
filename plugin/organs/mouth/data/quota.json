@@ -1,0 +1,46 @@
+{
+  "_note": "嘴的动作配额兜底：装配标了「本轮不许写动作」（quota = forbid）时，回复里出现动作行就是超配额（action-over-quota）。动作行的定义沿用既有的两路（整行括注包裹 / 身体部位开头且不含人称代词），括号对与身体部位表借自 action_note.json，人称代词表借自 policy.json 的 split 节——这里一个词都不另造。命中之后先按闸的规矩重写一次，二次仍有就把动作行剥掉、只留正文（比整句丢掉好），剥完只剩空白才整句弃掉。",
+  "hit": {
+    "clause_id": "动作超配额",
+    "kind": "动作配额"
+  },
+  "hit_note": "闸用的两个名字：clause_id 进 Hit 与弃言账本，kind 进 Hit 的标签。闸不自己造名字，账本里看到的就是这里写的。",
+  "quota_values": {
+    "forbid": [
+      "forbid",
+      "no-action",
+      "禁止动作",
+      "不许写动作",
+      "blocked"
+    ],
+    "allow": [
+      "allow",
+      "any",
+      "允许动作",
+      "sparing"
+    ]
+  },
+  "quota_values_note": "quota 认这两种写法：forbid（本轮不许写动作）与 allow（不设限），每项的别名都列在自己的清单里。比较前去掉首尾空白、不分大小写。装配没标（None）是第三种情况，等于这一关没跑，不许拿 allow 顶替；认不出的写法当场抛 QuotaBroken，不许猜成 allow。装配侧的开关就在 organs/mind/data/assembly.json 的 action.quota（window / max 数最近几轮，blocked 那一句是「这一轮一句动作行都不要写」）：organs/mind/conversation.py 按它算出 action.quota.blocked 这个布尔，调用侧照它传 blocked（=forbid）或 sparing（=allow），两种写法这里都认，不必自己拼词。",
+  "assembly_note": "装配侧那个开关叫 action.quota.blocked（见 organs/mind/data/assembly.json 与 organs/mind/conversation.py 的读法）：它是个布尔，blocked 为真就是本轮不许写动作。调用侧把 true 翻成 blocked（=forbid）、false 翻成 sparing（=allow）传进来——翻译只有这一句，判据仍然全在数据里。装配没标（quota=None）就是这一关没跑，不是 allow。",
+  "borrow": {
+    "action_table": "action_note",
+    "brackets": "brackets",
+    "body_parts": "body_parts",
+    "pronoun_table": "policy",
+    "pronoun_section": "split",
+    "pronouns": "action_pronouns"
+  },
+  "borrow_note": "判动作行与剥行要用的三张表一律借阅，不在本文件里另造：括号对与身体部位表借自 action_note.json（与 split.py 的 _is_action 同一口径），人称代词表借自 policy.json 的 split 节。要改「什么算动作行」，改那两份数据。",
+  "blank": " \t\n\r　",
+  "blank_note": "剥行时认的空白：删掉动作片段之后，一行里剩下的字全在这张表里、或者全是行末标点，就算「只剩空白」，这一行整行丢掉。",
+  "line_marks": "。！？!?…~～；;",
+  "line_marks_note": "行首尾要忽略的句末标点：「（尾巴晃了一下）。」删掉括注之后只剩一个句号，那不算正文，也不愿意把句号当成她要说的话发出去。",
+  "reason": {
+    "hit": "本轮装配没给写动作的资格，这句里却有动作行「{matched}」（一共 {count} 处）：动作超配额（action-over-quota），这句判废。",
+    "strip": "动作超配额（action-over-quota）：剥掉动作行「{removed}」，只留正文发出。",
+    "blank": "动作超配额（action-over-quota）：剥掉动作行「{removed}」之后只剩空白，没有正文可发，这句弃掉不发。",
+    "leftover": "动作超配额（action-over-quota）：剥掉动作行之后，正文仍被拦下（{clause_id}，命中「{matched}」），这句弃掉不发。",
+    "clear": "动作配额这一关查过了：这一轮没有超配额的动作行。"
+  },
+  "reason_note": "五种说法：hit 是判废那句（必须带 action-over-quota，账本靠它认门）；strip 是剥行后救回来那句；blank 是剥完只剩空白、整句丢掉那句；leftover 是剥完的正文仍被别的判据拦下那句；clear 是放行那句（放行要有据，面板上得看得见这一关查过了）。"
+}

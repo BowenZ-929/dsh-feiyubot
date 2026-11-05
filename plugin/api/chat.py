@@ -15,6 +15,15 @@ kind 给机器分岔，message 是模型那边的人话原文（str(LLMError) ==
 /mouth/gate 那个干跑端点只判不投（它的 delivered 恒为 false、would_deliver 只算不写）：一个拒绝
 要么落在这一层（真说过话），要么谁都不写（只是干跑），没有第三种。
 
+**闸在 /chat 生效（这一轮加的）**：answer() 返回之后、组装响应之前，逐泡再过一遍闸
+（条款 → 动作括注 → 内容重复 → 复述审计），命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里
+删掉，剩下的重算 send_at，全被弃掉就是 chunks=[]、reply=""（每一泡弃言各记一行弃言账）。所以
+gate 节除了既有的 decision / hit / drops，还逐泡交代 parts / in_parts / out_parts / blocked / note。
+判据一个都不在本文件：条款、复述审计、动作括注、内容重复全部经 warehouse.load 读；
+「她最近几条回话」只读 mind 的 recent_turns.jsonl，取最近几轮的条数同样从 repeat.json 里读。
+**动作配额也从装配传进闸**：answer() 回包的 action.quota.blocked 为真就传 forbid、为假传 allow；
+装配里没有这一项就是 None（闸记 quota_status=not-checked）——没标不是 allow，不许猜。
+
 成功体里多一节 refusal（**不破坏既有键**）：{kind, shape, verdict_reason, delivered{delivered,
 topic, until, remaining_min, reason}}。没判出拒绝时**这一节不出现**——不加一个空壳，免得人把
 「判过了、不是拒绝」与「没判」读成一件事；正面答了的那句本来也不该挂个 refusal。
@@ -27,12 +36,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from organs.heart import refuse as heart_refuse
 from organs.mind import conversation
+from organs.mind import recent as mind_recent
 from organs.mind.llm import LLMError
-from organs.mouth import refusal, warehouse
+from organs.mouth import action_note, audit, drops, gate, refusal, repeat, warehouse
+from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
 from organs.mouth.gate import ClauseBroken
 
 from .core import Result
@@ -59,6 +70,16 @@ DEFAULT_STATUS = 502
 
 LOG = logging.getLogger(LOGGER_NAME)
 
+GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（条款 → 动作括注 → 内容重复 → 复述审计），"
+             "命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里删掉，send_at 按剩下的重算。"
+             "in_parts 是进闸的泡数、out_parts 是出闸的泡数，blocked 是这次拦下过她的 clause_id"
+             "（去重、按出现顺序），parts 逐泡交代判词与这一泡过闸前后的原文，"
+             "另带这一泡的三样「判没判」读数：audit 是复述审计（status 不是 ok 就是没比过）、"
+             "action_status 是动作括注、repeat_status 是内容重复、quota_status 是动作配额"
+             "（not-checked 都是这一关没跑，不是通过）；顶层的 quota 是这一轮交给闸的配额写法"
+             "（forbid / allow / null），取自装配 action.quota.blocked，装配没标就是 null。"
+             "每一泡弃言都记一行账（organs/mouth/drops.py）。")
+
 
 def dispatch(route: str, body: Optional[Dict[str, Any]],
              store: Any, brain: Any) -> Result:
@@ -67,7 +88,11 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     body 非 dict、text 缺失或全空白 → 400；store / brain 未载入 → 503（说不出话的两种原因
     分开报：没有魂是没底色，没有脑是没记忆）。LLMError 之后一律非 200 + ok:false。
 
-    成功之后多做一步：拿对方那句（text）与她那句（payload["reply"]）判一次拒绝，判出来就投——
+    成功之后先过闸：拿 answer() 装配进去的那几段原文（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句 /
+    对方原话）与装配体逐泡过一遍闸，结果就地落回 payload（chunks / reply / gate）。闸坏了不 fail-open：
+    判据读不动就整轮弃掉，并在 gate 里如实说为什么。
+
+    再过一步：拿对方那句（text）与她那句（payload["reply"]）判一次拒绝，判出来就投——
     **全仓唯一的投递点就在这一处**。判据坏了（拒绝数据读不动）不改这一轮的成功：她那句话已经
     说出口了，写一行 WARNING、并在 refusal 那一节里如实说这次没判成、没投心。
     """
@@ -78,16 +103,353 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
         return 503, {"ok": False, "message": STORE_MISSING}
     if brain is None:
         return 503, {"ok": False, "message": BRAIN_MISSING}
+    # 闸要的「她最近几条回话」在答题之前读：answer() 最后一步会把这一轮追加进同一份账，
+    # 之后再读就把本轮当成了历史——她这句会跟自己比一次，于是每一句都成复读。
+    history = _her_recent()
     try:
         payload = conversation.answer(text, who=_who(body), store=store, brain=brain)
     except LLMError as exc:
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
         LOG.warning("POST /chat 失败：kind=%s message=%s", exc.kind, exc.message)
         return status, {"ok": False, "kind": exc.kind, "message": exc.message}
+    _gate_round(payload, text, store, history)
     section = _judge(text, payload.get("reply"))
     if section is not None:
         payload["refusal"] = section
     return 200, payload
+
+
+# —— 闸：逐泡过一遍，结果落回返回体 ————————————————
+
+def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
+                history: Optional[List[str]]) -> None:
+    """answer() 之后、交出去之前：把 chunks 里的每一泡单独过一遍闸，结论就地写回 payload。
+
+    五件事：
+
+    - **逐泡过闸**：每一泡各调一次 gate.enforce（条款 → 动作括注 → 内容重复 → 复述审计）。注入的
+      原文、最近几轮、判据表都是同一份——同一轮里的几泡是同一句话切出来的，凭什么两样看待。
+    - **真的落到返回体**：pass 原样留着；rewritten 换 Verdict.text（gap 沿用那一泡的）；dropped 从
+      chunks 里删掉。**一处都没被改时不碰 chunks**——不接闸时逐字相同，这条是被测过的。
+    - **重算 send_at**：删掉几泡之后，剩下的按原来的 gap_before 累加重排，不留洞（小数位与
+      pace.fill 同一个数，取自 policy 的 pace 段）。
+    - **全被弃掉**：chunks=[]、reply=""，gate.decision 记 dropped；每一泡弃言由 sink 记一行账。
+    - **判据读不动**：整轮弃掉（_not_gated），并在 gate.note 里说清是哪一处坏——出口不许 fail-open：
+      改不了就不发这句，也不拿她的沉默去兜一次没人做过的检查之外的东西。
+
+    动作配额（这一轮补的）也在这条路上：装配标了这一轮不许写动作就给闸 forbid、标了放行给 allow、
+    没标给 None（闸记 not-checked，**没标不是 allow**）。配额命中是闸里唯一一条不丢整句的路——
+    它把动作行剥掉、正文接着过其余判据，于是这一泡是 rewritten 而不是 dropped，text 换成剥完的正文。
+
+    gate 节既不新增顶层键，也不丢既有键：decision / hit / drops 是 answer() 给的那一份（页面与既有
+    断言都在读它），这里追加 parts / in_parts / out_parts / blocked / quota / note；被闸改过时
+    decision 与 hit 按最终结果改写——她一句都没出去，就不能还挂着 pass。
+    """
+    chunks = [dict(one) for one in (payload.get("chunks") or [])]
+    quota = _quota(payload)
+    section = dict(payload.get("gate") or {})
+    section.update({"parts": [], "in_parts": len(chunks), "out_parts": 0,
+                    "blocked": [], "quota": quota, "note": GATE_NOTE})
+    payload["gate"] = section
+    if not chunks:
+        section["note"] = (GATE_NOTE + "这一轮没有泡可过闸：reply 是空串，"
+                                    "装配那一步的闸已经把它整句弃掉了。")
+        return
+    try:
+        books = _books()
+        inject = _inject(asked, payload, store, books["audit"])
+    except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, gate.ClauseBroken,
+            audit.AuditBroken, action_note.ActionBroken, repeat.RepeatBroken,
+            OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("POST /chat 过闸没成：%s", exc)
+        _not_gated(payload, exc)
+        return
+
+    trace = drops.path_of()
+    today = _day()
+    recorded: List[str] = []
+
+    def sink(clause_id: str, reason: str) -> None:
+        """闸叫的那一声（只在弃掉那一泡时叫）：时刻在这一层给，落盘只在 drops 里。"""
+        drops.record(trace, clause_id, reason, datetime.now())
+        recorded.append(clause_id)
+
+    parts: List[Dict[str, Any]] = []
+    kept: List[Dict[str, Any]] = []
+    blocked: List[str] = []
+    changed = False
+    for index, chunk in enumerate(chunks):
+        verdict = gate.enforce(chunk["text"], books["clauses"], None, sink,
+                               inject=inject, policy=books["audit"],
+                               action=books["action"], recent=history,
+                               repeat_table=books["repeat"], quota=quota)
+        parts.append({"i": index, "decision": verdict.decision,
+                      "hits": [_hit_row(one) for one in verdict.hits],
+                      "reason": verdict.reason,
+                      "before": chunk["text"], "after": verdict.text,
+                      "audit": _audit_row(verdict.audit),
+                      "action_status": verdict.action_status,
+                      "repeat_status": verdict.repeat_status,
+                      "quota_status": verdict.quota_status})
+        if verdict.decision == "pass":
+            kept.append({"text": chunk["text"], "gap_before": chunk["gap_before"]})
+            continue
+        changed = True
+        if verdict.decision == "dropped":
+            blocked.append(verdict.hits[-1].clause_id if verdict.hits else "")
+            continue
+        kept.append({"text": verdict.text, "gap_before": chunk["gap_before"]})
+
+    section.update({"parts": parts, "out_parts": len(kept), "blocked": _unique(blocked)})
+    if changed:
+        _resend(payload, kept, books["digits"])
+        section["decision"] = "dropped" if not kept else "rewritten"
+        first = next((row for row in parts if row["hits"]), None)
+        if first is not None:
+            section["hit"] = {"clause_id": first["hits"][-1]["clause_id"],
+                              "reason": first["hits"][-1]["reason"]}
+    if recorded:
+        section["drops"] = {"today": int(drops.report(trace, today).get("today") or 0)}
+
+
+def _not_gated(payload: Dict[str, Any], exc: Exception) -> None:
+    """判据读不动：这一轮整句弃掉，并在 gate 里说清为什么（不 fail-open，也不假装过了闸）。"""
+    payload["chunks"] = []
+    payload["reply"] = ""
+    section = dict(payload.get("gate") or {})
+    section.update({"decision": "dropped", "out_parts": 0, "blocked": [],
+                    "note": GATE_NOTE + "这一次判据读不动（%s：%s），按「改不了就不许发」整轮弃掉，"
+                                        "一句都没出去。" % (type(exc).__name__, exc)})
+    payload["gate"] = section
+
+
+def _books() -> Dict[str, Any]:
+    """这一轮过闸用的五份判据，全部经 warehouse 读——api 里不写死一条条款、一个数。
+
+    条数（rounds）与小数位（round_digits）也在数据里：前者是她最近几条回话的窗口，后者与
+    pace.fill 算 send_at 用的是同一个数，重排时才不会跟切分那一处对不上。缺件坏件照实抛，
+    由 _gate_round 翻成「整轮弃掉」——判据读不动时不猜一个默认值顶上。
+    """
+    policy = warehouse.load("policy")
+    repeat_book = warehouse.load("repeat")
+    return {
+        "clauses": warehouse.load("clauses").get("clauses"),
+        "audit": warehouse.load("audit"),
+        "action": warehouse.load("action_note"),
+        "repeat": repeat_book,
+        "digits": int(policy["pace"]["round_digits"]),
+    }
+
+
+def _quota(payload: Mapping[str, Any]) -> Optional[str]:
+    """装配这一轮给不给写动作的资格，翻成闸认的那两种写法；没标就是 None。
+
+    取值路径只有一条，用的是 answer() 回包里现成的那一份（装配那边按
+    organs/mind/data/assembly.json 的 action.quota 数最近几轮算出来的 blocked）：
+
+    - blocked 为真 → "forbid"（本轮一句动作行都不许写）；
+    - blocked 为假 → "allow"（装配给了配额配置、这一轮放行）；
+    - action / action.quota / blocked 缺了、或 blocked 不是布尔 → None：**装配没标这一轮**，
+      闸记 quota_status="not-checked"。没标不是 allow——猜成放行，这一关就等于白设。
+
+    两个写法取自 organs/mouth/quota.py 的常量（数据里 quota_values 的别名也认，但这里不必自己拼词）。
+    """
+    action = payload.get("action")
+    if not isinstance(action, Mapping):
+        return None
+    book = action.get("quota")
+    if not isinstance(book, Mapping):
+        return None
+    blocked = book.get("blocked")
+    if not isinstance(blocked, bool):
+        return None
+    return quota_rules.FORBID if blocked else quota_rules.ALLOW
+
+
+def _inject(asked: str, payload: Mapping[str, Any], store: Any,
+            table: Mapping[str, Any]) -> Optional[List[Dict[str, str]]]:
+    """这一轮装配进提示词的原文，按 type 分段交给复述审计；一段都拿不到就是 None。
+
+    六段各按本来的来源取，取不到就**如实少一段**，不拿别的东西凑：
+
+    - 魂：store.raw 那几张卡的正文（identity / manner）；
+    - 锚句：answer() 真的注进去的半句（回包 anchors.items[*].injected），未配就是空；
+    - 记忆原文：回包 recalled[*].text；
+    - 心档位词：回包 heart 里那几档词（轴上的档位词、心境档、语气档）；
+    - 规矩句：装配说明里的 reply.instruction 与那几条格式要求；
+    - 对方原话：入站那句 text。
+
+    None（一段都没取到）交给 audit 报 audit-unavailable——**不许伪造通过**：没料可比就是没比过。
+    """
+    kinds = _kinds(table)
+    rows: List[Dict[str, str]] = []
+    for kind, text in ((kinds["soul"], _soul_text(store)),
+                       (kinds["anchor"], _anchor_text(payload)),
+                       (kinds["memory"], _memory_text(payload)),
+                       (kinds["heart"], _heart_text(payload)),
+                       (kinds["rule"], _rule_text()),
+                       (kinds["quote"], asked)):
+        body = (text or "").strip()
+        if body:
+            rows.append({"kind": kind, "text": body})
+    return rows or None
+
+
+def _kinds(table: Mapping[str, Any]) -> Dict[str, str]:
+    """六个 kind 的原词全部取自 data/audit.json：五类设定段按数据里的顺序，对方原话取 quote_kind。
+
+    五类设定段在审计那边是同一档（照搬一律拦），所以这里的顺序只决定报出来的来源段叫什么；
+    数量不对就当场抛（改数据改坏了要响，不许在这儿补一个默认名——那就是第二处真源）。
+    """
+    setting = table.get("setting_kinds")
+    quote = table.get("quote_kind")
+    if not isinstance(setting, (list, tuple)) or len(setting) != 5:
+        raise ValueError("audit.json 的 setting_kinds 要是五类设定段，读到 %r" % (setting,))
+    if not isinstance(quote, str) or not quote.strip():
+        raise ValueError("audit.json 的 quote_kind 要是一个非空字符串，读到 %r" % (quote,))
+    soul, anchor, memory, heart, rule = setting
+    return {"soul": str(soul), "anchor": str(anchor), "memory": str(memory),
+            "heart": str(heart), "rule": str(rule), "quote": quote.strip()}
+
+
+def _soul_text(store: Any) -> str:
+    """魂那几张卡的正文（identity / manner），摊平拼成一段；读不动的那张就当少一段。"""
+    out: List[str] = []
+    for block in ("identity", "manner"):
+        try:
+            raw = store.raw(block)
+        except (ValueError, OSError) as exc:
+            LOG.warning("POST /chat 读魂的 %s 卡没成：%s", block, exc)
+            continue
+        out.extend(_strings(raw))
+    return "\n".join(out)
+
+
+def _strings(value: Any) -> List[str]:
+    """把一张卡里所有非空字符串（含嵌套的清单与键值表）摊平；空着的一律不取。"""
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, Mapping):
+        out: List[str] = []
+        for one in value.values():
+            out.extend(_strings(one))
+        return out
+    if isinstance(value, (list, tuple)):
+        out = []
+        for one in value:
+            out.extend(_strings(one))
+        return out
+    return []
+
+
+def _anchor_text(payload: Mapping[str, Any]) -> str:
+    """这一轮真的注进去的锚句（半句）：回包 anchors.items[*].injected，未配锚句就是空。
+
+    不拿 say 全文替一份她没看见的原文——她抄不着没进提示词的东西，报成抄了就是冤枉她。
+    """
+    items = (payload.get("anchors") or {}).get("items") or []
+    return "\n".join(str(one.get("injected") or "") for one in items
+                      if isinstance(one, Mapping))
+
+
+def _memory_text(payload: Mapping[str, Any]) -> str:
+    """这一轮想起来的记忆原文：回包 recalled[*].text，一条都没有就是空。"""
+    return "\n".join(str(one.get("text") or "") for one in (payload.get("recalled") or [])
+                      if isinstance(one, Mapping))
+
+
+def _heart_text(payload: Mapping[str, Any]) -> str:
+    """这次心给的档位 / 摘要词：轴上的档位词加心境档、语气档（全是词，没有数）。"""
+    heart = payload.get("heart") or {}
+    out = _strings(heart.get("axes") or {})
+    for part in (heart.get("mood") or {}, heart.get("voice") or {}):
+        for key in ("tier", "tone"):
+            value = part.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip())
+    return "\n".join(out)
+
+
+def _rule_text() -> str:
+    """装配说明里的规矩句（reply.instruction 与那几条格式要求）；读不到就少这一段。"""
+    try:
+        conf = conversation.load_assembly()["reply"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("POST /chat 读装配说明没成：%s", exc)
+        return ""
+    rows = [str(conf.get("instruction") or "")]
+    rows.extend(str(one) for one in (conf.get("format") or []))
+    return "\n".join(one for one in rows if one.strip())
+
+
+def _her_recent() -> Optional[List[str]]:
+    """她最近几条自己的回话（旧的在前），只读 mind 的 recent_turns.jsonl；读不动返回 None。
+
+    条数（最近几轮）不写死：从 repeat.json 的 rounds 读，与去重那一关看的是同一个窗口。
+    三种情形必须分得开：账还没建 = 空清单（判过了，只是还没有历史）；账在、读出来空 = 空清单；
+    **读不动 = None**——这一关没判，闸会把它记成 not-checked，不许当成「没重复」。
+    """
+    try:
+        rounds = int(warehouse.load("repeat")["rounds"])
+        path = mind_recent.path_of()
+        if not path.is_file():
+            return []
+        rows = mind_recent.load(turns=rounds).get("turns") or []
+    except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, OSError,
+            ValueError, KeyError, TypeError) as exc:
+        LOG.warning("POST /chat 读不到她最近的回话：%s", exc)
+        return None
+    return [str(row.get("reply") or "") for row in rows]
+
+
+def _resend(payload: Dict[str, Any], kept: List[Dict[str, Any]], digits: int) -> None:
+    """把剩下的泡重排 send_at 后写回返回体：按原来的 gap_before 累加，删掉几泡也不留洞。
+
+    reply 跟着一改写的是「她这一轮实际说出口的话」：被弃的那几泡没发出去，就不该还留在 reply 里。
+    """
+    clock = 0.0
+    rows: List[Dict[str, Any]] = []
+    for one in kept:
+        clock = round(clock + float(one["gap_before"]), digits)
+        rows.append({"text": one["text"], "gap_before": one["gap_before"], "send_at": clock})
+    payload["chunks"] = rows
+    payload["reply"] = "".join(str(one["text"]) for one in rows)
+
+
+def _audit_row(seen: Any) -> Dict[str, Any]:
+    """这一泡的复述审计读数：status / 撞上的那一条 / 最长撞了几个字 / 阈值。
+
+    **status 原样透出**：不是 "ok" 就是没真的比过（audit-unavailable），这时既不是「通过」也不是
+    「拦住」——把它写成通过，等于替她背了一次没人做过的检查。没拿到注入原文时就是这一态。
+    """
+    one = getattr(seen, "hit", None)
+    return {
+        "status": getattr(seen, "status", None),
+        "hit": None if one is None else {"kind": one.kind, "seg_kind": one.seg_kind,
+                                         "matched": one.matched},
+        "lcs_len": getattr(seen, "lcs_len", None),
+        "threshold": getattr(seen, "threshold", None),
+    }
+
+
+def _hit_row(one: Any) -> Dict[str, str]:
+    """一条命中：哪条（条款 id 或违规类别）、什么标签、一句人话、命中的那段原文。"""
+    return {"clause_id": one.clause_id, "kind": one.kind,
+            "reason": one.reason, "matched": one.matched}
+
+
+def _unique(items: List[str]) -> List[str]:
+    """去重、按出现顺序（空串是「闸说弃了却没报条款」的缺口，不往 blocked 里塞）。"""
+    out: List[str] = []
+    for one in items:
+        if one and one not in out:
+            out.append(one)
+    return out
+
+
+def _day() -> str:
+    """今天的日期（ISO，十位）：弃言账按这个前缀认「今天」。"""
+    return datetime.now().date().isoformat()
 
 
 # —— 拒绝：判一次、投一次（唯一的投递点） ————————————————————

@@ -142,6 +142,7 @@
         <dt>判决</dt><dd id="gate-decision">还没说话</dd>
         <dt>命中条款</dt><dd id="gate-hit">无</dd>
         <dt>咽回的话</dt><dd id="gate-drops">无</dd>
+        <dt>这次过闸</dt><dd id="gate-line">还没说话</dd>
       </dl>
     </section>
     <section class="card" id="assembly-card">
@@ -307,6 +308,20 @@
     return "今日咽回 " + drops.today + " 条";
   }
 
+  // 这一轮过闸那一行：几泡进、几泡出、拦了什么。
+  // 泡数取自回包的 gate 节；blocked 是这次拦下她的 clause_id，一个都没有就写「没拦」——
+  // 缺字段时如实写一句「泡数没给」，不留白，也不编一个 0。
+  function gateLineText(gate) {
+    var inParts = gate.in_parts;
+    var outParts = gate.out_parts;
+    if (typeof inParts !== "number" || typeof outParts !== "number") {
+      return "这次过闸：泡数没给";
+    }
+    var blocked = gate.blocked || [];
+    var cuts = blocked.length ? blocked.join("、") : "没拦";
+    return "这次过闸：" + String(inParts) + " 泡进 / " + String(outParts) + " 泡出 / " + cuts;
+  }
+
   // 命中门：过就说出口，不过就咽回去；命中条款照抄 clause_id + reason。
   function renderGate(gate) {
     var decision = gate.decision;
@@ -322,6 +337,7 @@
       ? String(hit.clause_id || "没给条款号") + " · " + String(hit.reason || "没给理由")
       : "无（没命中条款）";
     el("gate-drops").textContent = dropsText(gate.drops);
+    el("gate-line").textContent = gateLineText(gate);
   }
 
   // 装配结果：逐段显示中文名与 chars/cap（超了标「超限」）；不认识的 key 照实显示，不静默丢。

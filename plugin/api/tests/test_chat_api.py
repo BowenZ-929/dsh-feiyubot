@@ -11,6 +11,9 @@
 - **闸在 /chat 生效（本轮加的）**：逐泡过一遍闸，结论真的落到返回体——复读（反复读）、动作括注
   （动作带场景）、复述设定段三条命中的路都走到 dropped；一句正常的回话一处都不改（chunks 的 text
   与不接闸时逐字相同）；全被弃掉时 chunks=[]、reply=""，并各记一行弃言账。
+- **动作配额也从装配传进闸（本轮补的）**：action.quota.blocked 为真 → forbid（剥行救回正文，
+  quota_status=ok，账本 reason 里带 action-over-quota）；为假 → allow（判过，放行动作括注那一关拦）；
+  装配没标 → None（quota_status=not-checked），**没标不是 allow**。
 - 只有一份装配：api.chat.dispatch 走的就是 conversation.answer（数一遍调用次数）。
 - 拒绝的**唯一投递点**在这一层（本轮加的）：判成软转向或那三句标准拒绝之一就投一次心
   （refusals.json 多一行）+ 记一行我们自己的 refuse.jsonl；正面答了不添 refusal 一节、一行都不写。
@@ -406,6 +409,94 @@ class ChatApiTest(unittest.TestCase):
         seen = mouth_audit.audit("一句正常的话", inject=None)
         self.assertEqual("audit-unavailable", seen.status)
         self.assertIsNone(seen.hit)
+
+# —— 动作配额：从装配传进闸（本轮补的） ————————————————
+
+    QUOTA_LINE = "（尾巴晃了一下）可爱归可爱，那也不是胖。"      # 踩配额那一句（正文还在）
+    NOTED_QUOTA_LINE = "（尾巴在水里晃了一下）可爱归可爱，那也不是胖。"
+
+    def _block_actions(self):
+        """把装配的动作配额顶满：账上最近一轮她自己写过动作行，blocked 就是真。
+
+        走的是装配那边现成的算法（repeat.count_with_actions 数最近 quota.window 轮），
+        这里只负责造一轮历史，不另算一遍配额。
+        """
+        recent.append({"ts": "2025-01-15T14:00:00+08:00", "who": "主人",
+                       "said": "你刚才那个样子", "reply": "（耳尖动了动）"})
+
+    def test_quota_forbid_strips_the_action_line_and_keeps_the_body(self):
+        """装配标了不许写动作：这一泡不被整条丢，动作行剥掉、正文留下，账照记。"""
+        self._block_actions()
+        before = len(self._drops_rows())
+        status, payload = self._send(text="你是不是胖了", reply=self.QUOTA_LINE)
+        self.assertEqual(200, status)
+        self.assertTrue(payload["action"]["quota"]["blocked"], "这一轮的装配配额该是顶满的")
+        gate = payload["gate"]
+        self.assertEqual("forbid", gate["quota"], "blocked 为真要翻成 forbid")
+        part = gate["parts"][0]
+        self.assertEqual("ok", part["quota_status"], "配额这一关真的判过了")
+        self.assertEqual("rewritten", part["decision"], "配额命中不能整条丢：剥行动作、正文留下")
+        self.assertEqual("动作超配额", part["hits"][-1]["clause_id"])
+        self.assertEqual(1, len(payload["chunks"]), "这一泡该留着")
+        self.assertEqual("可爱归可爱，那也不是胖。", payload["chunks"][0]["text"],
+                         "chunks 里那一泡要恰为正文")
+        self.assertEqual("可爱归可爱，那也不是胖。", payload["reply"])
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows), "剥行救回来的那一笔也要记账")
+        self.assertEqual("动作超配额", rows[-1]["clause_id"])
+        self.assertIn("action-over-quota", rows[-1]["reason"])
+
+    def test_quota_allow_leaves_the_action_note_gate_in_charge(self):
+        """装配标了放行（sparing → allow）：同一句走动作括注那一关，命中就 dropped。"""
+        status, payload = self._send(text="你是不是胖了", reply=self.NOTED_QUOTA_LINE)
+        self.assertEqual(200, status)
+        self.assertFalse(payload["action"]["quota"]["blocked"], "这一轮的装配配额该是没顶满")
+        gate = payload["gate"]
+        self.assertEqual("allow", gate["quota"], "blocked 为假要翻成 allow")
+        part = gate["parts"][0]
+        self.assertEqual("ok", part["quota_status"], "标了 allow 也算判过")
+        self.assertEqual("dropped", part["decision"], "配额放行时该是动作括注那一关拦下")
+        self.assertEqual("动作带场景", part["hits"][-1]["clause_id"])
+        self.assertEqual([], payload["chunks"])
+
+    def test_assembly_without_quota_is_not_checked_not_allow(self):
+        """装配没标配额：交给闸的是 None（记 not-checked），chunks 与不接闸时逐字相同。"""
+        self.assertIsNone(chat._quota({}), "回包里没有 action 时不许猜")
+        self.assertIsNone(chat._quota({"action": {"pool": [], "rule": "随便"}}), "没有 quota 一项时不许猜")
+        self.assertIsNone(chat._quota({"action": {"quota": {"blocked": "true"}}}),
+                          "blocked 不是布尔时不许猜成 allow")
+
+        reply = ("今天风大，我把窗关上了。晚上想喝粥，我给你留了一碗。"
+                 "你要是回来晚，我就先不睡。")
+        real = conversation.answer
+
+        def without_quota(text, who="", **kw):
+            """装配没标配额的样子：回包里没有 action.quota 这一项。"""
+            kw.setdefault("transport", _body(reply))
+            kw.setdefault("config", CONFIG)
+            kw.setdefault("env", ENV)
+            payload = real(text, who, **kw)
+            payload["action"].pop("quota", None)
+            return payload
+
+        with mock.patch.object(conversation, "answer", without_quota):
+            status, gated = api.handle("POST", "/chat", {"text": "今天怎么样"},
+                                       self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        gate = gated["gate"]
+        self.assertIsNone(gate["quota"], "装配没标时交给闸的是 None，不许猜成 allow")
+        self.assertEqual(["not-checked"] * len(gate["parts"]),
+                         [row["quota_status"] for row in gate["parts"]],
+                         "没标就是这一关没跑，不是通过")
+        self.assertEqual("pass", gate["decision"])
+        with mock.patch.object(conversation, "answer", without_quota):
+            with mock.patch.object(chat, "_gate_round", lambda *args, **kw: None):
+                status, plain = api.handle("POST", "/chat", {"text": "今天怎么样"},
+                                           self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertEqual([one["text"] for one in plain["chunks"]],
+                         [one["text"] for one in gated["chunks"]],
+                         "配额没标时 chunks 要与不接闸时逐字相同")
 
     # —— 拒绝：全仓唯一的投递点（本轮加的） ————————————————
 
