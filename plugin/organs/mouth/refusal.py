@@ -16,6 +16,12 @@
 二次命中即弃，弃了就是 text=""），弃言照旧进闸的账本（drop_sink 由调用方注入）。「这是拒绝」
 不是免检章：拒绝说得像客服，照样不能发。
 
+**红线被拦不是「拒绝」，是「不许发」。** 拒绝说法自己也会踩红线（改一次也没用，红线是唯一不许
+留原话的一类）。这时 RefusalVerdict 把闸的读数原样带出来：fatal_status 三态（ok / not-checked /
+fatal）、fatal 是那条证据（哪一类、撞上哪几个字），refused 记 False，reason 开头一句取自
+data/fatal.json 的 not_refusal_note——**这句不是拒绝，是不许发**。形状、事件、账本照旧，因为
+「她拒了」与「这句话能不能出去」本来就是两件事；gate_decision 仍只报闸的最后结局，两格互不顶替。
+
 **说完要投递一条拒绝事件给心。** event 的形状固定为 {ts, shape, full_name, why}，其中 full_name
 与心那边 REASONS 的三个词逐字相同（refused-topic / refused-mood / refused-nobody），ts 由调用方给
 （本文件不取时钟）。投递只走注入的 refuse_sink（默认 None＝不投）：这里**不写任何心的地方**、
@@ -55,11 +61,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
+from .gate import FATAL_HIT, FATAL_NOT_CHECKED
 from .gate import enforce as gate_enforce
 from .warehouse import load
 
 __all__ = ["RefusalBroken", "RefusalVerdict", "SoftVerdict", "enforce", "event", "say",
            "path_of", "record", "soft_scan", "soft_shape", "topic_in"]
+
+NOT_REFUSAL_KEY = "not_refusal_note"   # 红线表里那句人话：「不是拒绝，是不许发」
+
 
 TRACE_DIR = Path(__file__).resolve().parent / "trace"   # 包内痕迹目录（家里的仓库做出来前的临时落脚点）
 ENV_VAR = "MOUTH_TRACE_DIR"                             # 环境变量：换一个痕迹根目录，不动代码
@@ -112,14 +122,27 @@ class RefusalVerdict:
                      账本那行的 shape 就记这个，好让人一眼看出这次是硬拒绝还是软转向
       full_name      心那边的完整名（refused-topic 等），与心 REASONS 逐字相同
       refused        这句拒绝**最后发出去没有**：被闸弃掉就是 False。拒绝本身仍然成立——shape 与
-                     event 都在、账本照记，别把 False 读成「她没拒」
+                     event 都在、账本照记，别把 False 读成「她没拒」。
+                     **红线命中时它一定是 False，而且这时要读成「这句不是拒绝，是不许发」**：
+                     她确实拒了（形状、事件、账本一样不少），可那句话踩了红线、一个字都不许出去——
+                     「拒绝了」与「拒绝了但这话不能说」是两件事，两件都写在 fatal_status / fatal 上
       event          投给心的那条事件：{ts, shape, full_name, why}（软转向也这四个键）
       gate_decision  闸的判词："pass" | "rewritten" | "dropped"；软转向取数据里那个
-                     "unchanged"——她自己的原话不进闸，进了就要改她的话
-      reason         一句人话：按哪条判据、闸怎么说、事件投没投
+                     "unchanged"——她自己的原话不进闸，进了就要改她的话。
+                     **它说的是闸的最后结局，不许拿来当红线读数看**（那是 fatal_status 的事）
+      reason         一句人话：按哪条判据、闸怎么说、事件投没投；红线命中时开头那句取自
+                     data/fatal.json 的 not_refusal_note（「这句不是拒绝，是不许发：…」）
       sent           这条事件交给注入的 sink 了没有（sink 是 None 就是 False）
       soft           这一次的软转向判词（SoftVerdict）：判没判、命中哪几个词、为什么。没给 asked
                      时它如实写着 status="soft-unavailable"——判不了，不等于「不是拒绝」
+      fatal_status   红线那一关判成什么，三态**不许折叠**（原样取闸的 Verdict，本文件不再判一遍）：
+                     "ok"（给了红线表、判过、不是红线）| "not-checked"（这一轮没给表，判不了——
+                     **不是「不是红线」**）| "fatal"（踩上了，看下面 fatal 那一格）。
+                     软转向不过闸，所以它的 fatal_status 恒为 "not-checked"：她自己的原话一个字
+                     没进过红线那一关，本文件不假装它判过
+      fatal          踩上红线时那一条证据（gate.FatalHit：category / tag / clause_id / kind /
+                     matched / reason），没踩或没给表就是 None。**None 不是「不是红线」**，
+                     判没判看 fatal_status——两格各说各的，谁也不许顶替谁
     """
 
     text: str
@@ -132,6 +155,8 @@ class RefusalVerdict:
     sent: bool
     kind: str = KIND_HARD
     soft: Optional["SoftVerdict"] = None
+    fatal_status: str = FATAL_NOT_CHECKED
+    fatal: Optional[Any] = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +302,12 @@ def enforce(shape: str, table: Optional[Mapping[str, Any]] = None,
       不许 fail-open。
     - fatal 是这一轮的红线表，原样透传给闸（本文件不读盘、也不判红线）：给了才可能判出红线并丢，
       不给就是闸那一关没跑（判不了不等于可以吞掉这句，照样留原话）。
+    - **红线命中不是「拒绝」，是「不许发」**：闸的 fatal_status 原样透出（ok / not-checked / fatal
+      三态照抄，本文件不再判一遍红线），fatal 那一格是闸给的那条证据（哪一类 + 命中片段）。
+      refused 记 False，reason 开头那句换成 data/fatal.json 的 not_refusal_note（「这句不是拒绝，
+      是不许发：…」）；而形状、事件、账本一个字都不少——拒绝这件事照旧成立，只是这句话出不去了。
+      gate_decision 仍是闸的判词（红线命中时必然是 dropped），**它不许拿来顶替 fatal_status**：
+      一个说「闸最后怎么判的」，一个说「红线那一关判成什么」，两件事各占一格。
     - event 恒有（弃了也有）：拒绝发生没发生，不取决于这句发不发得出去。
     - refuse_sink 为 None 就不投，sent=False；drop_sink 交给闸，只在弃言那一次被叫。
     - now 必须有（事件带 ts）；不给就抛——本文件不替调用方取时钟。
@@ -299,15 +330,18 @@ def enforce(shape: str, table: Optional[Mapping[str, Any]] = None,
     sent = refuse_sink is not None
     if sent:
         refuse_sink(ev)
+    dead = gated.fatal_status == FATAL_HIT          # 红线的读数一律听闸的，本文件不再判一遍
     cfg = _reason_cfg(book)
     reason = _fill(cfg["template"], "reason.template",
-                   note=str(entry["note"]), full_name=str(entry["full_name"]),
+                   note=_fatal_note(fatal, gated.fatal) if dead else str(entry["note"]),
+                   full_name=str(entry["full_name"]),
                    why=ev["why"], gate=gated.reason,
                    sent=cfg["sent"] if sent else cfg["unsent"])
     return RefusalVerdict(text=gated.text, shape=key, full_name=str(entry["full_name"]),
-                          refused=bool(gated.text), event=ev,
+                          refused=False if dead else bool(gated.text), event=ev,
                           gate_decision=gated.decision, reason=reason, sent=sent,
-                          kind=KIND_HARD, soft=soft)
+                          kind=KIND_HARD, soft=soft,
+                          fatal_status=gated.fatal_status, fatal=gated.fatal)
 
 
 def path_of(path: Optional[Any] = None) -> Path:
@@ -402,6 +436,21 @@ def _reason_cfg(book: Mapping[str, Any]) -> Mapping[str, Any]:
     return part
 
 
+def _fatal_note(table: Any, hit: Any) -> str:
+    """红线命中时那一句人话：「这句不是拒绝，是不许发」。
+
+    说法在 data/fatal.json 的 not_refusal_note（红线说法的唯一主人），本文件一个词都不写死；
+    category 与 matched 都取自闸给的那条 FatalHit——**不自己再判一遍红线**，否则两处判据早晚分家。
+    表里缺这一句就抛 RefusalBroken（缺键不补默认说法：补一句，代码里就又多一处真源）。
+    """
+    line = table.get(NOT_REFUSAL_KEY) if isinstance(table, Mapping) else None
+    if not isinstance(line, str) or not line.strip():
+        raise RefusalBroken("的红线表里缺 %r 那一句人话（这句不是拒绝、是不许发；判据表在 "
+                            "organs/mouth/data/fatal.json）" % (NOT_REFUSAL_KEY,))
+    return _fill(line, NOT_REFUSAL_KEY, category=str(getattr(hit, "category", "")),
+                 matched=str(getattr(hit, "matched", "")))
+
+
 def _soft_cfg(book: Mapping[str, Any]) -> Mapping[str, Any]:
     """取软转向判据那一节：四张词表 + 三句话 + trim + 四句理由，缺一个就抛并指名。
 
@@ -492,7 +541,8 @@ def _soft_verdict(soft: SoftVerdict, text: str, book: Mapping[str, Any],
                    sent=reason_cfg["sent"] if sent else reason_cfg["unsent"])
     return RefusalVerdict(text=text, shape=KIND_SOFT, full_name=str(entry["full_name"]),
                           refused=True, event=ev, gate_decision=str(cfg["gate"]),
-                          reason=reason, sent=sent, kind=KIND_SOFT, soft=soft)
+                          reason=reason, sent=sent, kind=KIND_SOFT, soft=soft,
+                          fatal_status=FATAL_NOT_CHECKED, fatal=None)
 
 
 def _fill(template: str, where: str, **fields: Any) -> str:

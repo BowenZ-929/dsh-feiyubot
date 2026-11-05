@@ -550,5 +550,75 @@ class SoftEdges(unittest.TestCase):
         self.assertTrue(refusal.soft_scan("……" + plain, SOFT_ASKED).is_soft)
 
 
+# 红线表（类别、记号与那句人话的唯一主人）：测试里一个类别名、一句人话都不写死
+FATAL = load("fatal")
+# 一句踩隐私红线的素材（素材不是判据）：把它换成某条拒绝的说法，红线必然命中
+PHONE_LINE = "我的手机号是13800138000，这个话题先不聊。"
+
+
+class FatalStatusRidesAlong(unittest.TestCase):
+    """第 6 条：红线那一关的读数原样透出——三态不许折叠，且「红线命中不是拒绝，是不许发」。
+
+    fatal_status 与 gate_decision 是两件事：前者说「红线那一关判成什么」，后者说「闸的最后结局」。
+    两格各说各的，谁也不许顶替谁；refused 在红线命中时是 False，读成「这句不是拒绝，是不许发」。
+    """
+
+    def _hit(self) -> RefusalVerdict:
+        """一条踩上红线的拒绝：把 topic 那句说法人为改成带手机号的，闸必然判 dropped。"""
+        book = _copy_book()
+        book["shapes"]["topic"]["say"] = PHONE_LINE
+        return refusal.enforce("topic", book, CLAUSES, now=NOW, fatal=FATAL)
+
+    def test_clean_refusal_says_ok(self):
+        verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, fatal=FATAL)
+        self.assertEqual("ok", verdict.fatal_status, "给了表、判过、不是红线")
+        self.assertIsNone(verdict.fatal, "ok 与 not-checked 都没有证据")
+        self.assertTrue(verdict.refused)
+        self.assertTrue(verdict.text)
+
+    def test_without_the_table_it_is_not_checked(self):
+        verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW)
+        self.assertEqual("not-checked", verdict.fatal_status, "没给表：这一关没跑，不是「不是红线」")
+        self.assertIsNone(verdict.fatal)
+        self.assertTrue(verdict.refused, "判不了红线不等于这句不许发")
+        self.assertTrue(verdict.text)
+
+    def test_red_line_is_not_a_refusal_but_a_no_send(self):
+        verdict = self._hit()
+        self.assertEqual("fatal", verdict.fatal_status)
+        self.assertFalse(verdict.refused, "红线命中：这句不是拒绝，是不许发")
+        self.assertEqual("", verdict.text, "红线是唯一不许留原话的一类")
+        self.assertEqual("dropped", verdict.gate_decision, "闸的判词照旧是它自己那个")
+        hit = verdict.fatal
+        self.assertIsNotNone(hit)
+        self.assertEqual(FATAL["categories"][0]["id"], hit.category, "手机号属数据里第一类红线")
+        self.assertIn("13800138000", hit.matched)
+        note = FATAL["not_refusal_note"].format(category=hit.category, matched=hit.matched)
+        self.assertIn(note, verdict.reason, "红线命中时那句人话取自数据，代码里不写死")
+        self.assertFalse(verdict.sent)
+        self.assertEqual(FULL_NAMES["topic"], verdict.event["full_name"], "拒绝这件事照旧成立")
+
+    def test_three_readings_do_not_fold(self):
+        ok = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, fatal=FATAL).fatal_status
+        unchecked = refusal.enforce("topic", BOOK, CLAUSES, now=NOW).fatal_status
+        fatal = self._hit().fatal_status
+        self.assertEqual(3, len({ok, unchecked, fatal}), "三态折成一态，面板上就分不清判没判过")
+        self.assertEqual(("ok", "not-checked", "fatal"), (ok, unchecked, fatal))
+
+    def test_fatal_status_does_not_stand_in_for_gate_decision(self):
+        ok = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, fatal=FATAL)
+        dead = self._hit()
+        self.assertEqual(("ok", "pass"), (ok.fatal_status, ok.gate_decision))
+        self.assertEqual(("fatal", "dropped"), (dead.fatal_status, dead.gate_decision))
+
+    def test_soft_never_went_through_the_red_line(self):
+        soft = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, fatal=FATAL,
+                               asked=SOFT_ASKED, answer=SOFT_ANSWER)
+        self.assertEqual(refusal.KIND_SOFT, soft.kind)
+        self.assertEqual("not-checked", soft.fatal_status, "软转向不过闸：这一关真没跑")
+        self.assertIsNone(soft.fatal)
+        self.assertTrue(soft.refused)
+
+
 if __name__ == "__main__":
     unittest.main()

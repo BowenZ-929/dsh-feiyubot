@@ -225,6 +225,97 @@ class ResidentsTest(unittest.TestCase):
             residents.borrow_ledger(root=self.root)
         self.assertEqual(caught.exception.code, "READOUT_UNREADABLE")
 
+    # —— 写读数：record_readout（这一轮加的）——————————————
+
+    def _one_borrow(self) -> str:
+        outcome = residents.register_borrow(
+            root=self.root, role="organ", by="mouth", source="clauses.json", version="v1",
+            total=8, sha256="b" * 64, note="嘴借去用的条款清单")
+        return outcome["borrow"]["borrow_id"]
+
+    def test_a_written_readout_is_read_back_and_flips_to_connected(self):
+        """写一条读数之后：read_learned 读得到，borrow_ledger 那条从未接入变已接入。"""
+        borrow_id = self._one_borrow()
+        self.assertEqual("未接入", residents.borrow_ledger(root=self.root)["borrows"][0]["readout_status"])
+
+        outcome = residents.record_readout(borrow_id, 3, role="organ", by="mouth",
+                                           note="这一轮真用掉三条", root=self.root)
+        self.assertEqual(borrow_id, outcome["readout"]["borrow_id"])
+        self.assertEqual(3, outcome["readout"]["learned"])
+        self.assertEqual("名片盒", outcome["audit"].room)
+        self.assertEqual("借阅读数.json", outcome["audit"].name)
+
+        # 落盘长这样：readouts[borrow_id] = {learned, note, at, by}
+        raw = json.loads((self.root / "名片盒" / "借阅读数.json").read_text(encoding="utf-8"))
+        self.assertEqual({"learned", "note", "at", "by"}, set(raw["readouts"][borrow_id]))
+        self.assertEqual(3, raw["readouts"][borrow_id]["learned"])
+        self.assertEqual("mouth", raw["readouts"][borrow_id]["by"])
+
+        learned = residents.read_learned(root=self.root)
+        self.assertEqual("已接入", learned["status"])
+        self.assertEqual(3, learned["readouts"][borrow_id]["learned"])
+        row = residents.borrow_ledger(root=self.root)["borrows"][0]
+        self.assertEqual(3, row["learned"])
+        self.assertEqual("已接入", row["readout_status"])
+
+    def test_zero_is_a_real_readout_and_merges_instead_of_overwriting(self):
+        """0 照写（0 是真读数，不是缺失），且只动自己那一条：表里别人的读数一个字节不变。"""
+        first = self._one_borrow()
+        second = residents.register_borrow(
+            root=self.root, role="organ", by="mouth", source="policy.json", version="v1",
+            total=4, sha256="c" * 64)["borrow"]["borrow_id"]
+        residents.record_readout(first, 5, role="organ", by="mouth", root=self.root)
+        residents.record_readout(second, 0, role="organ", by="mouth", root=self.root)
+
+        readouts = residents.read_learned(root=self.root)["readouts"]
+        self.assertEqual(5, readouts[first]["learned"])
+        self.assertEqual(0, readouts[second]["learned"])
+        rows = {row["borrow_id"]: row for row in residents.borrow_ledger(root=self.root)["borrows"]}
+        self.assertEqual(0, rows[second]["learned"])
+        self.assertEqual("已接入", rows[second]["readout_status"], "0 也算已接入，不许读成未接入")
+
+    def test_bad_learned_or_empty_borrow_id_is_loud_and_names_the_field(self):
+        """不合法当场抛、点名是哪一格，且一个字节都没写：不许静默改成 0。"""
+        borrow_id = self._one_borrow()
+        audit_before = len(audit.read_tail(root=self.root))
+        bad_inputs = [("", 1), ("   ", 1), (borrow_id, True), (borrow_id, "3"),
+                      (borrow_id, -1), (borrow_id, 1.5), (borrow_id, None)]
+        for given_id, learned in bad_inputs:
+            with self.assertRaises(cards.CardError) as caught:
+                residents.record_readout(given_id, learned, role="organ", by="mouth",
+                                         root=self.root)
+            self.assertEqual("BAD_ARGUMENT", caught.exception.code, (given_id, learned))
+            field = "learned" if str(given_id).strip() else "borrow_id"
+            self.assertIn(field, caught.exception.detail, (given_id, learned))
+        self.assertFalse((self.root / "名片盒" / "借阅读数.json").exists(), "抛了就不许留下半份读数")
+        self.assertEqual(audit_before, len(audit.read_tail(root=self.root)),
+                         "抛在不合法入参上，账也不该多记一行")
+
+    def test_a_broken_readout_file_raises_instead_of_being_overwritten(self):
+        """读数单坏了照既有口径响亮抛：不当作「还没有读数」，免得把一屋子读数覆盖成一条。"""
+        borrow_id = self._one_borrow()
+        card_box = self.root / "名片盒"
+        (card_box / "借阅读数.json").write_text("{坏掉的", encoding="utf-8")
+        with self.assertRaises(cards.CardError) as caught:
+            residents.record_readout(borrow_id, 1, role="organ", by="mouth", root=self.root)
+        self.assertEqual("READOUT_UNREADABLE", caught.exception.code)
+        self.assertEqual("{坏掉的",
+                         (card_box / "借阅读数.json").read_text(encoding="utf-8"))
+
+    def test_writing_a_readout_goes_through_the_same_door_as_registering(self):
+        """写权与 register_borrow 同一口径：门二把 agent 拦在外面，organ 放行。"""
+        borrow_id = self._one_borrow()
+        (self.root / "access.json").write_text(
+            json.dumps({"version": 1, "writable": []}), encoding="utf-8")
+        with self.assertRaises(access.AccessDenied) as caught:
+            residents.record_readout(borrow_id, 2, role="agent", by="agent", root=self.root)
+        self.assertEqual("ROOM_READONLY", caught.exception.code)
+        self.assertEqual("名片盒", caught.exception.detail["room"])
+        self.assertFalse((self.root / "名片盒" / "借阅读数.json").exists())
+
+        residents.record_readout(borrow_id, 2, role="organ", by="mouth", root=self.root)
+        self.assertEqual(2, residents.read_learned(root=self.root)["readouts"][borrow_id]["learned"])
+
     # -------------------------------------------------------------- 3. 仓库指针卡
 
     def _mouth_copy(self) -> Path:

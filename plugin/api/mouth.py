@@ -257,9 +257,14 @@ def _gate(params: Mapping[str, str]) -> Result:
       注入原文就是没比过，「没比过」与「比过了、没在复述」是两件事，混一起就等于替她背了一次
       没人做过的检查。
     - verdict 只在给了 refuse 或 asked 时有：{kind, shape, full_name, reason, text, event,
-      gate_decision, hit, soft}。这一节只说**判了什么**——kind 是形状大类（hard|soft），shape 是那一节
-      的名字（topic / soft…），reason 是按哪条判据判的，hit 是闸在这一句上命中的条款，soft 是软转向
-      那四样 {is_soft, status, opener, redirect, question, reason}（没给 asked 就是 null）。没判成拒绝
+      gate_decision, hit, soft, refused, fatal_status}。这一节只说**判了什么**——kind 是形状大类
+      （hard|soft），shape 是那一节的名字（topic / soft…），reason 是按哪条判据判的，hit 是闸在
+      这一句上命中的条款，soft 是软转向
+      那四样 {is_soft, status, opener, redirect, question, reason}（没给 asked 就是 null）。
+      refused 是「她拒了、这句最后发出去没有」；**fatal_status 是红线那一关判成什么**
+      （ok / not-checked / fatal，原样取 RefusalVerdict，本层不另判）——红线命中时 refused=false 而
+      fatal_status="fatal"，说的是「这句不是拒绝，是不许发」，而 gate_decision 仍是闸的判词
+      （dropped）：三个读数各占一格，谁也不顶替谁。没判成拒绝
       （她正面答了、只是没转开、或者判不了）时 kind/shape/full_name 都是 null、event 是 null：
       这时 verdict 说的是「判过了、不是拒绝」，理由取软转向那句人话。status 不是 "ok" 就是没真的
       比过，**不许当成「不是拒绝」**。
@@ -705,17 +710,25 @@ def _verdict_section(refused: Any, gated: Any, soft: Any, final: str,
     读数，理由取软转向那句人话：这时 verdict 说的是「判过了、不是拒绝」（或「判不了」），不是「没判」。
     kind 是形状大类（hard|soft），shape 是那一节的名字（topic / soft…）：少了 kind，人就得靠猜
     shape 是不是 "soft" 才知道这次是软转向还是硬拒绝。
+
+    refused 与 fatal_status 是这一轮新透出的两格，**各有各的意思、不许互相顶替**：
+    refused 说「她拒了、这句最后发出去没有」（红线命中时是 false：这话不许发，不是她没拒）；
+    fatal_status 说「红线那一关判成什么」（ok / not-checked / fatal，原样取 RefusalVerdict）；
+    gate_decision 说「闸最后怎么判的」（红线命中时必然是 dropped）。没判成拒绝时 refused 是 null
+    （没有「拒绝成立不成立」这回事），fatal_status 照旧取闸的读数——干跑这一路闸是跑过的。
     """
     if refused is None:
         return {"kind": None, "shape": None, "full_name": None, "event": None,
                 "reason": soft.reason if soft is not None else "",
                 "text": final, "gate_decision": gated.decision, "hit": clause,
+                "refused": None, "fatal_status": gated.fatal_status,
                 "soft": _soft_section(soft) if soft is not None else None}
     hard = refused.kind != refusal.KIND_SOFT
     return {"kind": refused.kind, "shape": refused.shape, "full_name": refused.full_name,
             "event": refused.event, "reason": refused.reason, "text": final,
             "gate_decision": gated.decision if hard else refused.gate_decision,
             "hit": clause,
+            "refused": refused.refused, "fatal_status": refused.fatal_status,
             "soft": _soft_section(soft) if soft is not None else None}
 def _readonly_section(verdict: Any) -> Dict[str, Any]:
     """软转向时闸那一遍的读数：照跑、照判，只是不许改她的话（所以这里只报不改）。

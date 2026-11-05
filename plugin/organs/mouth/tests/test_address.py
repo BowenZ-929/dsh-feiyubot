@@ -292,5 +292,54 @@ class AddressTest(unittest.TestCase):
             address.tier_of(1.0, {"nothing": {}})
 
 
+class RequestedNameIsReadFromTheData(unittest.TestCase):
+    """他这一轮要人叫他什么：判据全在数据的 rename_markers，抽不到就是 None（**不许编**）。
+
+    三种情形一律回 None，一样对待：这话不像要求改称呼、只否掉旧叫法却没说新的、抓回来那一截是空的。
+    不许拿人名录里的名字或档位里的称呼词顶上——认不出就是没听清，照旧按档位叫。
+    认人也不归它管：谁在说话只认 id（person.id / 请求里的 who），昵称不是身份。
+    """
+
+    def test_each_marker_reads_the_new_name(self):
+        self.assertTrue(TABLE["rename_markers"]["named"], "空表等于一句都认不出")
+        cases = {"以后叫我老李": "老李", "叫我老李就行": "老李",
+                 "以后喊我Z": "Z", "我改名叫张三": "张三"}
+        for line, want in cases.items():
+            self.assertEqual(want, address.requested_name(line, TABLE), line)
+
+    def test_unreadable_is_none_never_invented(self):
+        for line in ("今天天气不错", "", "   ", None, "我改名了", "叫我", "12345"):
+            self.assertIsNone(address.requested_name(line, TABLE), "抽不到就 None：%r" % (line,))
+
+    def test_a_denial_alone_hands_out_no_name(self):
+        """「别叫我老王」只否掉旧叫法、没给新的：不许把老王当成他要的新叫法。"""
+        self.assertIsNone(address.requested_name("别叫我老王", TABLE))
+        self.assertIsNone(address.requested_name("别再叫我老王", TABLE))
+        self.assertEqual("老李", address.requested_name("别再叫我老王，叫我老李", TABLE),
+                         "同一句里后面真给了新叫法，就用那一个")
+
+    def test_id_is_what_identifies_a_person_not_the_nickname(self):
+        note = TABLE["rename_markers"]["id_note"]
+        self.assertIn("id", note, "数据里要有一句「认人只认 id」")
+        self.assertIn("昵称", note, "数据里要有一句「不许凭昵称猜人」")
+        wanted = address.requested_name("以后叫我老李", TABLE)
+        got = address.resolve(_person(20.0, rename_request=wanted), TABLE)
+        self.assertEqual("u-1", got.who, "who 只从 person.id 来，与昵称无关")
+        self.assertEqual("老李", got.address)
+
+    def test_broken_table_raises_instead_of_reading_as_none(self):
+        from organs.mouth.model import PolicyMiss
+        for damage in ("missing", "no-group", "bad-regex"):
+            book = _book()
+            if damage == "missing":
+                del book["rename_markers"]
+            elif damage == "no-group":
+                book["rename_markers"]["named"] = [r"叫我"]
+            else:
+                book["rename_markers"]["named"] = [r"叫我("]
+            with self.assertRaises(PolicyMiss, msg=damage):
+                address.requested_name("以后叫我老李", book)
+
+
 if __name__ == "__main__":
     unittest.main()

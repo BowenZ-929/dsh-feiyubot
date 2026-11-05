@@ -7,7 +7,8 @@
    加模板路径，**不回空正文、不编内容、不报 0 字**。本文件里没有任何一条往抽屉写的分支。
 2. 咬不准的「她认得多少词」这类读数 → 借阅条，落在**名片盒**里：borrow.jsonl 一条一借，
    读数单列在 借阅读数.json（人也能改）。缺读数就 learned=None + readout_status="未接入"，
-   **不报 0**——答不出和答出零是两件事。为什么不新开一间「档案」：档案是模块名，物理只落
+   **不报 0**——答不出和答出零是两件事。写读数只有一处入口 record_readout（按 borrow_id 合并、
+   整份原子换掉）；「答不出」与「答出零」在写的那一侧也分开：learned 不合法当场抛，不许拿 0 顶。为什么不新开一间「档案」：档案是模块名，物理只落
    名片盒与信箱这两间（modules/home.md:22「名片盒与信箱，一人一卡、一信一件」）；借阅条自己
    是一张**卡片**（plan.md:89「档案里的第三类卡片」），卡片归名片盒；信箱装的是来往的长文、
    一封一件，把卡片塞信箱等于把卡片当信件。房名不变、房间不新增，只是这间房里多一个卡片种类。
@@ -158,6 +159,56 @@ def register_borrow(root=None, *, role, by, source, version, total, sha256, note
     return {"borrow": row, "audit": entry}
 
 
+def record_readout(borrow_id, learned, *, role, by, note="", root=None) -> dict:
+    """写一条读数进 借阅读数.json：这条借阅条「她现在认得多少词／这一轮真用掉几条」。
+
+    为什么是「按 borrow_id 合并」而不是追加一行：一行一借的账在 borrow.jsonl（append-only），
+    读数单是**一张表**——同一张借阅条只该有一个当前值；追加就成了「哪一行算数」的第二处判定，
+    而这一处判定长在谁手里都会跟人手动改的那一份分叉。所以这里读旧表 → 合并
+    readouts[borrow_id] → 整份原子换掉（走 store 既有写法：同目录临时件 + os.replace），
+    表里别人的那几条一个字都不动。
+
+    **不合法当场抛、点名是哪一格，不静默改成 0**：0 是一个真实读数（这一轮真的一条都没用上），
+    拿它去顶一个「不知道」，账上就再也分不清「用不上」和「没量过」。learned 只收 int——bool 是
+    int 的子类（True 会写成 1），也一并拒；负数没有意义，同样拒。borrow_id 空着就等于不说这条
+    读数落在哪张借阅条上，也拒。
+
+    **读数单坏了照样响亮抛**（_read_readouts 的既有口径）：文件在但读不出来，跟「还没有读数」是
+    两件事；当成没有读数的写法会把一屋子读数覆盖成一条。
+
+    写权与 register_borrow 同一口径（check_write 一次，上限不在这里手搓第二遍），写完追一行
+    审计（room 仍是名片盒），返回 {readout, audit}。
+    """
+    key = borrow_id.strip() if isinstance(borrow_id, str) else ""
+    if not key:
+        raise cards.CardError("BAD_ARGUMENT", {"borrow_id": borrow_id},
+                              "borrow_id 不能空：读数要落在哪张借阅条上得点名，收到 %r"
+                              % (borrow_id,))
+    if isinstance(learned, bool) or not isinstance(learned, int):
+        raise cards.CardError("BAD_ARGUMENT", {"learned": learned},
+                              "learned 只收 int（bool 也不算），收到 %r；不合法不静默改成 0"
+                              % (learned,))
+    if learned < 0:
+        raise cards.CardError("BAD_ARGUMENT", {"learned": learned},
+                              "learned 不许负数，收到 %r；不合法不静默改成 0" % (learned,))
+    note = note or ""
+    access.check_write(role=role, room=BORROW_ROOM, name=READOUT_FILE, chars=len(note),
+                       root=root)
+
+    home = store.home_root(root)
+    readouts, _status = _read_readouts(home)
+    row = {"learned": learned, "note": note, "at": _now(), "by": by or role}
+    merged = dict(readouts)
+    merged[key] = row
+    path = _readout_path(home)
+    store.atomic_write_text(path, json.dumps({"readouts": merged}, ensure_ascii=False,
+                                             sort_keys=True, indent=2) + "\n")
+    entry = audit.append_entry(root=root, role=role, by=by, room=BORROW_ROOM, name=READOUT_FILE,
+                               chars=len(note),
+                               bytes=len(json.dumps(row, ensure_ascii=False).encode("utf-8")))
+    return {"readout": dict({"borrow_id": key}, **row), "audit": entry}
+
+
 def borrow_ledger(root=None) -> dict:
     """把借阅条与读数合并成一份账：答不出的一律 learned=None、readout_status="未接入"。
 
@@ -247,7 +298,7 @@ def warehouse_pointers(root=None) -> dict:
     rows, bad = _read_jsonl(home / WAREHOUSE_ROOM / cards.INDEX_NAME)
     pointers: List[Dict[str, Any]] = []
     for item in cards.fold(rows):
-        if item.get("kind") != POINTER_KIND:
+        if item.get("kind") != POINTER_KIND or item.get("consumed"):
             continue
         params = item.get("params") or {}
         if not params.get("pointer"):

@@ -20,10 +20,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from unittest import mock
 from urllib.parse import quote
 
 from api import api
@@ -37,6 +39,7 @@ from organs.soul import load
 
 MOUTH_ROUTES = ("/mouth/split", "/mouth/address", "/mouth/tone", "/mouth/gate")
 SOURCE = Path(mouth_api.__file__).read_text(encoding="utf-8")
+MOUTH_DATA = Path(__file__).resolve().parents[2] / "organs" / "mouth" / "data"
 
 _ENDERS = "。！？!?…"
 
@@ -486,19 +489,47 @@ class MouthApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         section = payload["verdict"]
         self.assertEqual({"kind", "shape", "full_name", "event", "reason", "text",
-                          "gate_decision", "hit", "soft"}, set(section))
+                          "gate_decision", "hit", "soft", "refused", "fatal_status"},
+                         set(section))
         said = [mouth_api.refusal.say(one) for one in ("topic", "mood", "nobody")]
         self.assertIn(section["text"], said, "拒绝说法必须来自 data/refusal.json 那三句")
         self.assertEqual("topic", section["shape"])
         self.assertEqual("hard", section["kind"], "硬拒绝与软转向在返回里必须分得开")
         self.assertEqual("refused-topic", section["full_name"])
         self.assertEqual("pass", section["gate_decision"])
+        self.assertTrue(section["refused"], "这句真说得出去了：refused 是「拒了、也发出去了」")
+        self.assertEqual("ok", section["fatal_status"], "给了红线表、判过、不是红线")
         self.assertIsNone(section["soft"], "没给 asked 就没有软转向判词")
         self.assertEqual({"ts", "shape", "full_name", "why"}, set(section["event"]))
         self.assertFalse(ledger.exists(), "干跑不写拒绝账：这一行等真实投递时再记")
         self.assertFalse(payload["delivered"]["delivered"])
         self.assertFalse(payload["delivered"]["would_deliver"], "认不出话题就投不进去")
         self.assertIn("认不出", payload["delivered"]["why"])
+
+    def test_gate_refuse_hitting_a_red_line_is_no_send_not_a_refusal(self):
+        """拒绝的说法自己踩上红线：refused 是假、fatal_status 是 fatal，而 gate_decision 仍是 dropped。
+
+        「她拒了」与「这句不许发」是两件事，三个读数各占一格、谁也不顶替谁：event 照旧在（拒绝成立），
+        text 是空串（红线是唯一不许留原话的一类），闸那个判词一个字都不改。判据表整份拷进临时根再
+        把某条说法改成带手机号的那句——改的是数据，判的是同一条链路。
+        """
+        root = Path(self._tmp.name) / "mouth"
+        if not root.is_dir():
+            shutil.copytree(str(MOUTH_DATA), str(root))
+        book = json.loads((root / "refusal.json").read_text(encoding="utf-8"))
+        book["shapes"]["topic"]["say"] = "我的手机号是13800138000，这个话题先不聊。"
+        (root / "refusal.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"MOUTH_DATA_DIR": str(root)}):
+            status, payload = self._call("GET", "/mouth/gate?refuse=topic")
+        self.assertEqual(200, status)
+        section = payload["verdict"]
+        self.assertEqual("fatal", section["fatal_status"], "红线这一关真判出了红线")
+        self.assertFalse(section["refused"], "红线命中：这句不是拒绝，是不许发")
+        self.assertEqual("", section["text"], "红线不许留原话")
+        self.assertEqual("dropped", section["gate_decision"], "闸的判词不许被 fatal_status 顶替")
+        self.assertEqual("dropped", payload["decision"])
+        self.assertIsNotNone(section["event"], "拒绝成立这件事照旧：事件还在")
+        self.assertIn("13800138000", section["hit"]["matched"], "面板上要看得出撞上了什么")
 
     def test_gate_refuse_unknown_shape_is_400_and_names_it(self):
         """refuse 给了个数据里没有的形状：400 并指名，不静默挑一个、也不往账本里写。"""

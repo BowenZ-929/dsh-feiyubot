@@ -251,6 +251,29 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 `delivered.delivered:false` 并说明为什么——拒绝事件照样在 `refuse.jsonl` 记一行（`sent:false`），
 她拒了这件事与这一笔有没有落到心上是两件事。
 
+**借阅读数也随成功体出去（这一轮加的）**：多一节 `borrow`（不破坏既有键）：
+
+```json
+{"borrow": {"status": "ok|failed",
+            "files": [{"source": "clauses.json", "borrow_id": "借-1", "learned": 7}],
+            "note": "这一轮借用了 2 份词条，读数已投给家：…"}}
+```
+
+名单是 `api/chat.py` 的 `_books()` **这一层真读过**的那几份（`clauses.json` / `policy.json`；
+称呼表是装配那一步读的，这一层不替它记账），条数是这一轮自己的账：条款按「过闸真比过的那些」算
+（有泡可过闸就是启用条款全表，一泡都没有就是 0），`policy` 只数这一层真读了的那几段
+（`pace.round_digits`）。**`learned` 取不到就写 0，0 是一次真实读数**（这一轮一条都没用上），
+不是缺失；缺失是「这一行根本不写」。家那侧：`borrow_ledger()` 的 `borrows` 里找不到该
+`source` 就先 `register_borrow`（`version` 取 sha256 前 12 位、`total` 是整份几条、
+`sha256` 是全量；一 source 一条，第二轮不再登记），再逐份 `record_readout` 写读数
+（`organs/home/residents.py`：按 `borrow_id` 合并、整份原子换掉、追一行审计）。
+
+**投递失败不许影响这一轮说话**：整段包在 `try` 里，失败只在 `borrow` 节里如实写
+`status:"failed"` 与原因（家里只读、盘满、数据缺件都属于这一类），她的 `reply` / `chunks`
+一个字节都不动——读数是账，账写不进去不许连话一起吞掉。读数怎么算在嘴那侧
+（`organs/mouth/borrow.py`，纯函数：不读盘、不取时钟），措辞在
+`organs/mouth/data/borrow.json`。
+
 **闸在 `/chat` 生效（这一轮加的）**：`conversation.answer()` 返回之后、组装响应之前，把 `chunks`
 里的**每一泡单独过一遍闸**（条款 → 动作括注 → 内容重复 → 复述审计）。命中就改一次、改不了就弃那一泡：
 
@@ -352,6 +375,32 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 - **`drops`**（`/mouth/gate`，**pass 的那次也带**）：弃言账本的读数 `{today, last_clause_id, line, exists, errors, trace}`。`line` 就是那句人话「今天因闸弃言 N 次，最近一次命中 <clause-id>」。三件事分开报：账本不存在 = `today:0 + exists:false`（等于今天还没记过，不是读不到）；有坏行 = 跳过并计入 `errors`；写不进去 = 直接 500（记不上账就要响，不报 0 次）。账本属于「临时落脚」，家那一轮搬去家·痕迹。
 - **`renamed` / `source` / `memory_draft`**（`/mouth/address`、`/mouth/tone`）：给了 `rename` 就**当场换**（`source=本轮改名`、`renamed=true`），档位不动；落不到盘，也改不了人名录——`memory_draft` 就是「他要求过叫他 X」这条**亲历记忆草稿**，形状恰好是脑 `ingest()` 的入参，由出口投递。违禁自称过不了这道门（`source=回退`、`banned_self` 记下被挡的词）。
 
+**红线被拦不是「拒绝」，是「不许发」（本轮加的）**：拒绝那三句自己也会踩红线（改一次也救不回来，
+红线是唯一不许留原话的一类）。这时 `RefusalVerdict` 把闸的读数原样带出来，`/mouth/gate` 的
+`verdict` 节也跟着多两格：`fatal_status` 三态**不许折叠**——`ok`（给了红线表、判过、不是红线）/
+`not-checked`（这一轮没给表，判不了，**不是「不是红线」**）/ `fatal`（踩上了）；`refused` 在红线
+命中时是 `false`，读成「这句不是拒绝，是不许发」——她确实拒了（`shape` / `event` / 账本一样不少），
+可那句话一个字都出不去，`text` 是空串。**三个读数各占一格、谁也不顶替谁**：`refused` 说「拒了、
+这句发出去没有」，`fatal_status` 说「红线那一关判成什么」，`gate_decision` 说「闸最后怎么判的」
+（红线命中时必然是 `dropped`）。那句人话（「这句不是拒绝，是不许发：…」）取自
+`organs/mouth/data/fatal.json` 的 `not_refusal_note`，代码里一个词都不写死；软转向不过闸，所以它
+的 `fatal_status` 恒为 `not-checked`（那一关真没跑，本层不假装它判过）。
+
+**这一轮叫他什么：`addressed`（本轮加的）**：`POST /chat` 的成功体多一节
+`addressed: {who, address, source}`（`who` 是人名录里的 id，`address` 是这一轮真用的称呼，
+`source` 取 `address_table.json` 的 `source`：人名录 / 会话覆盖 / 本轮改名 / 回退）。判据全在
+`data/address_table.json` 的 `rename_markers`：`named` 每条带一个捕获组（抓到的就是他这一轮要的
+叫法：叫我老李 / 以后喊我Z / 我改名叫…），`denied` 不带捕获组（只否掉旧叫法：别叫我老王——这一句
+**不给**新叫法，抽不到就回 `None`，不许编、也不许拿人名录里的名字顶上）。认人只认 id：昵称不是
+身份。抽到就叫法当场换（`source=本轮改名`）、把 `address.rename_memory` 那条**亲历记忆**投给脑
+一次（`brain.ingest(**draft)`），并记进**进程内**那本 `SessionAddressBook`（模块级单例，**只活这个
+进程、不落盘**）；下一轮他再开口，`address.resolve(..., session=book)` 就用会话覆盖
+（`source=会话覆盖`），换一个进程就是新的一本、回到人名录档位。**违禁自称照样过不去**
+（`self_guard`）：退到中性叫法，那一轮既不投记忆、也不记会话账——改名不是绕过自称红线的后门。
+接线点在 `conversation.answer()` 返回之后、过闸之前：称呼只读他那句话与脑的人名录（`answer()`
+刚把他的原话落进脑，人名录里才查得到这个人），而闸可能把整轮弃掉——他改的叫法不该跟着她那句被弃
+的话一起丢。提示词里那一段称呼仍由 `organs/mind/conversation.py` 按人名录算（不在本次边界内），
+会话覆盖目前落在出口读数与脑那条记忆上。
 ## 7 家（第四批：十间房 + 存取接口 + 审计）
 
 十条路由：九条 GET、一条 POST。房名表、两道门、审计、索引卡都在 `organs/home/`，

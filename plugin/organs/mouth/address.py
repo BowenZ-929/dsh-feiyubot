@@ -23,19 +23,30 @@ identity.self_names 授权名单里时，**照样退到中性叫法**——不�
 但**只活这个会话、进程重启即丢**；它的真值不在这本薄账里，而在 rename_memory 产出的那条亲历
 记忆——投给脑，下回合由人名录带回来（本文件不写盘、不要求脑加任何人名录字段）。
 
+**「他要人叫他什么」由数据认，不由代码猜**：requested_name 只读 data/address_table.json 的
+rename_markers（named 带捕获组＝新叫法，denied 不带＝只否掉旧叫法），认不出就是 None——它不查
+人名录，也不拿昵称认人（认人只认 id）。谁把抽到的叫法记进会话账、谁把它投给脑，是出口那一侧的事：
+本文件只提供 requested_name / SessionAddressBook / rename_memory 三件工具，一次都不自己接线。
+
 红线（不许抛错中断出口）：挑出来的叫法若落在魂 identity.self_names 授权名单之外又被当自称用
 （「违禁自称」），一律退到中性叫法，把被挡下的那个词记在 banned_self 里，并在 note 里说一句实话；
 不抛错、不写回脑、不写回魂。
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .model import PolicyMiss, need, section
 from .warehouse import load
 
-__all__ = ["Addressee", "SessionAddressBook", "load_table", "rename_memory", "resolve", "tier_of"]
+__all__ = ["Addressee", "SessionAddressBook", "load_table", "rename_memory", "requested_name",
+           "resolve", "tier_of"]
+
+RENAME_KEY = "rename_markers"    # 数据里「要求改称呼」那一节
+NAMED_KEY = "named"              # 那一节里「带捕获组：抓到的就是新叫法」的正则
+DENIED_KEY = "denied"            # 那一节里「不带捕获组：只否掉旧叫法」的正则
 
 
 @dataclass(frozen=True)
@@ -217,6 +228,80 @@ def rename_memory(who: str, address: str, ts: Optional[str] = None,
             "text": template.format(address=_text(address).strip()),
             "source_type": str(need(guard, "rename_memory_source_type")),
             "ts": ts}
+
+
+def requested_name(text: Any, table: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """从对方这句话里抽出「他这一轮要的那个叫法」；抽不到就是 None（**不许编**）。
+
+    判据一个字都不在本文件：data/address_table.json 的 rename_markers 一节里有两张正则表——
+    named 每条带**一个捕获组**，抓到的就是他这一轮要的称呼（「以后叫我老李」→ 老李）；
+    denied 不带捕获组，它只是否掉旧叫法、并不给出新叫法（「别再叫我老王」）。两表的先后即优先级，
+    而被 denied 那一截盖住的那一处 named 不算数：同一句里后面另有一处 named 才算
+    （「别再叫我老王，叫我老李」→ 老李）。
+
+    抽不到就回 None，三种情形一样对待：这话不像要求改称呼、只否掉旧叫法却没说新的、
+    正则抓回来的那一截是空的。**不许**拿人名录里的名字、档位里的称呼词或上一次的叫法顶上——
+    认不出他说的是哪个叫法，就照旧按档位叫（这是「没听清」，不是「听清了换一个」）。
+
+    认人也不归它管：**只认 id**（谁在说话由人名录的 person.id / 请求里的 who 决定），
+    这里只回答「他要人叫他什么」，不回答「他是谁」——昵称不是身份，同一句里出现三个名字
+    也不代表来了三个人（那句话写在数据的 rename_markers.id_note 里）。
+
+    table 不给就现读数据；缺节、缺键、词表里混进非字符串、正则编译不过，一律抛 PolicyMiss
+    （缺键不补默认值，坏正则不许静默当成「没命中」）。
+    """
+    book = table if isinstance(table, Mapping) else load("address_table")
+    cfg = section(book, RENAME_KEY)
+    named = _regexes(cfg, NAMED_KEY, groups=True)
+    denied = _regexes(cfg, DENIED_KEY, groups=False)
+    body = _text(text).strip()
+    if not body:
+        return None
+    covered = [found.span() for pattern in denied for found in _finditer(pattern, body)]
+    for pattern in named:
+        for found in _finditer(pattern, body):
+            if any(start <= found.start() < end for start, end in covered):
+                continue                      # 这一处被「别叫我…」否掉了，不当成他要的新叫法
+            name = _text(found.group(1)).strip() if found.groups() else ""
+            if name:
+                return name
+    return None
+
+
+def _regexes(cfg: Mapping[str, Any], name: str, groups: bool) -> List[str]:
+    """取一张正则表：必须是清单、每项非空字符串；named 那表还要求正好一个捕获组。
+
+    缺键、非清单、混进非字符串、该带捕获组的没带（或带了不止一个），都抛 PolicyMiss 并指名。
+    空清单照收：清空 named 就是「一句话都不认成要求改称呼」，那是人改数据的选择，不是坏件。
+    """
+    raw = need(cfg, name)
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise PolicyMiss("键 %r（读到的不是一份清单）" % (name,))
+    out: List[str] = []
+    for item in raw:
+        pattern = _text(item).strip()
+        if not pattern:
+            raise PolicyMiss("表 %r 里有一项不是非空字符串（读到的 %r）" % (name, item))
+        if groups:
+            found = _compile(pattern)
+            if found.groups != 1:
+                raise PolicyMiss("表 %r 里的 %r 该带正好一个捕获组（现在是 %d 个）——抓不到就不知道"
+                                 "他要哪个叫法" % (name, pattern, found.groups))
+        out.append(pattern)
+    return out
+
+
+def _compile(pattern: str) -> "re.Pattern[str]":
+    """编译一条正则；编译不过抛 PolicyMiss 并指名——坏的正则不许静默当成「没命中」。"""
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        raise PolicyMiss("正则 %r 编译不过：%s" % (pattern, exc)) from None
+
+
+def _finditer(pattern: str, body: str) -> List[Any]:
+    """一条正则在这段话里的全部命中（按位置先后）；编译不过照 _compile 的规矩抛。"""
+    return list(_compile(pattern).finditer(body))
 
 
 def _tiers(table: Mapping[str, Any]) -> List[Mapping[str, Any]]:

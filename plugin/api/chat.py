@@ -50,9 +50,28 @@ fatal_status 看得出这一关判没判。其余情形改了一次还是命中�
 text 是进门那句原话、parts[*].kept_after_rewrite=true，账本记一行带「<通道>-after-rewrite」的账——
 **绝不静默变哑**：在最该回答的那一句上沉默，比「说话带点毛病」糟得多。
 
+**称呼也在这一层接上（这一轮加的）**：answer() 返回之后、过闸之前先看一眼**对方这句话**有没有
+「要求改称呼」（refusal 管她拒没拒，这里管他叫啥，两件事各走各路）。抽到就叫法当场换
+（source=本轮改名）、把 rename_memory 那条**亲历记忆**投给脑一次（brain.ingest(**draft)），
+并记进本进程那本 AddressBook（模块级单例，只活这个进程、不落盘）；下一轮他再开口，
+resolve(..., session=ADDRESS_BOOK) 就用会话覆盖（source=会话覆盖）。**为什么挑这个点**：称呼只读
+他那句话与脑的人名录，而 answer() 刚刚把他的原话落进脑——人名录里因此才查得到这个人；放在过闸
+之前，是因为闸可能把整轮弃掉，而他改的叫法不该跟着她那句被弃的话一起丢。违禁自称照样过不去：
+resolve 退到中性叫法，那一轮既不投记忆、也不记会话账。返回体因此多一节
+addressed: {who, address, source}。（提示词那一段称呼由 organs/mind/conversation.py 自己按人名录
+算，不在本次边界内——会话覆盖目前落在出口读数与脑那条记忆上。）
+
 成功体里多一节 refusal（**不破坏既有键**）：{kind, shape, verdict_reason, delivered{delivered,
 topic, until, remaining_min, reason}}。没判出拒绝时**这一节不出现**——不加一个空壳，免得人把
 「判过了、不是拒绝」与「没判」读成一件事；正面答了的那句本来也不该挂个 refusal。
+
+**这一轮借了家里哪几份词条、各用掉几条也随成功体出去**（同样是加一节、不动既有键）：多一节
+borrow {status, files:[{source, borrow_id, learned}], note}。名单是 api/chat.py 的 _books() 真读过
+的那几份（clauses.json / policy.json——称呼表是装配那一步读的，这一层不替它记账），条数是这一轮
+自己的账（条款按过闸真比过的那些算：有泡可过闸就是启用条款全表，一泡都没有就是 learned=0，
+**0 是一次真实读数、不是缺失**）。家里还没有这份借阅条就先 register_borrow 登记一条（一 source 一条，第二轮不再登记），
+再逐份 record_readout 写读数。**投递失败不许影响这一轮说话**：整段包在 try 里，失败只在 borrow
+节里如实写 status=failed 与原因，她的 reply / chunks 一个字节都不动。
 
 不加鉴权、不改绑地址：这一层的入口由 devserver / 宿主决定，端点只认 POST /chat。
 每次失败写一行 WARNING 日志（logger 名 qqagent.chat，含 kind 与 message）——失败要留痕，
@@ -63,14 +82,16 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from organs.heart import refuse as heart_refuse
+from organs.home import residents as home_residents
+from organs.home import store as home_store
 from organs.mind import conversation
 from organs.mind import llm
 from organs.mind import recent as mind_recent
 from organs.mind.llm import LLMError
-from organs.mouth import action_note, audit, drops, gate, refusal, repeat, warehouse
+from organs.mouth import action_note, address, audit, borrow, drops, gate, refusal, repeat, warehouse
 from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
 from organs.mouth import rewrite as rewrite_rules      # 参数名就叫 rewrite，模块用别名进来免得被挡住
 from organs.mouth.gate import ClauseBroken
@@ -105,6 +126,11 @@ LOG = logging.getLogger(LOGGER_NAME)
 TRANSPORT: Optional[Any] = None
 CONFIG: Optional[Mapping[str, Any]] = None
 ENV: Optional[Mapping[str, str]] = None
+
+# 这一轮叫他什么，本进程内的一本薄账（address.SessionAddressBook）：**只活这个进程、不落盘**。
+# 退出即丢是它的全部语义——真要长久的叫法靠投给脑的那条亲历记忆（rename_memory），下回合由人名录
+# 带回来；这本账只负责「他刚说完、还没轮到下一轮」那一小段。换进程＝新的一本，回到名录档位。
+ADDRESS_BOOK = address.SessionAddressBook()
 
 GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（条款 → 动作括注 → 内容重复 → 复述审计），"
              "命中就交给模型改一次（同一个 transport、带 budget_ms 硬时限）；改完不命中就用新稿，"
@@ -156,11 +182,69 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
         LOG.warning("POST /chat 失败：kind=%s message=%s", exc.kind, exc.message)
         return status, {"ok": False, "kind": exc.kind, "message": exc.message}
+    _address_round(payload, text, brain, _who(body))
     _gate_round(payload, text, store, history)
     section = _judge(text, payload.get("reply"))
     if section is not None:
         payload["refusal"] = section
+    _borrow_round(payload)
     return 200, payload
+
+
+# —— 称呼：这一轮叫他什么 ——————————————————————
+
+def _address_round(payload: Dict[str, Any], asked: str, brain: Any, who: str) -> None:
+    """认「他要求改称呼」→ 当场换 → 投给脑一条亲历记忆 → 记进本进程那本薄账，并把读数落进回包。
+
+    四步，顺序钉死（别调换）：
+
+    1. **认**：address.requested_name(asked, 表) 从**对方这句话**里抽他要的叫法。判据全在
+       data/address_table.json 的 rename_markers（named 带捕获组＝新叫法，denied 不带＝只否掉
+       旧叫法）；抽不到就是 None——不编、也不从人名录里挑一个顶上，照旧按档位叫。
+    2. **换**：把这一轮的要求塞进 person 的 rename_request 再 resolve（优先级：会话覆盖 > 本轮改名 >
+       人名录档位），于是这一轮 source=本轮改名。**先 resolve 再 remember**：反过来的话这一轮就会
+       被自己的覆盖盖住，面板上看到的会是「会话覆盖」，分不出「这一轮他刚说的」与「上一轮记下的」。
+    3. **投**：没被违禁自称挡下（renamed 且 banned_self 为空）才 rename_memory → brain.ingest(**draft)
+       投一次，并 ADDRESS_BOOK.remember —— 记忆是长久的（下回合由人名录带回来），会话账只活这个进程。
+       被挡下的那一轮**两样都不做**：退到中性叫法，不投那条记忆（改名不是绕过自称红线的后门）。
+    4. **透出**：payload["addressed"] = {who, address, source}，面板上看得见这轮叫他什么。
+
+    who 是人名录里的 id（脑查人只认 id 与别名，不按昵称猜人）：记会话账也用这个 id，下一轮
+    resolve 的 _session_override 按同一个 id 找，才找得回来。
+
+    坏了不 fail-open 也不 fail-close：称呼判据读不动就记一行 WARNING，**这一节不出现**（不拿空壳
+    冒充「这轮没改名」）——她那句话已经说出口了，称呼这一层不许因为它自己坏掉就把整轮吞了。
+    """
+    try:
+        table = address.load_table()
+        person = brain.lookup(who) if who else None
+        wanted = address.requested_name(asked, table)
+        view = dict(person) if isinstance(person, Mapping) else None
+        if wanted:
+            view = dict(view or {})
+            view["rename_request"] = wanted
+        called = address.resolve(view, table, session=ADDRESS_BOOK)
+        key = called.who or who
+        if wanted and key and called.renamed and not called.banned_self:
+            _remember_rename(brain, key, wanted)
+            ADDRESS_BOOK.remember(key, wanted)
+    except (address.PolicyMiss, warehouse.WarehouseMiss, warehouse.WarehouseBroken,
+            OSError, ValueError, TypeError, KeyError) as exc:
+        LOG.warning("POST /chat 记称呼没成：%s", exc)
+        return
+    payload["addressed"] = {"who": key, "address": called.address, "source": called.source}
+
+
+def _remember_rename(brain: Any, who: str, called: str) -> None:
+    """把「他要求过叫他某个叫法」投给脑一次：草稿的形状就是 ingest 的入参（address.rename_memory 给）。
+
+    投不进去只记一行 WARNING：这一轮的话已经说出去了，记忆没记上不该让整轮失败；会话账照记——
+    一条记忆（持久）与一本薄账（只活这个进程）是两件事，一件没成不连累另一件。
+    """
+    try:
+        brain.ingest(**address.rename_memory(who, called, ts=_stamp()))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        LOG.warning("POST /chat 记改称呼没成：%s", exc)
 
 
 # —— 闸：逐泡过一遍，结果落回返回体 ————————————————
@@ -395,17 +479,25 @@ def _books() -> Dict[str, Any]:
     条数（rounds）与小数位（round_digits）也在数据里：前者是她最近几条回话的窗口，后者与
     pace.fill 算 send_at 用的是同一个数，重排时才不会跟切分那一处对不上。缺件坏件照实抛，
     由 _gate_round 翻成「整轮弃掉」——判据读不动时不猜一个默认值顶上。
+
+    另带一份 sources（数据文件名 → 表本体），只放**这一层真读过**的那两份：借阅读数拿它算
+    「这一轮借了哪几份、各用掉几条」。称呼表是装配那一步读的，这里不替它记账——报一份没读过的，
+    读数就是编的。
     """
     policy = warehouse.load("policy")
+    clauses_book = warehouse.load("clauses")
     repeat_book = warehouse.load("repeat")
     return {
-        "clauses": warehouse.load("clauses").get("clauses"),
+        "clauses": clauses_book.get("clauses"),
         "audit": warehouse.load("audit"),
         "fatal": warehouse.load("fatal"),
         "action": warehouse.load("action_note"),
         "repeat": repeat_book,
         "rewrite": warehouse.load("rewrite"),
         "digits": int(policy["pace"]["round_digits"]),
+        # 这一层真读过的数据文件名 → 表本体：借阅读数拿它算「这一轮借了哪几份、各用掉几条」。
+        # 只报这儿读过的：称呼表是装配那一步读的，这一层不替它记账（报一份没读过的，读数就是编的）。
+        "sources": {"clauses.json": clauses_book, "policy.json": policy},
     }
 
 
@@ -772,3 +864,107 @@ def _who(body: Any) -> str:
         return ""
     raw = body.get("who")
     return raw.strip() if isinstance(raw, str) else ""
+
+
+# —— 借阅读数：这一轮借了家里哪几份词条、各用掉几条 ——————————
+
+#: 这一层真读用到的 policy 段：pace.round_digits（重排 send_at 与切分用的是同一个数）。
+POLICY_SECTIONS_USED: Tuple[str, ...] = ("pace",)
+
+BORROW_FALLBACK = "读数没投进家（%s：%s），这一轮的话照发——失败的只是读数，不是她的话"
+
+
+def _borrow_round(payload: Dict[str, Any]) -> None:
+    """把这一轮「借了家里哪几份词条、各用掉几条」投回家；投不进去也只写一节 failed。
+
+    **投递失败不许影响这一轮说话**：登记借阅条、写读数、追审计全在 try 里，任何一步抛了都只把
+    结论写进回包的 borrow 节——reply / chunks 一个字节都不动，也不降级成空回话。读数是账，
+    话是说给他听的那句：账写不进去，不许连话一起吞掉。
+
+    数据在这一层重新读一次（不借闸那一份）：闸可能半路就整轮弃掉了，那时候这一层根本没读成，
+    读数就得如实说没投；借闸的那一份，等于替一次没发生的读取作证。
+    """
+    try:
+        payload["borrow"] = _deliver_readout(payload)
+    except Exception as exc:                    # 读数这一关坏成什么样都不许动她的话
+        LOG.warning("POST /chat 投读数没成：%s", exc)
+        payload["borrow"] = {"status": borrow.STATUS_FAILED, "files": [],
+                             "note": BORROW_FALLBACK % (type(exc).__name__, exc)}
+
+
+def _deliver_readout(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """算这一轮真用过的词条 → 家里缺借阅条的先登记 → 每份写一条读数 → 交回一节 borrow。
+
+    三件事各归各家：算读数是嘴（organs/mouth/borrow.py 的纯函数），登记借阅条与写读数在家
+    （residents.register_borrow / record_readout，写权与上限只在家的 access 里判一次）。
+    这一层只做顺序与往返：名单来自 _books()（它最清楚读了哪几份），条数来自这一轮自己的账。
+    """
+    books = _books()
+    words = warehouse.load("borrow")
+    event = borrow.usage(books["sources"], counts=_counts_used(payload, books))
+    ids = borrow.ids_of(home_residents.borrow_ledger().get("borrows"))
+    for item in event["files"]:
+        if item["source"] in ids:
+            continue                            # 一 source 一条：第二轮不再登记
+        ids[item["source"]] = _register_borrow(books["sources"][item["source"]], item, words)
+    files: List[Dict[str, Any]] = []
+    for row in borrow.readout(event, ids)["rows"]:
+        home_residents.record_readout(
+            row["borrow_id"], row["learned"], role="organ", by="mouth",
+            note=borrow.note_of(words, "record", label=borrow.label(words, row["source"]),
+                                used=row["learned"]))
+        files.append({"source": row["source"], "borrow_id": row["borrow_id"],
+                      "learned": row["learned"]})
+    if not files:
+        return {"status": borrow.STATUS_OK, "files": [], "note": borrow.note_of(words, "empty")}
+    joined = "、".join("%s（%s）" % (borrow.label(words, one["source"]), one["source"])
+                      for one in files)
+    return {"status": borrow.STATUS_OK, "files": files,
+            "note": borrow.note_of(words, "ok", count=len(files), sources=joined)}
+
+
+def _register_borrow(table: Mapping[str, Any], item: Mapping[str, Any],
+                     words: Mapping[str, Any]) -> str:
+    """家里还没有这份词的借阅条：按数据现场算指纹登记一条，回来它的 borrow_id。
+
+    version 取 sha256 的前 12 位（给人看的那一截），total 是这份**整份几条**（事件里的 entries，
+    不是这一轮用掉几条），sha256 是全量——短形只是个招牌，认身份靠全量那一份。
+    """
+    digest = home_store.sha256_file(warehouse.path_of(item["source"]))
+    outcome = home_residents.register_borrow(
+        role="organ", by="mouth", source=item["source"], version=digest[:12],
+        total=item["entries"], sha256=digest,
+        note=borrow.note_of(words, "register", source=item["source"]))
+    return outcome["borrow"]["borrow_id"]
+
+
+def _counts_used(payload: Mapping[str, Any], books: Mapping[str, Any]) -> Dict[str, int]:
+    """这一轮每份词条真用掉几条：条款数过闸时真比过的那些，policy 数这一层真读过的那几段。
+
+    条款按「真比过」算，不按「命中过」算：一条都没命中不等于没用上——闸本来就逐条比一遍，
+    比过的都算用上。所以有泡可过闸时是**启用的条款全表**，一泡都没有（装配那一步就整句弃掉了）
+    就是 0。**0 是一次真实读数**：这一轮一条条款都没比过，不是「没量过」，也不是缺失。
+    policy 那边同理：只数这一层真读了的那几段（pace.round_digits 这一段）。
+    """
+    sources = books.get("sources") or {}
+    counts: Dict[str, int] = {}
+    if "clauses.json" in sources:
+        counts["clauses.json"] = _compared(books.get("clauses"), payload)
+    if "policy.json" in sources:
+        policy = sources["policy.json"]
+        counts["policy.json"] = len([name for name in POLICY_SECTIONS_USED
+                                     if isinstance(policy, Mapping) and name in policy])
+    return counts
+
+
+def _compared(clauses: Any, payload: Mapping[str, Any]) -> int:
+    """这一轮过闸真比过的条款条数：有泡可过闸就是启用条款全表（停用的不算用上），否则 0。
+
+    为什么按「比过」不按「命中」：命中在装配那一步就已经弃掉了，能走到这一层的泡里几乎没有
+    命中；按命中算，读数就永远是 0，「她这一轮用掉几条」也就永远答不出。
+    """
+    parts = ((payload.get("gate") or {}).get("parts") or [])
+    if not parts:
+        return 0
+    return len([one for one in (clauses or [])
+                if isinstance(one, Mapping) and one.get("enabled", True)])
