@@ -1,7 +1,11 @@
 {
   "split": {
-    "max_parts": 3,
+    "max_parts": 12,
     "max_chars": 150,
+    "sentences_per_part": 2,
+    "action_line_max_chars": 20,
+    "action_pronouns": "我你他她咱",
+    "retired_note": "max_parts 原来是条数判据（3），现在退成防炸上限（12，超了才合并）：主判据换成 sentences_per_part=2「每泡最多两句」，300 字十来句按两句一泡就是 6–7 泡，3 泡压不住；max_chars 也从「每泡不超它」退成「单句超长仍按它硬切 + degraded」的兜底，语义不变；cut_window_chars 与 cut_preference 只剩在单句超长那条兜底路上起作用，普通段落按句末切，用不上窗口。旧键一个不删——退役的是判据的位次，不是键。",
     "hard_cut_reason": "这一泡原本 {chars} 字，中间一个停顿符号都没有，只能按 {max_chars} 字硬切；带 degraded 一起发。",
     "sentence_end": "。！？!?…~～",
     "semicolon": "；;",

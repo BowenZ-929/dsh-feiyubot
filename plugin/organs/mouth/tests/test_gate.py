@@ -18,6 +18,7 @@ from pathlib import Path
 
 from organs.mouth import audit as recitation
 from organs.mouth import gate
+from organs.mouth.action_note import ActionBroken
 from organs.mouth.audit import AuditBroken
 from organs.mouth.gate import ClauseBroken, Hit, Verdict, check, enforce
 from organs.mouth.warehouse import load
@@ -429,6 +430,96 @@ class ReciteAuditRidesTheGate(unittest.TestCase):
         self.assertIn("没有这一类", str(caught.exception))
 
 
+class ActionNoteRidesTheGate(unittest.TestCase):
+    """动作括注（第三轮 B）接在条款后面：同一条路（改一次还不行就弃），判没判挂在 action_status 上。
+
+    判据表与闸用的两个名字全从 data/action_note.json 读：这里只验「接上了没有、判没判看得出来没有」。
+    """
+
+    NOTE = load("action_note")
+    CLAUSE_ID = NOTE["hit"]["clause_id"]
+    KIND = NOTE["hit"]["kind"]
+    LINE = "（尾巴尖在水里轻轻蜷了一下）"      # 括号里带了没给过的场景（她真写过的那句）
+    CLEAN = "（主人夸我了嘿嘿）"                # 括号里有话，但没有场景词
+    REWRITTEN = "尾巴垂下去。"                  # 改写之后不再带场景
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_check_reports_it(self):
+        hit = check(self.LINE, CLAUSES, action=self.NOTE)
+        self.assertIsInstance(hit, Hit)
+        self.assertEqual(self.CLAUSE_ID, hit.clause_id)      # 名字取自数据，闸不自己造
+        self.assertEqual(self.KIND, hit.kind)
+        self.assertIn("没给过", hit.reason)                   # 是一句人话，说清毛病在哪
+
+    def test_check_does_not_judge_without_the_table(self):
+        """没给判据表就整段不跑——但也不许把「没跑」说成「没问题」。"""
+        self.assertIsNone(check(self.LINE, CLAUSES))
+        self.assertIsNone(check(self.CLEAN, CLAUSES, action=self.NOTE))   # 给了表也没命中
+
+    def test_missing_rewriter_drops_and_the_ledger_names_it(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.LINE, CLAUSES, None, sink, action=self.NOTE)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)                   # 带场景的那句一个字也不发
+        self.assertEqual(self.CLAUSE_ID, verdict.hits[0].clause_id)
+        self.assertEqual("ok", verdict.action_status)         # 这一关真的判过了
+        self.assertEqual(1, len(seen), "一次弃言只记一笔")
+        self.assertEqual(self.CLAUSE_ID, seen[0][0])          # 账本里是数据里那个名字
+        self.assertEqual(verdict.reason, seen[0][1])
+        self.assertIn("没给重写器", verdict.reason)
+
+    def test_rewrite_clears_it(self):
+        verdict = enforce(self.LINE, CLAUSES, lambda text: self.REWRITTEN, action=self.NOTE)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.REWRITTEN, verdict.text)
+        self.assertEqual("ok", verdict.action_status)
+        self.assertIsNone(check(verdict.text, CLAUSES, action=self.NOTE))  # 改完真的不再带场景
+
+    def test_second_hit_drops(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.LINE, CLAUSES, _same, sink, action=self.NOTE)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
+                         [one.clause_id for one in verdict.hits])   # 两次命中都在，按发生顺序
+        self.assertIn("改了一次还是这样", verdict.reason)
+        self.assertEqual(1, len(seen))
+
+    def test_not_checked_is_not_the_same_as_checked_and_clean(self):
+        """验收 5：「没判」与「判过没问题」必须分得开——同一句、同一份结局，状态不一样。"""
+        unchecked = enforce(self.CLEAN, CLAUSES, None)
+        checked = enforce(self.CLEAN, CLAUSES, None, action=self.NOTE)
+        self.assertEqual("pass", unchecked.decision)
+        self.assertEqual("pass", checked.decision)            # 结局一样：都放行
+        self.assertEqual("not-checked", unchecked.action_status)
+        self.assertEqual("ok", checked.action_status)          # 状态不一样：一个没判、一个判过
+        self.assertNotEqual(unchecked.action_status, checked.action_status)
+        self.assertIn(self.NOTE["reason"]["clear"], checked.reason)   # 放行要有据：查过了就说出来
+        self.assertNotIn(self.NOTE["reason"]["clear"], unchecked.reason)
+
+    def test_unchecked_still_lets_the_sentence_through(self):
+        """没给表时按既有规矩放行（不替调用方做主），但它救不了带场景的那句：给表就拦。"""
+        self.assertEqual("pass", enforce(self.LINE, CLAUSES, None).decision)
+        self.assertEqual("dropped", enforce(self.LINE, CLAUSES, None, action=self.NOTE).decision)
+
+    def test_clause_comes_first(self):
+        """条款先判（既有逻辑不动）：两边都撞时先报条款。"""
+        hit = check(SPEECH + self.LINE, CLAUSES, action=self.NOTE)
+        self.assertEqual("courtesy-open", hit.clause_id)
+
+    def test_broken_table_is_loud(self):
+        """坏表当场响并点名（不许静默当成「没有判据」放行），空词表也算坏。"""
+        with self.assertRaises(ActionBroken) as caught:
+            enforce(self.LINE, CLAUSES, _human, action=dict(self.NOTE, env_words=[]))
+        self.assertIn("env_words", str(caught.exception))
+        with self.assertRaises(ActionBroken) as caught:
+            enforce(self.LINE, CLAUSES, _human, action={})
+        self.assertIn("where", str(caught.exception))
+
+
 class GateStaysClean(unittest.TestCase):
     """第 7 条与硬约束：代码里没有条款，也没有时钟、随机数、宿主。"""
 
@@ -444,6 +535,15 @@ class GateStaysClean(unittest.TestCase):
     def test_gate_stays_pure(self):
         self.assertNotRegex(self.source,
                             r"(?m)^\s*(?:import|from)\s+(?:time|datetime|random)\b")
+
+    def test_gate_source_has_no_action_note_word(self):
+        """动作括注的词表与名字也不许进闸：闸只接判据，不持判据。"""
+        note = load("action_note")
+        for word in note["env_words"]:
+            self.assertNotIn(word, self.source)
+        self.assertNotIn(note["hit"]["clause_id"], self.source)
+        for line in note["reason"].values():
+            self.assertNotIn(line, self.source)
 
     def test_gate_imports_no_host(self):
         for word in ("astrbot", "deepseek-ai", "cordis", "OneBot", "NapCat", "aiocqhttp"):

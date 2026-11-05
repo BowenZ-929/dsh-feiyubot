@@ -67,6 +67,19 @@ class RangesDifferByTier(unittest.TestCase):
             self.assertIn(repr(bad), str(caught.exception))
         self.assertIn(repr(COLD), str(caught.exception))   # 报错里列着数据里现有的档（键是字符串）
 
+    def test_retired_bounds_are_kept_but_not_used(self):
+        """旧区间没删：留在 retired 里（带日期与理由）标作废，读区间只认 ranges 那一节。"""
+        retired = BOOK["retired"]
+        self.assertTrue(retired["reason"].strip())
+        self.assertTrue(retired["date"].strip())
+        self.assertEqual(set(RANGES), set(retired["ranges"]), "四档一个都不许丢")
+        for tier, old in retired["ranges"].items():
+            self.assertGreaterEqual(old["hi"], style.target_range(tier, BOOK)[1],
+                                    "收窄只许往下收：旧的上限不小于现在的")
+        self.assertGreater(retired["ranges"][HOT]["hi"], RANGES[HOT]["hi"],
+                           "第 4 档收窄过：旧的上限比现在的大")
+        self.assertNotEqual(retired["ranges"]["2"], RANGES["2"], "第 2 档也收窄过")
+
     def test_ranges_come_from_data(self):
         """改数据就改行为：把冷档区间改成 5..5，同一句 30 字的话立刻算「在区间外」。"""
         book = _copy_book()
@@ -229,6 +242,26 @@ class Ledger(unittest.TestCase):
             self.assertEqual([row["decision"] for row in rows], ["over_target", "rewritten"])
             self.assertEqual([row["ts"] for row in rows], [NOW, NOW])
             self.assertTrue(all(row["reason"] for row in rows))
+
+    def test_record_carries_the_target_range(self):
+        """账本行带一列 target（"lo-hi"）：区间收窄过，没有这一列就分不清是拿哪一套判的。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "style.jsonl")
+            lo, hi = style.target_range(COLD, BOOK)
+            style.record(path, "over_target", "改不了，放行", NOW, target=(lo, hi))
+            style.record(path, "over_target", "改不了，放行", NOW)      # 不给就不带这一列
+            rows = [json.loads(line) for line in
+                    Path(path).read_text(encoding="utf-8").splitlines()]
+            self.assertEqual("%d-%d" % (lo, hi), rows[0]["target"])
+            self.assertNotIn("target", rows[1], "不给 target 时旧行格式一个字都没变")
+
+    def test_record_refuses_a_bad_target(self):
+        """target 不是一对整数、也不是非空字符串：当场抛，不许写一行读不懂的账。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in ((1, 2, 3), "", "   ", 24, (True, 24), (8.0, 24), [8]):
+                with self.assertRaises(ValueError):
+                    style.record(os.path.join(tmp, "style.jsonl"), "over_target", "改不了", NOW,
+                                 target=bad)
 
     def test_record_refuses_row_without_a_reason(self):
         with tempfile.TemporaryDirectory() as tmp:

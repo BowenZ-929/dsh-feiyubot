@@ -245,7 +245,8 @@ class ConversationAnswerTest(unittest.TestCase):
                            % (normal, max_chars))
         self.assertEqual(normal, reply_conf["default"], "default 要跟着平常走")
 
-        # 一段不超预算、但超过嘴的切分线的回复：真链路里该切成 2–3 泡。
+        # 一段不超预算、但超过嘴的切分线的回复：真链路里该切成多泡（每泡 1–2 句；
+        # max_parts=12 只是防炸上限）。旧的「2–3 泡」口径已退役。
         sentence = "你问医院那回事，我记得的，是陪你妈去复查对吧。花生过敏我也记着，别再吃带花生的点心了。"
         reply_text = sentence
         while len(reply_text) <= max_chars:

@@ -6,10 +6,14 @@
 1. 三种形状各说一次，说的都是数据里那句（没被闸拦，也不是客服腔）；
 2. **拒绝的话照样过闸**：把某条说法人为写成客服腔，必须被条款拦下——「这是拒绝」不是免检章；
 3. 三形状都有事件可投：事件带 shape / 完整名 / why / ts，投递只走注入的 sink（None 就是不投）；
-4. 账本记三行（refuse.jsonl），sent 落进每一行，「投过没投过」不必猜。
+4. 账本记三行（refuse.jsonl），sent 落进每一行，「投过没投过」不必猜；
+5. 软转向（soft）也是拒绝：她真说过的那段「这个啊 + 转移 + 反问」要认出来，原话一个字符都不改、
+   事件照旧记 refused-topic、账本那行记 shape=soft；而正面答了（时间词/数字）的一段一律不算，
+   没有原问题（asked）时只报「判不了」，不报「不是拒绝」。
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import tempfile
@@ -39,6 +43,18 @@ COURTESY_IDS = ("courtesy-open", "courtesy-close")
 # 说法自己的规矩（长度上下限、破折号、禁用词表）也在数据里：测试里一个阈值、一个词都不写死
 RULES = BOOK["style_rules"]
 PUNCT = load("policy")["visible"]["strip"]      # 去标点借现成那张可见字符表，不另造一份
+
+# 软转向那一节的判据（词表与理由都在数据里：测试里一个阈值、一个理由模板都不写死）
+SOFT = BOOK["soft"]
+
+# 她真说过的那段：开头垫话 + 转移 + 反问，一个正面回答的字都没有
+SOFT_ANSWER = ("……这个啊。鱼在海里游着游着，有些同伴就游远了，不算丢下……"
+               "行了行了，我又不是不能自己待着。倒是你，怎么突然问这个。")
+SOFT_ASKED = "你以前是不是也被人丢下过？"
+
+# 正面答了的一段（我妈几点做手术那段的答）：时间词与数字都在里面
+PLAIN_ANSWER = "明天上午九点做，第二台，我陪她去。"
+PLAIN_ASKED = "我妈明天几点做手术？"
 
 
 def _copy_book() -> dict:
@@ -293,6 +309,235 @@ class DataIsBrokenLoudly(unittest.TestCase):
         with self.assertRaises(RefusalBroken) as caught:
             refusal.enforce("topic", BOOK, CLAUSES, now=None)
         self.assertIn("时刻", str(caught.exception))
+
+
+class SoftRedirectIsStillARefusal(unittest.TestCase):
+    """第 5 条之一：那句「这个啊 + 转向 + 反问」要认成拒绝，而且一个字符都不许改。"""
+
+    def test_scan_reads_the_words_she_actually_said(self):
+        scan = refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED)
+        self.assertIsInstance(scan, refusal.SoftVerdict)
+        self.assertTrue(scan.is_soft)
+        self.assertEqual(scan.status, refusal.SOFT_STATUS_OK)
+        self.assertIn(scan.opener, SOFT["openers"])                 # 命中的词来自数据
+        self.assertIn(scan.redirect, SOFT["redirect_markers"])
+        self.assertIn(scan.question, SOFT["question_markers"])
+        self.assertTrue(scan.reason)
+
+    def test_enforce_makes_it_soft_and_leaves_the_text_alone(self):
+        sent = []
+        verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, asked=SOFT_ASKED,
+                                  answer=SOFT_ANSWER, refuse_sink=sent.append)
+        self.assertEqual(verdict.shape, refusal.KIND_SOFT)
+        self.assertEqual(verdict.kind, refusal.KIND_SOFT)
+        self.assertEqual(verdict.full_name, FULL_NAMES[SOFT["event_shape"]])
+        self.assertEqual(verdict.text, SOFT_ANSWER)                  # 逐字相同，一个字符都不改
+        self.assertTrue(verdict.refused)
+        self.assertEqual(verdict.gate_decision, SOFT["gate"])         # 她的原话不过闸
+        self.assertTrue(verdict.sent)
+        self.assertIn(SOFT["reasons"]["soft"].split("{")[0], verdict.soft.reason)
+
+    def test_event_is_still_refused_topic_with_the_soft_why(self):
+        sent = []
+        verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, asked=SOFT_ASKED,
+                                  answer=SOFT_ANSWER, refuse_sink=sent.append)
+        self.assertEqual(sent, [verdict.event])                      # 投出去的正是这一条
+        self.assertEqual(set(verdict.event), {"ts", "shape", "full_name", "why"})
+        self.assertEqual(verdict.event["shape"], SOFT["event_shape"])
+        self.assertEqual(verdict.event["full_name"], FULL_NAMES[SOFT["event_shape"]])
+        self.assertEqual(verdict.event["why"], SOFT["why"])           # 措辞来自数据
+        self.assertEqual(verdict.event["ts"], NOW)
+
+    def test_ledger_row_says_shape_soft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, asked=SOFT_ASKED,
+                                      answer=SOFT_ANSWER, refuse_sink=lambda event: None)
+            row = refusal.record(path, verdict.event, verdict.sent, verdict.kind)
+            line = Path(path).read_text(encoding="utf-8")
+            self.assertIn('"shape": "soft"', line)                   # 账本行原文里就有
+            self.assertEqual(json.loads(line)["shape"], refusal.KIND_SOFT)
+            self.assertEqual(row["shape"], refusal.KIND_SOFT)
+            self.assertEqual(row["full_name"], FULL_NAMES[SOFT["event_shape"]])
+
+
+class PositiveAnswerIsNotARefusal(unittest.TestCase):
+    """第 5 条之二：正面答了（时间词 / 数字）就一律不算软转向。"""
+
+    def test_scan_says_it_was_answered(self):
+        scan = refusal.soft_scan(PLAIN_ANSWER, PLAIN_ASKED)
+        self.assertFalse(scan.is_soft)
+        self.assertEqual(scan.status, refusal.SOFT_STATUS_OK)        # 比过了，只是比出来不是
+        hits = [word for word in SOFT["answer_markers"]
+                if word in PLAIN_ANSWER and word in scan.reason]
+        self.assertTrue(hits, scan.reason)                           # 判词点名了命中的那条信号
+
+    def test_enforce_keeps_it_hard(self):
+        verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, asked=PLAIN_ASKED,
+                                  answer=PLAIN_ANSWER, refuse_sink=lambda event: None)
+        self.assertNotEqual(verdict.shape, refusal.KIND_SOFT)
+        self.assertEqual(verdict.kind, refusal.KIND_HARD)
+        self.assertFalse(verdict.soft.is_soft)
+
+    def test_no_soft_event_and_no_new_row(self):
+        """出口就是这么用软转向的：判成才投、才记。这一段判不成，于是事件一条不投、账本一行不添。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            sent = []
+            scan = refusal.soft_scan(PLAIN_ANSWER, PLAIN_ASKED)
+            if scan.is_soft:
+                verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, asked=PLAIN_ASKED,
+                                          answer=PLAIN_ANSWER, refuse_sink=sent.append)
+                refusal.record(path, verdict.event, verdict.sent, verdict.kind)
+            self.assertFalse(scan.is_soft)
+            self.assertEqual(sent, [])                               # 一条拒绝事件都没投
+            self.assertFalse(Path(path).exists())                    # 账本一行都没添
+
+
+class WithoutTheQuestionItCannotJudge(unittest.TestCase):
+    """第 5 条之三：没有原问题就是「判不了」——不是「不是拒绝」，两者不许混。"""
+
+    def test_no_asked_is_unavailable(self):
+        for asked in (None, "", "   \n"):
+            scan = refusal.soft_scan(SOFT_ANSWER, asked)
+            self.assertEqual(scan.status, refusal.SOFT_STATUS_UNAVAILABLE)
+            self.assertFalse(scan.is_soft)
+            self.assertEqual((scan.opener, scan.redirect, scan.question), ("", "", ""))
+            self.assertIn("判不了", scan.reason)
+            self.assertIn(SOFT["reasons"]["unavailable"].split("：")[0], scan.reason)
+
+    def test_unavailable_reads_differently_from_not_a_refusal(self):
+        missing = refusal.soft_scan(SOFT_ANSWER, None)
+        not_soft = refusal.soft_scan("行了行了，我知道了。", SOFT_ASKED)
+        self.assertNotEqual(missing.status, not_soft.status)         # 一个没比过，一个比过了
+        self.assertNotEqual(missing.reason, not_soft.reason)
+
+    def test_the_verdict_has_no_door_to_send_anything(self):
+        """判词本身不投事件：soft_scan 连 sink 的口子都没有（没口子＝投不出去）。"""
+        self.assertEqual(set(inspect.signature(refusal.soft_scan).parameters),
+                         {"answer", "asked", "table"})
+
+    def test_enforce_takes_the_hard_road_when_the_question_is_missing(self):
+        sent = []
+        verdict = refusal.enforce("topic", BOOK, CLAUSES, now=NOW, refuse_sink=sent.append)
+        self.assertEqual(verdict.kind, refusal.KIND_HARD)
+        self.assertEqual(verdict.event["why"], BOOK["shapes"]["topic"]["why"])  # 不是软转向那句
+        self.assertEqual(verdict.soft.status, refusal.SOFT_STATUS_UNAVAILABLE)  # 判不了如实挂着
+
+
+class HardShapesStayHard(unittest.TestCase):
+    """第 5 条之四：软转向接进来以后，三句硬拒绝的说法与事件一个字都没变。"""
+
+    def test_three_lines_stay_hard_letter_for_letter(self):
+        for shape in SHAPES:
+            bare = refusal.enforce(shape, BOOK, CLAUSES, now=NOW, refuse_sink=lambda event: None)
+            scanned = refusal.enforce(shape, BOOK, CLAUSES, now=NOW, refuse_sink=lambda event: None,
+                                      asked=SOFT_ASKED, answer=PLAIN_ANSWER)
+            self.assertEqual(bare.kind, refusal.KIND_HARD)
+            self.assertEqual(scanned.kind, refusal.KIND_HARD)
+            self.assertEqual(scanned.shape, shape)
+            self.assertEqual(scanned.text, BOOK["shapes"][shape]["say"])
+            self.assertEqual(scanned.event, bare.event)              # 事件逐字不变
+            self.assertEqual((scanned.gate_decision, scanned.reason),
+                             (bare.gate_decision, bare.reason))
+
+    def test_hard_rows_keep_the_short_shape_when_none_is_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            event = refusal.event("mood", "有理由", NOW, table=BOOK)
+            row = refusal.record(path, event, True)
+            self.assertEqual(row["shape"], "mood")                   # 不给就沿用旧行格式
+            self.assertEqual(set(json.loads(Path(path).read_text(encoding="utf-8"))), set(row))
+            hard = refusal.record(path, event, True, refusal.KIND_HARD)
+            self.assertEqual(hard["shape"], refusal.KIND_HARD)       # 给了就记大类
+
+    def test_record_refuses_a_blank_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                refusal.record(os.path.join(tmp, "refuse.jsonl"),
+                               refusal.event("topic", "有理由", NOW, table=BOOK), True, "  ")
+
+
+class SoftJudgementFollowsTheData(unittest.TestCase):
+    """第 5 条之五：判据改数据即改行为——openers 清空，同一段就不再是软转向。"""
+
+    def _book_in(self, tmp: str, edit) -> dict:
+        """把整份数据写进临时目录、改一处，再按那个根目录读回来（验的是「读数据」）。"""
+        book = _copy_book()
+        edit(book)
+        Path(tmp, "refusal.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
+        return load("refusal", root=tmp)
+
+    def test_clearing_the_openers_stops_the_recognition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleared = self._book_in(tmp, lambda book: book["soft"].__setitem__("openers", []))
+            self.assertEqual(cleared["soft"]["openers"], [])
+            scan = refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED, table=cleared)
+            self.assertFalse(scan.is_soft)                           # 同一段，词表清空就不认了
+            verdict = refusal.enforce("topic", cleared, CLAUSES, now=NOW, asked=SOFT_ASKED,
+                                      answer=SOFT_ANSWER, refuse_sink=lambda event: None)
+            self.assertEqual(verdict.kind, refusal.KIND_HARD)
+            self.assertEqual(verdict.text, cleared["shapes"]["topic"]["say"])
+        self.assertTrue(refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED).is_soft)   # 原数据照样认
+
+    def test_clearing_both_marker_tables_stops_it_too(self):
+        def clear_both(book):
+            book["soft"]["redirect_markers"] = []
+            book["soft"]["question_markers"] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cleared = self._book_in(tmp, clear_both)
+            self.assertFalse(refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED, table=cleared).is_soft)
+
+    def test_either_marker_table_is_enough(self):
+        """转移与反问是「或」不是「与」：只留一边，同一段照样认得出（判据写在数据那张表上）。"""
+        for kept, dropped in (("redirect_markers", "question_markers"),
+                              ("question_markers", "redirect_markers")):
+            with tempfile.TemporaryDirectory() as tmp:
+                cleared = self._book_in(tmp, lambda book: book["soft"].__setitem__(dropped, []))
+                self.assertTrue(refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED, table=cleared).is_soft,
+                                kept)
+
+    def test_missing_soft_section_raises_and_names_it(self):
+        book = _copy_book()
+        del book["soft"]
+        with self.assertRaises(RefusalBroken) as caught:
+            refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED, table=book)
+        self.assertIn(refusal.SOFT_KEY, str(caught.exception))
+
+    def test_missing_key_names_key_and_section(self):
+        book = _copy_book()
+        del book["soft"]["answer_markers"]
+        with self.assertRaises(RefusalBroken) as caught:
+            refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED, table=book)
+        self.assertIn("answer_markers", str(caught.exception))
+
+    def test_broken_pattern_raises_instead_of_reading_as_a_miss(self):
+        book = _copy_book()
+        book["soft"]["openers"] = ["(这个啊"]
+        with self.assertRaises(RefusalBroken) as caught:
+            refusal.soft_scan(SOFT_ANSWER, SOFT_ASKED, table=book)
+        self.assertIn("(这个啊", str(caught.exception))
+
+
+class SoftEdges(unittest.TestCase):
+    """第 5 条之六：只有语气词、或只有转移没有垫话，都不是软转向。"""
+
+    def test_only_an_opener_is_not_a_redirect(self):
+        scan = refusal.soft_scan("行了行了，我知道了。", SOFT_ASKED)
+        self.assertFalse(scan.is_soft)
+        self.assertIn(scan.opener, SOFT["openers"])                  # 垫话确实命中了
+        self.assertEqual((scan.redirect, scan.question), ("", ""))    # 可没有转移，也没有反问
+
+    def test_redirect_without_an_opener_is_not_soft(self):
+        scan = refusal.soft_scan("鱼游得挺远的。倒是你呢？", SOFT_ASKED)
+        self.assertFalse(scan.is_soft)
+        self.assertEqual(scan.opener, "")
+        self.assertTrue(scan.redirect or scan.question)              # 转移/反问在，但没有垫话
+
+    def test_leading_punctuation_does_not_hide_the_opener(self):
+        plain = "这个啊，倒是你呢？"
+        self.assertTrue(refusal.soft_scan(plain, SOFT_ASKED).is_soft)
+        self.assertTrue(refusal.soft_scan("……" + plain, SOFT_ASKED).is_soft)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,10 @@
 organs/mouth/data/style_target.json（经 warehouse.load 只读借入），代码里一个数都不写——改区间是
 改数据，不是改代码；数据缺键当场抛 StyleBroken，不补默认值。
 
+区间收窄过一次，旧值没删：它们挪在 style_target.json 的 retired 节里（带 reason 与日期）标作废。
+为什么收窄也留在那句 reason 里——她 56 字那句在旧的第 4 档（24..120）里合法 pass，那是区间本身宽，
+不是闸没咬住。账本行因此多了一列 target（"lo-hi"），好分辨这一句是拿哪一套区间判的。
+
 **两者不互相覆盖，写在这里就是钉死它**：核的五档预算是**上限**（超了由核截断），嘴的目标区间是
 **目标**（超了由嘴重写一次，不截断也不发脾气）。所以：
 
@@ -152,14 +156,21 @@ def path_of(path: Optional[Any] = None) -> Path:
     return target / LEDGER_NAME
 
 
-def record(path: Optional[Any], decision: str, reason: str, now: Any) -> Dict[str, Any]:
-    """往长度账本追一行：ts / decision / reason。时间由调用方给，本函数不取时钟。
+def record(path: Optional[Any], decision: str, reason: str, now: Any,
+           target: Any = None) -> Dict[str, Any]:
+    """往长度账本追一行：ts / decision / reason（给了 target 就再带一列目标区间）。时间由调用方给。
+
+    target 是这一档的目标区间（一对整数，落成 "lo-hi"；也可直接给一个现成的词），写进来是为了
+    分辨改前改后：同一句在旧区间里 pass、新区间里 over_target，账本上一眼看得见是拿哪一套判的。
+    不给就不带这一列（旧行格式因此一个字都没变）。
 
     写不进去就照实抛——记不上账是失败，不是「这一句没超」。记的是判词与那句人话，
     整句原文不进账本（人话里已经带着字数与区间，复盘够用）。
     """
     row = {"ts": _stamp(now), "decision": str(decision or "").strip(),
            "reason": str(reason or "").strip()}
+    if target is not None:
+        row["target"] = _target_word(target)
     if not row["decision"]:
         raise ValueError("长度账本必须带 decision：不知道这一句最后怎么处理的，这一行记了也没用")
     if not row["reason"]:
@@ -169,6 +180,23 @@ def record(path: Optional[Any], decision: str, reason: str, now: Any) -> Dict[st
     with open(target, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     return row
+
+
+def _target_word(target: Any) -> str:
+    """把目标区间落成一个 "lo-hi" 词：一对整数就拼，现成的非空字符串就照用，别的抛。
+
+    这一列只为分辨「改前改后」，所以它必须是一段能读的字，不是一个看不懂的结构：
+    回头翻账本的人要能一眼看出这一句是拿哪一套区间判的。
+    """
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    if isinstance(target, (tuple, list)) and len(target) == 2:
+        lo, hi = target
+        if (isinstance(lo, int) and not isinstance(lo, bool)
+                and isinstance(hi, int) and not isinstance(hi, bool)):
+            return "%d-%d" % (lo, hi)
+    raise ValueError("长度账本的 target 要给一对整数（这一档的 lo 与 hi），或一个现成的非空字符串；"
+                     "读到的 %r 两样都不是" % (target,))
 
 
 def _over_target(body: str, before: int, lo: int, hi: int, fields: Dict[str, Any],

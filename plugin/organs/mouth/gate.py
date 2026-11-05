@@ -17,12 +17,13 @@
 
 两道出口，缺一道都不算拦住：
 
-- check(text, clauses, inject=None, policy=None) -> Hit | None：命中返回一条 Hit，里面带一句人话
-  原因（含命中的那段原文）；没命中返回 None。**不返回布尔**——布尔说不出「为什么拦」，日志与面板
-  也就没法复盘，只能再翻译一次。
-- enforce(text, clauses, rewrite, sink=None, inject=None, policy=None) -> Verdict：命中一次 → 交给
-  注入的 rewrite 改一次 → 再 check；还命中就 decision="dropped"、text 留空串，两次命中的原因都按
-  发生顺序留在 hits 里。Verdict.audit 是这一轮复述审计的读数（status / hit / lcs_len / threshold）。
+- check(text, clauses, inject=None, policy=None, action=None) -> Hit | None：命中返回一条 Hit，
+  里面带一句人话原因（含命中的那段原文）；没命中返回 None。**不返回布尔**——布尔说不出「为什么拦」，
+  日志与面板也就没法复盘，只能再翻译一次。
+- enforce(text, clauses, rewrite, sink=None, inject=None, policy=None, action=None) -> Verdict：命中
+  一次 → 交给注入的 rewrite 改一次 → 再 check；还命中就 decision="dropped"、text 留空串，两次命中的
+  原因都按发生顺序留在 hits 里。Verdict.audit 是这一轮复述审计的读数（status / hit / lcs_len /
+  threshold），Verdict.action_status 是动作括注那一关判没判过（"ok" / "not-checked"）。
 
 rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端：闸只管判，不改写。
 传 None 视为「改不了」，直接弃掉——**出口不许 fail-open**，改不了就别说这句。rewrite 自己抛错、
@@ -53,6 +54,13 @@ Verdict.audit（status 不是 "ok" 就是没真的比过），或者直接调 or
 **这条不影响「缺料不弃这句」**：审计判不了时 enforce 照常按条款走，decision 与既有五种结局一字
 不变，只是 audit.status 如实写着 audit-unavailable——缺料是调用侧的问题，不拿她的沉默来兜。
 
+**动作＋场景是第三道判据（第三轮 B）**：她可以写自己的动作与表情，但不许顺手写我们没给过的场景。
+判据与词表全在 organs/mouth/action_note.py 与 data/action_note.json，闸只负责把它当成一次普通命中
+接进来：action 是调用方给的判据表，**None 就整段不判**——不判绝不是通过，所以判没判挂在
+Verdict.action_status 上（"ok" 真的判过，"not-checked" 这一轮没给表），由 api 层照实透出。
+命中走同一条路（改一次还不行就弃），Hit 里的 clause_id 与 kind 也取自数据，弃言账本里看到的因此
+是一个能指认的名字。判据表形状坏掉由 action_note 当场抛 ActionBroken，照实往上抛。
+
 纯函数：入参只有一段文本与一张只读的条款清单，出参只有结构化数据；不碰时钟、不碰随机数、
 不联网、不碰宿主 IO（本文件不 import time / datetime / random），所以能离线预览，也能被单独替换。
 """
@@ -62,6 +70,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import action_note
 from .audit import AuditResult, audit as _audit
 
 __all__ = ["ClauseBroken", "Hit", "Verdict", "check", "enforce"]
@@ -104,33 +113,44 @@ class Verdict:
     # 这一轮复述审计的读数（audit.AuditResult）：status 不是 "ok" 就是没真的比过，别当成通过；
     # 记的是**进门那一段**（调用方给的 text）的读数，改写后的那次只为决定 decision，不覆盖它。
     audit: Optional[AuditResult] = None
+    # 动作括注那一关判没判过：action_note.STATUS_OK（真的判过）或 STATUS_NOT_CHECKED（没给判据表）。
+    # 与 audit 同理——「没判」不是「判过没问题」，两件事必须分得开，所以默认就是 not-checked。
+    action_status: str = action_note.STATUS_NOT_CHECKED
 
 
 def check(text: str, clauses: Sequence[Mapping[str, Any]],
-          inject: Any = None, policy: Optional[Mapping[str, Any]] = None) -> Optional[Hit]:
-    """看这段字有没有踩条款、有没有在复述注入的原文：命中返回一条 Hit，没命中返回 None。
+          inject: Any = None, policy: Optional[Mapping[str, Any]] = None,
+          action: Optional[Mapping[str, Any]] = None) -> Optional[Hit]:
+    """看这段字有没有踩条款、有没有在动作里带场景、有没有在复述注入的原文：命中给一条 Hit，否则 None。
 
     **返回的不是布尔。** Hit 里带一句人话原因，原因里含这次命中的那段原文，所以日志、面板、
     复盘都能直接用这句话，不必再翻译一遍。
 
-    先判条款（既有逻辑不动），条款没命中再看审计：按 clauses 的先后顺序逐条 re.search，返回第一
-    条命中的（顺序即优先级）；零宽正则也会命中，那种情况下原因里改说位置，免得出现一对空引号。
+    顺序钉死：条款 → 动作括注 → 复述审计。条款按 clauses 的先后顺序逐条 re.search，返回第一条命中
+    的（顺序即优先级）；零宽正则也会命中，那种情况下原因里改说位置，免得出现一对空引号。动作括注
+    与条款一样是「怎么写」的形状判据，所以紧跟在条款后面；审计管的是「说的事是不是抄来的」，
+    仍是最后一关。
 
     **没给 inject 就整段不跑审计**：没有料可比的审计既不是通过、也不是拦住，而这个返回类型装不下
     第三种状态。要区分 ok 与 audit-unavailable，看 enforce 的 Verdict.audit 或直接调 audit()。
+    **没给 action 同样整段不跑动作括注**，道理一样：没判不是通过，判没判看 Verdict.action_status。
     """
     prepared, _disabled = _prepared(clauses)
     body = text or ""
     found = _scan(prepared, body)
     if found is not None:
         return found
+    noted = _noted(body, action)
+    if noted is not None:
+        return noted
     return _recited(body, inject, policy)
 
 
 def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             rewrite: Optional[Callable[[str], str]] = None,
             sink: Optional[Callable[[str, str], None]] = None,
-            inject: Any = None, policy: Optional[Mapping[str, Any]] = None) -> Verdict:
+            inject: Any = None, policy: Optional[Mapping[str, Any]] = None,
+            action: Optional[Mapping[str, Any]] = None) -> Verdict:
     """过闸：命中一次 → 用注入的 rewrite 改一次 → 再 check；还命中就弃掉这句。
 
     rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端。五种结局：
@@ -149,41 +169,52 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     返回值里的 audit 是这一轮审计的读数（audit.AuditResult）：status 为 "ok" 才算真的比过，
     为 "audit-unavailable" 表示没拿到注入原文、判不了——**这时决策照常按条款走，不弃这句**，
     但状态如实带出来，api 层照实透出（缺料不是清白，也不是拦）。
+
+    动作括注（第三轮 B）同样接在这条路上，判在条款与审计之间：命中就当一次普通命中。给没给判据表
+    看 action_status——"ok" 表示这一轮真的判过，"not-checked" 表示没给表、这一关没跑；**没跑不是
+    通过**，两者在返回值里必须分得开（这也是它不肯塞一条假 Hit 进 check 的原因）。
     """
     prepared, disabled = _prepared(clauses)
     body = text or ""
     found = _scan(prepared, body)
     seen = _audit(body, inject, policy)
-    first = found if found is not None else _from_audit(seen)
+    noted = _noted(body, action)
+    judged = action_note.STATUS_OK if _has_action(action) else action_note.STATUS_NOT_CHECKED
+    first = found if found is not None else (noted if noted is not None else _from_audit(seen))
     if first is None:
-        return Verdict(text=body, decision="pass", hits=[],
-                       reason="没命中任何条款，这句照发。", disabled=disabled, audit=seen)
+        reason = "没命中任何条款，这句照发。"
+        if _has_action(action):
+            reason += action_note.clear_reason(action)     # 放行要有据：这一关查过了也要说出来
+        return Verdict(text=body, decision="pass", hits=[], reason=reason,
+                       disabled=disabled, audit=seen, action_status=judged)
     if rewrite is None:
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s也没给重写器，这句改不了，弃掉不发。" % _lead(first),
-                                disabled=disabled, audit=seen), sink)
+                                disabled=disabled, audit=seen, action_status=judged), sink)
     try:
         again = rewrite(body)
     except Exception as exc:          # 重写失败只算「改不了」，出口不许抛错
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s重写时出了错（%s：%s），这句改不了，弃掉不发。"
                                        % (_lead(first), type(exc).__name__, exc),
-                                disabled=disabled, audit=seen), sink)
+                                disabled=disabled, audit=seen, action_status=judged), sink)
     rewritten = again if isinstance(again, str) else ("" if again is None else str(again))
     if not rewritten.strip():
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s重写回来是空的，等于改不了，弃掉不发。" % _lead(first),
-                                disabled=disabled, audit=seen), sink)
+                                disabled=disabled, audit=seen, action_status=judged), sink)
     retried = _scan(prepared, rewritten)
-    second = retried if retried is not None else _from_audit(_audit(rewritten, inject, policy))
+    again_noted = _noted(rewritten, action)
+    second = retried if retried is not None else (
+        again_noted if again_noted is not None else _from_audit(_audit(rewritten, inject, policy)))
     if second is None:
         return Verdict(text=rewritten, decision="rewritten", hits=[first],
                        reason="%s改写一次后不再命中，发改写后的这句。" % _lead(first),
-                       disabled=disabled, audit=seen)
+                       disabled=disabled, audit=seen, action_status=judged)
     return _dropped(Verdict(text="", decision="dropped", hits=[first, second],
                             reason="%s改了一次还是这样（第二次还是被条款 %r 拦下，命中「%s」），"
                                    "这句弃掉不发。" % (_lead(first), second.clause_id, second.matched),
-                            disabled=disabled, audit=seen), sink)
+                            disabled=disabled, audit=seen, action_status=judged), sink)
 
 
 def _dropped(verdict: Verdict, sink: Optional[Callable[[str, str], None]]) -> Verdict:
@@ -219,6 +250,28 @@ def _from_audit(result: Optional[AuditResult]) -> Optional[Hit]:
         return None
     one = result.hit
     return Hit(clause_id=one.kind, kind=one.seg_kind, matched=one.matched, reason=one.reason)
+
+
+def _noted(text: str, action: Any) -> Optional[Hit]:
+    """动作括注这一关：判「动作里带了没给的场景」就返回一条 Hit；没给判据表就整段不跑。
+
+    clause_id 与 kind 都取自判据表（action_note 带出来的那两个名字），闸不自己造名字——账本里
+    看到的因此是一个数据里能指认的名字。**没给表就返回 None 不是放行**：这一关判没判挂在
+    Verdict.action_status 上（None 与「判过没问题」挤不进同一条通道，所以不塞假 Hit）。
+    表本身形状坏掉由 action_note 当场抛 ActionBroken，照实往上抛。
+    """
+    if not _has_action(action):
+        return None
+    found = action_note.check(text, action)
+    if found is None:
+        return None
+    return Hit(clause_id=found.clause_id, kind=found.kind, matched=found.matched,
+               reason=found.reason)
+
+
+def _has_action(action: Any) -> bool:
+    """给没给判据表：None 就是没给。别的形状一律当成给了，交给 action_note 去报错并指名缺哪一项。"""
+    return action is not None
 
 
 def _has_inject(inject: Any) -> bool:

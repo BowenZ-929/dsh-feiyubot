@@ -1,35 +1,55 @@
 """嘴的切分：只回答「切在哪」，不管「隔多久」。
 
-合法切点只落在语义停顿上：句末标点（。！？!?…~～，跳过尾部引号括号）、分号（；;）、
-逗号（，,）、换行。**不按字数切。** 只有单段本身就超过 policy 的 max_chars 时才允许硬切，
-硬切出来的那一泡带 degraded=true 与一句人话 reason，好让出口和日志一眼看出这句是被字数逼的。
+**一条一句，一泡最多两句。** 按「换行 + 句末标点」断句（一条正则，见 _sentences），断出来的句子
+按顺序攒：一泡最多 policy 的 split.sentences_per_part 句（默认 2），攒满就另起一泡。**段间延迟仍归
+pace.py**：本文件只填 text / degraded / reason，gap_before 与 send_at 留给 pace.fill；两个文件互不
+import，谁也不替对方算。
 
-**切点有层级，句末优先于逗号。** 按总长算出来的是「目标切点」——它只保证长度匀，不保证断得
-好听，于是常出现一泡泡在逗号上收尾（合法但不是最好的切点）。所以在目标切点**前后各一个窗口**
-（policy 的 split.cut_window_chars）以内再挑一次：窗口里有更好层级的合法切点就换过去，没有就
-原样退回。层级序列本身也在数据里（split.cut_preference，按顺序从好到差：句末 > 分号 > 换行 >
-逗号），代码只认「第几个」，不认「是哪一个字」。窗口换来的是切点质量，不是放松判据：一泡仍然
-不超过 max_chars、条数上限照旧、拼回来逐字等于原文、硬切照旧带 degraded。
+**整句是动作就自成一泡，不和台词挤一条。** 动作行只认两种形态，两张表都借自
+organs/mouth/data/action_note.json（借阅，不另造一份）：
+- 括号形态：整句去空白后以括号开头、以对应括号结尾（括号对就是 action_note.json 的 brackets）；
+- 无括号形态：整句以身体部位开头（body_parts）、不含人称代词（policy 的 split.action_pronouns）、
+  句长不超过 policy 的 split.action_line_max_chars。
+**无括号那种形态是必要的，不是补充**：验收那句「……谁肥了。尾巴甩了一下。蓝鲸才叫肥。我这是正常
+体型。」里，动作句没有括号，却必须单独成泡——只认括号，这条验收就漏了。反过来「我这是正常体型。」
+带人称代词，是台词不是动作，照旧并进隔壁泡。
 
-切点不许落在词中间：左边不许以连接词/助词收尾（的、地、得、了、着、和、与、跟、把、被、而、
-但、或、且、就、都、也、还），右边不许以 的/地/得/了/着 开头。两张字表都在
+**两句上限优先于条数上限。** 旧口径「最多 3 泡」与「每泡最多两句」不能同时成立（300 字十来句按
+两句一泡就是 6–7 泡），所以 max_parts 从判据退成防炸上限（默认 12，写在数据里）：只有泡数真超过它
+才合并相邻两泡，合并优先挑还没攒满两句的那一对——两句上限是主判据，防炸上限是例外，跟旧
+max_parts 压过 max_chars 是同一个道理，合并也不丢字。
+
+**max_chars 退成兜底，语义不变。** 旧口径里「每泡不超 max_chars」不再是主判据，只在**单句自己就
+超过 max_chars** 时上场：先在语义停顿处切（句末 > 分号 > 换行 > 逗号，切点落不到词中间），一片还是
+超长才按字数硬切，硬切出来的那一泡带 degraded=true 与一句人话 reason，好让出口和日志一眼看出这句
+是被字数逼的。这条兜底路上 split.cut_window_chars 仍有用：按总长算出来的是目标切点，窗口里还有更
+好层级的合法切点就换过去（「句末优先于逗号」这句旧话就活在这一段里）；普通段落不再需要它——切点
+本来就落在句末。
+
+切点不许落在词中间：左边不许以连接词/助词收尾（的、地、得、了、着、和、与、跟、把、被、而、但、
+或、且、就、都、也、还），右边不许以 的/地/得/了/着 开头。两张字表都在
 organs/mouth/data/policy.json，不在代码里——加一批字是改数据，不是改算法。
 
-条数上限取自 policy（默认 3 泡）：能并就并，多出来的并进最后一泡，**不丢字**——
-把这批拼回去，与原文逐字相等。
+句数、条数、长度上限、词表、模板一律在数据里：判据与阈值在 policy.json 的 split 节，动作的括号对
+与身体部位在 action_note.json。四条约定一起成立：判据全在数据、兜底照旧带 degraded、动作自成一泡、
+拼回去与原文逐字相等。
 
-纯函数：入参只有「文本 + 只读的政策 dict」，出参只有结构化数据；不碰时钟、不碰随机数、
-不碰宿主 IO（本文件不 import time / datetime / random），所以能离线预览，也能被单独替换。
-间隔是 pace.py 的事，两个文件互不 import。
+纯函数：入参只有「文本 + 只读的政策 dict + 只读的动作表」，出参只有结构化数据；不碰时钟、不碰随机
+数、不写盘（本文件不 import time / datetime / random），所以能离线预览，也能被单独替换。间隔是
+pace.py 的事，两个文件互不 import。
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, List, Mapping, Sequence, Set
+from typing import Any, List, Mapping, Optional, Sequence, Set
 
-from .model import Batch, Policy, Seg, need, section
+from .model import Batch, Policy, PolicyMiss, Seg, need, section
+from .warehouse import load
 
 __all__ = ["split"]
+
+ACTION_TABLE = "action_note"      # 动作行那两张表（brackets / body_parts）借自这份数据，不另造
 
 
 @dataclass(frozen=True)
@@ -45,10 +65,32 @@ class _Piece:
     tier: int = 0
 
 
-def split(text: str, policy: Policy) -> Batch:
+@dataclass(frozen=True)
+class _Row:
+    """已经切好、还没填节奏的一泡。sentences 与 solo 只给防炸上限挑合并对象用，不进 Seg。"""
+
+    text: str
+    degraded: bool = False
+    reason: str = ""
+    sentences: int = 1      # 这一泡里算几句：动作句算一句，超长兜底切出来的一片也算一句
+    solo: bool = False      # 自成一泡：不许和邻居并（动作行与超长兜底的每一片）
+
+
+@dataclass(frozen=True)
+class _Action:
+    """动作行要用的表：括号对与身体部位借自 action_note.json，人称代词与长度上限取自 policy。"""
+
+    body_parts: Sequence[str]
+    brackets: Sequence[Sequence[str]]
+    pronouns: str
+    max_chars: int
+
+
+def split(text: str, policy: Policy, action_table: Optional[Mapping[str, Any]] = None) -> Batch:
     """把一段文本切成有序的几泡。
 
-    只填 text / degraded / reason；gap_before 与 send_at 留 0.0、summary 留空，等 pace.fill 填。
+    action_table 是动作行判据表（warehouse.load("action_note") 读出来的那份）；传 None 就现读仓库里的
+    默认表。只填 text / degraded / reason；gap_before 与 send_at 留 0.0、summary 留空，等 pace.fill 填。
     空白文本返回空批次（没有要发的泡）。
     """
     rules = section(policy, "split")
@@ -57,11 +99,171 @@ def split(text: str, policy: Policy) -> Batch:
         return Batch(parts=[], summary="")
     cap = int(need(rules, "max_chars"))
     max_parts = int(need(rules, "max_parts"))
+    per_part = int(need(rules, "sentences_per_part"))
+    action = _action_rules(rules, action_table)
+    rows = _throttle(_rows(body, rules, cap, per_part, action), max_parts)
+    return Batch(parts=_segs(rows), summary="")
+
+
+def _rows(body: str, rules: Mapping[str, Any], cap: int, per_part: int,
+          action: _Action) -> List[_Row]:
+    """句子攒成一泡一泡：动作句与超长句各自成泡，其余每泡最多 per_part 句。
+
+    超长句先把攒着的那一泡倒掉再切，切出来的几片顺序不变——拼回去仍是原文。
+    """
+    rows: List[_Row] = []
+    group: List[str] = []
+    for sentence in _sentences(body, rules):
+        if len(sentence) > cap:
+            rows.extend(_group_rows(group, per_part))
+            group = []
+            rows.extend(_overflow_rows(sentence, rules, cap))
+            continue
+        if _is_action(sentence, rules, action):
+            rows.extend(_group_rows(group, per_part))
+            group = []
+            rows.append(_Row(sentence, solo=True))
+            continue
+        group.append(sentence)
+    rows.extend(_group_rows(group, per_part))
+    return rows
+
+
+def _group_rows(sentences: Sequence[str], per_part: int) -> List[_Row]:
+    """普通句子按 per_part 句一泡排开：一泡里句数只由数据定，代码里数的是「第几句」。"""
+    rows: List[_Row] = []
+    for start in range(0, len(sentences), per_part):
+        group = sentences[start:start + per_part]
+        rows.append(_Row("".join(group), sentences=len(group)))
+    return rows
+
+
+def _overflow_rows(sentence: str, rules: Mapping[str, Any], cap: int) -> List[_Row]:
+    """单句自己就超过 max_chars：老判据原样上场（先在停顿处切，切不动才按字数硬切 + degraded）。
+
+    这是兜底，所以走的还是旧那条路：语义停顿切 → 硬切 → 按长度排泡 → 窗口换更好的切点。
+    """
     ranks = {str(name): index for index, name in enumerate(need(rules, "cut_preference"))}
     window = int(need(rules, "cut_window_chars"))
-    pieces = _pieces(_segments(body, rules), cap, rules, ranks)
-    ends = _plan(pieces, cap, max_parts)
-    return Batch(parts=_build(pieces, _prefer(pieces, ends, cap, window)))
+    max_parts = int(need(rules, "max_parts"))
+    pieces = _pieces(_segments(sentence, rules), cap, rules, ranks)
+    ends = _prefer(pieces, _plan(pieces, cap, max_parts), cap, window)
+    return [_Row(part.text, part.degraded, part.reason, solo=True) for part in _build(pieces, ends)]
+
+
+def _throttle(rows: Sequence[_Row], max_parts: int) -> List[_Row]:
+    """防炸上限：泡数超过 max_parts 才合并，优先并「还没攒满两句」的相邻两泡。
+
+    两句上限是主判据，max_parts 只是例外：真到这一步（比如一大片全是动作行），宁可让两句上限退一步，
+    也不许让泡数炸开——跟旧 max_parts 压过 max_chars 是同一个道理，合并只拼字，一个字也不丢。
+    """
+    out = list(rows)
+    while len(out) > max_parts:
+        chosen = None
+        for index in range(len(out) - 1):
+            left, right = out[index], out[index + 1]
+            if left.solo or right.solo:
+                continue                                    # 动作行与超长兜底那几片先不动
+            key = (left.sentences + right.sentences, len(left.text) + len(right.text))
+            if chosen is None or key < chosen[0]:
+                chosen = (key, index)
+        index = (chosen[1] if chosen is not None else
+                 min(range(len(out) - 1), key=lambda at: len(out[at].text) + len(out[at + 1].text)))
+        out[index:index + 2] = [_join_rows(out[index], out[index + 1])]
+    return out
+
+
+def _join_rows(left: _Row, right: _Row) -> _Row:
+    """两泡并一泡：degraded 取或，理由去重后接起来（被字数逼过的痕迹不许在合并里消失）。"""
+    reasons = [one for one in (left.reason, right.reason) if one]
+    return _Row(left.text + right.text,
+                degraded=left.degraded or right.degraded,
+                reason="；".join(dict.fromkeys(reasons)),
+                sentences=left.sentences + right.sentences,
+                solo=True)
+
+
+def _segs(rows: Sequence[_Row]) -> List[Seg]:
+    """把切好的泡落成 Seg：节奏留 0.0 等 pace.fill，别的字段一个不动。"""
+    return [Seg(text=row.text, gap_before=0.0, send_at=0.0,
+                degraded=row.degraded, reason=row.reason) for row in rows]
+
+
+def _action_rules(rules: Mapping[str, Any], table: Optional[Mapping[str, Any]]) -> _Action:
+    """把两张表读成一份只读判据：表借自 action_note.json，缺项当场响，不补默认值。
+
+    补一个默认值就等于有第二处真源：括号对与身体部位只许在 organs/mouth/data/action_note.json 里长大。
+    """
+    book = table if isinstance(table, Mapping) else load(ACTION_TABLE)
+    return _Action(body_parts=tuple(str(part) for part in _borrowed(book, "body_parts")),
+                   brackets=tuple((str(pair[0]), str(pair[1]))
+                                  for pair in _borrowed(book, "brackets")),
+                   pronouns=str(need(rules, "action_pronouns")),
+                   max_chars=int(need(rules, "action_line_max_chars")))
+
+
+def _borrowed(book: Mapping[str, Any], key: str) -> Any:
+    """从动作判据表里借一项：缺了就是缺了，报错里点名是哪一张表、哪一项。"""
+    try:
+        return book[key]
+    except (KeyError, TypeError):
+        raise PolicyMiss("action_note 的 %r（动作行判据借自 organs/mouth/data/%s.json）"
+                         % (key, ACTION_TABLE)) from None
+
+
+def _is_action(sentence: str, rules: Mapping[str, Any], action: _Action) -> bool:
+    """整句是动作吗：先认括号形态（松紧无关，只看整句是不是一个括注），再认无括号形态。
+
+    无括号形态三条一起满足才算：以身体部位开头、不含人称代词、句长不超过 action_line_max_chars。
+    三条里少一条它就只是叙述或台词——「我这是正常体型。」带人称代词，不许当动作行。
+    """
+    body = _core(sentence, rules)
+    if not body:
+        return False
+    for opener, closer in action.brackets:
+        if len(body) > len(opener) + len(closer) and body.startswith(opener) and body.endswith(closer):
+            return True
+    if len(body) > action.max_chars:
+        return False                                       # 太长了，那是叙述不是一下动作
+    if any(char in body for char in action.pronouns):
+        return False                                       # 带人称代词的是台词
+    return any(body.startswith(part) for part in action.body_parts)
+
+
+def _core(sentence: str, rules: Mapping[str, Any]) -> str:
+    """整句去掉首尾空白与句末标点：「（尾巴甩了一下）。」与「（尾巴甩了一下）」是同一句。
+
+    尾部引号括号不剥：括号形态要看的正是结尾那个括号；句末标点剥掉，长度比的是句子本身的字数。
+    """
+    body = (sentence or "").strip()
+    return body.rstrip("".join(sorted(set(str(need(rules, "sentence_end")))))).strip()
+
+
+def _sentences(text: str, rules: Mapping[str, Any]) -> List[str]:
+    """按「换行 + 句末标点」断句：一条正则，句尾的引号括号跟着上一句走。
+
+    正则的两个分支就是两种断点：句末标点（连着后面的引号括号）与换行。断出来的每一段都带着自己的
+    标点，拼起来逐字等于原文。纯空白、纯停顿的碎片并到邻居里（「……」自己不是一句话）。
+    """
+    ends = _class_of(str(need(rules, "sentence_end")))
+    closers = _class_of(str(need(rules, "trailing_closers")))
+    newlines = _class_of(str(need(rules, "newline")))
+    pattern = re.compile("[%s][%s]*|[%s]+" % (ends, closers, newlines))
+    chunks: List[str] = []
+    start = 0
+    for found in pattern.finditer(text):
+        if found.end() <= start:
+            continue
+        chunks.append(text[start:found.end()])
+        start = found.end()
+    if start < len(text):
+        chunks.append(text[start:])
+    return _merge_filler(chunks, rules)
+
+
+def _class_of(chars: str) -> str:
+    """把一张字表做成字符类里的样子：去重（同一个字不许进两次）并转义。"""
+    return "".join(re.escape(char) for char in dict.fromkeys(chars))
 
 
 def _stop_chars(rules: Mapping[str, Any]) -> Set[str]:
@@ -70,6 +272,37 @@ def _stop_chars(rules: Mapping[str, Any]) -> Set[str]:
     for key in ("sentence_end", "semicolon", "comma", "newline"):
         marks.update(str(need(rules, key)))
     return marks
+
+
+def _filler_only(chunk: str, filler: Set[str]) -> bool:
+    """这段字只有空白与停顿吗：是的话它自己不成一泡，跟着邻居走（一个字都不丢）。"""
+    return not any(not char.isspace() and char not in filler for char in chunk)
+
+
+def _merge_filler(chunks: Sequence[str], rules: Mapping[str, Any]) -> List[str]:
+    """纯空白、纯停顿的碎片并到邻居里：前面有泡就跟前一泡，没有就跟后一泡。
+
+    「……」这种省略号自己不是一句话：跟在前一泡后面读起来才通（「谁肥了。」后面接「……」）。
+    只有整段都是碎片的极端情况才会攒出单独一泡，那时也得留着——一泡不许是空的，但一个字也不许丢。
+    """
+    filler = _stop_chars(rules) | set(str(need(rules, "trailing_closers")))
+    merged: List[str] = []
+    pending = ""
+    for chunk in chunks:
+        if _filler_only(chunk, filler):
+            if merged:
+                merged[-1] += chunk
+            else:
+                pending += chunk
+            continue
+        merged.append(pending + chunk)
+        pending = ""
+    if pending:
+        if merged:
+            merged[-1] += pending
+        else:
+            merged.append(pending)
+    return merged
 
 
 def _breaks(text: str, rules: Mapping[str, Any]) -> List[int]:
@@ -168,27 +401,7 @@ def _segments(text: str, rules: Mapping[str, Any]) -> List[str]:
         start = position
     if start < len(text):
         chunks.append(text[start:])
-    return _merge_blank(chunks)
-
-
-def _merge_blank(chunks: Sequence[str]) -> List[str]:
-    """纯空白的碎片并到邻居里：一泡不许是空的，但一个字也不许丢。"""
-    merged: List[str] = []
-    pending = ""
-    for chunk in chunks:
-        if chunk.strip():
-            merged.append(pending + chunk)
-            pending = ""
-        elif merged:
-            merged[-1] += chunk
-        else:
-            pending += chunk
-    if pending:
-        if merged:
-            merged[-1] += pending
-        else:
-            merged.append(pending)
-    return merged
+    return _merge_filler(chunks, rules)
 
 
 def _pieces(segments: Sequence[str], cap: int, rules: Mapping[str, Any],

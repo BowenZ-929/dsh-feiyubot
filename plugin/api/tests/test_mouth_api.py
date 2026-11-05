@@ -6,6 +6,13 @@ brain=None / store=None、心的读数只从查询参数来、闸命中即弃、
 第三批第二轮又给 /mouth/gate 加了四个可选参数（inject / refuse / tier / hard_cap），
 **没有新路由**：这里逐条守住「不给新参数时与从前逐字一致」、三本账各记一行、
 以及「没比过的审计不许显示成通过」这三件事。
+
+第三轮 C 再给同一端点加两个参数（asked / answer，**仍然没有新路由**）：判成软转向时她的话一个字
+都不许改、闸只报不改、拒绝事件照旧进账本（那行的 shape 记 soft）并投给心；正面回答不算拒绝、
+账本不添行；asked 给了却是空白只能说 soft-unavailable，**不许当成「不是拒绝」**。动作括注这一关
+也接上了（action 那一节，判据全在 data/action_note.json），refusal 那一节另给 kind（hard|soft）：
+软的硬的在返回里必须分得开。心的根与话题词表在本文件用临时根（HEART_ROOT / HEART_TOPICS_FILE），
+**一条也不往实盘写**。
 """
 from __future__ import annotations
 
@@ -22,11 +29,23 @@ from api import core as api_core
 from api import mouth as mouth_api
 from api.tests.helpers import copy_fixture
 from organs.brain import BrainStore
+from organs.heart import refuse as heart_refuse
 from organs.mouth import gate as mouth_gate
 from organs.soul import load
 
 MOUTH_ROUTES = ("/mouth/split", "/mouth/address", "/mouth/tone", "/mouth/gate")
 SOURCE = Path(mouth_api.__file__).read_text(encoding="utf-8")
+
+_ENDERS = "。！？!?…"
+
+
+def _sentence_count(text: str) -> int:
+    """一泡里有几句：数句末标点，末尾没标点的残句也算一句（切分的判据是句数，不是字数）。"""
+    count = sum(1 for char in text if char in _ENDERS)
+    tail = text.rstrip()
+    if tail and tail[-1] not in _ENDERS:
+        count += 1
+    return count
 
 # 300 字中文：有停顿符号，切得出 2–3 泡（条数上限与硬切阈值都在 policy.json，这里只是素材）
 TEXT_300 = ("昨晚下了一场雨，早上路边的梧桐叶全亮了。我端着豆浆站在街口，看扫地的大爷把落叶推成一堆。"
@@ -77,6 +96,15 @@ class MouthApiTest(unittest.TestCase):
         self.brain = BrainStore(Path(self._tmp.name) / "brain")
         for _ in range(20):                      # 今天连续二十次互动 → 读数 20 → 挚友档
             self.brain.interact("u-familiar", display="小林")
+        # 心也用这一套临时根：投心真写盘（refusals.json），但只写临时目录
+        self._env_heart = os.environ.get("HEART_ROOT")
+        self._env_topics = os.environ.get("HEART_TOPICS_FILE")
+        os.environ["HEART_ROOT"] = str(Path(self._tmp.name) / "heart")
+        topics = Path(self._tmp.name) / "topics.json"
+        topics.write_text(json.dumps({"猫": ["年糕"], "医院": ["住院"], "海边": []},
+                                     ensure_ascii=False), encoding="utf-8")
+        os.environ["HEART_TOPICS_FILE"] = str(topics)
+        self.addCleanup(self._restore_heart_env)
 
     def _restore_trace_env(self) -> None:
         """把 MOUTH_TRACE_DIR 还原成进来时的样子（别的测试不该被这份账本影响）。"""
@@ -84,6 +112,15 @@ class MouthApiTest(unittest.TestCase):
             os.environ.pop("MOUTH_TRACE_DIR", None)
         else:
             os.environ["MOUTH_TRACE_DIR"] = self._env
+
+    def _restore_heart_env(self) -> None:
+        """把心的根与话题词表还原：投心的那几次都落在临时目录，实盘一条也不写。"""
+        for name, old in (("HEART_ROOT", self._env_heart),
+                          ("HEART_TOPICS_FILE", self._env_topics)):
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
 
     def _ledger(self) -> Path:
         return mouth_api.drops.path_of()
@@ -148,12 +185,20 @@ class MouthApiTest(unittest.TestCase):
 
     # —— 2. 300 字中文：2–3 泡、首条 0.0、其余 > 0 ————————————————
 
-    def test_split_300_chars_makes_two_or_three_parts(self):
+    def test_split_300_chars_keeps_two_sentences_per_part(self):
+        """泡数不再是判据：「每泡最多两句」才是（旧「2–3 泡」已退役，见 policy.json 的 retired_note）。
+
+        300 字十来句按两句一泡会切出 7 泡——这是新判据的正确结果，不是切分坏了。
+        """
         self.assertEqual(300, len(TEXT_300))
         status, payload = self._call("GET", "/mouth/split?text=" + TEXT_300 + "&seed=demo")
         self.assertEqual(200, status)
         parts = payload["parts"]
-        self.assertIn(len(parts), (2, 3))
+        self.assertGreater(len(parts), 1, "300 字只切出一泡：两句一条没生效")
+        self.assertLessEqual(len(parts), 12, "超过防炸上限 12 泡")
+        for part in parts:
+            self.assertTrue(1 <= _sentence_count(part["text"]) <= 2,
+                            "这一泡不是 1–2 句：%r" % part["text"])
         self.assertEqual(0.0, parts[0]["gap_before"])
         for part in parts[1:]:
             self.assertGreater(part["gap_before"], 0.0)
@@ -400,12 +445,17 @@ class MouthApiTest(unittest.TestCase):
     # —— 9d. /mouth/gate 的四个可选参数（没有新端点，顺序：拒绝 → 闸 → 长度） ————————
 
     def test_gate_without_new_params_keeps_the_old_shape(self):
-        """不给 inject/refuse/tier：旧键旧值逐字不变（note 与 drops 也算），只多一节 audit。"""
+        """不给 inject/refuse/tier/asked：旧键旧值逐字不变（note 与 drops 也算），只多一节 audit。
+
+        这一段没有动作括注的样子（数据里的括号、身体部位词一个都不在），所以 action 那一节不出现：
+        「这一关没跑」不装成「查过了」，闸的 reason 也一个字节都没被多缀一句。
+        """
         status, payload = self._call("GET", "/mouth/gate?text=" + GATE_PASS_TEXT)
         self.assertEqual(200, status)
         self.assertEqual({"ok", "readonly", "agent", "hit", "decision", "reason", "text",
                           "rewriter", "disabled_ids", "drops", "note", "audit"}, set(payload),
                          "不给新参数时键集合只许多一节 audit")
+        self.assertNotIn("action", payload, "没有动作括注的样子时不许凭空多一节 action")
         for key, want in GATE_BASELINE.items():
             self.assertEqual(want, payload[key], key)
         trace = str(self._trace / "drops.jsonl")
@@ -424,11 +474,12 @@ class MouthApiTest(unittest.TestCase):
         status, payload = self._call("GET", "/mouth/gate?refuse=topic")   # 拒绝不要求 text
         self.assertEqual(200, status)
         section = payload["refusal"]
-        self.assertEqual({"text", "shape", "full_name", "event", "sent",
+        self.assertEqual({"text", "shape", "kind", "full_name", "event", "sent",
                           "gate_decision", "reason"}, set(section))
         said = [mouth_api.refusal.say(one) for one in ("topic", "mood", "nobody")]
         self.assertIn(section["text"], said, "拒绝说法必须来自 data/refusal.json 那三句")
         self.assertEqual("topic", section["shape"])
+        self.assertEqual("hard", section["kind"], "硬拒绝与软转向在返回里必须分得开")
         self.assertEqual("refused-topic", section["full_name"])
         self.assertEqual("pass", section["gate_decision"])
         self.assertFalse(section["sent"], "HTTP 这层没有心：sent 必须如实是 false")
@@ -509,7 +560,7 @@ class MouthApiTest(unittest.TestCase):
         status, fourth = self._call(
             "GET", "/mouth/gate?text=" + OVER_TARGET_TEXT + "&tier=4&hard_cap=150")
         self.assertEqual(200, status)
-        self.assertEqual((24, 120), (fourth["style"]["target_lo"], fourth["style"]["target_hi"]))
+        self.assertEqual((20, 72), (fourth["style"]["target_lo"], fourth["style"]["target_hi"]))
         self.assertEqual("pass", fourth["style"]["decision"], "同一句在第 4 档的区间里")
         self.assertEqual(1, len(mouth_api.style.path_of().read_text(
             encoding="utf-8").splitlines()), "pass 不该往长度账本里添行")
@@ -549,6 +600,145 @@ class MouthApiTest(unittest.TestCase):
             status, payload = self._call("GET", path)
             self.assertEqual(400, status, path)
             self.assertIn("text", payload["message"], path)
+
+    # —— 9e. 软转向 + 投心（第三轮 C）：她的话一个字不改，事件照投、账本照记 ——————
+
+    SOFT_ANSWER = ("……这个啊。鱼在海里游着游着，有些同伴就游远了……行了行了，"
+                   "我又不是不能自己待着。倒是你，怎么突然问这个")
+    ASKED_CAT = "猫今天怎么没来？"          # 话题词表里带「猫」，投心才认得出来
+    ANSWERED = "明天上午九点，我在医院门口等你。"   # 撞上正面回答的信号：她答了
+    NOTED_TEXT = "（尾巴尖在水里轻轻蜷了一下）"      # 动作括注里写了我们没给过的场景
+
+    def test_gate_soft_redirect_keeps_her_words_and_tells_the_heart(self):
+        """判成软转向：text 逐字不变、kind=soft、闸只报不改、事件进账本记 shape=soft、投心成功。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=%s&asked=%s" % (quote(self.SOFT_ANSWER),
+                                                     quote(self.ASKED_CAT)))
+        self.assertEqual(200, status)
+        self.assertEqual(self.SOFT_ANSWER, payload["text"], "软转向：她的话一个字都不许改")
+        self.assertEqual(self.SOFT_ANSWER, payload["refusal"]["text"])
+        self.assertEqual("soft", payload["refusal"]["kind"])
+        self.assertEqual("soft", payload["refusal"]["shape"])
+        self.assertEqual("unchanged", payload["refusal"]["gate_decision"],
+                         "她的话不进闸：闸的判词是「没动过」")
+        self.assertIsNone(payload["hit"], "闸照跑但没弃这句：hit 不许举出来")
+        self.assertEqual({"decision", "hits", "reason"}, set(payload["gate_readonly"]))
+        self.assertIn(payload["gate_readonly"]["decision"], ("pass", "dropped"),
+                      "闸的判词要如实报在 gate_readonly 里")
+        self.assertTrue(payload["soft"]["is_soft"])
+        self.assertEqual("ok", payload["soft"]["status"])
+        heart = payload["heart"]
+        self.assertEqual({"delivered", "topic", "until", "remaining_min", "reason"}, set(heart))
+        self.assertTrue(heart["delivered"], "软转向也是拒绝，要投给心")
+        self.assertEqual("猫", heart["topic"])
+        self.assertTrue(heart["until"], "投心成功必须带回冷却到什么时候")
+        rows = mouth_api.refusal.path_of().read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(rows), "软转向也要在 refuse.jsonl 里留一行")
+        row = json.loads(rows[0])
+        self.assertEqual("soft", row["shape"], "账本这一列要分得清硬拒绝与软转向")
+        self.assertEqual("refused-topic", row["full_name"])
+        self.assertTrue(row["sent"])
+        # 心那边现场查得出冷却：冷却只能由时间解除
+        cooling = heart_refuse.check(["猫"])
+        self.assertIn("猫", cooling["cooling"])
+        self.assertGreater(cooling["items"][0]["remaining_min"], 0)
+
+    def test_gate_soft_redirect_adds_no_drop_row(self):
+        """闸照跑但只报不改：软转向这句一个字节都没被弃，弃言账本一行都不添。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=%s&asked=%s" % (quote(self.SOFT_ANSWER),
+                                                     quote(self.ASKED_CAT)))
+        self.assertEqual(200, status)
+        self.assertFalse(self._ledger().exists(), "软转向不许进弃言账本")
+        self.assertEqual(0, payload["drops"]["today"])
+
+    def test_gate_soft_redirect_still_counts_the_length(self):
+        """长度垫在最后，判的是她照发的这一句：档 4 的区间照报（56 字这一句按数据算）。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=%s&asked=%s&tier=4" % (quote(self.SOFT_ANSWER),
+                                                            quote(self.ASKED_CAT)))
+        self.assertEqual(200, status)
+        self.assertEqual(len(self.SOFT_ANSWER), payload["style"]["chars"])
+        self.assertEqual((20, 72), (payload["style"]["target_lo"], payload["style"]["target_hi"]))
+
+    def test_gate_answered_question_is_not_a_refusal(self):
+        """正面答了（含「明天上午九点」）：kind 不是 soft、不投事件、账本不添行。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=%s&asked=%s" % (quote(self.ANSWERED), quote(self.ASKED_CAT)))
+        self.assertEqual(200, status)
+        self.assertNotIn("refusal", payload, "答了就不该有拒绝那一节")
+        self.assertNotIn("heart", payload, "没拒就别投心")
+        self.assertNotEqual("soft", payload.get("refusal", {}).get("kind"))
+        self.assertFalse(payload["soft"]["is_soft"])
+        self.assertEqual("ok", payload["soft"]["status"])
+        self.assertEqual("pass", payload["decision"])
+        self.assertEqual(self.ANSWERED, payload["text"])
+        self.assertFalse(mouth_api.refusal.path_of().exists(), "没拒就不许往拒绝账本里添行")
+
+    def test_gate_blank_asked_is_unavailable_not_clean(self):
+        """asked 给了却是空白：判不了就如实写 soft-unavailable——**这不是「不是拒绝」**。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=%s&asked=%s" % (quote(self.SOFT_ANSWER), quote("   ")))
+        self.assertEqual(200, status)
+        self.assertEqual("soft-unavailable", payload["soft"]["status"])
+        self.assertFalse(payload["soft"]["is_soft"])
+        self.assertIn("判不了", payload["soft"]["reason"])
+        self.assertNotIn("refusal", payload, "判不了不许当成一次拒绝")
+        self.assertEqual(self.SOFT_ANSWER, payload["text"])
+        self.assertFalse(mouth_api.refusal.path_of().exists())
+
+    def test_gate_refuse_with_asked_delivers_to_the_heart(self):
+        """refuse=topic 加上 asked：硬拒绝也投心，账本那一行的 shape 记 hard。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?refuse=topic&asked=" + quote(self.ASKED_CAT))
+        self.assertEqual(200, status)
+        self.assertEqual("hard", payload["refusal"]["kind"])
+        self.assertEqual("topic", payload["refusal"]["shape"])
+        self.assertTrue(payload["heart"]["delivered"])
+        self.assertEqual("猫", payload["heart"]["topic"])
+        row = json.loads(mouth_api.refusal.path_of().read_text(
+            encoding="utf-8").splitlines()[0])
+        self.assertEqual("hard", row["shape"])
+        self.assertTrue(row["sent"])
+
+    def test_gate_refuse_without_a_known_topic_does_not_pretend(self):
+        """没给 asked（认不出话题）：不投心、delivered=false 并说清为什么，事件照样进账本。"""
+        status, payload = self._call("GET", "/mouth/gate?refuse=topic")
+        self.assertEqual(200, status)
+        self.assertFalse(payload["heart"]["delivered"])
+        self.assertIsNone(payload["heart"]["topic"])
+        self.assertIn("认不出", payload["heart"]["reason"])
+        self.assertFalse(payload["refusal"]["sent"])
+        row = json.loads(mouth_api.refusal.path_of().read_text(
+            encoding="utf-8").splitlines()[0])
+        self.assertFalse(row["sent"], "没投成不许在账本里写成投过了")
+
+    # —— 9f. 动作括注：判据在数据里，命中的证据在返回里 ————————————————
+
+    def test_gate_action_note_in_a_bracket_is_dropped_with_evidence(self):
+        """（尾巴尖在水里…）：括号内从严命中 → dropped，action 给出哪一路、哪个场景词。"""
+        marks = mouth_api.warehouse.load("action_note")
+        status, payload = self._call("GET", "/mouth/gate?text=" + quote(self.NOTED_TEXT))
+        self.assertEqual(200, status)
+        self.assertEqual("dropped", payload["decision"])
+        self.assertEqual("", payload["text"])
+        self.assertEqual(marks["hit"]["clause_id"], payload["hit"]["clause_id"])
+        self.assertEqual({"checked", "where", "env_word", "reason"}, set(payload["action"]))
+        self.assertTrue(payload["action"]["checked"], "这一关真判过了")
+        self.assertEqual(marks["where"]["bracket"], payload["action"]["where"])
+        self.assertIn(payload["action"]["env_word"], marks["env_words"])
+        self.assertIn(payload["action"]["env_word"], payload["action"]["reason"])
+
+    def test_gate_action_note_clear_is_reported_when_it_checked(self):
+        """有身体部位、没场景词：动作那一关查过了也要说出来（放行有据），不命中就是 null。"""
+        marks = mouth_api.warehouse.load("action_note")
+        status, payload = self._call("GET", "/mouth/gate?text=" + quote("尾巴垂下去，我有点累。"))
+        self.assertEqual(200, status)
+        self.assertEqual("pass", payload["decision"])
+        self.assertTrue(payload["action"]["checked"])
+        self.assertIsNone(payload["action"]["where"])
+        self.assertIsNone(payload["action"]["env_word"])
+        self.assertEqual(marks["reason"]["clear"], payload["action"]["reason"])
 
     # —— 10. 未知端点 ————————————————————————————————
 

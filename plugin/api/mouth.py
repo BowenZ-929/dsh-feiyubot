@@ -1,4 +1,4 @@
-"""嘴的四个只读干跑端点：把三批的库（切分+节奏、称呼、语气档、闸、拒绝、长度）接到 HTTP 上。
+"""嘴的四个只读干跑端点：把这几批的库（切分+节奏、称呼、语气档、闸、拒绝、长度）接到 HTTP 上。
 
 四条全是 GET，而且**只干跑**：算一遍给人看，不发出去。没有 POST/PUT/DELETE 分支——
 非 GET 由 core.handle 统一回 405，措辞说明「嘴的干跑端点只读」。
@@ -8,6 +8,12 @@ organs/mouth 的 record 里（drops.record / refusal.record / style.record），
 「时刻 + 路径」的供应方——路径口径三处一致（MOUTH_TRACE_DIR > 包内 trace/），时刻一律取
 datetime.now()（库层一个都不取时钟）。本文件自己不碰文件：没有 open 调用、没有 mkdir、
 没有 JSON 写盘，所以账本写不进去时的 500 一定是那三处 record 抛上来的。
+
+**第四处副作用在心上**（写在这里，因为它不在这条 trace 口径里）：/mouth/gate 判出拒绝（硬拒绝
+或软转向）时会调 heart.refuse.ingest，那一次**真落盘**——写进心的实盘根下 refusals.json
+（HEART_ROOT > <仓库>/home/organs/heart，心自己的口径，不认 MOUTH_TRACE_DIR）。所以验收与测试
+想把心指到临时目录，改的是 HEART_ROOT，不是 MOUTH_TRACE_DIR。本文件仍然不碰文件：那一笔写盘是
+heart.refuse 借 store 干的，投不进去（认不出话题、额度用完）照实写在返回的 heart 里。
 
 /mouth/address 与 /mouth/tone 还要认一个新查询参数 rename=<新叫法>：这一轮本人要求换个叫法，
 称呼**当场就换**（退到中性等于没听人话），返回里加 renamed 与 memory_draft 那一节——
@@ -26,18 +32,32 @@ mood/energy/engage/offset 不给就是 None，返回里的 heart_source 会如�
 本轮**没有重写器**：/mouth/gate 命中就弃（decision="dropped"），api 层不伪造一次改写，
 也不把命中的句子当 pass 放出去。
 
-/mouth/gate 这一轮扩了四个**可选**参数（inject / refuse / tier / hard_cap），**没有新端点**：
-不给就与从前逐字一致（只多一节 audit）。判的顺序钉死并写进 _gate 的 docstring：
-**拒绝 → 闸（含照抄审计）→ 目标长度**——先决定说不说、再决定这么说行不行、最后才管长短。
-三节各自交代：audit 恒在（status 为 audit-unavailable 时原样透出，不许显示成通过）、
-refusal 只在给了 refuse 时有、style 只在给了 tier 时有（这一轮没有重写器，超目标只能如实报
-「改不了、放行并记账」，rewrites 恒为 0）。
+/mouth/gate 后来又扩了**可选**参数（inject / refuse / tier / hard_cap，第三轮 C 再加
+asked / answer），**从头到尾没有新端点**：一个都不给就与从前逐字一致（只多一节 audit）。
+判的顺序钉死并写进 _gate 的 docstring：**拒绝（含软转向）→ 闸（条款 → 动作括注 → 复述审计）→
+目标长度**——先决定说不说、再决定这么说行不行、最后才管长短。各节各自交代：audit 恒在
+（status 为 audit-unavailable 时原样透出，不许显示成通过）、refusal 只在给了 refuse 或有软转向时
+有、style 只在给了 tier 时有（这一轮没有重写器，超目标只能如实报「改不了、放行并记账」，
+rewrites 恒为 0）。
 
 弃言不再是「发了个空串就没了」：闸把「谁拦的、为什么」交给 api 注入的 sink，api 把它记进
 organs/mouth/drops.py 的账本（时刻在这里给，写盘只在 drops 里），返回里固定带一节 drops。
 **pass 的那次也带**——人要能看见「今天已经弃过几次」，而不是只有被弃那次才看得见；
 文件不存在、坏行几行也都如实分开放（读不到 ≠ 0 次）。这一轮不加路由：弃言那一行就挂在
 /mouth/gate 的返回里，外加那个 trace 文件。
+
+**嘴这一轮把「不肯」接到心上（第三轮 C，仍没有新端点）**：/mouth/gate 多认两个可选参数 asked
+（对方那句问话）与 answer（她说的话，缺省用 text）。给了 asked 就先 refusal.soft_scan 判一次
+「她是不是把话转开了」：判成软转向 → **她的原话一个字都不改**，闸照跑但只报不改（读数在
+gate_readonly 里），拒绝事件照旧进 refuse.jsonl（这一行的 shape 记 soft），再经 heart.refuse.ingest
+投给心，返回里带 heart={delivered, topic, until, remaining_min}；判不了（soft-unavailable）就如实
+写在 soft 那一节，**不当成「不是拒绝」**。给了 refuse（hard 三选一）走既有的 refusal.enforce，
+同样投心。话题名只从心那份共用词表里认（refuse.vocabulary），认不出就不投、只说为什么——心不收
+词表以外的话题，这一层也不替它造分类。
+
+动作括注这一关也接上了：/mouth/gate 读 organs/mouth/data/action_note.json 传进 gate.enforce(action=)，
+返回里固定带一节 action={checked, where, env_word, reason}——checked=false 是「这一关没跑」，
+不是「查过没问题」。/mouth/gate 的 refusal 那一节同时给 shape 与 kind（hard|soft）：软的硬的分得开。
 
 未载入如实报：brain=None 时 /mouth/address 与 /mouth/tone 回 200 + status="未接入"，
 store=None 时 /mouth/tone 也回未接入——不 500，也不假装有读数。
@@ -48,7 +68,8 @@ import json
 from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
-from organs.mouth import address, audit, drops, gate, pace, refusal, style, tone, warehouse
+from organs.heart import refuse as heart_refuse
+from organs.mouth import action_note, address, audit, drops, gate, pace, refusal, style, tone, warehouse
 from organs.mouth import PolicyMiss, WarehouseBroken, WarehouseMiss
 from organs.mouth.split import split as split_text
 from organs.soul import SoulLoadError
@@ -73,9 +94,16 @@ GATE_NOTE = ("这一轮没有重写器：命中就弃（decision=dropped），ap
              "errors 是读不出来的坏行数；disabled_ids 是这次被停用、没参与匹配的条款。")
 GATE_NOTE_MORE = ("另外三节按「拒绝 → 闸（含照抄审计）→ 目标长度」的顺序判：audit 是照抄审计的读数"
                   "（status 不是 ok 就是没真的比过，audit-unavailable 不许当成通过）；refusal 只在"
-                  "给了 refuse 时有，且 HTTP 这层没有心，所以 sent=false、事件照旧进 refuse.jsonl；"
+                  "给了 refuse 或有软转向时有，事件照旧进 refuse.jsonl、并在这里投给心；"
                   "style 只在给了 tier 时有，这一轮没有重写器，超目标只能如实报改不了。"
                   "干跑也会记账：三本账（drops / refuse / style）都吃 MOUTH_TRACE_DIR。")
+GATE_NOTE_HEART = ("这一轮把拒绝接到了心上：给了 asked/refuse 就先判「她是不是把话转开了」，判成软转向"
+                   "（soft）时她的原话一个字都不改——闸照跑但只报不改，读数在 gate_readonly 里；"
+                   "拒绝事件照旧进 refuse.jsonl（那一行的 shape 记 hard / soft），再经"
+                   "heart.refuse.ingest 投给心。heart.delivered=false 时看 heart.reason："
+                   "认不出话题（只认心那份词表）或额度用完都如实写着，不写成投过了；"
+                   "soft.status 不是 ok 就是没真的比过（soft-unavailable≠不是拒绝）。"
+                   "action 那一节恒在：checked=false 是这一关没跑，不是查过没问题。")
 
 
 def dispatch(route: str, params: Mapping[str, str], store: Any, brain: Any) -> Result:
@@ -191,13 +219,13 @@ def _tone(params: Mapping[str, str], store: Any, brain: Any) -> Result:
 
 
 def _gate(params: Mapping[str, str]) -> Result:
-    """过闸干跑：拒绝 → 闸（含照抄审计）→ 目标长度；命中就弃，三本账照记。
+    """过闸干跑：拒绝（含软转向）→ 闸（条款 → 动作括注 → 照抄审计）→ 目标长度；命中就弃，账照记。
 
-    **顺序钉死**：先决定说不说（refuse）、再决定这么说行不行（闸 + 照抄审计）、最后才管长短
-    （style）。拒绝排在闸前面，是因为「这句要不要说」与「这样说合不合格」是两件事；长度垫在
-    最后，是因为一句被弃掉的话再短也没意义。
+    **顺序钉死**：先决定说不说（refuse / 软转向）、再决定这么说行不行（闸 + 动作括注 + 照抄审计）、
+    最后才管长短（style）。拒绝排在闸前面，是因为「这句要不要说」与「这样说合不合格」是两件事；
+    长度垫在最后，是因为一句被弃掉的话再短也没意义。
 
-    四个新参数都**可选**，都不给时返回与从前逐字一致（只多一节 audit）：
+    六个新参数都**可选**，一个都不给时返回与从前逐字一致（只多一节 audit）：
 
     - inject：URL 编码的 JSON 数组 [{"kind": "魂", "text": "…"}]，交给照抄审计去比。
       解析失败不是 500、也不静默当成「没给」：400 说清「inject 要一个 JSON 数组」；
@@ -206,19 +234,34 @@ def _gate(params: Mapping[str, str]) -> Result:
     - refuse：topic / mood / nobody（数据里那三种形状；完整名 refused-topic 也认）。给了就走
       拒绝这条路，说法取自 organs/mouth/data/refusal.json，**这句同样过闸**：命中即弃（弃了
       text 是空串，照旧进弃言账本）。拒绝不要求 text——拒了就没有原文可言，那时 text 一概不看。
+    - asked：对方那句问话；answer：她说的话（缺省用 text）。给了 asked 就先 refusal.soft_scan 判一次
+      软转向。判成 soft 时**她的原话一个字都不改**：闸照跑但只报不改（读数在 gate_readonly），
+      refusal.text 与返回的 text 都是那句原话，事件照旧进 refuse.jsonl（shape 记 soft）并投给心；
+      判不了（asked 给了却是空白）时 soft.status 是 soft-unavailable，**这不是「不是拒绝」**。
     - tier：1..4，嘴的目标档位（与 /mouth/tone 的 tone.tier 同一套档）；hard_cap：核给的字数上限。
       两个可以只给一个：只给 tier 就是「核没给上限」，上限取这句自己的字数（于是 over_hard_cap
       恒为 false——不拿嘴的目标区间冒充核的上限）；**只给 hard_cap 不给 tier 是 400**：
       没档位就没有目标区间，别猜。
 
-    三节各自交代：
+    各节各自交代：
 
     - audit **恒在**：status 为 "audit-unavailable" 时原样透出，**不许显示成通过**——没拿到
       注入原文就是没比过，「没比过」与「比过了、没在复述」是两件事，混一起就等于替她背了一次
       没人做过的检查。
-    - refusal 只在给了 refuse 时有：{text, shape, full_name, event, sent, gate_decision, reason}。
-      **HTTP 这层没有心**，所以不往 refusal 里注入 refuse_sink（sent=False 如实报），但事件照旧
-      由 refusal.record 落进 refuse.jsonl：她拒了这件事，不因为出口还没有心就不记账。
+    - refusal 只在给了 refuse 或有软转向时有：{text, shape, kind, full_name, event, sent,
+      gate_decision, reason}。kind 是形状大类（hard|soft），shape 是那一节的名字（topic / soft…），
+      两种拒绝在返回里分得开。sent 说的是**投给心了没有**（heart.delivered）：投不进去（认不出话题、
+      额度用完）就照实 false，事件仍由 refusal.record 落进 refuse.jsonl——她拒了这件事，不因为这次
+      投不进心就不记账。
+    - heart 只在投过心时有：{delivered, topic, until, remaining_min, reason}。话题名只从心那份共用
+      词表里认（refuse.vocabulary），认不出就不投并说清为什么——心不收词表以外的话题。
+    - soft 只在给了 asked 时有：{is_soft, status, opener, redirect, question, reason}。status 不是
+      "ok" 就是没真的比过，**不许当成「不是拒绝」**。
+    - action 在这段字**像动作括注**时才有（数据里的括号、身体部位词命中一个）：{checked, where,
+      env_word, reason}。只在这时把判据表交给闸，是为了不给别的调用改口径——没有括注的样子时，
+      闸的 reason 与从前逐字一致。checked=false 表示这一关没跑（判据表没给），不是「查过没问题」；
+      判据表与那两个词全来自 organs/mouth/data/action_note.json。
+    - gate_readonly 只在软转向时有：{decision, hits, reason}——闸照跑、照判，只是不许改她的话。
     - style 只在给了 tier 时有：{decision, target_lo, target_hi, chars, rewrites, over_hard_cap,
       reason}。**这一轮没有重写器**（rewrite=None），所以超目标只能如实报「改不了、放行并记账」，
       api 层不伪造一次改写（rewrites 恒为 0）；超硬上限也不截断，只把 over_hard_cap 举起来交给核。
@@ -227,15 +270,18 @@ def _gate(params: Mapping[str, str]) -> Result:
     有没有读不出来的坏行，四件事分开报）。
 
     **干跑也会记账**，这是事实，不是可以忘掉的实现细节：drops 走闸的 sink、refuse 走
-    refusal.record、style 走 style.record，三本账都吃 MOUTH_TRACE_DIR。任何一处写不进去都照实回
-    500——记账失败也是失败，不许当成「今天 0 次」。
+    refusal.record、style 走 style.record，三本账都吃 MOUTH_TRACE_DIR；判出拒绝时另有一笔落到
+    心上——heart.refuse.ingest 写心那边的 refusals.json（根由心自己定：HEART_ROOT，不认
+    MOUTH_TRACE_DIR）。任何一处写不进去都照实回 500——记账失败也是失败，不许当成「今天 0 次」。
 
     长度判的是**最后要发出去的那句**：闸弃掉时它已经是空串，长度那一节就按空串判（chars=0、
     decision="pass" 是「空串没有超目标」的意思，不是「这句合格」）——长度这一层不替闸改口径。
     """
     refuse = (params.get("refuse") or "").strip()
     text = _text(params)
-    if text is None and not refuse:
+    asked = _asked_text(params)
+    answer = _answer_text(params, text)
+    if text is None and not refuse and answer is None:
         return _missing_text("/mouth/gate")
     try:
         inject = _inject(params)
@@ -252,33 +298,63 @@ def _gate(params: Mapping[str, str]) -> Result:
     trace = drops.path_of()
     today = _day()
     now = datetime.now()
+    soft = None
     refused = None
+    heart: Dict[str, Any] = {}
     try:
         clauses = warehouse.load("clauses").get("clauses")
-        if refuse:
-            book = warehouse.load("refusal")
-            # 这一遍只取说法、事件与那句人话：不给 sink，所以不记账（记账归下面那一遍闸）
+        book = warehouse.load("refusal")
+        marks = warehouse.load("action_note")
+        if asked is not None:
+            soft = refusal.soft_scan(answer, asked, table=book)
+        source = asked if (asked or "").strip() else answer
+
+        def deliver(ev: Dict[str, Any]) -> None:
+            """投给心：库把事件交到这条 sink 上，「投没投成」由 _to_heart 如实写在 heart 里。"""
+            heart.update(_to_heart(source, ev))
+
+        if soft is not None and soft.is_soft:
+            # 软转向：她自己的那句原话照发，这里只负责认出来、装事件、投心
+            refused = _soft_refusal(book, clauses, asked, answer, now, deliver)
+            spoken = refused.text
+        elif refuse:
+            # 这一遍只取说法、事件与那句人话：不给 drop_sink，所以不记账（记账归下面那一遍闸）
             refused = refusal.enforce(refuse, table=book, clauses=clauses, rewrite=None,
-                                      refuse_sink=None, drop_sink=None, now=now)
+                                      refuse_sink=deliver, drop_sink=None, now=now,
+                                      asked=asked, answer=answer)
             spoken = refusal.say(refuse, table=book)
         else:
-            spoken = text
-        # 唯一一遍闸：条款 + 照抄审计都在这，弃言也只在这里记一次
-        verdict = gate.enforce(spoken, clauses, None, _sink(trace), inject=inject)
+            spoken = answer
+        notebook = marks if _looks_noted(spoken, marks) else None
+        if refused is not None and refused.kind == refusal.KIND_SOFT:
+            # 闸照跑，但只报不改：不给 sink、也不拿它的 text，弃言账本因此不添行
+            verdict = gate.enforce(spoken, clauses, None, None, inject=inject, action=notebook)
+        else:
+            # 唯一一遍闸：条款 + 动作括注 + 照抄审计都在这，弃言也只在这里记一次
+            verdict = gate.enforce(spoken, clauses, None, _sink(trace), inject=inject,
+                                   action=notebook)
         if refused is not None:
-            refusal.record(refusal.path_of(), refused.event, False)   # sent=False：这一层没有心
+            refusal.record(refusal.path_of(), refused.event, bool(heart.get("delivered")),
+                           shape=refused.kind)
         ledger = drops.report(trace, today)
-    except (audit.AuditBroken, refusal.RefusalBroken) as exc:
-        return _bad(str(exc))                 # 注入段与拒绝形状坏掉是调用方的事：400，不 500
+        noted = action_note.check(spoken, marks) if notebook is not None else None
+        cleared = action_note.clear_reason(marks) if notebook is not None else ""
+    except (audit.AuditBroken, refusal.RefusalBroken, action_note.ActionBroken) as exc:
+        return _bad(str(exc))                 # 注入段、拒绝形状、判据表坏掉是调用方的事：400
     except (WarehouseMiss, WarehouseBroken, gate.ClauseBroken, OSError) as exc:
         return _broken(exc)
+    except ValueError as exc:
+        return _broken(exc)                   # 投心时的 ValueError 是我们这边的错，不许咽
+    soft_here = refused is not None and refused.kind == refusal.KIND_SOFT
+    final = refused.text if soft_here else verdict.text
     counted = None
     if tier:
         try:
             target = warehouse.load("style_target")
-            counted = style.apply(verdict.text, tier,
-                                  len(verdict.text) if hard_cap is None else hard_cap,
-                                  table=target, rewrite=None, sink=_style_sink())
+            lo, hi = style.target_range(tier, target)
+            counted = style.apply(final, tier,
+                                  len(final) if hard_cap is None else hard_cap,
+                                  table=target, rewrite=None, sink=_style_sink(lo, hi))
         except style.StyleBroken as exc:
             return _bad(str(exc))             # 档位不认识、上限不是数：同样是调用方的事
         except (WarehouseMiss, WarehouseBroken, OSError) as exc:
@@ -288,23 +364,33 @@ def _gate(params: Mapping[str, str]) -> Result:
         "ok": True,
         "readonly": True,
         "agent": AGENT,
-        "hit": {"clause_id": hit.clause_id, "kind": hit.kind,
-                "reason": hit.reason, "matched": hit.matched} if hit else None,
-        "decision": verdict.decision,
-        "reason": verdict.reason,
-        "text": verdict.text,
+        "hit": None if soft_here else (
+            {"clause_id": hit.clause_id, "kind": hit.kind,
+             "reason": hit.reason, "matched": hit.matched} if hit else None),
+        "decision": refused.gate_decision if soft_here else verdict.decision,
+        "reason": refused.reason if soft_here else verdict.reason,
+        "text": final,
         "rewriter": False,
         "disabled_ids": verdict.disabled,
         "drops": ledger,
         "note": GATE_NOTE,
         "audit": _audit_section(verdict.audit),
     }
+    if notebook is not None:
+        payload["action"] = _action_section(noted, verdict.action_status, cleared)
+    if soft_here:
+        payload["gate_readonly"] = _readonly_section(verdict)
     if refused is not None:
-        payload["refusal"] = _refusal_section(refused, verdict)
+        payload["refusal"] = _refusal_section(refused, verdict, heart, final)
+    if soft is not None:
+        payload["soft"] = _soft_section(soft)
+    if heart:
+        payload["heart"] = heart
     if counted is not None:
         payload["style"] = _style_section(counted)
-    if inject is not None or refuse or tier:
-        payload["note"] = GATE_NOTE + GATE_NOTE_MORE
+    if inject is not None or refuse or tier or asked is not None:
+        payload["note"] = GATE_NOTE + GATE_NOTE_MORE + (
+            GATE_NOTE_HEART if refused is not None else "")
     return 200, payload
 
 
@@ -315,17 +401,100 @@ def _sink(trace: Any) -> Callable[[str, str], None]:
     return note
 
 
-def _style_sink() -> Callable[[str, str], None]:
-    """把长度这一层的记账接到 style.jsonl 上：判词与那句人话由库给，时刻与路径在这一层。
+def _style_sink(lo: int, hi: int) -> Callable[[str, str], None]:
+    """把长度这一层的记账接到 style.jsonl 上：判词与那句人话由库给，时刻、路径、目标区间在这一层。
 
     只在「记账」那几次被叫一遍（超目标、改不了、超硬上限）；pass 与 rewritten 不叫——
-    没超的事不必进账本。跟弃言账本同一个口径：写不进去照实抛，由 _gate 回 500。
+    没超的事不必进账本。落进账本的那一列 target（"lo-hi"）是这一档的目标区间：区间收窄过一次，
+    没有这一列，回头看见一行 over_target 就分不清是拿旧区间还是新区间判的。
+    跟弃言账本同一个口径：写不进去照实抛，由 _gate 回 500。
     """
     trace = style.path_of()
 
     def note(decision: str, reason: str) -> None:
-        style.record(trace, decision, reason, datetime.now())
+        style.record(trace, decision, reason, datetime.now(), target=(lo, hi))
     return note
+
+
+def _looks_noted(text: Any, marks: Mapping[str, Any]) -> bool:
+    """这段字里有没有「动作括注」的样子：数据里的某个括号，或某个身体部位词。
+
+    判据表只在真有可能命中时才交给闸，是为了不给别的调用改口径：没有动作括注的样子时，闸的
+    reason 与从前逐字一致（不会被多缀一句「这一关查过了」）。这个前置检查不会漏判——两条路
+    要么认括号（括号内从紧），要么要身体部位词（括号外从松），两样都没有，命中就无从谈起。
+    括号表与身体部位词表都来自 data/action_note.json，本文件不留一个字。
+    """
+    body = text if isinstance(text, str) else ""
+    for pair in marks.get("brackets") or []:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            if any(isinstance(side, str) and side and side in body for side in pair):
+                return True
+    for word in marks.get("body_parts") or []:
+        if isinstance(word, str) and word and word in body:
+            return True
+    return False
+
+
+def _soft_refusal(book: Mapping[str, Any], clauses: Any, asked: Optional[str],
+                  answer: Optional[str], now: Any, sink: Any = None) -> Any:
+    """软转向走 refusal.enforce 那条路取事件与那句人话：形状取自数据 soft.event_shape。
+
+    不在这层自己装事件，是因为台词、判据、事件形状与 why 全在 data/refusal.json 里；api 只负责
+    把 asked / answer 交进去。它给回来的 text 就是她自己的那句原话，本文件一个字节都不改。
+    数据里那个形状要是认不得，refusal.enforce 会当场抛 RefusalBroken（400），不猜。
+    """
+    return refusal.enforce(_soft_shape(book), table=book, clauses=clauses, rewrite=None,
+                           refuse_sink=sink, drop_sink=None, now=now,
+                           asked=asked, answer=answer)
+
+
+def _soft_shape(book: Mapping[str, Any]) -> str:
+    """软转向记事件时用哪个形状：取自 data/refusal.json 的 soft.event_shape，代码里不留这个名字。"""
+    part = book.get("soft") if isinstance(book, Mapping) else None
+    shape = part.get("event_shape") if isinstance(part, Mapping) else None
+    return shape if isinstance(shape, str) else ""
+
+
+def _to_heart(source: Any, event: Mapping[str, Any]) -> Dict[str, Any]:
+    """把这一次拒绝投给心：认话题 → heart.refuse.ingest → 把心的账翻成四样。
+
+    话题名只从心那份共用词表里认（refuse.vocabulary，与 heart.refuse 同一个口径）：心不收
+    词表以外的话题，这一层也不替它造分类。认不出来就不投，并说清是「认不出」而不是「没拒」。
+    投不进去（今日额度用完）也照实回 delivered=false，不把它写成投过了；理由用心的原话。
+    写盘失败照实抛（ValueError / OSError 由 _gate 翻成 500）：投心失败也是失败。
+    """
+    topic = _topic_of(source)
+    if topic is None:
+        return {"delivered": False, "topic": None, "until": None, "remaining_min": None,
+                "reason": "认不出拒的是哪个话题：对方那句问话里没有心认可的话题名"
+                          "（词表见 organs/brain/topics.json），这次没投心"}
+    full_name = str(event.get("full_name") or "")
+    out = heart_refuse.ingest(topic, full_name, now=_stamp())
+    delivered = bool(out.get("ok"))
+    if delivered:
+        reason = "投给心：%r 记一次「%s」，冷却到 %s。" % (topic, full_name, out.get("until"))
+    else:
+        reason = str(out.get("message") or out.get("code") or "心没收这次拒绝")
+    return {"delivered": delivered, "topic": topic, "until": out.get("until"),
+            "remaining_min": out.get("remaining_min"), "reason": reason}
+
+
+def _topic_of(text: Any) -> Optional[str]:
+    """从一段话里认出话题名：只认心那份词表上的名字（认不得就不认，不猜、不造分类）。
+
+    这一段只做「这段字里有没有出现过某个话题名」，不做分词也不做同义词：词表本来就是一串人写的
+    话题名，认不出就说认不出——比替心猜一个话题、把它记进冷却账要诚实得多。
+    """
+    body = text if isinstance(text, str) else ""
+    for name in heart_refuse.vocabulary():
+        if name and name in body:
+            return name
+    return None
+
+
+def _stamp() -> str:
+    """投心时给的那一刻（ISO，秒级）：本文件是时刻的供应方，库层一个都不取时钟。"""
+    return datetime.now().replace(microsecond=0).isoformat()
 
 
 def _day() -> str:
@@ -342,6 +511,25 @@ def _text(params: Mapping[str, str]) -> Optional[str]:
         return None
     body = raw if isinstance(raw, str) else str(raw)
     return body if body.strip() else None
+
+
+def _asked_text(params: Mapping[str, str]) -> Optional[str]:
+    """查询串里对方那句问话：没给是 None（这一次不判软转向），给了就给原文（空白也算给了）。
+
+    空白也算给了，是因为「给了却没内容」与「根本没给」不一样：前者要如实落成 soft-unavailable
+    （没比过），后者才是什么都不用判。这个区别由 refusal.soft_scan 的 status 说出来。
+    """
+    raw = params.get("asked")
+    if raw is None:
+        return None
+    return raw if isinstance(raw, str) else str(raw)
+
+
+def _answer_text(params: Mapping[str, str], text: Optional[str]) -> Optional[str]:
+    """查询串里她说的话：给了 answer 就用它，没给就沿用 text（软转向判的是她那句话）。"""
+    raw = params.get("answer")
+    body = raw if isinstance(raw, str) else ""
+    return body if body.strip() else text
 
 
 def _missing_text(route: str) -> Result:
@@ -518,20 +706,73 @@ def _audit_section(seen: Any) -> Dict[str, Any]:
     }
 
 
-def _refusal_section(refused: Any, verdict: Any) -> Dict[str, Any]:
-    """拒绝那一节：说法、形状、事件、投没投、闸怎么判的、一句人话。
+def _refusal_section(refused: Any, verdict: Any, heart: Any, final: str) -> Dict[str, Any]:
+    """拒绝那一节：说法、形状、形状大类、事件、投没投、闸怎么判的、一句人话。
 
     text 与 gate_decision 取的是**外层那一遍闸**（含照抄审计）的判词——那才是这句要过的那道；
     refusal.enforce 那一遍只用来取说法、事件与人话（不给 sink，所以不记账，两遍不会各记一次）。
+    唯一的例外是软转向：那时她的话不进闸（进了就要改她的话），text 是那句原话、gate_decision 用
+    数据里那个「没动过」的判词——闸那一遍的读数在 gate_readonly 里另报。
+
+    kind 是形状大类（hard|soft），shape 是那一节的名字（topic / mood / nobody / soft）：两个都要，
+    少了 kind，人就得靠猜 shape 是不是 "soft" 才知道这次是软转向还是硬拒绝。
+    sent 说的是投给心了没有（heart.delivered），不是「库里的 sink 接没接」。
     """
+    soft = refused.kind == refusal.KIND_SOFT
     return {
-        "text": verdict.text,
+        "text": final,
         "shape": refused.shape,
+        "kind": refused.kind,
         "full_name": refused.full_name,
         "event": refused.event,
-        "sent": refused.sent,
-        "gate_decision": verdict.decision,
+        "sent": heart["delivered"] if heart is not None else refused.sent,
+        "gate_decision": refused.gate_decision if soft else verdict.decision,
         "reason": refused.reason,
+    }
+
+
+def _readonly_section(verdict: Any) -> Dict[str, Any]:
+    """软转向时闸那一遍的读数：照跑、照判，只是不许改她的话（所以这里只报不改）。
+
+    hits 是闸看出问题的那些条（可能是空的），decision 是它本来想怎么处理——都留着给人看：
+    「照发」不等于「闸没意见」，两件事分开报，比把闸的判词抹掉诚实。
+    """
+    return {
+        "decision": verdict.decision,
+        "hits": [{"clause_id": one.clause_id, "kind": one.kind,
+                  "matched": one.matched, "reason": one.reason} for one in verdict.hits],
+        "reason": verdict.reason,
+    }
+
+
+def _soft_section(soft: Any) -> Dict[str, Any]:
+    """软转向判词那一节：是不是、比没比过、命中哪几个词、为什么这么判。
+
+    status 原样透出：不是 "ok" 就是没真的比过（soft-unavailable），**这时既不是「是软转向」，
+    也不是「不是拒绝」**——没比过而已，不许把它读成清白。
+    """
+    return {
+        "is_soft": soft.is_soft,
+        "status": soft.status,
+        "opener": soft.opener,
+        "redirect": soft.redirect,
+        "question": soft.question,
+        "reason": soft.reason,
+    }
+
+
+def _action_section(found: Any, status: str, cleared: str) -> Dict[str, Any]:
+    """动作括注那一节：判没判、哪一路命中、踩到哪个场景词、一句人话。
+
+    checked 取闸的 action_status（"ok" 才算真判过）：false 是「这一关没跑」，不是「查过没问题」，
+    两者必须分得开。where / env_word 都取自判据表（括号内 / 身体句、场景词表里的那个词）；
+    没命中时给的是 data/action_note.json 里那句「查过了」的人话——放行也要有据。
+    """
+    return {
+        "checked": status == action_note.STATUS_OK,
+        "where": found.where if found is not None else None,
+        "env_word": found.env_word if found is not None else None,
+        "reason": found.reason if found is not None else cleared,
     }
 
 
