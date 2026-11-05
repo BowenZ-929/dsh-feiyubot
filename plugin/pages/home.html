@@ -94,6 +94,9 @@
          overflow-wrap: anywhere; color: var(--home-fg); background: var(--home-bg);
          border: 1px solid var(--home-border); border-radius: 6px; padding: .5rem .6rem; min-height: 2.4rem; }
 </style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
+     直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
+<script src="panel-base.js" data-page="home"></script>
 </head>
 <body>
 <header class="banner">家 · 十间房 / 存取 / 审计。本面板无鉴权，只许绑 127.0.0.1；十间房固定，本页没有「新建房间」。</header>
@@ -209,10 +212,9 @@
 (function () {
   "use strict";
 
-  // 壳把本页挂在 /qqagent/panel/home 下（iframe 的文档路径没有结尾斜杠），核自己挂在 /home。
-  // 请求一律按当前挂载前缀补回去：绝对路径 "/home/rooms" 在 iframe 里会打到壳的根，那是 404。
-  var MOUNT = location.pathname.replace(/\/+$/, "");
-  var BASE = MOUNT.slice(-5) === "/home" ? MOUNT.slice(0, -5) : "";
+  // 挂载前缀只在 panel-base.js 里算一次（<head> 里按 data-page="home" 引入）。
+  // call() 里那句 panelFetch 只给路径，前缀由公共片段补：直开核打到 /home/rooms，
+  // 壳里打到 /qqagent/panel/home/rooms，壳剥掉前缀后仍是 /home/rooms。
 
   var LAST_LINES_KEY = "home.audit.lines";
   var LAST_SEQ_KEY = "home.audit.seq";
@@ -249,7 +251,7 @@
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    return fetch(BASE + path, init).then(function (res) {
+    return panelFetch(path, init).then(function (res) {
       return res.json().then(function (data) {
         return { status: res.status, data: data };
       }, function () {

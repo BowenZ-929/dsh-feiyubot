@@ -24,11 +24,12 @@ from typing import Any, Dict, Optional, Sequence
 from organs.brain import BrainStore, load as load_brain
 from organs.soul import SoulLoadError, load
 from . import api, inbound, roots
-from .pages import PAGE_FILES, read_page
+from .pages import PAGE_FILES, page_type, read_page
 
-# 静态页：路径 → 页面文件（与 api.ROUTES 无关，这几个路径只发 html，不进 api.handle）
+# 静态页：路径 → 文件（与 api.ROUTES 无关，这几条路径只发字节，不进 api.handle）。
+# content-type 按后缀查 api/pages.py 的 PAGE_TYPES：panel-base.js 必须是 text/javascript，
+# 发成 text/html 浏览器会拒绝执行（MIME 检查）。
 PAGE_ROUTES = PAGE_FILES
-PAGE_TYPE = "text/html; charset=utf-8"
 
 
 def _decode_target(raw: str) -> str:
@@ -88,7 +89,7 @@ class _Handler(BaseHTTPRequestHandler):
         if data is None:
             self._send(404, {"ok": False, "message": "面板页找不到：%s" % name})
             return
-        self._send_bytes(200, PAGE_TYPE, data)
+        self._send_bytes(200, page_type(name), data)
 
     def _send(self, status: int, payload: Dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

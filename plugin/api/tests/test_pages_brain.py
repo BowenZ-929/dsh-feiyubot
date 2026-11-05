@@ -191,9 +191,11 @@ class WritesAreTheProposalAndTheCard(unittest.TestCase):
         """
         text = _text()
         self.assertEqual(len(FETCH_RE.findall(text)), 0, "出现了裸 fetch(\"path\")")
-        self.assertEqual(text.count("fetch(BASE + path, init)"), 1,
-                         "fetch 被复制到了 call() 之外，或没补挂载前缀")
-        self.assertEqual(re.findall(r"""fetch\(\s*["']""", text), [],
+        # 2026-11-05：挂载前缀只在 pages/panel-base.js 里算一次，页里的出口叫 panelFetch；
+        # 断言的意思没变——全页只有一个补前缀的取数出口，且它拿到的路径不带前缀。
+        self.assertEqual(text.count("panelFetch(path, init)"), 1,
+                         "取数出口被复制到了 call() 之外，或没走公共片段补前缀")
+        self.assertEqual(re.findall(r"""(?:panel)?[Ff]etch\(\s*["']""", text), [],
                          "有 fetch 直接写死路径：绕过了 call() 的前缀补全")
 
 
@@ -205,13 +207,17 @@ class RequestsFollowTheMountPrefix(unittest.TestCase):
     （壳剥掉前缀后落到核的 /brain/...）。名片是相对挂载的路径，所以它也必须走 call()。
     """
 
-    def test_mount_and_base_are_derived_from_pathname(self):
+    # 口径变更（2026-11-05 一页一席位）：MOUNT/BASE 的推导从「每页各写一份
+    # var MOUNT/var BASE」搬进 pages/panel-base.js，全项目只剩一份。判据因此从
+    # 「页里有那两行 var」换成「页里没有第二份推导 + 用相对地址引入了公共片段」——
+    # 防的还是同一件事：iframe 里的绝对路径打到宿主根。
+    def test_mount_prefix_comes_from_the_shared_fragment(self):
         text = _text()
-        self.assertIn('var MOUNT = location.pathname.replace(/\\/+$/, "");', text,
-                      "缺挂载前缀：iframe 里的绝对路径会打到宿主根")
-        self.assertIn('var BASE = MOUNT.slice(-6) === "/brain" ? MOUNT.slice(0, -6) : "";', text,
-                      "BASE 要按挂载路径算：直开核时为空串，挂在壳里时是壳前缀")
-        self.assertEqual(text.count("BASE + path"), 1,
+        self.assertIn('<script src="panel-base.js" data-page="brain"></script>', text,
+                      "没按相对地址引入公共片段并声明自己是哪一页")
+        self.assertNotIn("var MOUNT", text, "页里又长出一份 MOUNT 推导")
+        self.assertNotIn("var BASE", text, "页里又长出一份 BASE 推导")
+        self.assertEqual(text.count("panelFetch(path"), 1,
                          "补前缀的地方该只有 call() 一处")
         self.assertNotIn('fetch("/brain', text)
         self.assertNotIn("fetch('/brain", text)
@@ -223,7 +229,7 @@ class RequestsFollowTheMountPrefix(unittest.TestCase):
         self.assertEqual(1, text.count('call("POST", "/soul/proposal"'))
         self.assertEqual(1, text.count('call("PATCH", cardPath('),
                          "名片写入绕开了 call()：iframe 里会打到宿主根")
-        self.assertIn("return fetch(BASE + path, init)", text,
+        self.assertIn("return panelFetch(path, init)", text,
                       "写与读要共用一个出口，只给 /brain/* 补前缀等于在壳里写不进去")
 
 
@@ -382,8 +388,11 @@ class ClickablesPointAtRealRoutes(unittest.TestCase):
 
     def test_anchors_resolve_to_pages(self):
         text = _text()
+        # 2026-11-05：回跳从 ".." 改成 "../"。iframe 里 ".." 会折成 /qqagent/panel
+        # （结尾没有斜杠），页内相对地址（panel-base.js 也是相对地址）就从那一层开始解析、
+        # 全打歪；"../" 在核与壳两种挂载下都落在魂页上。
         for href in ANCHOR_RE.findall(text):
-            self.assertTrue(href in ("..", "heart"), "多了一条去向不明的链接：%r" % href)
+            self.assertTrue(href in ("../", "heart"), "多了一条去向不明的链接：%r" % href)
         self.assertEqual(text.count('<a href='), 2)
 
 

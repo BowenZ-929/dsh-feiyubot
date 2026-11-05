@@ -5,16 +5,22 @@ DSH 插件包（TypeScript）。它只做四件事：**登记座位、搬运 HTT
 
 - **核**（Python，`../plugin/`）跑在 `127.0.0.1:8787`（`QQAGENT_CORE_PORT` 可改），面板页与 `/soul*` 接口都是它的；
   **壳负责把它拉起来并看着它**（探活 → spawn → 退避重启 → 收摊时收掉）。
-- **壳**（本包）把三个页面挂到 DSH 的三处席位上，把面板的 HTTP 原样转给核，并给心与脑各开一条只读端点。
+- **壳**（本包）只挂**一个**席位「她的面板」，把面板的 HTTP 原样转给核。
 - 两侧只经 HTTP 说话；壳不 import 核，核不知道壳存在。
 
-## 三处席位 × 三个页面
+## 一个席位，页内自己导航（2026-11-05 收口）
 
-| 页面 | id / main key | 内容 |
+| 席位 | id / main key | 内容 |
 | --- | --- | --- |
-| 魂 | `qqagent-soul` | `<iframe src="/qqagent/panel">` —— 核自己的面板页（看魂、改魂、翻变更史）。壳不重新实现任何展示逻辑 |
-| 心 | `qqagent-heart` | 只读页：列出 `/qqagent/heart` 搬来的字段；没有数据就是一句「未接入」。**没有任何写控件** |
-| 脑 | `qqagent-brain` | 只读页：列出 `/qqagent/brain` 搬来的字段；没有数据就是一句「未接入」。**没有任何写控件** |
+| 她的面板 | `qqagent-panel` | `<iframe src="/qqagent/panel/panel">` —— 核上的聚合页 `plugin/pages/panel.html`：一条导航（魂 · 心 · 脑 · 家 · 日子 · 聊天 · 设置）+ 一个 iframe |
+
+**为什么不是一页一个席位**：席位是宿主契约，每加一页就多一处布局、多一处空态；而页面本来
+就是一体的。所以导航长在核侧的聚合页里（`pages/panel.html`），**壳里不新增任何导航逻辑**。
+
+- 壳**不再**为心与脑搬数据：原来那份 `/qqagent/heart`、`/qqagent/brain` 端点与 3s 轮询已经删掉，
+  页面自己在 iframe 里取数。**别从这里长回第二条取数路径。**
+- 前缀推导只有一份：`plugin/pages/panel-base.js`（`PANEL_BASE` + `panelFetch`）。页面各写一份
+  `var MOUNT/var BASE` 的历史已经清掉，`api/tests/test_pages_fetch_targets.py` 看着这条。
 
 每个页面都挂在三处（`docs/reference/panel.md` §1① 的形态）：
 

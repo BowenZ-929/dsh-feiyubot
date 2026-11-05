@@ -28,6 +28,9 @@
   .legend { margin: 0 0 .6rem; color: #8a8a8a; font-size: .82rem; }
   .back { font-size: .9rem; margin-top: 2.4rem; }
 </style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
+     直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
+<script src="panel-base.js" data-page="heart"></script>
 </head>
 <body>
 <main>
@@ -113,16 +116,15 @@
       这一块没有输入框：面板只把账摊开给人看，不替人查话题。</p>
   </section>
 
-  <p class="back"><a href="..">← 回魂面板</a></p>
+  <p class="back"><a href="../">← 回魂面板</a></p>
 </main>
 <script>
 (function () {
   "use strict";
 
-  // 壳把本页挂在 /qqagent/panel/heart 下（iframe 的文档路径没有结尾斜杠），核自己挂在 /heart。
-  // 请求一律按当前挂载前缀补回去：绝对路径 "/heart/mood" 在 iframe 里会打到壳的根，那是 404。
-  var MOUNT = location.pathname.replace(/\/+$/, "");
-  var BASE = MOUNT.slice(-6) === "/heart" ? MOUNT.slice(0, -6) : "";
+  // 挂载前缀只在 panel-base.js 里算一次（<head> 里按 data-page="heart" 引入）。
+  // 取数一律 panelFetch("/heart/mood")：直开核打到 /heart/mood，壳里打到
+  // /qqagent/panel/heart/mood，壳剥掉前缀后仍是 /heart/mood。
 
   var STATES = ["说", "少说", "不说"];
   var judged = [];
@@ -393,31 +395,31 @@
 
   // 注意："/heart" 是**页面本身**（HTML），JSON 概览在 "/heart/overview"。
   // 打错一处，整页会报"核 /heart 回的不是 JSON"。
-  fetch(BASE + "/heart/overview").then(function (res) { return res.json(); }).then(function (data) {
+  panelFetch("/heart/overview").then(function (res) { return res.json(); }).then(function (data) {
     renderStatus(data);
     renderIntents(data.intents);
     renderRefusalCooling(data.refusals);
   }).catch(fail);
 
-  fetch(BASE + "/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
+  panelFetch("/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
 
-  fetch(BASE + "/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
+  panelFetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
 
-  fetch(BASE + "/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(fail);
+  panelFetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(fail);
 
-  fetch(BASE + "/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(fail);
+  panelFetch("/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(fail);
 
-  fetch(BASE + "/heart/engage").then(function (res) { return res.json(); }).then(function (data) {
+  panelFetch("/heart/engage").then(function (res) { return res.json(); }).then(function (data) {
     renderEngage("被动", data);
   }).catch(fail);
 
-  fetch(BASE + "/heart/engage?intent=proactive").then(function (res) { return res.json(); }).then(function (data) {
+  panelFetch("/heart/engage?intent=proactive").then(function (res) { return res.json(); }).then(function (data) {
     renderEngage("主动", data);
   }).catch(fail);
 
-  fetch(BASE + "/heart/pending").then(function (res) { return res.json(); }).then(renderPending).catch(fail);
+  panelFetch("/heart/pending").then(function (res) { return res.json(); }).then(renderPending).catch(fail);
 
-  fetch(BASE + "/heart/refusals").then(function (res) { return res.json(); }).then(renderRefusalQuota).catch(fail);
+  panelFetch("/heart/refusals").then(function (res) { return res.json(); }).then(renderRefusalQuota).catch(fail);
 
 }());
 </script>

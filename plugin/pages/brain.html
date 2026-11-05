@@ -172,22 +172,15 @@
   #error-card { border-color: var(--warn); }
   #error-card .card-title { color: var(--warn); font-weight: 600; margin-bottom: .3rem; }
 </style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
+     直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
+<script src="panel-base.js" data-page="brain"></script>
 </head>
 <body>
 <header class="banner">脑 · 记忆与判断只能看：都由程序写（architecture.md §9.2）。人能写的只有名片四栏（称呼 / 雷点 / 备注 / 照片说明），熟稔仍在只读侧。本页两条写：「接受提案」写的是魂，不是脑；名片写的是人写的字段，不动熟稔。</header>
-<nav class="links" aria-label="页面导航"><a href="..">← 回魂面板</a> · <a href="heart">心 · 只读</a></nav>
-<script>
-  // 壳把本页挂在 /qqagent/panel/brain 下（iframe 的文档路径没有结尾斜杠），裸相对 href 会被浏览器
-  // 折成 /qqagent/heart —— 那是壳的 JSON 端点，不是核的只读页。按当前挂载前缀把链接补回去。
-  (function () {
-    var mount = location.pathname.replace(/\/+$/, "");
-    var base = mount.slice(-6) === "/brain" ? mount.slice(0, -6) : "";
-    if (!base) { return; }
-    for (const a of document.querySelectorAll("nav.links a")) {
-      if (a.getAttribute("href") !== "..") { a.href = base + "/" + a.getAttribute("href"); }
-    }
-  })();
-</script>
+<nav class="links" aria-label="页面导航"><a href="../">← 回魂面板</a> · <a href="heart">心 · 只读</a></nav>
+<!-- 两条导航是相对地址：直开核时 / 与 /heart，壳里 /qqagent/panel/ 与
+     /qqagent/panel/heart（壳剥前缀后仍是 / 与 /heart）。壳前缀不在页里写第二份。 -->
 <main id="page" data-state="loading">
   <h1>脑</h1>
   <p class="note">三块读：人名录（含熟稔读数）、记忆四档、判断结论。脑的写入是程序内的消息路径；
@@ -302,10 +295,9 @@
     ["备注", "notes", "textarea"],
     ["照片说明", "photo_note", "input"]
   ];
-  // 壳把本页挂在 /qqagent/panel/brain 下（iframe 的文档路径没有结尾斜杠），核自己挂在 /brain。
-  // 请求一律按当前挂载前缀补回去：绝对路径 "/brain/overview" 在 iframe 里会打到壳的根，那是 404。
-  var MOUNT = location.pathname.replace(/\/+$/, "");
-  var BASE = MOUNT.slice(-6) === "/brain" ? MOUNT.slice(0, -6) : "";
+  // 挂载前缀只在 panel-base.js 里算一次（<head> 里按 data-page="brain" 引入）。
+  // call() 里那句 panelFetch 只给路径，前缀由公共片段补：直开核打到 /brain/overview，
+  // 壳里打到 /qqagent/panel/brain/overview，壳剥掉前缀后仍是 /brain/overview。
   var STATE = {
     loaded: false,
     overview: null, today: null, people: null, proposals: null, self: null,
@@ -343,7 +335,7 @@
       init.body = JSON.stringify(body);
     }
     // 取数与写都只从这一条出去：BASE 是挂载前缀（直开核时是空串）。
-    return fetch(BASE + path, init).then(function (res) {
+    return panelFetch(path, init).then(function (res) {
       return res.json().then(function (data) {
         return { status: res.status, data: data };
       }, function () {

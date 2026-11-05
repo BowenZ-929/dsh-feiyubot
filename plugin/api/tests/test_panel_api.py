@@ -679,9 +679,15 @@ class DevserverPageTest(unittest.TestCase):
         self.assertIsNone(devserver.read_page("nope.html", root))
 
     def test_root_and_panel_serve_the_same_page(self):
-        self.assertEqual({"/": "soul.html", "/panel": "soul.html",
+        # 口径变更（2026-11-05 一页一席位）："/" 仍是魂页（直开核时 / 就是魂），
+        # "/panel" 改成聚合页 panel.html（页里一条导航 + 一个 iframe，DSH 侧只有一个席位）。
+        # 新增 /day、/settings 两张占位页（导航里点得到、打开不是 404）与 /panel-base.js
+        # （MOUNT/BASE 的唯一一份推导，按 .js 发 text/javascript）。
+        self.assertEqual({"/": "soul.html", "/panel": "panel.html",
                           "/heart": "heart.html", "/brain": "brain.html",
-                          "/home": "home.html", "/chat": "chat.html"},
+                          "/home": "home.html", "/day": "day.html",
+                          "/settings": "settings.html", "/chat": "chat.html",
+                          "/panel-base.js": "panel-base.js"},
                          devserver.PAGE_ROUTES)
         data = devserver.read_page("soul.html")
         self.assertIsNotNone(data)
@@ -738,10 +744,12 @@ class DevserverHttpTest(unittest.TestCase):
         self.assertIn("text/html", ctype)
         self.assertIn(b"<!doctype html", body)
 
-    def test_panel_path_serves_the_same_page(self):
+    def test_panel_path_serves_the_aggregation_page(self):
+        # 口径变更（2026-11-05）：/panel 不再是 soul.html 的别名，是那条导航 + iframe 的
+        # 聚合页（panel.html）；"/" 才是魂页。
         status, body, _ = self._get("/panel")
         self.assertEqual(200, status)
-        self.assertEqual(devserver.read_page("soul.html"), body)
+        self.assertEqual(devserver.read_page("panel.html"), body)
 
     def test_render_endpoint_answers_over_http(self):
         status, body, ctype = self._get("/soul/render?audience=%E7%86%9F%E4%BA%BA")

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>她的面板</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; }
+  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
+         margin: 0; color: #1b1b1b; background: #fbfbfb;
+         display: flex; flex-direction: column; }
+  .tabs { display: flex; flex-wrap: wrap; gap: .2rem; align-items: baseline;
+          padding: .5rem .8rem; background: #fff; border-bottom: 1px solid #ececec; }
+  .tabs a { padding: .2rem .6rem; border-radius: 999px; text-decoration: none;
+            color: #555; font-size: .95rem; }
+  .tabs a:hover { background: #f2f2f2; }
+  .tabs a.on { background: #1b1b1b; color: #fff; }
+  iframe { flex: 1; border: 0; width: 100%; display: block; background: #fbfbfb; }
+</style>
+</head>
+<body>
+<!-- 导航只是搬运：每一项都是**相对地址**，解析出来就是核上那一页。
+     直开核时文档在 /panel，相对 heart 解析成 /heart；
+     壳里文档在 /qqagent/panel/panel，相对 heart 解析成 /qqagent/panel/heart，剥前缀后还是 /heart。
+     七项一一对应核上真实路由（魂 / 心 /heart 脑 /brain 家 /home 日子 /day 聊天 /chat 设置 /settings）：
+     点不出 404 是这一页的硬要求，删一个按钮比留一个死按钮强。 -->
+<nav class="tabs" id="tabs" aria-label="她的面板导航">
+  <a href="./" target="organ" class="on">魂</a>
+  <a href="heart" target="organ">心</a>
+  <a href="brain" target="organ">脑</a>
+  <a href="home" target="organ">家</a>
+  <a href="day" target="organ">日子</a>
+  <a href="chat" target="organ">聊天</a>
+  <a href="settings" target="organ">设置</a>
+</nav>
+<iframe name="organ" title="面板页" src="./"></iframe>
+<script>
+(function () {
+  "use strict";
+
+  // 导航条只做一件事：换 iframe 的地址（target="organ" 干的）并把当前这一项点亮。
+  // 页里没有任何她的判断，也没有第二条取数路径。
+  var tabs = document.getElementById("tabs");
+  var links = tabs.querySelectorAll("a");
+  tabs.addEventListener("click", function (event) {
+    var target = event.target;
+    if (target.tagName !== "A") { return; }
+    for (var i = 0; i < links.length; i += 1) {
+      links[i].className = links[i] === target ? "on" : "";
+    }
+  });
+}());
+</script>
+</body>
+</html>

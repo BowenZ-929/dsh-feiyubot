@@ -50,6 +50,8 @@
   .owner { font-size: .78rem; color: var(--dim); margin: 0 0 .5rem; }
   .muted { color: var(--dim); font-size: .85rem; }
   .hidden { display: none; }
+  /* 口癖护栏降档那一行：黄色（宿主变量，取不到就用同一个兜底色） */
+  .warn { color: var(--warn, #d98a3d); }
   /* 消息流 */
   .thread { display: flex; flex-direction: column; gap: .5rem; min-height: 4rem; }
   .bubble { max-width: 42rem; padding: .45rem .75rem; border-radius: var(--radius);
@@ -90,10 +92,13 @@
   dl.kv dt { color: var(--dim); }
   dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 </style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
+     直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
+<script src="panel-base.js" data-page="chat"></script>
 </head>
 <body>
 <header class="banner">说话 · 她第一次真说话：这一页只有一条写（POST /chat）。她的话按 chunks 分条出，心的档位与命中门只回显，人改不了。记忆的写入在核里，页面上没有开关。</header>
-<nav class="links" aria-label="页面导航"><a href="/">← 回魂面板</a></nav>
+<nav class="links" aria-label="页面导航"><a href="../">← 回魂面板</a></nav>
 <main>
   <div>
     <h1>跟她说一句话</h1>
@@ -154,6 +159,7 @@
         <dt>温度</dt><dd id="llm-temperature">还没说话</dd>
         <dt>连续性</dt><dd id="continuity-line">还没说话</dd>
         <dt>锚句</dt><dd id="anchors-line">还没说话</dd>
+        <dt>口癖护栏</dt><dd id="guard-line">还没说话</dd>
       </dl>
     </section>
   </aside>
@@ -162,10 +168,9 @@
 (function () {
   "use strict";
 
-  // 挂载前缀：直开核时 MOUNT 是 /chat，BASE 为空串；
-  // 挂在壳里（/qqagent/panel/chat）时 BASE 是 /qqagent/panel，请求原样打回核的 /chat。
-  var MOUNT = location.pathname.replace(/\/+$/, "");
-  var BASE = MOUNT.slice(-5) === "/chat" ? MOUNT.slice(0, -5) : "";
+  // 挂载前缀只在 panel-base.js 里算一次（<head> 里按 data-page="chat" 引入）。
+  // 直开核时 PANEL_BASE 是空串，挂在壳里（/qqagent/panel/chat）时是 /qqagent/panel；
+  // 两种都靠 panelFetch(path) 把前缀补回来，路径本身只写核上的那一条。
 
   // 后端 kind → 人话归类。message 一律原样显示，不在这里改写、也不显示原始 JSON。
   var KIND_TEXT = {
@@ -202,7 +207,7 @@
       init.body = JSON.stringify(body);
     }
     // 取数与写都只从这一条出去：BASE 是挂载前缀（直开核时是空串）。
-    return fetch(BASE + path, init).then(function (res) {
+    return panelFetch(path, init).then(function (res) {
       return res.json().then(function (data) {
         return { status: res.status, data: data };
       }, function () {
@@ -420,10 +425,38 @@
     return "没给";
   }
 
+  // 口癖护栏：「口癖命中率 12%（滚动 50 · 阈值 30%）· 注入 5 条/共 5 条」，
+  // 降档时同一句后面接「已降到 2 条」，并给这一行加 warn（黄）。缺字段一律写「没给」。
+  function guardText(guard) {
+    var conf = guard || {};
+    function given(value) {
+      return (value === undefined || value === null) ? null : String(value);
+    }
+    function percent(value) {
+      return (typeof value === "number") ? String(Math.round(value * 100)) + "%" : null;
+    }
+    var rate = percent(conf.rate) || "没给";
+    var window = given(conf.window) || "没给";
+    var threshold = percent(conf.threshold) || "没给";
+    var injected = given(conf.injected) || "没给";
+    var available = given(conf.available) || "没给";
+    var head = "口癖命中率 " + rate + "（滚动 " + window + " · 阈值 " + threshold + "）"
+             + " · 注入 " + injected + " 条/共 " + available + " 条";
+    if (conf.over !== true) { return head; }
+    return head + " · 已降到 " + injected + " 条";
+  }
+
   function renderReadouts(data) {
     el("llm-temperature").textContent = temperatureText(data.llm);
     el("continuity-line").textContent = continuityText(data.continuity);
     el("anchors-line").textContent = anchorsText(data.anchors);
+    var guard = data.guard || {};
+    el("guard-line").textContent = guardText(guard);
+    if (guard.over === true) {
+      el("guard-line").classList.add("warn");
+    } else {
+      el("guard-line").classList.remove("warn");
+    }
   }
 
   function send(text) {

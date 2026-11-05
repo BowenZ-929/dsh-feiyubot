@@ -1,11 +1,16 @@
-"""面板静态页的名单（pages/ 目录的 html 读取）。
+"""面板静态页的名单（pages/ 目录的 html / js 读取）。
 
 只读语义已经不在这一层：心的七条读数端点由 api/heart.py（HEART_ROUTES）全权接管，
 脑由 api/brain.py（BRAIN_ROUTES）接管，405 的措辞与路由归组都在 core.handle 里按器官
 表分派。"READONLY_PAGES：心还是占位页"那个化石概念随心线落地一起删掉了——两处登记
 同一个 /heart 会被 core._merge 当场拒掉。
-这里只剩一件事：PAGE_FILES，devserver 直接发字节的静态页名单（/heart 仍发 heart.html）。
+这里只剩一件事：PAGE_FILES，devserver 直接发字节的静态名单。
 architecture §9.2：心与脑只能看。页是活的只读视图，不含任何写入口。
+
+一页一个席位（2026-11-05）：DSH 里只有一个席位「她的面板」，页内一条导航条
+（魂 / 心 / 脑 / 家 / 日子 / 聊天 / 设置）换 iframe 的地址；/panel 发聚合页 panel.html，
+"/" 仍是魂页（直开核时 / 就是魂）。日子与设置这一轮没有真实页面，各发一张占位页——
+导航里点得到、打开不是 404，比删掉那一项更接近下一步。
 """
 from __future__ import annotations
 
@@ -16,13 +21,30 @@ PAGE_DIR = Path(__file__).resolve().parents[1] / "pages"
 # api.handle 的只读端点：路径 → 方法。心在 heart.py、脑在 brain.py，这张表留空
 # （同名键重复注册会被 core._merge 当场拒掉），不再有"占位页"这类端点。
 PAGE_ROUTES: Dict[str, str] = {}
-# 静态页：路径 → 页面文件（devserver 直接发字节，不经 api.handle）
-PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "soul.html",
+# 静态页：路径 → 文件（devserver 直接发字节，不经 api.handle）
+# "/" 与 "/panel" 不是同一张页：直开核时 / 是魂，/panel 是那条导航 + iframe 的聚合页
+#（壳里只有一个席位，iframe 指向它）。/day、/settings 是占位页——没有真实页面的
+# 导航项也要点得开，这是本项目的硬规矩：点不到真实路由的按钮要删，不留死按钮。
+PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "panel.html",
                               "/heart": "heart.html", "/brain": "brain.html",
                               "/home": "home.html",
+                              "/day": "day.html",
+                              "/settings": "settings.html",
                               # 说话页：GET /chat 发这一页的字节，POST /chat 走 api.handle
                               #（devserver._dispatch 只在 GET 时查 PAGE_FILES，两条不打架）。
-                              "/chat": "chat.html"}
+                              "/chat": "chat.html",
+                              # MOUNT/BASE 只有一份推导，就在这个片段里（各页相对地址引入）。
+                              # 脚本要单独的 content-type，见下面的 PAGE_TYPES。
+                              "/panel-base.js": "panel-base.js"}
+# 按后缀给 content-type：一律 text/html 的话，浏览器会把 panel-base.js 当 HTML 拒掉
+#（"MIME type ('text/html') is not executable"）。表里只有一样非 html。
+PAGE_TYPE = "text/html; charset=utf-8"
+PAGE_TYPES: Dict[str, str] = {".js": "text/javascript; charset=utf-8"}
+
+
+def page_type(name: str) -> str:
+    """一个静态文件的 content-type：按后缀查表，查不到按 html。"""
+    return PAGE_TYPES.get(Path(name).suffix.lower(), PAGE_TYPE)
 
 
 def read_page(name: str, root: Optional[Path] = None) -> Optional[bytes]:

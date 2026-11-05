@@ -52,17 +52,15 @@
   nav.links { max-width: 1180px; margin: 0 0 1rem; font-size: .9rem; color: #555; }
   nav.links a { color: #2f6f4f; }
 </style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
+     直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
+<script src="panel-base.js" data-page="soul"></script>
 </head>
 <body>
 <header class="banner">本面板无鉴权，只许绑 127.0.0.1；改魂只有本页下面这几处入口。</header>
 <nav class="links" aria-label="只读页">另有只读两页：<a href="heart">心 · 只读</a>、<a href="brain">脑 · 只读</a>（是入口，不是写口）</nav>
-<script>
-  // 壳把本页挂在 /qqagent/panel 下（iframe 的文档路径没有结尾斜杠），裸相对 href 会被浏览器
-  // 折成 /qqagent/heart —— 那是壳的 JSON 端点，不是核的只读页。按当前前缀把两条链接补回面板下。
-  if (location.pathname.startsWith('/qqagent/panel')) {
-    for (const a of document.querySelectorAll('nav.links a')) a.href = '/qqagent/panel/' + a.getAttribute('href');
-  }
-</script>
+<!-- 两条入口是相对地址：直开核时 /heart、/brain，壳里 /qqagent/panel/heart、
+     /qqagent/panel/brain（壳剥前缀后仍是 /heart、/brain）。壳前缀不在页里写第二份。 -->
 <main>
   <div>
     <section aria-labelledby="ro-h">
@@ -172,7 +170,9 @@
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    return fetch(path, init).then(function (res) {
+    // 路径只写核上那一条（"/soul/render"）；挂载前缀由 panel-base.js 的 panelFetch 补，
+    // 壳里补成 /qqagent/panel/soul/render，剥前缀后还是 /soul/render。
+    return panelFetch(path, init).then(function (res) {
       return res.json().then(function (data) {
         return { status: res.status, data: data };
       }, function () {
