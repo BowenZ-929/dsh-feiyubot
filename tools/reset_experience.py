@@ -52,6 +52,7 @@ CLEAR = (
     "brain/evictions.jsonl", "brain/topic_candidates.json",
     "heart/energy.json", "heart/mood_traj.jsonl", "heart/pending.json", "heart/refusals.json",
     "day/schedule.json",
+    "mind/recent_turns.jsonl",  # 最近 12 轮：也是经历，清场要清
     "home/audit.jsonl", "home/audit.seen.json", "home/仓库/index.jsonl", "home/工作台/index.jsonl",
 )
 
