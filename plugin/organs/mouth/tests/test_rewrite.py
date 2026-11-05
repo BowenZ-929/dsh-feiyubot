@@ -202,6 +202,68 @@ class BrokenTableIsLoud(unittest.TestCase):
         self.assertIn("rewrite-failed", str(caught.exception))
 
 
+class AfterRewriteSaysWhichGateFailed(unittest.TestCase):
+    """改成了、却还是命中那一条：那一行账怎么说。
+
+    通道名与记号全从 data/rewrite.json 的 after_rewrite 读：这里只验「接上了没有、括号里的记号
+    对不对、认不出的通道会不会响」。红线那类不走这一格（判据在 data/fatal.json）。
+    """
+
+    MARKS = BOOK["after_rewrite"]["marks"]
+
+    def test_every_channel_gets_its_own_mark(self):
+        for channel, mark in self.MARKS.items():
+            with self.subTest(channel=channel):
+                said = rewriting.after_rewrite_reason(channel, clause_id="某个名字", why="某一句话")
+                self.assertIn(mark, said)                       # 账本靠这个记号认门
+                self.assertIn("某个名字", said)                  # 点名是哪一条没改掉
+                self.assertIn("某一句话", said)                  # 也带上那一关自己的说法
+        self.assertEqual(len(self.MARKS), len({one for one in self.MARKS.values()}))
+
+    def test_an_unknown_channel_is_loud(self):
+        with self.assertRaises(RewriteBroken) as caught:
+            rewriting.after_rewrite_reason("没听说过的通道")
+        self.assertIn("after_rewrite.marks", str(caught.exception))
+
+    def test_the_marks_come_from_the_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            other = _write_and_load(tmp, {"after_rewrite": dict(
+                BOOK["after_rewrite"], marks=dict(self.MARKS, audit="另一套记号"))})
+            self.assertIn("另一套记号", rewriting.after_rewrite_reason("audit", "x", "y", table=other))
+
+    def test_the_reason_must_carry_the_mark(self):
+        """说法里不带 {mark} 就是坏数据：那一行看不出是哪一关没改掉，等于没记。"""
+        with self.assertRaises(RewriteBroken) as caught:
+            rewriting.after_rewrite_reason(
+                "audit", "x", "y",
+                table=dict(BOOK, after_rewrite=dict(BOOK["after_rewrite"],
+                                                    reason="这一句改过还是不行。")))
+        self.assertIn("after_rewrite.reason", str(caught.exception))
+
+    def test_broken_marks_are_named(self):
+        for marks, spot in (({}, "marks"), ("一整串字", "marks"),
+                            ({"audit": ""}, "audit"), ({"": "audit-after-rewrite"}, "通道名")):
+            with self.subTest(marks=marks):
+                with self.assertRaises(RewriteBroken) as caught:
+                    rewriting.after_rewrite_reason(
+                        "audit", "x", "y",
+                        table=dict(BOOK, after_rewrite=dict(BOOK["after_rewrite"], marks=marks)))
+                self.assertIn(spot, str(caught.exception))
+
+    def test_the_unchecked_note_comes_from_the_data(self):
+        """没给红线表时补那一句也取自数据：代码里连这句说明都不许出现。"""
+        said = rewriting.after_rewrite_reason("clause", "某个名字", "某一句话", checked=False)
+        self.assertIn(self.MARKS["clause"], said)
+        self.assertIn(BOOK["after_rewrite"]["unchecked"], said)
+        self.assertNotIn(BOOK["after_rewrite"]["unchecked"],
+                         rewriting.after_rewrite_reason("clause", "x", "y", checked=True))
+        with self.assertRaises(RewriteBroken) as caught:
+            rewriting.after_rewrite_reason(
+                "clause", "x", "y", checked=False,
+                table=dict(BOOK, after_rewrite=dict(BOOK["after_rewrite"], unchecked="")))
+        self.assertIn("unchecked", str(caught.exception))
+
+
 class RewriteStaysClean(unittest.TestCase):
     """硬约束：判据不进代码，也没有时钟、随机数与写盘。"""
 
@@ -224,6 +286,12 @@ class RewriteStaysClean(unittest.TestCase):
     def test_source_has_no_keep_pattern(self):
         for key in ("digits", "latin"):
             self.assertNotIn(BOOK["keep"][key], self.source)
+
+    def test_source_has_no_after_rewrite_wording(self):
+        """那一行账的说法与四个记号也只在数据里：代码里出现一个都算第二处真源。"""
+        self.assertNotIn(BOOK["after_rewrite"]["reason"], self.source)
+        for mark in BOOK["after_rewrite"]["marks"].values():
+            self.assertNotIn(mark, self.source)
 
     def test_source_has_no_clock_or_random(self):
         self.assertNotRegex(self.source,

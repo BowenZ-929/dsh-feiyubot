@@ -70,6 +70,21 @@ REPEAT_BOOK = json.loads((MOUTH_DATA / "repeat.json").read_text(encoding="utf-8"
 REPEAT_CLAUSE = REPEAT_BOOK["hit"]["clause_id"]
 SKIP_CLAUSE = REPEAT_BOOK["hit"]["skip_clause_id"]
 SKIP_MARK = "skipped-by-request"        # 跳过那句 reason 里必须出现的记号
+AUDIT_BOOK = json.loads((MOUTH_DATA / "audit.json").read_text(encoding="utf-8"))
+AUDIT_SKIP = AUDIT_BOOK["skip"]         # 复述审计按他说的放过那一笔：名字、记号、说法全在数据里
+AUDIT_SKIP_CLAUSE = AUDIT_SKIP["clause_id"]
+AUDIT_SKIP_MARK = AUDIT_SKIP["status"]
+FATAL_BOOK = json.loads((MOUTH_DATA / "fatal.json").read_text(encoding="utf-8"))
+FATAL_CLAUSE = FATAL_BOOK["hit"]["clause_id"]
+GIVE_UP_CATEGORY = FATAL_BOOK["categories"][2]      # 放弃式那一类（顺序写在数据里）
+GIVE_UP_LINE = "反正我不疼，你别管了"                 # 一句放弃式的素材，不是判据
+AFTER_MARKS = json.loads((MOUTH_DATA / "rewrite.json").read_text(
+    encoding="utf-8"))["after_rewrite"]["marks"]
+
+
+def _mark_of(tag: str) -> str:
+    """某一类红线在账本里那个记号（按数据里的 mark 与 tag 填）：测试不自己造这个字符串。"""
+    return FATAL_BOOK["mark"].format(tag=tag)
 KEPT_MARK = "rewrite-failed"            # 改不动、留原话那句 reason 里必须出现的记号
 REWRITE_KEYS = {"status", "why", "from", "to"}
 
@@ -345,67 +360,101 @@ class ChatApiTest(unittest.TestCase):
             shutil.copytree(str(MOUTH_DATA), str(root))
         return root
 
-    def test_a_repeated_reply_is_dropped_by_the_gate(self):
-        """第二轮她说了一模一样的一句：内容去重拦下，chunks 少一条，blocked 里看得见「反复读」。
+    def test_a_repeated_reply_survives_the_failed_rewrite(self):
+        """第二轮她说了一模一样的一句：内容去重命中，改了还是同一个开场 → 留进门原话，不再丢空。
 
-        重写那一次也回一句「还是同一个开场」的话（换了个尾，前几个字没换）：二次命中才弃，
-        这条测的正是「改了一次还这样」那一格。
+        **这条断言是被新规矩改准的**：以前二次命中即弃（chunks 空 = 她哑了）。现在规矩是「在最该
+        回答的那一句上沉默，比说话带点毛病糟得多」——所以 decision 是 pass、chunks 里还是她那句
+        原话，账本记一行带 repeat-after-rewrite 的账，parts[*].kept_after_rewrite=true。
+        判据照样看得见：hits 里两条命中、repeat_status=ok、rewrite.status=ok（模型确实改了）。
         """
         status, first = self._send(text="我回来了", reply=self.HER_LINE)
         self.assertEqual(200, status)
         self.assertEqual("pass", first["gate"]["decision"])
         self.assertEqual(1, len(first["chunks"]))
+        before = len(self._drops_rows())
         status, second = self._post({"text": "我回来了"},
                                     _script(self.HER_LINE, self.HER_LINE + "主人"))
         self.assertEqual(200, status)
         gate = second["gate"]
-        self.assertEqual("dropped", gate["decision"])
-        self.assertEqual([], second["chunks"], "被弃的那一泡该从 chunks 里删掉")
-        self.assertEqual("", second["reply"])
-        self.assertEqual(1, gate["in_parts"])
-        self.assertEqual(0, gate["out_parts"])
-        self.assertEqual("dropped", gate["parts"][0]["decision"])
-        self.assertIn("反复读", gate["blocked"], "拦下她的 clause_id 要能被指认")
-        self.assertIn("反复读", gate["hit"]["clause_id"])
-        self.assertEqual("ok", gate["parts"][0]["repeat_status"], "这一关真的比过了")
-        self.assertEqual("ok", gate["parts"][0]["rewrite"]["status"], "重写那一次真的跑了")
+        part = gate["parts"][0]
+        self.assertEqual("pass", gate["decision"], "二次命中不再丢空")
+        self.assertNotEqual([], second["chunks"], "二次命中非红线：chunks 不许空")
+        self.assertEqual([self.HER_LINE], [one["text"] for one in second["chunks"]])
+        self.assertEqual(self.HER_LINE, second["reply"])
+        self.assertEqual(1, gate["out_parts"])
+        self.assertEqual("pass", part["decision"])
+        self.assertTrue(part["kept_after_rewrite"], "留原话那一格要看得出来")
+        self.assertEqual(self.HER_LINE, part["after"], "发的是进门那句原话，不是没改成的新稿")
+        self.assertEqual(["反复读", "反复读"], [one["clause_id"] for one in part["hits"]])
+        self.assertEqual("ok", part["repeat_status"], "这一关真的比过了")
+        self.assertEqual("ok", part["rewrite"]["status"], "重写那一次真的跑了")
+        self.assertEqual([], gate["blocked"], "这一泡没被弃，blocked 就不该有它")
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows), "留原话也要留一行账")
+        self.assertEqual("反复读", rows[-1]["clause_id"])
+        self.assertIn(AFTER_MARKS["repeat"], rows[-1]["reason"])
 
-    def test_a_noted_line_with_an_uninvited_scene_is_dropped(self):
-        """动作括注里出现了我们没给过的场景：命中、弃掉，人话原因里带着那个场景词。
+    def test_a_noted_line_survives_the_failed_rewrite(self):
+        """动作括注里出现了我们没给过的场景：命中，改了还带着同一个场景词 → 留进门原话，不再丢空。
 
-        重写那一句仍然带着同一个场景词：改了一次还踩，按老规矩弃掉整泡。
+        **这条断言是被新规矩改准的**：以前二次命中即弃。判据照旧看得见（hits 里是「动作带场景」，
+        人话点名那个场景词、account 上是一行 action-after-rewrite），只是这一泡不再整泡消失。
         """
+        before = len(self._drops_rows())
         status, payload = self._post({"text": "你在干嘛"},
                                      _script(self.NOTED_LINE, "（尾巴在水里轻轻地蜷了一下）"))
         self.assertEqual(200, status)
         gate = payload["gate"]
-        self.assertEqual([], payload["chunks"])
-        self.assertEqual("", payload["reply"])
         part = gate["parts"][0]
-        self.assertEqual("dropped", part["decision"])
+        self.assertEqual("pass", part["decision"])
+        self.assertTrue(part["kept_after_rewrite"])
+        self.assertNotEqual([], payload["chunks"], "二次命中非红线：chunks 不许空")
+        self.assertEqual([self.NOTED_LINE], [one["text"] for one in payload["chunks"]])
+        self.assertEqual(self.NOTED_LINE, payload["reply"])
         self.assertEqual("ok", part["action_status"], "这一关真的判过了（不是没跑）")
-        self.assertEqual("动作带场景", gate["hit"]["clause_id"])
-        self.assertIn("水里", gate["hit"]["reason"], "拦下她要说出是哪个场景词")
-        self.assertIn("动作带场景", gate["blocked"])
+        self.assertEqual("动作带场景", part["hits"][-1]["clause_id"])
+        self.assertIn("水里", part["hits"][-1]["reason"], "拦下她要说出是哪个场景词")
+        self.assertEqual(before + 1, len(self._drops_rows()))
+        self.assertEqual("动作带场景", self._drops_rows()[-1]["clause_id"])
+        self.assertIn(AFTER_MARKS["action"], self._drops_rows()[-1]["reason"])
 
-    def test_reciting_the_soul_card_is_dropped_by_the_audit(self):
-        """她把魂那张卡上的话原样念了出来：复述审计命中设定段，弃掉；audit.status 是 ok。"""
+    def test_a_recited_soul_card_survives_the_failed_rewrite(self):
+        """验收一：她把魂那张卡上的话原样念了出来，改了一次还在念 → **原话发出**，不再丢空。
+
+        rewrite.status 是 ok（模型确实改了），但新稿仍撞「复述设定段」——这正是以前会丢掉整泡的
+        那一格。现在 decision 是 pass、chunks / reply 非空、账上一行含 audit-after-rewrite；
+        audit.status 仍是 ok、hit 照旧带着（面板看得见她引了设定）。
+        """
         line = "我嘴上不认，行动先到"
         soul = self.tmp / "soul"
         write_json(soul / "manner.json", {"stance": line})
         store = load(soul)
+        before = len(self._drops_rows())
         status, payload = self._post({"text": "你是不是又不承认"},
                                      _script(line, "我嘴上不认，行动倒是先到了。"), store=store)
         self.assertEqual(200, status)
         gate = payload["gate"]
         part = gate["parts"][0]
-        self.assertEqual("dropped", part["decision"])
-        self.assertEqual("ok", part["audit"]["status"], "审计没真的比过（这里该是 ok）")
+        self.assertEqual("pass", part["decision"], "二次命中非红线：不许丢掉整泡")
+        self.assertEqual("ok", part["rewrite"]["status"], "模型确实改了（改写这回事没出问题）")
+        self.assertTrue(part["kept_after_rewrite"])
+        self.assertNotEqual([], payload["chunks"], "chunks 不许空")
+        self.assertTrue(payload["reply"], "reply 不许空")
+        self.assertEqual([line], [one["text"] for one in payload["chunks"]], "发的是进门那句原话")
+        self.assertEqual(line, payload["reply"])
+        self.assertFalse(part["audit"]["skipped"], "没要求重复，就没有跳过")
+        self.assertEqual("ok", part["audit"]["status"], "审计真的比过了（这里该是 ok）")
+        self.assertEqual("ok", part["fatal_status"], "红线这一关判过了、不是红线（ok 不是 not-checked）")
+        self.assertIsNone(part["fatal"])
         self.assertEqual("复述设定段", part["audit"]["hit"]["kind"])
         self.assertEqual("魂", part["audit"]["hit"]["seg_kind"])
-        self.assertEqual("复述设定段", gate["hit"]["clause_id"])
-        self.assertEqual([], payload["chunks"])
-        self.assertIn("复述设定段", gate["blocked"])
+        self.assertEqual("复述设定段", part["hits"][-1]["clause_id"])
+        self.assertEqual([], gate["blocked"], "这一泡没被弃，blocked 就不该有它")
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows), "留原话也要留一行账")
+        self.assertEqual("复述设定段", rows[-1]["clause_id"])
+        self.assertIn(AFTER_MARKS["audit"], rows[-1]["reason"], "账上要看得出是审计这一关没改掉")
 
     def test_a_normal_reply_passes_and_keeps_every_chunk_verbatim(self):
         """一句正常回话一处都不改：chunks 的 text 与**不接闸**那一遍逐字相同（diff 为空）。"""
@@ -429,11 +478,14 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(reply, gated["reply"])
 
     def test_all_parts_dropped_leaves_nothing_and_records_one_drop(self):
-        """全被弃掉：chunks=[]、reply=""，弃言账本多一行，reason 里带着 clause_id。"""
+        """全被弃掉：chunks=[]、reply=""，弃言账本多一行，reason 里带着 clause_id。
+
+        **这一格换了素材**：二次命中留原话之后，非红线已经走不到「整泡消失」了——能全被弃掉的只剩
+        红线（隐私 / 辱骂 / 放弃式：唯一不许留原话的一类）。这句里带着手机号，一泡都发不出去。
+        """
         before = len(self._drops_rows())
-        status, payload = self._post({"text": "窗台上是什么"},
-                                     _script("（水面上有月亮）尾巴慢慢蜷了一下",
-                                             "（水面上有月亮）尾巴慢慢地蜷了一下"))
+        status, payload = self._post({"text": "你有电话吗"},
+                                     _body("我手机号是 13812345678，你记一下"))
         self.assertEqual(200, status)
         self.assertEqual([], payload["chunks"])
         self.assertEqual("", payload["reply"])
@@ -441,8 +493,32 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(0, payload["gate"]["out_parts"])
         rows = self._drops_rows()
         self.assertEqual(before + 1, len(rows), "弃掉的这一泡要留一行弃言账")
-        self.assertEqual("动作带场景", rows[-1]["clause_id"])
-        self.assertIn("动作带场景", rows[-1]["reason"], "弃言账的 reason 里要能看见 clause_id")
+        self.assertEqual(FATAL_CLAUSE, rows[-1]["clause_id"])
+        self.assertIn(FATAL_CLAUSE, rows[-1]["reason"], "弃言账的 reason 里要能看见 clause_id")
+        self.assertEqual(FATAL_BOOK["categories"][0]["id"], payload["gate"]["parts"][0]["fatal"]["category"])
+
+    def test_a_red_line_is_dropped_and_the_panel_shows_which_kind(self):
+        """验收二：一句放弃式（「反正我不疼，你别管了」）——红线，整泡丢掉，面板说得出是哪一类。
+
+        红线是唯一不许留原话的一类：二次命中留原话那一条规矩到它这里就停（改一次也不能保证它
+        发不出去）。parts[*].fatal 里带着类别与撞上的那几个字，fatal_status 是 fatal（红灯）。
+        """
+        before = len(self._drops_rows())
+        status, payload = self._post({"text": "你还好吗"}, _body(GIVE_UP_LINE))
+        self.assertEqual(200, status)
+        self.assertEqual("dropped", payload["gate"]["decision"])
+        self.assertEqual([], payload["chunks"], "红线不许留原话")
+        self.assertEqual("", payload["reply"])
+        part = payload["gate"]["parts"][0]
+        self.assertEqual(GIVE_UP_CATEGORY["id"], part["fatal"]["category"])
+        self.assertEqual(GIVE_UP_CATEGORY["tag"], part["fatal"]["tag"])
+        self.assertEqual("fatal", part["fatal_status"], "红灯：这一关真的判出了红线")
+        self.assertIn("不疼", part["fatal"]["matched"])
+        self.assertFalse(part["kept_after_rewrite"])
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows))
+        self.assertEqual(FATAL_CLAUSE, rows[-1]["clause_id"])
+        self.assertIn(_mark_of(GIVE_UP_CATEGORY["tag"]), rows[-1]["reason"])
 
     def test_the_repeat_window_comes_from_the_data(self):
         """复读窗口不写死：repeat.json 的 rounds 改成 1 之后，隔了一轮的那句就不算复读了。"""
@@ -523,9 +599,10 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("allow", gate["quota"], "blocked 为假要翻成 allow")
         part = gate["parts"][0]
         self.assertEqual("ok", part["quota_status"], "标了 allow 也算判过")
-        self.assertEqual("dropped", part["decision"], "配额放行时该是动作括注那一关拦下")
-        self.assertEqual("动作带场景", part["hits"][-1]["clause_id"])
-        self.assertEqual([], payload["chunks"])
+        self.assertEqual("动作带场景", part["hits"][-1]["clause_id"], "拦下它的是动作括注那一关")
+        self.assertEqual("pass", part["decision"], "二次命中非红线：留原话，不再丢空（断言已改准）")
+        self.assertTrue(part["kept_after_rewrite"])
+        self.assertEqual([self.NOTED_QUOTA_LINE], [one["text"] for one in payload["chunks"]])
 
     def test_assembly_without_quota_is_not_checked_not_allow(self):
         """装配没标配额：交给闸的是 None（记 not-checked），chunks 与不接闸时逐字相同。"""
@@ -848,24 +925,32 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(SKIP_CLAUSE, rows[-1]["clause_id"], "账本里是数据里那个名字")
         self.assertIn(SKIP_MARK, rows[-1]["reason"])
 
-    def test_the_same_repeat_without_a_request_is_still_dropped(self):
-        """同一句复读，但对方这句没有重复请求（「今天吃啥」）：照旧判废，blocked 里是复读那条。
+    def test_the_same_repeat_without_a_request_is_judged_but_kept(self):
+        """同一句复读、对方这句没有重复请求（「今天吃啥」）：判据照旧判，但不再丢空。
 
-        重写那一次也回一句还是同一个开场的话——二次命中才弃，这正是「改一次还这样」那一格。
+        **这条断言是被新规矩改准的**：以前这里 dropped。现在二次命中留进门原话（账上一行
+        repeat-after-rewrite）——「没有豁免」这件事仍然看得见：repeat_status 是 ok（真的判过、
+        判废了），不是 skipped-by-request，账本那行里也不带那个跳过记号。
         """
         status, first = self._send(text="我回来了", reply=self.HER_LINE)
         self.assertEqual(200, status)
+        before = len(self._drops_rows())
         status, payload = self._post({"text": "今天吃啥"},
                                      _script(self.HER_LINE, self.HER_LINE + "主人"))
         self.assertEqual(200, status)
         gate = payload["gate"]
-        self.assertEqual("dropped", gate["decision"], "没要求重复就没有豁免")
-        self.assertEqual([], payload["chunks"])
-        self.assertEqual("", payload["reply"])
-        self.assertIn(REPEAT_CLAUSE, gate["blocked"])
         part = gate["parts"][0]
+        self.assertEqual("pass", part["decision"], "没要求重复就没有豁免，但也不许丢空")
+        self.assertNotEqual([], payload["chunks"], "二次命中非红线：chunks 不许空")
+        self.assertEqual([self.HER_LINE], [one["text"] for one in payload["chunks"]])
+        self.assertEqual(self.HER_LINE, payload["reply"])
         self.assertEqual("ok", part["repeat_status"], "这一关真的比过了、判废了")
         self.assertEqual("ok", part["rewrite"]["status"])
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows))
+        self.assertEqual(REPEAT_CLAUSE, rows[-1]["clause_id"])
+        self.assertIn(AFTER_MARKS["repeat"], rows[-1]["reason"])
+        self.assertNotIn(SKIP_MARK, rows[-1]["reason"], "没有豁免：这一行不许带跳过记号")
 
     def test_a_request_without_a_repeat_records_nothing(self):
         """他虽说了「再说一遍」，但这一句本来就不重复：没有「判废」可放，也就不记那一笔账。"""
@@ -877,6 +962,96 @@ class ChatApiTest(unittest.TestCase):
         part = payload["gate"]["parts"][0]
         self.assertEqual("pass", part["decision"])
         self.assertEqual("ok", part["repeat_status"], "比过了、没重复——不是跳过")
+        self.assertEqual(before, len(self._drops_rows()), "没撞上就没有账可记")
+
+    # —— 豁免：对方要她重复时的复述审计（本轮加的） ————————
+
+    SETTING = "嘴上不认，行动先到：拒绝的话说完，事已经做了"   # 魂里那句原文（设定类，照搬就拦）
+    BEFORE_LINE = "主人回来啦，我把碗放桌上了。"                # 她上一轮说过的那句（开场就是这几个字）
+    RECITED = "主人回来啦，我嘴上不认，行动先到。"               # 这一轮她照做：同一开场 + 复述设定段
+    ASKED_AGAIN = "再说一遍你刚才说的是什么"                    # 现场那句（命中请求标记）
+
+    def _soul_store(self, line: str):
+        """只带一张方式卡的魂：注入的原文因此只有这一句，复述与不复述一眼分得开。"""
+        soul = self.tmp / "soul"
+        write_json(soul / "manner.json", {"stance": line})
+        return load(soul)
+
+    def test_a_recitation_the_user_asked_for_passes_verbatim(self):
+        """现场复现：对方说「再说一遍你刚才说的是什么」，她照做 → 复述设定段 + 同一动作行。
+
+        验收一：decision 仍是 pass、chunks 与 reply 非空、text 与输入逐字相同；账上两行（内容重复
+        与复述审计各一行、各带自己的记号）；审计那节 hit 照旧在（面板看得见她引了设定）且
+        skipped=true。**她照办的那一下不该被吞**。
+        """
+        store = self._soul_store(self.SETTING)
+        status, first = self._post({"text": "我回来了"}, _body(self.BEFORE_LINE), store=store)
+        self.assertEqual(200, status)
+        self.assertEqual("pass", first["gate"]["decision"], "上一轮那句既不复读也没复述")
+        before = len(self._drops_rows())
+        status, payload = self._post({"text": self.ASKED_AGAIN}, _body(self.RECITED), store=store)
+        self.assertEqual(200, status)
+        gate = payload["gate"]
+        self.assertEqual("pass", gate["decision"], "对方要她重复，这一句不该被判废")
+        self.assertEqual([self.RECITED], [one["text"] for one in payload["chunks"]])
+        self.assertEqual(self.RECITED, payload["reply"])
+        self.assertTrue(payload["chunks"], "chunks 不许空")
+        self.assertTrue(payload["reply"], "reply 不许空")
+        self.assertEqual([], gate["blocked"])
+        part = gate["parts"][0]
+        self.assertEqual("pass", part["decision"])
+        self.assertEqual(self.RECITED, part["before"])
+        self.assertEqual(self.RECITED, part["after"], "放行就是原样放行，一个字都不改")
+        self.assertTrue(part["audit"]["skipped"], "审计这一关也按他说的放过")
+        self.assertIsNotNone(part["audit"]["hit"], "面板上要看得见她引了设定")
+        self.assertEqual("ok", part["audit"]["status"])        # 状态仍是 ok：真的比过了
+        self.assertEqual(mouth_repeat.STATUS_SKIPPED, part["repeat_status"])
+        self.assertEqual("not-tried", part["rewrite"]["status"], "豁免这两泡一次重写都不发")
+        rows = self._drops_rows()
+        self.assertEqual(before + 2, len(rows), "两关各记一行账，不合并")
+        self.assertEqual(SKIP_CLAUSE, rows[-2]["clause_id"])
+        self.assertIn(SKIP_MARK, rows[-2]["reason"])
+        self.assertEqual(AUDIT_SKIP_CLAUSE, rows[-1]["clause_id"])
+        self.assertIn(AUDIT_SKIP_MARK, rows[-1]["reason"])
+        self.assertNotEqual(rows[-2]["reason"], rows[-1]["reason"], "两行各是各的说法")
+
+    def test_the_same_recitation_without_a_request_is_judged_but_kept(self):
+        """同一句照搬、对方没有请求（「今天吃啥」）：豁免不许外溢——判据照旧判，但不再丢空。
+
+        **这条断言是被新规矩改准的**：以前这里 dropped（上一轮验收要求「同一句仍 dropped」）。
+        规矩改成「二次命中留原话」之后，这一泡是 pass、发的是她那句原话，账上一行
+        audit-after-rewrite；「没有豁免」仍然看得见：audit.skipped 是 false、audit.hit 照旧带着。
+        """
+        store = self._soul_store(self.SETTING)
+        before = len(self._drops_rows())
+        status, payload = self._post({"text": "今天吃啥"},
+                                     _script(self.RECITED, self.RECITED + "主人"), store=store)
+        self.assertEqual(200, status)
+        gate = payload["gate"]
+        part = gate["parts"][0]
+        self.assertEqual("pass", part["decision"], "没有豁免，但也不许丢空")
+        self.assertNotEqual([], payload["chunks"], "二次命中非红线：chunks 不许空")
+        self.assertEqual([self.RECITED], [one["text"] for one in payload["chunks"]])
+        self.assertFalse(part["audit"]["skipped"], "没有请求就不许记成跳过")
+        self.assertIsNotNone(part["audit"]["hit"])
+        self.assertEqual("ok", part["audit"]["status"])
+        self.assertEqual(AUDIT_BOOK["verdicts"]["setting"], part["hits"][-1]["clause_id"])
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows))
+        self.assertEqual(AUDIT_BOOK["verdicts"]["setting"], rows[-1]["clause_id"])
+        self.assertIn(AFTER_MARKS["audit"], rows[-1]["reason"])
+
+    def test_a_request_that_recites_nothing_records_only_nothing(self):
+        """他虽说了「再说一遍」，但这一句本来就没复述也没重复：没有「判废」可放，账一行都不记。"""
+        store = self._soul_store(self.SETTING)
+        before = len(self._drops_rows())
+        status, payload = self._post({"text": self.ASKED_AGAIN}, _body("今天风大，我把窗关好了。"),
+                                     store=store)
+        self.assertEqual(200, status)
+        part = payload["gate"]["parts"][0]
+        self.assertEqual("pass", part["decision"])
+        self.assertFalse(part["audit"]["skipped"])
+        self.assertIsNone(part["audit"]["hit"])
         self.assertEqual(before, len(self._drops_rows()), "没撞上就没有账可记")
 
     # —— 重写：命中先改一次（本轮加的） ————————————

@@ -26,6 +26,11 @@ PLAIN = DATA["plain_kind"]
 VERDICT_SETTING = DATA["verdicts"]["setting"]
 VERDICT_QUOTE = DATA["verdicts"]["quote_unmarked"]
 
+SKIP = DATA["skip"]                        # 按他说的放过那一笔：名字、记号、说法都在数据里
+SKIP_CLAUSE = SKIP["clause_id"]
+SKIP_MARK = SKIP["status"]
+SKIP_REASON = SKIP["reason"]
+
 MARKER = "你上次说"                        # 引述标记的一个实例；下面先断言它确实在数据里
 SOUL_LINE = "嘴上不认，行动先到：拒绝的话说完，事已经做了"
 QUOTE_LINE = "你妈住院了吧"
@@ -221,6 +226,72 @@ class DataIsTheSourceOfTruth(unittest.TestCase):
         with self.assertRaises(AuditBroken) as caught:
             recitation.audit(SOUL_LINE, [{"kind": SOUL, "text": SOUL_LINE}], both)
         self.assertIn("setting_kinds", str(caught.exception))
+
+
+class AskedToReciteIsMarkedNotJudged(unittest.TestCase):
+    """对方明说要她重复／引用时，这一关只记账、不判废——但**命中照旧算命中**。
+
+    豁免的是「判不判废」，不是「算不算撞上」：所以 status 仍是 ok、hit 仍带着（面板上看得见她
+    引了设定），另加 skipped 与一句取自数据的 skip_reason。为什么留着标记：我们不想让她养成引用
+    设定的习惯，只是不在这句上拦。开不开豁免由闸算一次传进来（repeat.requested），本文件不判。
+    """
+
+    def setUp(self):
+        self.inject = [{"kind": SOUL, "text": SOUL_LINE}]
+
+    def test_the_hit_stays_and_the_skip_is_marked(self):
+        result = recitation.audit(SOUL_LINE, self.inject, None, requested=True)
+        self.assertEqual(STATUS_OK, result.status)            # 真的比过了，不是没比
+        self.assertIsInstance(result.hit, AuditHit)           # 命中照旧带着
+        self.assertTrue(result.skipped)
+        self.assertEqual(SKIP_CLAUSE, result.skip_clause_id)  # 记账的名字取自数据
+        self.assertIn(SKIP_MARK, result.skip_reason)          # 账本靠这个记号认门
+        self.assertIn(result.hit.matched, result.skip_reason)  # 人话里点名撞上的那截
+        self.assertIn(SOUL, result.skip_reason)               # 也点名来源段那一类
+
+    def test_without_the_request_nothing_is_added(self):
+        result = recitation.audit(SOUL_LINE, self.inject, None, requested=False)
+        self.assertFalse(result.skipped)
+        self.assertEqual("", result.skip_clause_id)
+        self.assertEqual("", result.skip_reason)
+        self.assertIsInstance(result.hit, AuditHit)
+
+    def test_a_request_without_a_hit_marks_nothing(self):
+        """没撞上就没有「判废」可放：不记那一笔，也不加跳过。"""
+        result = recitation.audit("今天风大。", self.inject, None, requested=True)
+        self.assertIsNone(result.hit)
+        self.assertFalse(result.skipped)
+
+    def test_unavailable_stays_unavailable(self):
+        """判不了就是判不了：缺料这一态不受 request 影响，也不许因此变成 ok。"""
+        result = recitation.audit(SOUL_LINE, None, None, requested=True)
+        self.assertEqual(STATUS_UNAVAILABLE, result.status)
+        self.assertFalse(result.skipped)
+
+    def test_unmarked_quote_is_skipped_too(self):
+        """对方原话没带标记那一路同样豁免：他要引的就是那句话。"""
+        result = recitation.audit(QUOTE_LINE, [{"kind": QUOTE, "text": QUOTE_LINE}], None, True)
+        self.assertEqual(VERDICT_QUOTE, result.hit.kind)
+        self.assertTrue(result.skipped)
+        self.assertIn(VERDICT_QUOTE, result.skip_reason)
+
+    def test_broken_skip_section_is_loud(self):
+        """记账那一节坏了就当场响并点名：说不清「为什么没判废」等于没记。"""
+        for changes, spot in (({"skip": {}}, "clause_id"),
+                              ({"skip": dict(SKIP, status="")}, "status"),
+                              ({"skip": dict(SKIP, reason="这一句没带记号")}, "skip.status")):
+            with self.subTest(changes=changes):
+                with self.assertRaises(AuditBroken) as caught:
+                    recitation.audit(SOUL_LINE, self.inject, dict(DATA, **changes), True)
+                self.assertIn(spot, str(caught.exception))
+
+    def test_the_request_markers_have_only_one_home(self):
+        """标记词表只有 data/repeat.json 那一份：audit.py 里出现一条就是第二处真源。"""
+        source = Path(recitation.__file__).read_text(encoding="utf-8")
+        for marker in load("repeat")["request_markers"]:
+            self.assertNotIn(marker, source)
+        self.assertNotIn(SKIP_CLAUSE, source)      # 记账的名字也不许进代码
+        self.assertNotIn(SKIP_REASON, source)      # 那句人话同样只在数据里
 
 
 class AuditStaysClean(unittest.TestCase):

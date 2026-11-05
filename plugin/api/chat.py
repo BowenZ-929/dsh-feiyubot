@@ -37,6 +37,19 @@ parts[*].rewrite（{status, why, from, to}，from / to 只放一小截）。
 repeat_status 记成跳过那个状态——**她重复是对的，别吞**。这条豁免只在真撞上重复、且 asked 命中
 请求标记时成立，asked 为空一律不豁免。
 
+**同一句请求也豁免复述审计（这一轮加的）**：他要她重复／引用时，把她刚才那段设定原样再说一遍
+是她照办，审计这一关也只记账、不判废。豁免开关由闸算一次（repeat.requested(asked, 表)），同时交给
+内容重复与复述审计——请求标记只有 repeat.json 那一份，本文件不另存一份。跳过时那一泡照原样发出、
+账本各记一行（内容重复那行带 skipped-by-request、复述审计那行带 audit-skipped-by-request），
+parts[*].audit 里的 hit **照旧带着**（面板看得见她引了设定）、另加 skipped=true：豁免的是判废，
+不是「撞上」这件事。一句话同时撞两关就记两行账。
+
+**红线与「二次命中留原话」（这一轮加的）**：闸多收一张红线表（data/fatal.json，经 warehouse 读：
+隐私 / 辱骂 / 放弃式），踩上的那一泡照旧 dropped，parts[*].fatal 里看得见是哪一类、撞上了什么，
+fatal_status 看得出这一关判没判。其余情形改了一次还是命中时，闸不再丢整句：decision 仍是 pass、
+text 是进门那句原话、parts[*].kept_after_rewrite=true，账本记一行带「<通道>-after-rewrite」的账——
+**绝不静默变哑**：在最该回答的那一句上沉默，比「说话带点毛病」糟得多。
+
 成功体里多一节 refusal（**不破坏既有键**）：{kind, shape, verdict_reason, delivered{delivered,
 topic, until, remaining_min, reason}}。没判出拒绝时**这一节不出现**——不加一个空壳，免得人把
 「判过了、不是拒绝」与「没判」读成一件事；正面答了的那句本来也不该挂个 refusal。
@@ -99,10 +112,13 @@ GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（�
              "弃掉的泡从 chunks 里删掉，send_at 按剩下的重算。"
              "in_parts 是进闸的泡数、out_parts 是出闸的泡数，blocked 是这次拦下过她的 clause_id"
              "（去重、按出现顺序），parts 逐泡交代判词与这一泡过闸前后的原文，"
-             "另带这一泡的几样「判没判」读数：audit 是复述审计（status 不是 ok 就是没比过）、"
+             "另带这一泡的几样「判没判」读数：audit 是复述审计（status 不是 ok 就是没比过；"
+             "skipped 是「对方要她重复／引用、这一关只记账没判废」，此时 hit 照旧带着）、"
              "action_status 是动作括注、repeat_status 是内容重复（skipped-by-request 是「对方要她"
-             "再说一遍、这一关只记账没判废」）、quota_status 是动作配额（not-checked 都是这一关"
-             "没跑，不是通过），以及 rewrite 是这一泡的重写读数"
+             "再说一遍、这一关只记账没判废」）、quota_status 是动作配额、fatal_status 是红线这一关"
+             "（not-checked 都是这一关没跑，不是通过）、fatal 是踩上的那一类红线（没踩就是 null），"
+             "以及 kept_after_rewrite 是「改过一次还是命中、按原话发了」（true 时这一泡没被丢掉），"
+             "加上 rewrite 是这一泡的重写读数"
              "（{status: ok|failed|not-tried, why, from, to}，from / to 只是一小截）；"
              "顶层的 quota 是这一轮交给闸的配额写法"
              "（forbid / allow / null），取自装配 action.quota.blocked，装配没标就是 null。"
@@ -163,7 +179,14 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
       **改不动（超时 / 空 / 不合规 / 出口抛错）就保留原话发出**并记一笔账，绝不输出空——
       一句略有瑕疵的话也比她突然变哑强。每一泡的重写读数挂在 parts[*].rewrite 上。
     - **对方要她重复时不判废**：asked（入站那句）原样转给闸，撞上重复而对方明说要她再说一遍时，
-      这一泡照发、账本记一行 skipped-by-request，repeat_status 记成跳过那个状态。
+      这一泡照发、账本记一行 skipped-by-request，repeat_status 记成跳过那个状态。**同一句请求也
+      豁免复述审计**：那一关撞上了同样只记一行账（audit-skipped-by-request）、照原样发出，而
+      parts[*].audit 里的 hit 与 status 一字节不改，只多一个 skipped=true——标记不丢，面板看得见
+      她引了设定。两关同时撞上就各记一行，不合并。
+    - **改了一次还是命中（不是红线）就留原话**：这一泡的 decision 仍是 pass、text 是进门那句
+      （闸里 Verdict.kept_after_rewrite=True），账本多一行「<通道>-after-rewrite」——在最该回答的
+      那一句上沉默，比说话带点毛病糟得多。**红线是唯一例外**：踩上隐私 / 辱骂 / 放弃式，这一泡
+      照旧 dropped（parts[*].fatal 里看得见是哪一类）。
     - **真的落到返回体**：pass 原样留着；rewritten 换 Verdict.text（gap 沿用那一泡的）；dropped 从
       chunks 里删掉。**一处都没被改时不碰 chunks**——不接闸时逐字相同，这条是被测过的。
     - **重算 send_at**：删掉几泡之后，剩下的按原来的 gap_before 累加重排，不留洞（小数位与
@@ -222,7 +245,7 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
             sink, inject=inject, policy=books["audit"],
             action=books["action"], recent=history,
             repeat_table=books["repeat"], quota=quota,
-            asked=asked, keep_unrewritten=True)
+            asked=asked, keep_unrewritten=True, fatal=books["fatal"])
         parts.append({"i": index, "decision": verdict.decision,
                       "hits": [_hit_row(one) for one in verdict.hits],
                       "reason": verdict.reason,
@@ -231,6 +254,9 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
                       "action_status": verdict.action_status,
                       "repeat_status": verdict.repeat_status,
                       "quota_status": verdict.quota_status,
+                      "fatal": _fatal_row(verdict.fatal),
+                      "fatal_status": verdict.fatal_status,
+                      "kept_after_rewrite": bool(verdict.kept_after_rewrite),
                       "rewrite": rewritten})
         if verdict.decision == "pass":
             kept.append({"text": chunk["text"], "gap_before": chunk["gap_before"]})
@@ -295,7 +321,8 @@ def _rewriter(original: str, *, asked: str, books: Mapping[str, Any], inject: An
     def rewrite(body: str) -> str:
         hit = gate.check(body, books["clauses"], inject=inject, policy=books["audit"],
                          action=books["action"], recent=recent,
-                         repeat_table=books["repeat"], quota=quota, asked=asked)
+                         repeat_table=books["repeat"], quota=quota, asked=asked,
+                         fatal=books["fatal"])
         before = rewrite_rules.excerpt(body, table)
         try:
             said = _ask_model(rewrite_rules.prompt(body, hit, table), table)
@@ -374,6 +401,7 @@ def _books() -> Dict[str, Any]:
     return {
         "clauses": warehouse.load("clauses").get("clauses"),
         "audit": warehouse.load("audit"),
+        "fatal": warehouse.load("fatal"),
         "action": warehouse.load("action_note"),
         "repeat": repeat_book,
         "rewrite": warehouse.load("rewrite"),
@@ -557,19 +585,35 @@ def _resend(payload: Dict[str, Any], kept: List[Dict[str, Any]], digits: int) ->
 
 
 def _audit_row(seen: Any) -> Dict[str, Any]:
-    """这一泡的复述审计读数：status / 撞上的那一条 / 最长撞了几个字 / 阈值。
+    """这一泡的复述审计读数：status / 有没有按他说的放过 / 撞上的那一条 / 最长撞了几个字 / 阈值。
 
     **status 原样透出**：不是 "ok" 就是没真的比过（audit-unavailable），这时既不是「通过」也不是
     「拦住」——把它写成通过，等于替她背了一次没人做过的检查。没拿到注入原文时就是这一态。
+    **skipped 与 hit 同时为真**是合法的一态：她确实照搬了设定段、对方也明说要她重复，于是这一句
+    只记账不判废——hit 照旧交出去，面板上因此看得见「她引了设定」，而这一泡没被丢掉。
     """
     one = getattr(seen, "hit", None)
     return {
         "status": getattr(seen, "status", None),
+        "skipped": bool(getattr(seen, "skipped", False)),
         "hit": None if one is None else {"kind": one.kind, "seg_kind": one.seg_kind,
                                          "matched": one.matched},
         "lcs_len": getattr(seen, "lcs_len", None),
         "threshold": getattr(seen, "threshold", None),
     }
+
+
+def _fatal_row(one: Any) -> Optional[Dict[str, str]]:
+    """这一泡的红线读数：哪一类、撞上了什么、一句人话；没踩红线（或者这一轮没给表）就是 None。
+
+    **None 不是「不是红线」**：这一关判没判挂在同一泡的 fatal_status 上（"ok" 真的判过，
+    "not-checked" 这一轮没给红线表）。踩上红线时这一泡必然 dropped——那是唯一不许留原话的一类。
+    """
+    if one is None:
+        return None
+    return {"category": getattr(one, "category", ""), "tag": getattr(one, "tag", ""),
+            "clause_id": getattr(one, "clause_id", ""), "kind": getattr(one, "kind", ""),
+            "matched": getattr(one, "matched", ""), "reason": getattr(one, "reason", "")}
 
 
 def _hit_row(one: Any) -> Dict[str, str]:
@@ -603,6 +647,9 @@ def _judge(asked: str, answer: Any) -> Optional[Dict[str, Any]]:
     只会把「转开了」这句话当成普通回答放过。
 
     asked 是对方那句原话，answer 是她那句（被闸弃掉的轮 reply 是空串，这里自然判不出什么）。
+
+    这里也把红线表（data/fatal.json）透传给闸：拒绝那三句"改了一次还是命中"时，闸按新规矩留
+    原话发出（不再整句吞掉），只有踩上红线才丢——"她该拒绝的时候整句消失"是最糟的一种哑。
     """
     body = answer if isinstance(answer, str) else ""
     try:
@@ -618,10 +665,12 @@ def _judge(asked: str, answer: Any) -> Optional[Dict[str, Any]]:
             """库约定的投递口：事件到手就投一次心，投没投成如实写进 delivered 那一节。"""
             delivered.update(_deliver(asked, found_event, kind))
 
-        # 软转向那一遍不过闸（她的原话一个字都不改），所以只有硬拒绝才去取条款。
+        # 软转向那一遍不过闸（她的原话一个字都不改），所以只有硬拒绝才去取条款与红线表。
+        # 红线表透传给闸：拒绝的那三句"改了还不成"时，闸照样留原话，但踩上红线才丢。
         found = refusal.enforce(shape, table=book, refuse_sink=sink, now=_stamp(),
                                 clauses=None if soft.is_soft else _clauses(),
-                                asked=asked if soft.is_soft else None, answer=body)
+                                asked=asked if soft.is_soft else None, answer=body,
+                                fatal=warehouse.load("fatal"))
     except (refusal.RefusalBroken, ClauseBroken, warehouse.WarehouseMiss,
             warehouse.WarehouseBroken) as exc:
         LOG.warning("POST /chat 判拒绝没成：%s", exc)

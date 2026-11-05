@@ -263,15 +263,20 @@ def enforce(shape: str, table: Optional[Mapping[str, Any]] = None,
             drop_sink: Optional[DropSink] = None,
             now: Any = None,
             asked: Any = None,
-            answer: Any = None) -> RefusalVerdict:
+            answer: Any = None,
+            fatal: Any = None) -> RefusalVerdict:
     """说一次拒绝：取数据里的说法 → 过闸 → 装事件 → 投给心 → 拼一句人话。
 
     顺序钉死（别调换）：取形状 → 取说法 → 过闸 → 装事件并投递。闸先走一步，是因为句子先要过检
     才谈得上「说过」；事件后投，则是因为「拒了」这件事与「这句能不能发」是两件事——句子被闸弃掉，
     心照样要知道她拒了。
 
-    - text 来自 gate.enforce：命中就改一次、二次命中即弃（text=""）；rewrite 为 None 时按闸的规矩
-      直接弃掉，出口不许 fail-open。
+    - text 来自 gate.enforce：命中就改一次；**二次命中不再弃（红线除外）**——按闸那条「绝不静默
+      变哑」留进门那句原话，账本记一行 after-rewrite。理由：拒绝的那三句正好落在「改了还不成」
+      这一格上，弃掉就等于她该拒绝的时候整句消失。rewrite 为 None 时按闸的规矩直接弃掉，出口
+      不许 fail-open。
+    - fatal 是这一轮的红线表，原样透传给闸（本文件不读盘、也不判红线）：给了才可能判出红线并丢，
+      不给就是闸那一关没跑（判不了不等于可以吞掉这句，照样留原话）。
     - event 恒有（弃了也有）：拒绝发生没发生，不取决于这句发不发得出去。
     - refuse_sink 为 None 就不投，sent=False；drop_sink 交给闸，只在弃言那一次被叫。
     - now 必须有（事件带 ts）；不给就抛——本文件不替调用方取时钟。
@@ -289,7 +294,7 @@ def enforce(shape: str, table: Optional[Mapping[str, Any]] = None,
         return _soft_verdict(soft, answer if isinstance(answer, str) else "",
                              book, refuse_sink, now)
     said = str(entry["say"])
-    gated = gate_enforce(said, clauses, rewrite=rewrite, sink=drop_sink)
+    gated = gate_enforce(said, clauses, rewrite=rewrite, sink=drop_sink, fatal=fatal)
     ev = event(key, str(entry["why"]), now, table=book)
     sent = refuse_sink is not None
     if sent:

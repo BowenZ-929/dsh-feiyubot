@@ -33,6 +33,7 @@ FULL_NAMES = {key: BOOK["shapes"][key]["full_name"] for key in SHAPES}
 REASON = BOOK["reason"]
 SOURCE = Path(refusal.__file__).read_text(encoding="utf-8")
 NOW = "2026-01-02T03:04:05"          # 时刻由调用方给，这里给一个固定的
+AFTER_MARKS = load("rewrite")["after_rewrite"]["marks"]   # 二次命中留原话那一行账的记号（取自数据）
 
 # 一句货真价实的客服腔：命中 courtesy-close（「感谢理解 + 我们会尽快处理」）
 CUSTOMER_SERVICE = "感谢您的理解，我们会尽快为您处理。"
@@ -186,16 +187,25 @@ class RefusalStillPassesTheGate(unittest.TestCase):
         self.assertEqual(verdict.text, refusal.say("mood", BOOK))
         self.assertTrue(verdict.refused)
 
-    def test_same_line_twice_is_still_dropped(self):
-        """改一次还命中 = 弃掉（二次命中即弃），账本照记。"""
+    def test_same_line_twice_keeps_the_line(self):
+        """改一次还命中（非红线）= 留原话发出，账本记一行 after-rewrite。
+
+        **这条断言是被「二次命中不丢空」那条新规矩改准的，不是放宽。** 以前二次命中即弃，于是她
+        该拒绝的那一句会整句消失——「在最该回答的那一句上沉默，比说话带点毛病糟得多」，而拒绝正是
+        最该说话的一格。判据仍然判了：拦它的是 courtesy-close，账本那一行带着 clause-after-rewrite
+        记号；refused 仍为真（她拒了这件事没有变）。
+        """
         book = _copy_book()
         book["shapes"]["nobody"]["say"] = CUSTOMER_SERVICE
         dropped = []
         verdict = refusal.enforce("nobody", book, CLAUSES, rewrite=lambda text: text,
-                                  now=NOW, drop_sink=lambda cid, why: dropped.append(cid))
-        self.assertEqual(verdict.text, "")
-        self.assertEqual(verdict.gate_decision, "dropped")
-        self.assertEqual(dropped, ["courtesy-close"])
+                                  now=NOW,
+                                  drop_sink=lambda cid, why: dropped.append((cid, why)))
+        self.assertEqual(verdict.text, CUSTOMER_SERVICE, "留原话：这句照样发出去")
+        self.assertEqual(verdict.gate_decision, "pass")
+        self.assertTrue(verdict.refused)                       # 话说出去了
+        self.assertEqual([one[0] for one in dropped], ["courtesy-close"])
+        self.assertIn(AFTER_MARKS["clause"], dropped[0][1])    # 账上认出「改过、还是不行」
 
     def test_no_saying_literal_in_the_module(self):
         """说法全在数据里：代码里一个字都不许出现。"""

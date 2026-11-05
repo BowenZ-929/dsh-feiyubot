@@ -272,7 +272,7 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 
 | 字段 | 是什么 |
 | --- | --- |
-| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,hit,lcs_len,threshold}, action_status, repeat_status, quota_status, rewrite{status,why,from,to}}` |
+| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,skipped,hit,lcs_len,threshold}, action_status, repeat_status, quota_status, fatal{category,tag,clause_id,kind,matched,reason}, fatal_status, kept_after_rewrite, rewrite{status,why,from,to}}`；`audit.skipped=true` 表示「对方要她重复／引用，这一关只记账没判废」，此时 `hit` 照旧带着；`fatal` 是踩上的那一类红线（没踩就是 `null`，**不是「不是红线」**，判没判看 `fatal_status`）；`kept_after_rewrite=true` 表示「改过一次还是命中、按进门那句原话发了」 |
 | `in_parts` / `out_parts` | 进闸的泡数 / 出闸（真发出去）的泡数 |
 | `blocked[]` | 这次拦下过她的 `clause_id`（去重、按出现顺序），一条都没拦就是空表 |
 | `quota` | 这一轮交给闸的动作配额写法：`forbid`（装配标了本轮不许写动作）/ `allow`（标了放行）/ `null`（装配没标——闸记 `quota_status=not-checked`，**没标不是 allow**） |
@@ -306,8 +306,43 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 `skipped-by-request` 的账，`parts[*].repeat_status` 记 `skipped-by-request`（既不是 `ok` 也不是
 `not-checked`）。`asked` 为空一律不豁免；只说了请求、本来就没重复的，什么都不记。
 
-四样「判没判」的读数**不许折叠**：`audit.status` 不是 `ok` 就是没真的比过，
-`action_status` / `repeat_status` / `quota_status` 的 `not-checked` 是**这一关没跑**，不是「查过没问题」。
+**同一句请求也豁免复述审计**：他要她重复／引用时，把她刚才那段设定原样再说一遍是她照办，审计
+这一关同样只记账、不判废——否则「她照做的那一下」还是被吞一次（现场那句
+「再说一遍你刚才说的是什么」就是这么哑的）。豁免开关由闸算**一次**：`repeat.requested(asked, 表)`
+（标记词表只有 `data/repeat.json` 的 `request_markers` 那一份，`data/audit.json` 里没有、也不许
+另抄一张），同一个布尔同时交给内容去重与复述审计，两关因此不会判出两个结论。跳过时那一泡照原样
+发出（`decision: pass`、`before == after`），**但标记不丢**：`parts[*].audit` 里 `hit` 与
+`status: ok` 照旧（面板上看得见她引了设定），另加 `skipped: true`；账本记一行 `clause_id` 取自
+`data/audit.json` 的 `skip.clause_id`、`reason` 带 `audit-skipped-by-request` 的账。
+**一句话同时撞上内容重复与复述审计时两关各记一行**（各带自己的记号），不合并成一条。为什么还要
+标记与记账：我们不想让她养成引用设定的习惯，只是不在这句上拦——不拦而无声，账本上就与「这一关
+没跑」长得一样。`asked` 里没有请求标记时豁免一点都不外溢：同一句照旧判废。
+
+**改了一次还是命中 → 留原话，不再丢空（本轮加的）**：以前二次命中就 `dropped`——她明明改了、
+也没改成红线，整泡却消失了。规矩是「**在最该回答的那一句上沉默，比说话带点毛病糟得多**」，所以
+二次命中（非红线）改成 `decision: pass`、`text` 是**进门那句原话**（不是那个没改成的新稿），
+`hits` 里两条命中都留着，`parts[*].kept_after_rewrite=true`，弃言账本记一行 `reason` 带
+`<通道>-after-rewrite` 的账（通道＝条款 / 动作括注 / 内容重复 / 复述审计，记号与说法全在
+`data/rewrite.json` 的 `after_rewrite` 节）——留原话不是「没问题」，账本上必须看得出「这句改过、
+还是不行、按原话发了」。**配额剥行那条例外不变**：配额命中仍优先剥行（把动作行拿掉比留原话强），
+剥完只剩空白才丢。
+
+**红线是唯一不许留原话的一类（本轮加的）**：隐私（手机号、身份证、住址、账号密码）、辱骂、放弃式
+（「反正我不疼」「我无所谓了」「死了算了」「不用管我」）这三类判的不是「这句有毛病」，是「这句
+不能出去」。判据与全部说法在 `organs/mouth/data/fatal.json`，闸只把命中摊成 `FatalHit`：
+`clause_id` / `kind` 取自数据，`category` 是哪一类，`reason` 里带着数据里那个记号
+（`fatal-<tag>`）。踩上就 `dropped`、`chunks` 里一泡都没有、`parts[*].fatal` 里看得见是哪一类；
+**红线也不交给重写器**（改一次不能保证它不出去），改完回来的新稿若自己踩上红线，一样丢掉。
+`fatal_status` 三态**不许折叠**：`ok`（判过、不是红线）/ `not-checked`（这一轮没给红线表，判不了）
+/ `fatal`（踩上了，看 `fatal` 那一节是哪一类）。**「给不给表」不是「吞不吞这句」的开关**：没给表也
+照样留原话（`kept_after_rewrite=true`），只是 `fatal_status` 记 `not-checked`，账行里补一句取自
+`data/rewrite.json` 的 `after_rewrite.unchecked`——判不了不等于可以把这句话吞掉。判据表在真链路上
+三处都传：逐泡过闸、拒答那三句（`organs/mouth/refusal.py` 只透传、自己不读盘）、`/mouth/gate` 干跑。
+
+五样「判没判」的读数**不许折叠**：`audit.status` 不是 `ok` 就是没真的比过，
+`action_status` / `repeat_status` / `quota_status` / `fatal_status` 的 `not-checked` 是**这一关没跑**，
+不是「查过没问题」（红线那一关尤其：`not-checked` 时 `fatal` 也是 `null`，那不等于「不是红线」；
+`fatal` 非 `null` 时 `fatal_status` 一定是 `fatal`，三态在返回里分得开）。
 `pages/chat.html` 的「命中门」那块因此多一行 `gate-line`：「这次过闸：N 泡进 / M 泡出 / 拦了什么」
 （`blocked` 里的 `clause_id` 用顿号连起来，一条都没有就写「没拦」；泡数缺了就写「泡数没给」）。
 

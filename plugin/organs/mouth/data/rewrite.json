@@ -56,5 +56,16 @@
     "failed": "这句改不动（rewrite-failed：{why}）；原话留着发出去——改不了也不许把她的这句吞掉。",
     "clear": "重写这一次没跑：这一句没命中任何判据，也没有要改的那一处。"
   },
-  "reason_note": "failed 是「改不动、留原话」那一句（必须带 rewrite-failed，账本靠它认门）；clear 是没命中、根本不用改那句。"
+  "reason_note": "failed 是「改不动、留原话」那一句（必须带 rewrite-failed，账本靠它认门）；clear 是没命中、根本不用改那句。",
+  "after_rewrite": {
+    "marks": {
+      "clause": "clause-after-rewrite",
+      "action": "action-after-rewrite",
+      "repeat": "repeat-after-rewrite",
+      "audit": "audit-after-rewrite"
+    },
+    "reason": "这句改过一次还是被「{clause_id}」拦下（{mark}）：二次命中不是红线，按「绝不静默变哑」把进门那句原话发出去，不再丢空。没改掉的那一处是：{why}",
+    "unchecked": "另外要说清：这一轮没拿到红线表，判不了这一句是不是红线；按「绝不静默变哑」留原话发出，没有因为「判不了」就吞掉她这句话。"
+  },
+  "after_rewrite_note": "改了一次还是命中的那一格：marks 是四条判据通道各自的记号（条款 / 动作括注 / 内容重复 / 复述审计，与闸那边 Verdict 上的 action_status / repeat_status 同一套口径），reason 必须带 {mark}——账本靠它认出「这一句改过、还是不行、按原话发了」；unchecked 是「这一轮根本没给红线表」时补在账行后面那一句（判不了不等于可以吞掉这句话）。红线（data/fatal.json）不走这一格：那类话二次命中照旧丢掉。"
 }

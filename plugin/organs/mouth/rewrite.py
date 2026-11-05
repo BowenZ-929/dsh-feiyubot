@@ -16,6 +16,10 @@
   「改成别的东西了」，说法全在数据里，代码里一句都不写。
 - **改不动的时候怎么说**：`failed_reason(why)` 那一段必须带 rewrite-failed——闸与账本靠它认出
   「这句本来要改、没改成、按原话发了」，而不是「这句没命中」。
+- **改成了、却还是命中那一条怎么说**：`after_rewrite_reason(channel, ...)` 拼出那一行
+  「<通道>-after-rewrite」的账（通道名与记号都在 data/rewrite.json 的 after_rewrite 节）。这一格
+  闸不再丢整句：留进门那句原话发出，只在账本上留痕——**在最该回答的那一句上沉默，比说话带点
+  毛病糟得多**。红线那类不走这一格（那类话照旧丢掉），判据在 organs/mouth/data/fatal.json。
 
 **改不动不等于弃掉。** 本文件最大的用处是让「改不动」这条路有话说：api 层拿 `Unrewritable` 把
 失败原因带出网络那一层，闸据此保留原话、记一行账，**绝不输出空**。宁可发一句略有瑕疵的话，
@@ -43,7 +47,8 @@ STATUS_NOT_TRIED = "not-tried"   # 这一句没命中，压根没送出去改
 
 __all__ = ["RewriteBroken", "Unrewritable", "STATUS_OK", "STATUS_FAILED", "STATUS_NOT_TRIED",
            "prompt", "accept", "failed_reason", "clear_reason", "timeout_why", "error_why",
-           "no_rewriter_why", "not_text_why", "budget_ms", "attempts", "excerpt"]
+           "no_rewriter_why", "not_text_why", "after_rewrite_reason", "budget_ms", "attempts",
+           "excerpt"]
 
 
 class RewriteBroken(ValueError):
@@ -100,6 +105,9 @@ class _Rules:
     why_not_text: str
     reason_failed: str
     reason_clear: str
+    after_marks: Mapping[str, str]
+    reason_after_rewrite: str
+    reason_after_rewrite_unchecked: str
 
 
 def prompt(original: Any, hit: Any = None,
@@ -176,6 +184,30 @@ def failed_reason(why: Any, table: Optional[Mapping[str, Any]] = None) -> str:
 def clear_reason(table: Optional[Mapping[str, Any]] = None) -> str:
     """没命中、根本不用改那一句人话（数据里的 reason.clear）。"""
     return _fill(_rules(table).reason_clear, "reason.clear")
+
+
+def after_rewrite_reason(channel: str, clause_id: Any = "", why: Any = "",
+                         checked: bool = True,
+                         table: Optional[Mapping[str, Any]] = None) -> str:
+    """改了一次还是命中（且不是红线）那一句人话：必须带 <通道>-after-rewrite，账本靠它认门。
+
+    channel 是闸那边四条判据通道之一（条款 / 动作括注 / 内容重复 / 复述审计）：改了一次没改掉的
+    是哪一关，账本上要看得出来，所以记号按通道分开。认不出的通道当场抛 RewriteBroken——猜一个
+    通道，账本上就会多出一行「不知道是哪一关没改掉」的账。
+    记号与那整句人话全在 data/rewrite.json 的 after_rewrite 节，本文件不写死一个记号、一句说法。
+    checked=False 表示这一轮没拿到红线表（判不了是不是红线）：那一行后面再补一句取自数据的说明
+    （after_rewrite.unchecked），把「判不了」写在账上——判不了不等于可以吞掉这句话，所以话照发。
+    """
+    rules = _rules(table)
+    mark = rules.after_marks.get(channel)
+    if mark is None:
+        raise RewriteBroken("after_rewrite.marks", " 里没有通道 %r（只认 %s）。"
+                            % (channel, "、".join(repr(one) for one in rules.after_marks)))
+    said = _fill(rules.reason_after_rewrite, "reason.after_rewrite", mark=mark,
+                 channel=channel, clause_id=_text_of(clause_id), why=_text_of(why))
+    if checked:
+        return said
+    return said + _fill(rules.reason_after_rewrite_unchecked, "after_rewrite.unchecked")
 
 
 def timeout_why(table: Optional[Mapping[str, Any]] = None) -> str:
@@ -276,6 +308,7 @@ def _rules(table: Optional[Mapping[str, Any]] = None) -> _Rules:
     rule = _mapping(book, "rule")
     why = _mapping(book, "why")
     reason = _mapping(book, "reason")
+    after = _mapping(book, "after_rewrite")
     low = _positive(keep=length, key="min", spot="length.min", allow_zero=False)
     high = _positive(keep=length, key="max", spot="length.max", allow_zero=False)
     if low > high:
@@ -307,9 +340,15 @@ def _rules(table: Optional[Mapping[str, Any]] = None) -> _Rules:
                    why_no_rewriter=_word(why, "no_rewriter"),
                    why_not_text=_word(why, "not_text"),
                    reason_failed=_word(reason, "failed"),
-                   reason_clear=_word(reason, "clear"))
+                   reason_clear=_word(reason, "clear"),
+                   after_marks=_marks(after, "marks"),
+                   reason_after_rewrite=_word(after, "reason"),
+                   reason_after_rewrite_unchecked=_word(after, "unchecked"))
     if "rewrite-failed" not in rules.reason_failed:
         raise RewriteBroken("数据", "里 reason.failed 必须带 rewrite-failed：账本靠它认出这一笔。")
+    if "{mark}" not in rules.reason_after_rewrite:
+        raise RewriteBroken("数据", "里 after_rewrite.reason 必须带 {mark}："
+                                    "记账那一行看不出是哪一关没改掉，等于没记。")
     return rules
 
 
@@ -335,6 +374,22 @@ def _word(data: Mapping[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RewriteBroken("数据", "的 %r 必须是一句非空字符串。" % key)
     return value
+
+
+def _marks(data: Mapping[str, Any], key: str) -> Mapping[str, str]:
+    """取一张「通道 → 记号」表：非空、键与记号都是非空字符串，不接受一整串字冒充。"""
+    value = _need(data, key)
+    if not isinstance(value, Mapping) or not value:
+        raise RewriteBroken("数据", "的 %r 必须是一份非空的键值表（通道 → 记号）。" % key)
+    out: dict = {}
+    for one, mark in value.items():
+        if not isinstance(one, str) or not one.strip():
+            raise RewriteBroken("数据", "的 %r 里有一个不是字符串、或空着的通道名。" % key)
+        if not isinstance(mark, str) or not mark.strip():
+            raise RewriteBroken("数据", "的 %r 里通道 %r 的记号不是一句非空字符串。"
+                                % (key, one))
+        out[one] = mark
+    return out
 
 
 def _words(data: Mapping[str, Any], key: str) -> Tuple[str, ...]:

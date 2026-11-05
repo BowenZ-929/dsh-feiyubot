@@ -157,15 +157,23 @@ class EnforceOnceAndDrop(unittest.TestCase):
         self.assertIsNone(check(verdict.text, CLAUSES))     # 第二次不再命中
         self.assertIn("不再命中", verdict.reason)
 
-    def test_second_hit_drops(self):
+    def test_second_hit_keeps_the_line(self):
+        """改一次还是命中（非红线）→ 留原话发出，不再丢空。
+
+        这条断言是被「二次命中不丢空」那条新规矩改准的（以前是 dropped + text=""）：在最该回答的
+        那一句上沉默，比说话带点毛病糟得多。判据仍然判了：两次命中都在、账本有一行 after-rewrite。
+        这一例没给红线表，所以 fatal_status 是 not-checked（判不了是不是红线），话照样发。
+        """
         verdict = enforce(SPEECH, CLAUSES, _same)
-        self.assertEqual(verdict.decision, "dropped")
-        self.assertEqual(verdict.text, "")                  # 命中句一个字也不许发出去
+        self.assertEqual(verdict.decision, "pass")
+        self.assertEqual(verdict.text, SPEECH)              # 发的是进门那句原话
+        self.assertTrue(verdict.kept_after_rewrite)
         self.assertEqual(len(verdict.hits), 2)              # 两次命中都在，按发生顺序
         self.assertEqual(verdict.hits[0].clause_id, "courtesy-open")
         self.assertEqual(verdict.hits[1].clause_id, "courtesy-open")
-        self.assertIn("改了一次还是这样", verdict.reason)
-        self.assertIn("弃掉", verdict.reason)
+        self.assertEqual("not-checked", verdict.fatal_status, "没给红线表：这一关没跑")
+        self.assertIn(load("rewrite")["after_rewrite"]["marks"]["clause"], verdict.reason)
+        self.assertIn("没拿到红线表", verdict.reason)        # 判不了这件事要在账上说出来
 
     def test_rewrite_missing_drops(self):
         """rewrite=None 视为改不了：直接弃，不许 fail-open 把命中句发出去。"""
@@ -288,11 +296,15 @@ class SinkSeesEveryDrop(unittest.TestCase):
         seen = []
         return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
 
-    def test_dropped_reports_the_clause_that_finally_stopped_it(self):
+    def test_the_kept_line_still_reports_the_clause_that_stopped_it(self):
+        """二次命中留原话也记一笔（这条断言被新规矩改准：以前是「弃掉那一笔」）。
+
+        记的是第二次拦下它的那一条与那句人话——「这句改过、还是不行、按原话发了」，账面要看得见。
+        """
         seen, sink = self._spy()
-        verdict = enforce(SPEECH, CLAUSES, _same, sink)     # 改一次还是命中 → dropped
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual(1, len(seen), "一次弃言只记一笔")
+        verdict = enforce(SPEECH, CLAUSES, _same, sink)     # 改一次还是命中 → 留原话 + 记一笔
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(1, len(seen), "留原话也要留一笔账")
         self.assertEqual(verdict.hits[-1].clause_id, seen[0][0])
         self.assertEqual(verdict.reason, seen[0][1])        # 记的是那句人话，不是整句原文
 
@@ -480,15 +492,21 @@ class ActionNoteRidesTheGate(unittest.TestCase):
         self.assertEqual("ok", verdict.action_status)
         self.assertIsNone(check(verdict.text, CLAUSES, action=self.NOTE))  # 改完真的不再带场景
 
-    def test_second_hit_drops(self):
+    def test_second_hit_keeps_the_line(self):
+        """二次命中（非红线）留原话：这条断言是被「二次命中不丢空」那条新规矩改准的。
+
+        动作括注仍然是拦下它的那一条（两次命中都在、账本一行 action-after-rewrite），只是这一句
+        不再整句消失。
+        """
         seen, sink = self._spy()
         verdict = enforce(self.LINE, CLAUSES, _same, sink, action=self.NOTE)
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.LINE, verdict.text)
+        self.assertTrue(verdict.kept_after_rewrite)
         self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
                          [one.clause_id for one in verdict.hits])   # 两次命中都在，按发生顺序
-        self.assertIn("改了一次还是这样", verdict.reason)
         self.assertEqual(1, len(seen))
+        self.assertIn(load("rewrite")["after_rewrite"]["marks"]["action"], seen[0][1])
 
     def test_not_checked_is_not_the_same_as_checked_and_clean(self):
         """验收 5：「没判」与「判过没问题」必须分得开——同一句、同一份结局，状态不一样。"""
@@ -630,23 +648,37 @@ class RepeatRidesTheGate(unittest.TestCase):
         self.assertEqual(self.CLAUSE_ID, verdict.hits[0].clause_id)
         self.assertIsNone(check(verdict.text, CLAUSES, recent=[self.FIRST]))   # 改完真的不再重复
 
-    def test_third_line_dropped_and_the_ledger_carries_the_tag(self):
+    def test_third_line_kept_and_the_ledger_carries_the_tag(self):
+        """二次命中留原话（这条断言被新规矩改准了：以前 dropped + text=""）。
+
+        「她复读了」这件事仍然看得见：两次命中都在、账本里是数据里那个名字、reason 带 repeat 的记号
+        与 after-rewrite 的记号。
+        """
         seen, sink = self._spy()
         verdict = enforce(self.THIRD, CLAUSES, _same, sink, recent=[self.FIRST, self.SECOND])
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)                     # 命中句一个字也不许发出去
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.THIRD, verdict.text)              # 发的是进门那句原话
+        self.assertTrue(verdict.kept_after_rewrite)
         self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
                          [one.clause_id for one in verdict.hits])   # 两次命中都在，按发生顺序
-        self.assertEqual(1, len(seen), "一次弃言只记一笔")
+        self.assertEqual(1, len(seen), "留原话也要留一笔账")
         self.assertEqual(self.CLAUSE_ID, seen[0][0])           # 账本里是数据里那个名字
         self.assertIn(self.TAG, seen[0][1])                    # reason 里带着 repeat 记号
+        self.assertIn(load("rewrite")["after_rewrite"]["marks"]["repeat"], seen[0][1])
         self.assertEqual(verdict.reason, seen[0][1])
 
     def test_rewritten_text_is_judged_against_the_same_history(self):
-        """改写回来又撞上同一句：第二次照样拦（窗口没变，判据也没变）。"""
+        """改写回来又撞上同一句：第二次照样判（窗口没变，判据也没变），但留的是进门那句原话。
+
+        这条断言被新规矩改准：以前 dropped + text=""。现在 decision 是 pass、text 是进门那句
+        （THIRD，不是那个没改成的新稿 FIRST）、hits 两条都在。
+        """
         verdict = enforce(self.THIRD, CLAUSES, lambda text: self.FIRST, recent=[self.FIRST])
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.THIRD, verdict.text)
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
+                         [one.clause_id for one in verdict.hits])
 
     def test_not_checked_is_not_the_same_as_checked_and_clean(self):
         """验收 4：同一句、同一份结局，状态必须分得开——一个没比、一个比过没重复。"""
@@ -742,6 +774,210 @@ class ARequestToRepeatSkipsTheGate(unittest.TestCase):
         verdict = enforce(self.THIRD, CLAUSES, None, None, asked=self.ASKED)
         self.assertEqual("pass", verdict.decision)
         self.assertEqual("not-checked", verdict.repeat_status)
+
+
+class ARequestToReciteAlsoSkipsTheAudit(unittest.TestCase):
+    """对方要她重复／引用时，复述审计也只记账、不判废——标记不丢，豁免也不外溢。
+
+    判据与名字一个都不在这里：设定段、记账用的名字、两个记号全从 data 读。这里验四件事：
+    跳过写进账本；命中照旧带着（skipped 与 hit 同时为真）；一句话同时撞两关时各记一行；
+    没有请求时豁免一点都不外溢。
+    """
+
+    BOOK = load("audit")
+    SKIP = BOOK["skip"]
+    REPEAT = load("repeat")
+    SETTING = "嘴上不认，行动先到：拒绝的话说完，事已经做了"     # 魂里那句原文（设定类）
+    SAID = "我嘴上不认，行动先到。"                              # 她照搬回来的一句（单行，只撞审计）
+    BEFORE = "主人回来啦，我把碗放桌上了。"                       # 上一轮她那句：开场是这几个字
+    BOTH = "主人回来啦，我嘴上不认，行动先到。"                   # 同时撞两关：同一开场 + 复述设定段
+    ASKED = "你刚才说的那句再说一遍"
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def _inject(self):
+        return [{"kind": self.BOOK["setting_kinds"][0], "text": self.SETTING}]
+
+    def test_the_audit_is_skipped_and_the_line_goes_out(self):
+        """"同一句、有请求：decision 保持 pass、text 一个字不改、hits 空，但审计那节留着 hit。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.SAID, CLAUSES, None, sink, inject=self._inject(),
+                          policy=self.BOOK, recent=[], repeat_table=self.REPEAT,
+                          asked=self.ASKED)
+        self.assertEqual("pass", verdict.decision)                 # 话照发
+        self.assertEqual(self.SAID, verdict.text)                  # 一个字都不改
+        self.assertEqual([], verdict.hits)                         # 跳过不是命中：闸不动这句
+        self.assertTrue(verdict.audit.skipped)                     # 但命中照旧算命中
+        self.assertIsNotNone(verdict.audit.hit)                    # 面板看得见她引了设定
+        self.assertEqual(1, len(seen), "跳过也要留一行账")
+        self.assertEqual(self.SKIP["clause_id"], seen[0][0])       # 账本里是数据里那个名字
+        self.assertIn(self.SKIP["status"], seen[0][1])
+        self.assertIn(self.SKIP["status"], verdict.reason)         # 面板上也看得见
+
+    def test_check_reports_no_hit_when_the_user_asked_for_it(self):
+        self.assertIsNone(check(self.SAID, CLAUSES, inject=self._inject(),
+                                policy=self.BOOK, asked=self.ASKED))
+        self.assertIsInstance(check(self.SAID, CLAUSES, inject=self._inject(),
+                                    policy=self.BOOK), Hit)
+
+    def test_one_line_hitting_both_rows_of_skips(self):
+        """一句话同时撞上内容重复与复述审计：两关各记一行、各带自己的记号，不合并成一条。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.BOTH, CLAUSES, None, sink, inject=self._inject(),
+                          policy=self.BOOK, recent=[self.BEFORE],
+                          repeat_table=self.REPEAT, asked=self.ASKED)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.BOTH, verdict.text)
+        self.assertEqual(2, len(seen), "两关各记一行账，不合并")
+        self.assertEqual(self.REPEAT["hit"]["skip_clause_id"], seen[0][0])   # 先记内容重复那一关
+        self.assertEqual(self.SKIP["clause_id"], seen[1][0])                 # 再记复述审计那一关
+        self.assertNotIn(self.SKIP["status"], seen[0][1])                    # 各带自己的记号
+        self.assertIn(self.SKIP["status"], seen[1][1])
+        self.assertNotEqual(seen[0][1], seen[1][1], "两行各是各的说法，不许复用一句")
+        self.assertEqual(repeats.STATUS_SKIPPED, verdict.repeat_status)
+        self.assertTrue(verdict.audit.skipped)
+        self.assertIsNotNone(verdict.audit.hit)
+        self.assertIn(self.SKIP["status"], verdict.reason)
+        self.assertIn("skipped-by-request", verdict.reason)
+
+    def test_without_the_request_it_is_still_dropped(self):
+        """豁免不许外溢：asked 里没有请求标记，同一句照旧判废。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.SAID, CLAUSES, None, sink, inject=self._inject(),
+                          policy=self.BOOK, recent=[], repeat_table=self.REPEAT,
+                          asked="今天吃啥")
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertFalse(verdict.audit.skipped)
+        self.assertIsNotNone(verdict.audit.hit)
+        self.assertEqual(self.BOOK["verdicts"]["setting"], verdict.hits[0].clause_id)
+
+    def test_an_empty_asked_never_exempts(self):
+        for asked in ("", None, "   "):
+            with self.subTest(asked=asked):
+                verdict = enforce(self.SAID, CLAUSES, None, None, inject=self._inject(),
+                                  policy=self.BOOK, recent=[], repeat_table=self.REPEAT,
+                                  asked=asked)
+                self.assertEqual("dropped", verdict.decision)
+                self.assertFalse(verdict.audit.skipped)
+
+    def test_a_request_that_recites_nothing_records_nothing(self):
+        """他虽说了「再说一遍」，但这一句本来就没复述：没有「判废」可放，账一行都不记。"""
+        seen, sink = self._spy()
+        verdict = enforce("明天风大，我把窗关好了。", CLAUSES, None, sink, inject=self._inject(),
+                          policy=self.BOOK, recent=[], repeat_table=self.REPEAT,
+                          asked=self.ASKED)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual([], seen)
+        self.assertFalse(verdict.audit.skipped)
+
+    def test_only_one_place_decides_and_the_wording_stays_in_data(self):
+        """闸只调 repeat.requested 算一次；跳过那一笔的名字与说法一个字都不许进代码。"""
+        source = Path(gate.__file__).read_text(encoding="utf-8")
+        calls = re.findall(r"(?m)^\s+wanted = repeat\.requested\(", source)
+        self.assertEqual(2, len(calls), "check 与 enforce 各算一次，别处不再重算")
+        self.assertNotIn(self.SKIP["clause_id"], source)
+        self.assertNotIn(self.SKIP["reason"], source)
+
+
+class ASecondHitKeepsTheOriginalLine(unittest.TestCase):
+    """改了一次还是命中（而且不是红线）→ 留进门那句原话，不再丢空。
+
+    以前二次命中即弃：她明明改了、也没改成红线，整泡却消失了。规矩是**在最该回答的那一句上沉默，
+    比「说话带点毛病」糟得多**——所以 decision 是 pass、text 是进门那句（不是那个没改成的新稿），
+    hits 两条都留着，账本记一行「<通道>-after-rewrite」。
+    四关（条款 / 动作括注 / 内容重复 / 复述审计）各验一遍：通道名与记号全从数据读。
+    放宽的前提是**给了红线表**（下面每一例都传 fatal=FATAL）；没给表的调用方照旧二次命中即弃。
+    """
+
+    FATAL = load("fatal")
+    MARKS = load("rewrite")["after_rewrite"]["marks"]
+    BOOK = load("repeat")
+    NOTE = load("action_note")
+    AUDIT = load("audit")
+    SETTING = "嘴上不认，行动先到：拒绝的话说完，事已经做了"
+    FIRST = "主人回来啦，我把碗放桌上了。"
+    AGAIN = "主人回来啦，灯我给你留着呢。"
+    NOTED = "（尾巴在水里蜷了一下）可爱归可爱，那也不是胖。"
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def _inject(self):
+        return [{"kind": self.AUDIT["setting_kinds"][0], "text": self.SETTING}]
+
+    def test_the_clause_that_survives_the_rewrite(self):
+        seen, sink = self._spy()
+        verdict = enforce(SPEECH, CLAUSES, _same, sink, fatal=self.FATAL)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(SPEECH, verdict.text, "发的是进门那句原话，不是没改成的新稿")
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertEqual(2, len(verdict.hits), "两次命中都留着")
+        self.assertIsNone(verdict.fatal)
+        self.assertEqual("ok", verdict.fatal_status)
+        self.assertEqual(1, len(seen))
+        self.assertEqual(verdict.hits[-1].clause_id, seen[0][0])
+        self.assertIn(self.MARKS["clause"], seen[0][1])
+
+    def test_the_action_note_that_survives_the_rewrite(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.NOTED, CLAUSES, lambda text: self.NOTED + "。", sink,
+                          action=self.NOTE, fatal=self.FATAL)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.NOTED, verdict.text)
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertEqual(self.NOTE["hit"]["clause_id"], verdict.hits[-1].clause_id)
+        self.assertIn(self.MARKS["action"], seen[0][1])
+
+    def test_the_repeat_that_survives_the_rewrite(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.AGAIN, CLAUSES, lambda text: text + "主人", sink,
+                          recent=[self.FIRST], repeat_table=self.BOOK, fatal=self.FATAL)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.AGAIN, verdict.text)
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertEqual("ok", verdict.repeat_status)
+        self.assertIn(self.MARKS["repeat"], seen[0][1])
+
+    def test_the_recitation_that_survives_the_rewrite(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.SETTING, CLAUSES, lambda text: text + "吧", sink,
+                          inject=self._inject(), policy=self.AUDIT, fatal=self.FATAL)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.SETTING, verdict.text)
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertEqual(2, len(verdict.hits))
+        self.assertIsNotNone(verdict.audit.hit, "审计那节的命中照旧带着")
+        self.assertEqual(self.AUDIT["verdicts"]["setting"], verdict.hits[-1].clause_id)
+        self.assertIn(self.MARKS["audit"], seen[0][1])
+
+    def test_without_a_red_line_table_it_still_keeps_the_line(self):
+        """没给红线表也留原话：判不了是不是红线，不等于可以吞掉这句话。
+
+        区别只在读数上：fatal_status 是 not-checked（这一关没跑），账行里补一句取自数据的
+        「这一轮没拿到红线表」。**「给不给表」不是「吞不吞这句」的开关**。
+        """
+        seen, sink = self._spy()
+        verdict = enforce(SPEECH, CLAUSES, _same, sink)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(SPEECH, verdict.text)
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertIsNone(verdict.fatal)
+        self.assertEqual("not-checked", verdict.fatal_status)
+        self.assertIn(self.MARKS["clause"], seen[0][1])
+        self.assertIn(load("rewrite")["after_rewrite"]["unchecked"], seen[0][1][-len(
+            load("rewrite")["after_rewrite"]["unchecked"]):])
+
+    def test_the_quota_strip_still_wins_over_keeping_the_original(self):
+        """配额那条老例外不变：它优先剥行（把动作行拿掉比留原话强），不是「留原话」。"""
+        verdict = enforce(self.NOTED, CLAUSES, lambda text: text, None, quota="forbid",
+                          fatal=self.FATAL)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertFalse(verdict.kept_after_rewrite)
 
 
 class KeepUnrewrittenKeepsHerLine(unittest.TestCase):
@@ -944,13 +1180,18 @@ class QuotaOverruns(unittest.TestCase):
         self.assertEqual("", verdict.text)
         self.assertEqual("courtesy-open", verdict.hits[-1].clause_id)
 
-    def test_other_criteria_still_drop_the_whole_sentence(self):
-        """别的判据第二次命中仍照旧弃整句（旧行为一个字节都不许变）。"""
+    def test_other_criteria_keep_the_line_instead_of_dropping_it(self):
+        """别的判据第二次命中不再弃整句：留原话（配额那条「剥行」例外只属于配额）。
+
+        这条断言是被「二次命中不丢空」那条新规矩改准的：以前这里 dropped + text=""。现在 decision
+        是 pass、text 是进门那句、kept_after_rewrite=True、salvaged=False（它不是剥行救回来的）。
+        """
         note = load("action_note")
         verdict = enforce("（尾巴在水里晃了一下）", CLAUSES, _same, action=note)   # 没标配额
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual("（尾巴在水里晃了一下）", verdict.text)
         self.assertFalse(verdict.salvaged)
+        self.assertTrue(verdict.kept_after_rewrite)
         self.assertEqual(note["hit"]["clause_id"], verdict.hits[-1].clause_id)
 
     def test_broken_quota_is_loud(self):

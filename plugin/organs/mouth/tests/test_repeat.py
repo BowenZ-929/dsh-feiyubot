@@ -152,6 +152,44 @@ class ARequestToRepeatIsSkipped(unittest.TestCase):
         self.assertEqual(KIND_ACTION, skip.hit.kind)
 
 
+class TheRequestDecisionHasOneHome(unittest.TestCase):
+    """请求标记只有一份真源：判定公开成 requested()，闸算一次、两关（去重与复述审计）共用。
+
+    两关各判一次就会各有一份词表，迟早分岔成「这一关当他要重复、那一关不认」——同一句话在账本
+    上两种说法。所以这里既验 requested() 本身，也验 check 认的是**传进来的那个结论**，而不是
+    自己偷偷重算一遍。
+    """
+
+    ASKED = "你刚才说的那句再说一遍"
+
+    def test_it_is_a_public_entry(self):
+        self.assertIn("requested", repeats.__all__)
+
+    def test_it_reads_the_data_markers(self):
+        self.assertTrue(repeats.requested(self.ASKED))
+        for asked in ("今天吃啥", "", None, "   ", "\n"):
+            with self.subTest(asked=asked):
+                self.assertFalse(repeats.requested(asked))
+
+    def test_the_markers_come_from_the_table_it_is_given(self):
+        """换一张表就换一套说法：判据只有数据那一份，函数里一条标记都不列。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            other = _write_and_load(tmp, {"request_markers": ["闭嘴"]})
+            self.assertFalse(repeats.requested(self.ASKED, other))
+            self.assertTrue(repeats.requested("闭嘴", other))
+
+    def test_check_obeys_the_conclusion_it_is_handed(self):
+        """传进来的结论说了算：同一句 asked、两种结论，结局跟着变——闸就是这么用的。"""
+        self.assertIsInstance(repeats.check(THIRD, [FIRST], None, self.ASKED, True), RepeatSkip)
+        self.assertIsInstance(repeats.check(THIRD, [FIRST], None, self.ASKED, False), RepeatHit)
+        self.assertIsInstance(repeats.check(THIRD, [FIRST], None, "今天吃啥", True), RepeatSkip)
+
+    def test_none_means_the_caller_has_not_decided_yet(self):
+        """默认 None：调用方没算过就现算一次，算的还是 requested() 那一处。"""
+        self.assertIsInstance(repeats.check(THIRD, [FIRST], None, self.ASKED, None), RepeatSkip)
+        self.assertIsInstance(repeats.check(THIRD, [FIRST], None, "今天吃啥", None), RepeatHit)
+
+
 class NotCheckedIsNotClean(unittest.TestCase):
     """recent 为 None 是「没判」，空清单是「判过、没重复」：两件事同一个返回值，状态必须分得开。"""
 

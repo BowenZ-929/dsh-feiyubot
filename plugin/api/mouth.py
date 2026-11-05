@@ -317,6 +317,7 @@ def _gate(params: Mapping[str, str]) -> Result:
         clauses = warehouse.load("clauses").get("clauses")
         book = warehouse.load("refusal")
         marks = warehouse.load("action_note")
+        fatal = warehouse.load("fatal")           # 红线表：干跑也按同一份判据判（红线命中就 dropped）
         if asked is not None:
             soft = refusal.soft_scan(answer, asked, table=book)
         source = asked if (asked or "").strip() else answer
@@ -329,18 +330,19 @@ def _gate(params: Mapping[str, str]) -> Result:
             # 这一遍只取说法、事件与那句人话：不给 drop_sink，所以不记账（记账归下面那一遍闸）
             refused = refusal.enforce(refuse, table=book, clauses=clauses, rewrite=None,
                                       refuse_sink=None, drop_sink=None, now=now,
-                                      asked=asked, answer=answer)
+                                      asked=asked, answer=answer, fatal=fatal)
             spoken = refusal.say(refuse, table=book)
         else:
             spoken = answer
         notebook = marks if _looks_noted(spoken, marks) else None
         if refused is not None and refused.kind == refusal.KIND_SOFT:
             # 闸照跑，但只报不改：不给 sink、也不拿它的 text，弃言账本因此不添行
-            gated = gate.enforce(spoken, clauses, None, None, inject=inject, action=notebook)
+            gated = gate.enforce(spoken, clauses, None, None, inject=inject, action=notebook,
+                                 fatal=fatal)
         else:
             # 唯一一遍闸：条款 + 动作括注 + 照抄审计都在这，弃言也只在这里记一次
             gated = gate.enforce(spoken, clauses, None, _sink(trace), inject=inject,
-                                 action=notebook)
+                                 action=notebook, fatal=fatal)
         # 干跑到此为止：拒绝只判不投——不调 heart.refuse.ingest，也不调 refusal.record，
         # 心的 refusals.json 与我们自己的 refuse.jsonl 因此一个字节都不动。
         delivered = _delivered(source, refused)
@@ -450,7 +452,7 @@ def _soft_refusal(book: Mapping[str, Any], clauses: Any, asked: Optional[str],
     """
     return refusal.enforce(refusal.soft_shape(book), table=book, clauses=clauses, rewrite=None,
                            refuse_sink=sink, drop_sink=None, now=now,
-                           asked=asked, answer=answer)
+                           asked=asked, answer=answer, fatal=warehouse.load("fatal"))
 
 
 def _delivered(source: Any, refused: Any) -> Dict[str, Any]:

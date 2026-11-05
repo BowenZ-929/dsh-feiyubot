@@ -28,6 +28,14 @@ inject 的形状是 [{"kind": <六类之一>, "text": str}]；**未知 kind 当�
 显式带状态与一句人话（reason），由 api 层照实透出。两种状态调用方一眼就能分开：
 status 为 "ok" 才算真的比过，status 为 "ok" 且 hit 为 None 才算「没在复述」。
 
+**对方明确要求重复／引用时，这一关也只记账、不判废（这一轮加的）。** 他要她「再说一遍」「重复
+刚才那句」时，把她说过的那段设定原样再说一遍正是他要的，这时候还判废等于把她照办的那一下
+也吞掉。豁免的开关由闸传进来（requested），判法只有一处：repeat.requested(asked, 表)——**请求
+标记的词表不在这里**，在这里另抄一份就是第二处真源。此时交出去的是**一样算命中**的读数：
+status 仍旧 "ok"、hit 照旧带着（面板上看得见她引了设定），另加 skipped=True 与一句取自数据的
+skip_reason（里面带着 audit-skipped-by-request）。**为什么只记账不判废、又为什么要标记**：我们
+不想让她养成引用设定的习惯，只是不在这句上拦——标记留着，账才记得下来。
+
 **返回的是一句人话 + 片段 + 来源段 kind，不是布尔。** AuditHit 里带 kind（违规类别：设定段
 照搬 / 原话没带标记，取值在数据里）、matched（撞上的那几个字，归一化之后的）、seg_kind
 （来源段是哪一类）、reason（可以直接贴进日志与面板的一句话）；布尔说不出「为什么拦」。
@@ -41,7 +49,7 @@ status 为 "ok" 才算真的比过，status 为 "ok" 且 hit 为 None 才算「�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .warehouse import load
@@ -88,6 +96,11 @@ class AuditResult:
       reason    一句人话：为什么拦、为什么放行、或者为什么判不了
       lcs_len   最长公共子串的长度；拦下时是那一截的长度，放行时是最长的那一截
       threshold 这一轮用的阈值（来自数据，不是代码里的常数）
+      skipped   这一条命中按对方的要求没判废（他要她重复／引用）：hit 与 status 原样不变，
+                变的只是闸拿它怎么办——decision 保持 pass、话照发
+      skip_clause_id  skipped 为真时闸记账用的名字（取自数据），与 hit.kind 不是一回事：
+                前者记「为什么没判废」，后者记「她犯了哪一条」
+      skip_reason     skipped 为真时那句人话，里面带着 audit-skipped-by-request；账本与面板直接用
     """
 
     status: str
@@ -95,6 +108,9 @@ class AuditResult:
     reason: str
     lcs_len: int
     threshold: int
+    skipped: bool = False
+    skip_clause_id: str = ""
+    skip_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -120,14 +136,20 @@ class _Rules:
     verdict_setting: str
     verdict_quote: str
     reasons: Mapping[str, str]
+    skip_clause_id: str
+    skip_status: str
+    skip_reason: str
 
 
 def audit(text: str, inject: Any = None,
-          policy: Optional[Mapping[str, Any]] = None) -> AuditResult:
+          policy: Optional[Mapping[str, Any]] = None,
+          requested: bool = False) -> AuditResult:
     """判这段输出是不是在复述注入的原文：返回一句人话 + 片段 + 来源段 kind，不是布尔。
 
     inject 是调用方注入的原文段（[{"kind": ..., "text": ...}]，或一段纯字符串）；
-    policy 是审计数据（warehouse.load("audit") 读出来的那份表），传 None 就现读仓库里的默认表。
+    policy 是审计数据（warehouse.load("audit") 读出来的那份表），传 None 就现读仓库里的默认表；
+    requested 是「对方这一轮是不是在要她重复／引用」——由闸拿 repeat.requested(asked, 表) 算一次
+    传进来，**本文件不判这一件事、也不存那张标记表**（存了就是第二处真源）。
 
     逐段比最长公共子串，取第一段「撞够阈值又违规」的当结果：
 
@@ -135,8 +157,13 @@ def audit(text: str, inject: Any = None,
     - 对方原话段撞够阈值、但窗口内没有引述标记 → 也拦。
     - 对方原话段撞够阈值、标记就在前面 → 放行，并在 reason 里点名是哪个标记。
 
+    撞上了、而 requested 为真时→ **读数一样算命中**（status 仍是 "ok"、hit 原样带着、面板看得见
+    她引了设定），只是另加 skipped=True 与一句取自数据的 skip_reason（带 audit-skipped-by-request）：
+    这一句不判废，话照发。为什么还要标记：我们不想让她养成引用设定的习惯，只是不在这句上拦——
+    标记留着，账才记得下来。requested 为假时一个字段都不多，旧行为一个字节不变。
+
     inject 为 None 或空（空清单、全空白字符串）→ status 是 "audit-unavailable"：判不了，
-    不弃这句，但也绝不返回 ok（缺料不是清白）。
+    不弃这句，但也绝不返回 ok（缺料不是清白）。这一态不受 requested 影响：判不了就是判不了。
     """
     rules = _rules(policy)
     segments = _segments(inject, rules)
@@ -162,10 +189,10 @@ def audit(text: str, inject: Any = None,
             return _blocked(rules, rules.verdict_quote, segment.kind, matched, length,
                             rules.reasons["quote_unmarked"].format(
                                 seg_kind=segment.kind, matched=matched,
-                                lcs_len=length, window=rules.window))
+                                lcs_len=length, window=rules.window), requested)
         return _blocked(rules, rules.verdict_setting, segment.kind, matched, length,
                         rules.reasons["setting"].format(
-                            seg_kind=segment.kind, matched=matched, lcs_len=length))
+                            seg_kind=segment.kind, matched=matched, lcs_len=length), requested)
     if marked is not None:
         marker, matched, seg_kind = marked
         reason = rules.reasons["quote_marked"].format(seg_kind=seg_kind, matched=matched,
@@ -178,18 +205,30 @@ def audit(text: str, inject: Any = None,
 
 
 def _blocked(rules: _Rules, verdict: str, seg_kind: str, matched: str, length: int,
-             reason: str) -> AuditResult:
-    """撞够了就成一条证据：违规类别、来源段那一类、撞上的那几个字、一句人话。"""
-    return AuditResult(status=STATUS_OK,
-                       hit=AuditHit(kind=verdict, matched=matched, seg_kind=seg_kind,
-                                    reason=reason),
-                       reason=reason, lcs_len=length, threshold=rules.threshold)
+             reason: str, requested: bool = False) -> AuditResult:
+    """撞够了就成一条证据：违规类别、来源段那一类、撞上的那几个字、一句人话。
+
+    requested 为真时再补上跳过那三个字段（skipped / skip_clause_id / skip_reason）——**命中照样
+    留着**：豁免的是「判不判废」，不是「算不算撞上」。面板要看得出她引了设定，账本要记下这一句
+    为什么没判废，两件事都靠这条读数，所以只加字段、不抹证据。
+    """
+    found = AuditResult(status=STATUS_OK,
+                        hit=AuditHit(kind=verdict, matched=matched, seg_kind=seg_kind,
+                                     reason=reason),
+                        reason=reason, lcs_len=length, threshold=rules.threshold)
+    if not requested:
+        return found
+    return replace(found, skipped=True, skip_clause_id=rules.skip_clause_id,
+                   skip_reason=rules.skip_reason.format(verdict=verdict, seg_kind=seg_kind,
+                                                        matched=matched, lcs_len=length))
 
 
 def _rules(policy: Optional[Mapping[str, Any]] = None) -> _Rules:
     """把审计数据读成一份只读规则；policy 为 None 就去仓库现读默认表。
 
     缺节缺键一律抛 AuditBroken——数据里没有的数不在代码里补默认值（补了就是第二处真源）。
+    skip 那一节是「按对方要求不判废」那一笔的账（记账用的名字、记号、那句人话）：它的 status 必须
+    出现在 reason 里，否则账本上就认不出「这一句为什么没判废」，说不清等于没记。
     """
     table = policy if policy is not None else load("audit")
     if not isinstance(table, Mapping):
@@ -212,10 +251,18 @@ def _rules(policy: Optional[Mapping[str, Any]] = None) -> _Rules:
         raise AuditBroken("数据", "里的 plain_kind %r 不在 setting_kinds 中：纯字符串一律"
                                  "按设定类从严，它必须是一个设定类。" % plain)
     reasons = {key: _word(_mapping(table, "reason"), key) for key in _REASON_KEYS}
+    skip = _mapping(table, "skip")
+    skip_clause_id = _word(skip, "clause_id")
+    skip_status = _word(skip, "status")
+    skip_reason = _word(skip, "reason")
+    if skip_status not in skip_reason:
+        raise AuditBroken("数据", "里 skip.reason 没有带上 skip.status（%r）：账本靠这个记号认出"
+                                  "「这一句为什么没判废」，说法与记号不许各走各的。" % skip_status)
     return _Rules(threshold=threshold, window=window, strip=strip, blank=blank,
                   quote_kind=quote_kind, setting_kinds=setting, plain_kind=plain,
                   markers=markers, verdict_setting=verdict_setting,
-                  verdict_quote=verdict_quote, reasons=reasons)
+                  verdict_quote=verdict_quote, reasons=reasons, skip_clause_id=skip_clause_id,
+                  skip_status=skip_status, skip_reason=skip_reason)
 
 
 def _segments(inject: Any, rules: _Rules) -> List[_Seg]:

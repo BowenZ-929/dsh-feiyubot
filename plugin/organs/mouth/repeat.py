@@ -35,6 +35,10 @@ RepeatSkip（**不是** RepeatHit）：这一关只记账、不判废，状态�
 为什么两步都要：只认「说了再说一遍」就跳过，等于每次他一开口说这话这一关就白设；而且没撞上重复
 的时候根本没有「判废」需要放掉，记那一笔账只是噪音。asked 为空一律不算请求——**不许默认豁免**。
 
+**请求标记只有一份真源，就是这里的 request_markers。** 同一句请求还要豁免复述审计（那边判的是
+「她照搬了设定段」），所以判定公开成 requested(asked, table)：闸算一次，把那个布尔同时交给
+repeat.check 与 audit.audit——审计那份数据里不许另抄一张标记表，抄了就是第二处真源。
+
 判据全在 organs/mouth/data/repeat.json（经 warehouse.load("repeat") 只读借入）：两个数、两张字符
 表、两条判据的名字、闸用的三个名字（clause_id 与 kind，外加跳过记账用的 skip_clause_id）、
 请求标记表、弃言账里认这一条用的记号、全部人话模板；
@@ -56,7 +60,7 @@ STATUS_NOT_CHECKED = "not-checked"   # 没拿到历史，这一关没跑；不�
 STATUS_SKIPPED = "skipped-by-request"  # 撞上了重复，但对方要她再说一遍：只记账，不判废
 
 __all__ = ["RepeatBroken", "RepeatHit", "RepeatSkip", "STATUS_OK", "STATUS_NOT_CHECKED",
-           "STATUS_SKIPPED", "check", "clear_reason", "names"]
+           "STATUS_SKIPPED", "check", "clear_reason", "names", "requested"]
 
 
 class RepeatBroken(ValueError):
@@ -134,12 +138,16 @@ class _Rules:
 
 def check(text: str, recent: Optional[Sequence[str]],
           table: Optional[Mapping[str, Any]] = None,
-          asked: str = "") -> Optional[Union[RepeatHit, RepeatSkip]]:
+          asked: str = "",
+          requested: Optional[bool] = None) -> Optional[Union[RepeatHit, RepeatSkip]]:
     """看她这句是不是在最近 rounds 条里已经把同一动作行、或同一开场念过一遍：给证据、或给跳过，否则 None。
 
     table 是判据表（warehouse.load("repeat") 读出来的那份），传 None 就现读仓库里的默认表；
     recent 是她最近若干条输出的原文（旧的在先），**None 表示这一轮拿不到历史**；
     asked 是对方这一轮说的那句话——他明说要她重复时，撞上重复也只记账、不判废。
+    requested 是「问过一次的结论」：闸拿 requested(asked, table) 算一次，再把那个布尔交给这一关
+    与复述审计两处，免得同一句话被两套标记表判出两个结果。默认 None 表示调用方没算过，就现算一次
+    （算的还是 requested() 那一处，标记表仍旧只有一份）。
 
     三种读数分开：
 
@@ -165,12 +173,26 @@ def check(text: str, recent: Optional[Sequence[str]],
     found = _same_action_line(body, window, rules) or _same_opening(body, window, rules)
     if found is None:
         return None
-    if not _requested(asked, rules):
+    if not (_requested(asked, rules) if requested is None else bool(requested)):
         return found
     return RepeatSkip(hit=found, clause_id=rules.skip_clause_id, status=STATUS_SKIPPED,
                       reason=_fill(rules.skip_reason, "skip_reason",
                                    matched=found.matched, prev_no=found.prev_index + 1,
                                    rounds=rules.rounds, tag=rules.tag, kind=found.kind))
+
+
+def requested(asked: Any, table: Optional[Mapping[str, Any]] = None) -> bool:
+    """对方这一句是不是在要她重复刚才那句：**判定只有这一处**，闸算一次、两关共用。
+
+    为什么公开成函数：请求标记表（request_markers）是这一条豁免的唯一真源，而豁免要落在两关上
+    （内容重复、复述审计）。两关各判一次就各有一份词表，迟早会分岔成「这一关当他要重复、那一关
+    不认」——同一句话在账本上就有两种说法。所以闸拿这一个布尔，同时交给 check 与 audit.check。
+
+    table 是判据表（warehouse.load("repeat") 读出来的那份），传 None 就现读仓库里的默认表；
+    asked 为空（None、空串、全空白）一律是假：**不许默认豁免**，默认豁免等于这一关白设。
+    匹配规则全在数据的 request_markers 里，代码里一条都不列。
+    """
+    return _requested(asked, _rules(table))
 
 
 def _requested(asked: Any, rules: _Rules) -> bool:
