@@ -30,7 +30,17 @@ PAGE_MOUNT = {name: path for path, name in PAGE_FILES.items()}
 
 # 页面里所有「点下去会发请求」的写法：call("METHOD", "path") 与 fetch("path", {method})
 CALL_RE = re.compile(r'call\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*"([^"]+)"')
-FETCH_RE = re.compile(r'fetch\(\s*"([^"]+)"')
+# 取数的路径可以是字面量，也可以是 BASE + "..."：页面在壳的 iframe 里必须补挂载前缀，
+# 绝对路径会打到宿主根（心页就因为漏了 BASE 报过「核 /heart 回的不是 JSON」）。
+# 两个函数名都要认：pages/panel-base.js 提供 window.panelFetch(path, init)，内部就是
+# fetch(PANEL_BASE + path)；直开核时 PANEL_BASE 是空串，panelFetch 因此是 fetch 的薄包装。
+# 页面从 fetch 改写成 panelFetch 之后，`fetch\(` 这个串在页面上一个字都不剩——
+# 只认 fetch 的正则会抽到空集，那条「每个取数都得是已登记路由」的断言就静默失效
+# （页面打任何未登记路径都不红）。所以名字两拼、前缀两拼，四种写法一起认。
+FETCH_RE = re.compile(r'(?:panel)?[Ff]etch\(\s*(?:BASE\s*\+\s*)?"([^"]+)"')
+# 整行注释要剔掉再解析：心页那句注释里就写着 panelFetch("/heart/mood")，把它算成
+# 「这一块在读这个端点」的话，删掉真取数、只留一句注释，块断言照样是绿的。
+COMMENT_PREFIXES = ("//", "/*", "*", "*/")
 BUTTON_ID_RE = re.compile(r'<button[^>]*\bid="([^"]+)"')
 ANCHOR_RE = re.compile(r'<a\b[^>]*\bhref="([^"]+)"')
 WRITE_VERBS = ('"post"', '"put"', '"delete"', '"patch"')
@@ -42,6 +52,12 @@ HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
 
 def _text(name: str) -> str:
     return (PAGES / name).read_text(encoding="utf-8")
+
+
+def _code_only(text: str) -> str:
+    """去掉整行注释后只剩代码：注释里提到的取数不算「这一块在读这个端点」。"""
+    return "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith(COMMENT_PREFIXES))
 
 
 class EveryClickableHasARoute(unittest.TestCase):
@@ -58,7 +74,7 @@ class EveryClickableHasARoute(unittest.TestCase):
 
     def test_soul_page_fetches_only_registered_routes(self):
         """任何裸 fetch("path") 也要落在路由表里（防止绕开 call 帮助函数）。"""
-        for path in FETCH_RE.findall(_text("soul.html")):
+        for path in FETCH_RE.findall(_code_only(_text("soul.html"))):
             route = path.partition("?")[0]
             self.assertTrue(route in api.ROUTES or route in PAGE_FILES,
                             "页面在 fetch 一条不存在的路径：%s" % route)
@@ -123,7 +139,7 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
 
     四件事一起看住：
     1. 页面上每一次 fetch 的路径都在 api.ROUTES 里，且那条路由就是 GET；
-    2. 画的是 mood 的轨迹：<canvas> + trajectory + fetch("/heart/mood") 三样都在；
+    2. 画的是 mood 的轨迹：<canvas> + trajectory + panelFetch("/heart/mood") 三样都在；
     3. 没有任何非 GET 的写法（连 "method" 这种第二参数都不许出现），也不挂定时器；
     4. 念头块、窗口块、睡眠账、意图排序真的在页上，且各自读的是自己那一块的键——
       只断言"没有写控件"的话，把这几块的取数删掉也照样是绿的。
@@ -131,9 +147,11 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
 
     def setUp(self) -> None:
         self.text = _text("heart.html")
+        # 取数只在代码里找：注释里那句 panelFetch("/heart/mood") 不是取数。
+        self.code = _code_only(self.text)
 
     def test_every_fetch_is_a_registered_get_route(self):
-        paths = FETCH_RE.findall(self.text)
+        paths = FETCH_RE.findall(self.code)
         self.assertGreaterEqual(len(paths), 3, "心页该从端点拉读数，少了说明解析没抓到")
         for path in paths:
             route = path.partition("?")[0]
@@ -145,7 +163,8 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
     def test_mood_trajectory_is_drawn_on_a_canvas(self):
         self.assertIn("<canvas", self.text, "轨迹要自绘：一张 <canvas>，不引外部库")
         self.assertIn("trajectory", self.text, "画的是 mood 的轨迹，源码里得看得见 trajectory")
-        self.assertIn('fetch("/heart/mood"', self.text, "轨迹数据来自 GET /heart/mood")
+        self.assertIn("/heart/mood", FETCH_RE.findall(self.code),
+                      "轨迹数据来自 GET /heart/mood")
         self.assertIn('getContext("2d")', self.text, "曲线是页内自绘的 2d 折线")
 
     def test_no_non_get_request_words_and_no_timers(self):
@@ -157,8 +176,9 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
 
     def test_pending_and_window_blocks_read_their_own_keys(self):
         """念头（/heart/pending）与近期窗口（判决带的 window）各读各的键。"""
-        for needle, note in (('fetch("/heart/pending"', "念头块来自 GET /heart/pending"),
-                             ("thoughts", "念头列表读 pending 的 thoughts"),
+        fetches = FETCH_RE.findall(self.code)
+        self.assertIn("/heart/pending", fetches, "念头块来自 GET /heart/pending")
+        for needle, note in (("thoughts", "念头列表读 pending 的 thoughts"),
                              ("ttl_left_min", "念头要显示剩余 TTL"),
                              ("此刻没有未了的念头", "没念头时给一句话，不显示空白"),
                              ("ignored-recently", "窗口命中时的理由码要写在页上"),
@@ -174,8 +194,9 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
         睡眠账七样（上次入睡 / 睡了多久 / 两个连续计数 / drift / 生效窗口 / wake_cap）、
         意图排序六样（order 的每条的 intent·weight·hit·why，加 top / pass / threshold）。
         """
-        for needle, note in (('fetch("/heart/sleep"', "睡眠账来自 GET /heart/sleep"),
-                             ("data.effective_window", "睡眠块显示生效窗口"),
+        fetches = FETCH_RE.findall(self.code)
+        self.assertIn("/heart/sleep", fetches, "睡眠账来自 GET /heart/sleep")
+        for needle, note in (("data.effective_window", "睡眠块显示生效窗口"),
                              ("data.wake_cap", "睡眠块显示 wake_cap"),
                              ("data.drift_hours", "睡眠块显示 drift"),
                              ("data.consecutive_late_nights", "睡眠块显示连续熬夜夜数"),
@@ -202,8 +223,9 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
         额度三样（用了几次 / 上限 / 还剩几次）、冷却中的话题四样（话题 / 剩余分钟 /
         第几次 / 理由），以及空着时那一句话。
         """
-        for needle, note in (('fetch("/heart/refusals"', "额度来自 GET /heart/refusals"),
-                             ("data.quota", "/heart/refusals 的额度块"),
+        fetches = FETCH_RE.findall(self.code)
+        self.assertIn("/heart/refusals", fetches, "额度来自 GET /heart/refusals")
+        for needle, note in (("data.quota", "/heart/refusals 的额度块"),
                              ("refusalQuota.used_today", "额度显示今天用了几次"),
                              ("refusalQuota.limit", "额度显示上限"),
                              ("refusalQuota.left", "额度显示还剩几次"),
@@ -219,7 +241,7 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
 
     def test_axes_and_voice_come_from_the_effective_route(self):
         """六轴档位与语气档都从合成点读：页面自己不做第二套换算。"""
-        self.assertIn('fetch("/heart/effective"', self.text,
+        self.assertIn("/heart/effective", FETCH_RE.findall(self.code),
                       "档位与语气档都来自 /heart/effective")
         self.assertIn("data.axes", self.text, "六轴档位用 effective 的 axes")
         self.assertIn("item.inner_word", self.text, "轴档读 effective 给的档位词")

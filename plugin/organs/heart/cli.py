@@ -54,7 +54,8 @@ def _root_note(root: Path) -> None:
 def demo_card(root: Path) -> None:
     """四对轴读成档位词、两轴标灰、再拿一张缺轴坏卡当场拒载。"""
     _root_note(root)
-    (root / card_module.CARD_FILE).write_bytes(card_module.DEFAULT_CARD_PATH.read_bytes())
+    # 播种：出厂 seed 料拷进临时根——这一行就是 SEED_CARD_PATH 的唯一用途。
+    (root / card_module.CARD_FILE).write_bytes(card_module.SEED_CARD_PATH.read_bytes())
     card = card_module.load_card(root / card_module.CARD_FILE)
     view = card_module.view(card)
     print("  载入四对轴：%s" % "、".join(view["loaded"]))

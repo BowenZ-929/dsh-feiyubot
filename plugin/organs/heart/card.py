@@ -1,6 +1,9 @@
 """heart-baseline：六轴性格卡（从魂整卡迁入，只读不写）。
 
 判据（数值是默认值不是验收线）：
+- 真源只有一个：**实盘是唯一真源；出厂那份是 seed 料，改了不影响实盘。**
+  实盘 = store.default_root()/baseline-card.json（HEART_ROOT > <仓库>/home/organs/heart），
+  出厂 = organs/heart/data/baseline-card.json（SEED_CARD_PATH，只给新机器播种与测试用）。
 - 卡是常量：本模块既不持有衰减尺，也不往盘上写一个字节——坏卡一律
   CardError，绝不补默认值（补默认值等于给基线多加一个写者）。
 - 数值只留内部：进文本的只有档位词，render_text() 的输出里不许出现
@@ -14,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,7 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from organs.heart import model, store
 
 CARD_FILE = "baseline-card.json"
-DEFAULT_CARD_PATH = store.DATA_DIR / CARD_FILE
+#: 出厂 seed 料（包内 data/）：只给新机器播种与测试用，改了不影响实盘。
+SEED_CARD_PATH = store.DATA_DIR / CARD_FILE
 
 # 拒载码：每一种坏法一个码，绝不合并成"卡坏了"。
 CARD_MISSING = "card-missing"
@@ -158,13 +163,31 @@ def _check_entry(axis_id: str, entry: Dict[str, Any],
     return issues
 
 
+def live_card_path() -> Path:
+    """实盘卡：store.default_root()（HEART_ROOT > <仓库>/home/organs/heart）/ CARD_FILE。"""
+    return store.default_root() / CARD_FILE
+
+
+def _default_card_path() -> Path:
+    """缺省解析：实盘在就用实盘；实盘没有 → 回退出厂 seed 并 WARN 一行。"""
+    live = live_card_path()
+    if live.exists():
+        return live
+    warnings.warn(
+        "实盘没有卡（%s），按出厂 seed 只读回退；要落盘请先播种。" % live,
+        stacklevel=3,
+    )
+    return SEED_CARD_PATH
+
+
 def load_card(path: Any = None) -> Card:
     """读卡并做成对校验；坏卡一律 CardError，绝不补默认值，也不写盘。
 
-    path 缺省用 DEFAULT_CARD_PATH（仓里的真卡）。读不到 → card-missing，
+    path 缺省**实盘优先**（live_card_path()）：实盘有卡就读实盘；实盘没有就回退
+    SEED_CARD_PATH（出厂 seed 料）并 warnings.warn 一行。读不到 → card-missing，
     坏 JSON / 不是 dict → card-corrupt，其余逐类见 _check_*。
     """
-    target = Path(path) if path is not None else DEFAULT_CARD_PATH
+    target = Path(path) if path is not None else _default_card_path()
     try:
         raw = target.read_text(encoding="utf-8")
     except OSError as exc:

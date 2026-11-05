@@ -55,7 +55,7 @@ class CardLoadTest(unittest.TestCase):
     # ---- 真卡 ---------------------------------------------------------
 
     def test_real_card_loads_with_four_paired_and_two_pending(self):
-        real = card.load_card()
+        real = card.load_card(card.SEED_CARD_PATH)
         self.assertEqual(real.paired, model.PAIRED_AXES)
         self.assertEqual(real.pending, model.PENDING_AXES)
         self.assertEqual((real.scale_min, real.scale_max), (0, 100))
@@ -73,14 +73,14 @@ class CardLoadTest(unittest.TestCase):
             self.assertIsNone(axis.shown, "待定轴不许有 shown")
 
     def test_real_card_keeps_handoff_block_and_matches_docs(self):
-        data = helpers.read_json_file(card.DEFAULT_CARD_PATH)
+        data = helpers.read_json_file(card.SEED_CARD_PATH)
         self.assertIn("_handoff", data, "整卡迁入：_handoff 段要原样留着")
         docs = Path(card.__file__).resolve().parents[3] / "docs" / "organs" / "soul" / "baseline-card-handoff.json"
-        self.assertEqual(sha256_of(card.DEFAULT_CARD_PATH), sha256_of(docs),
+        self.assertEqual(sha256_of(card.SEED_CARD_PATH), sha256_of(docs),
                          "搬过来的卡必须与 docs 那份逐字节一致")
 
     def test_view_marks_pending_greyed_and_lists_tier_words(self):
-        loaded = card.load_card()
+        loaded = card.load_card(card.SEED_CARD_PATH)
         view = card.view(loaded)
         self.assertEqual(len(view["pending"]), 2)
         for row in view["pending"]:
@@ -137,7 +137,7 @@ class CardLoadTest(unittest.TestCase):
         self.assertEqual(card.tier_of(5, 1, 5), model.TIER_COUNT)
 
     def test_render_text_has_no_arabic_digits(self):
-        loaded = card.load_card()
+        loaded = card.load_card(card.SEED_CARD_PATH)
         text = card.render_text(loaded)
         self.assertFalse(any(ch.isdigit() for ch in text), "渲染文本里不许出现 0-9：%r" % text)
         self.assertIn("待定", text)
@@ -148,7 +148,7 @@ class CardLoadTest(unittest.TestCase):
         self.assertGreaterEqual(len(set(hits)), 2, "至少两个档位词")
 
     def test_render_text_with_offsets_stays_word_only(self):
-        loaded = card.load_card()
+        loaded = card.load_card(card.SEED_CARD_PATH)
         text = card.render_text(loaded, {"想黏人": 1.5, "服气": -0.5})
         self.assertFalse(any(ch.isdigit() for ch in text))
         self.assertIn("黏人低档时不许连发三条以上", text)

@@ -199,15 +199,15 @@ class OffsetTest(unittest.TestCase):
         self.assertAlmostEqual(row["day_delta"], 1.0)
 
     def test_card_file_hash_is_untouched_by_every_write_path(self):
-        before_hash = sha256_of(card.DEFAULT_CARD_PATH)
-        before_bytes = Path(card.DEFAULT_CARD_PATH).read_bytes()
+        before_hash = sha256_of(card.SEED_CARD_PATH)
+        before_bytes = Path(card.SEED_CARD_PATH).read_bytes()
         offset.apply_daily("想黏人", 1.0, root=self.root, now=T0)
         offset.apply_daily("想黏人", 1.0, root=self.root, now=T0)
         offset.settle_week({"想黏人": 2.0, "心疼": -1.0}, root=self.root, now=T0)
         offset.read(root=self.root, now=T_6D)
         offset.overview(root=self.root, now=T_6D)
-        self.assertEqual(sha256_of(card.DEFAULT_CARD_PATH), before_hash, "卡哈希不许变")
-        self.assertEqual(Path(card.DEFAULT_CARD_PATH).read_bytes(), before_bytes)
+        self.assertEqual(sha256_of(card.SEED_CARD_PATH), before_hash, "卡哈希不许变")
+        self.assertEqual(Path(card.SEED_CARD_PATH).read_bytes(), before_bytes)
         self.assertFalse((self.root / card.CARD_FILE).exists(), "偏移不许往自己根目录落卡")
 
     def test_no_baseline_in_any_offset_signature(self):
