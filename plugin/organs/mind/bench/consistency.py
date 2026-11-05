@@ -13,6 +13,10 @@
 - 两条轨道（提取全是确定性正则/计数，零 LLM，一个词表都不写在本文件里，全在 data/questions.json）：
   A 不该变：称呼口径／自称／是否自称 AI／句长量级（按数据档界落桶）／口癖（命中与否）
   B 该变：措辞（原文哈希）／回应长度（字数）／情绪档位（heart.mood.tier）
+- C 轨（读数，**不进判定**）：每句回答用 organs.mind.usage.match 判一次「是不是拿台词库的
+  锚句开的场」，一格报**口癖命中率** = 该格所有回答里命中的比例。锚句整轮开始时读一次
+  （organs.home.anchors.read_all()），前缀字数现读 assembly.json 的 anchors.guard.prefix_chars。
+  C 只是趋势读数：判定仍是下面那四档，C 一列不参与。
 - 判定（顺序写死，每格写清触发了哪条）：
   1) 逐题相同率 ≥ 0.90 → **该轮判无效（疑似复制）**；
   2) 否则若 A 漂移率 > 0 → **换人**；
@@ -46,6 +50,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from organs import paths
 from organs.brain import BrainStore
+from organs.home import anchors as home_anchors
 from organs.mind import conversation
 from organs.soul import load as load_soul
 
@@ -77,6 +82,11 @@ CONFIG_LABELS = {
 }
 MODES = ("same", "shuffled")
 MODE_SHORT = {"same": "同序", "shuffled": "洗牌"}
+
+#: assembly.json 里 C 轨认的两个字数（anchors.guard）。**现读**，读不到才退回文档默认值，
+#: 退了会在报告头如实写出来——默认值不是配置。
+GUARD_PATH = ("anchors", "guard")
+GUARD_DEFAULTS = {"prefix_chars": 3, "opening_chars": 6}
 
 #: 假模型的配置与 key：transport 注入了也照样要过 llm.complete 的 key 与配置校验
 #: （真 network 一次都不发，见 llm.complete 的 transport 参数）。
@@ -172,6 +182,65 @@ def b_features(body: Mapping[str, Any]) -> Dict[str, Any]:
             "情绪档位": str(mood.get("tier") or "无")}
 
 
+# —— C 轨（读数，不进判定）：口癖命中 ————————————————
+
+
+def usage_module() -> Any:
+    """organs.mind.usage 按需取：没落地（或落了半个）就返回 None，C 轨报「未落地」，不补不猜。"""
+    try:
+        from organs.mind import usage
+    except ImportError:
+        return None
+    for name in ("match", "opening"):
+        if not callable(getattr(usage, name, None)):
+            return None
+    return usage
+
+
+def read_anchors(root: Optional[Any] = None) -> Dict[str, Any]:
+    """台词库的现行几条：整轮评测开始时读一次（她此刻说什么），轮内不重读。"""
+    data = home_anchors.read_all(root)
+    return {"anchors": list(data.get("anchors") or []),
+            "file": str(data.get("file") or ""),
+            "file_exists": bool(data.get("file_exists")),
+            "total": int(data.get("total") or 0)}
+
+
+def guard_settings(assembly: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """从这一份装配说明里现读 anchors.guard 的两个字数；缺哪项就退回默认并记下是哪项。"""
+    raw: Any = dict(assembly or {})
+    for key in GUARD_PATH:
+        raw = (raw or {}).get(key) or {}
+    got: Dict[str, Any] = {}
+    missing: List[str] = []
+    for name, default in GUARD_DEFAULTS.items():
+        value = raw.get(name)
+        if isinstance(value, int) and value > 0:
+            got[name] = value
+        else:
+            got[name] = default
+            missing.append(name)
+    got["from_assembly"] = not missing
+    got["missing"] = missing
+    return got
+
+
+def c_features(text: Any, anchors: Sequence[Mapping[str, Any]], *, prefix_chars: int,
+               opening_chars: int, module: Any = None) -> Dict[str, Any]:
+    """C 轨一句读数：这一句是不是拿台词库里的锚句开的场（口癖命中）。
+
+    匹配规则**一条都不写在这里**：全在 organs.mind.usage.match（前缀几个字也由它说了算）。
+    它没落地时 hit 记 None ——「未落地」不等于「没命中」，不拿 0 冒充数据。
+    """
+    body = str(text or "")
+    usage = module if module is not None else usage_module()
+    if usage is None:
+        return {"hit": None, "scene": "usage 未落地", "opening": ""}
+    hit, scene = usage.match(body, list(anchors), int(prefix_chars))
+    return {"hit": bool(hit), "scene": str(scene or ""),
+            "opening": str(usage.opening(body, int(opening_chars)) or "")}
+
+
 # —— 判定 ————————————————————————————————
 
 
@@ -187,9 +256,13 @@ def question_stats(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     wording = {str(value) for value in b_values["措辞"]}
     joints = {tuple((key, str(sample["b"][key])) for key in sorted(sample["b"]))
               for sample in samples}
+    known = [sample["c"] for sample in samples
+             if isinstance(sample.get("c"), dict) and sample["c"].get("hit") is not None]
     return {"drift": bool(drift_features), "drift_features": drift_features,
             "same_text": len(wording) == 1, "same_all": len(joints) == 1,
-            "a_values": a_values, "b_values": b_values}
+            "a_values": a_values, "b_values": b_values,
+            "c_hits": sum(1 for item in known if item["hit"]),
+            "c_known": len(known), "c_answers": len(samples)}
 
 
 def judge(stats: Mapping[str, Any]) -> Dict[str, Any]:
@@ -216,17 +289,26 @@ def judge(stats: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def cell_stats(per_question: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
-    """一格（配置 × 跑法）的汇总：两条轨道的两个率，然后按写死的顺序判一次。"""
+    """一格（配置 × 跑法）的汇总：两条轨道的两个率 + C 的口癖命中率，然后按写死的顺序判一次。
+
+    C 只算不判：judge() 只认 A/B，C 不进那四档。
+    """
     total = len(per_question)
     if not total:
         raise ValueError("这一格一道题都没有：判不了")
     rows = [per_question[question] for question in per_question]
     drift_features = sorted({name for row in rows for name in row["drift_features"]})
+    c_answers = sum(int(row.get("c_answers") or 0) for row in rows)
+    c_known = sum(int(row.get("c_known") or 0) for row in rows)
+    c_hits = sum(int(row.get("c_hits") or 0) for row in rows)
     stats = {
         "a_drift_rate": sum(1 for row in rows if row["drift"]) / total,
         "b_same_rate": sum(1 for row in rows if row["same_text"]) / total,
         "copy_rate": sum(1 for row in rows if row["same_all"]) / total,
         "drift_features": drift_features,
+        # C 命中率 = 该格**所有回答**里命中的比例；一次都判不了（usage 没落地）时记 None，不记 0。
+        "c_rate": (c_hits / c_answers) if c_answers and c_known == c_answers else None,
+        "c_hits": c_hits, "c_answers": c_answers,
     }
     stats.update(judge(stats))
     return stats
@@ -387,10 +469,17 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
              rules: Mapping[str, Any], transport: Optional[Callable[..., Any]] = None,
              seed: int = SEED_SAME, now: str = NOW, who: str = WHO,
              config_data: Optional[Mapping[str, Any]] = None,
-             env_data: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+             env_data: Optional[Mapping[str, Any]] = None,
+             anchors: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """跑一格（配置 × 跑法）：每一轮全新脑 + 全新 recent_root + 全新心根，轮内共享累积。"""
     per_question: Dict[str, List[Dict[str, Any]]] = {question: [] for question in questions}
     dropped = 0
+    # 锚句整轮读一次（在外面读：isolated_environment 会把家根切到临时目录，那里没有台词库）；
+    # 前缀字数从这一格的装配说明里现读。
+    anchor_book = dict(anchors) if anchors is not None else read_anchors()
+    cards = list(anchor_book.get("anchors") or [])
+    usage = usage_module()
+    guard = guard_settings(assembly_for(config))
     with isolated_environment(), tempfile.TemporaryDirectory(prefix="qqagent-bench-cell-") as tmp:
         root = Path(tmp)
         store = _load_soul(root / "soul")
@@ -407,12 +496,18 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
                 reply = str(got.get("reply") or "")
                 if (got.get("gate") or {}).get("decision") == "dropped":
                     dropped += 1
-                per_question[question].append({"run": run, "reply": reply,
-                                               "a": a_features(reply, rules),
-                                               "b": b_features(got)})
+                per_question[question].append({
+                    "run": run, "reply": reply,
+                    "a": a_features(reply, rules),
+                    "b": b_features(got),
+                    "c": c_features(reply, cards, prefix_chars=guard["prefix_chars"],
+                                    opening_chars=guard["opening_chars"], module=usage)})
     rows = {question: question_stats(samples) for question, samples in per_question.items()}
     return {"config": config, "mode": mode, "runs": int(runs),
             "questions": list(questions), "dropped": dropped,
+            "anchors": {"file": anchor_book.get("file"), "total": len(cards),
+                        "available": usage is not None},
+            "guard": guard,
             "stats": cell_stats(rows),
             "per_question": {question: {"stats": rows[question],
                                         "samples": per_question[question]}
@@ -426,11 +521,17 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
               now: str = NOW, who: str = WHO,
               model_label: str = "假模型 dry（回答 = 提示词哈希）",
               config_data: Optional[Mapping[str, Any]] = None,
-              env_data: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """整张表跑一遍：配置 × 跑法，一格一格来（格子之间不共享脑、不共享心、不共享最近 N 轮）。"""
+              env_data: Optional[Mapping[str, Any]] = None,
+              anchors: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """整张表跑一遍：配置 × 跑法，一格一格来（格子之间不共享脑、不共享心、不共享最近 N 轮）。
+
+    锚句**整轮开始前读一次**（就在这儿，没进 isolated_environment：家根切走之后读不到台词库），
+    然后一路传给每一格；轮内不再重读。
+    """
     source = dict(data) if data is not None else load_data()
     picked = [str(item) for item in (questions or source["questions"])]
     rules = source["rules"]
+    anchor_book = dict(anchors) if anchors is not None else read_anchors()
     cells: List[Dict[str, Any]] = []
     with isolated_environment():
         for mode in modes:
@@ -439,7 +540,8 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
                                       transport=transport,
                                       seed=shuffle_seed if mode == "shuffled" else seed,
                                       now=now, who=who,
-                                      config_data=config_data, env_data=env_data))
+                                      config_data=config_data, env_data=env_data,
+                                      anchors=anchor_book))
     params = answer_params()
     meta = {
         "model_label": model_label,
@@ -463,7 +565,26 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
                           if "assembly" in params else
                           "⚠ answer() 还没有 assembly 参数：退回临时实盘 "
                           "$QQAGENT_HOME/mind/assembly.json（不读也不改真数据）"),
+        "anchors": {"file": anchor_book.get("file"), "total": anchor_book.get("total"),
+                    "file_exists": anchor_book.get("file_exists")},
+        "usage_ready": usage_module() is not None,
     }
+    guard = dict(cells[0]["guard"]) if cells else dict(GUARD_DEFAULTS)
+    meta["prefix_chars"] = guard.get("prefix_chars")
+    meta["opening_chars"] = guard.get("opening_chars")
+    meta["guard_note"] = (
+        "前缀 %d 字／开场 %d 字：现读自 assembly.json 的 anchors.guard"
+        % (guard.get("prefix_chars"), guard.get("opening_chars"))
+        if guard.get("from_assembly") else
+        "⚠ assembly.json 的 anchors.guard 还没写 %s：退回文档默认值（前缀 %d 字／开场 %d 字），"
+        "如实报，别当配置"
+        % ("、".join(guard.get("missing") or []), guard.get("prefix_chars"),
+           guard.get("opening_chars")))
+    meta["anchors_note"] = (
+        "台词库现行 %d 条（整轮读一次：%s）；C 轨用 organs.mind.usage.match 判口癖命中"
+        % (anchor_book.get("total") or 0, anchor_book.get("file") or "—")
+        if meta["usage_ready"] else
+        "⚠ organs.mind.usage 还没落地：C 轨报「未落地」（rate = None），不拿 0 冒充没命中")
     report = {"meta": meta, "cells": cells}
     report["summary"] = summary_stats(report)
     return report
@@ -512,13 +633,16 @@ def summary_stats(report: Mapping[str, Any]) -> Dict[str, Any]:
                 "b_same": cell["stats"]["b_same_rate"],
                 "b_same_maxed": cell["stats"]["b_same_rate"] >= DEAD_SAME,
             })
+    c_rates = {mode: {config: (index[(config, mode)]["stats"].get("c_rate")
+                               if (config, mode) in index else None)
+                      for config in configs} for mode in modes}
     return {"by_mode": by_mode, "baseline": {mode: (None if cell is None else cell["stats"])
                                             for mode, cell in baseline.items()},
-            "gain": gain}
+            "gain": gain, "c_rates": c_rates}
 
 
 def render_table(report: Mapping[str, Any]) -> str:
-    """一张 Markdown 表：行 = 配置，列 = same / shuffled，格子里是两条轨道的率与判定。"""
+    """一张 Markdown 表：行 = 配置，列 = same / shuffled，格子里是 A/B 两个率 + C 命中 + 判定。"""
     index = _cell_index(report)
     modes = list(report["meta"]["modes"])
     runs = report["meta"]["runs"]
@@ -532,8 +656,10 @@ def render_table(report: Mapping[str, Any]) -> str:
                 cells.append("—")
                 continue
             stats = cell["stats"]
-            cells.append("A 漂移 %.2f · B 全同 %.2f · **%s**（第 %d 条）"
+            c_rate = stats.get("c_rate")
+            cells.append("A 漂移 %.2f · B 全同 %.2f · C 命中 %s · **%s**（第 %d 条）"
                          % (stats["a_drift_rate"], stats["b_same_rate"],
+                            "—" if c_rate is None else "%.2f" % c_rate,
                             stats["verdict"], stats["rule"]))
         lines.append("| %s | %s |" % (CONFIG_LABELS.get(config, config), " | ".join(cells)))
     return "\n".join(lines)
@@ -570,6 +696,9 @@ def render_meta(report: Mapping[str, Any]) -> str:
         "- A 轨（不该变）：称呼口径／自称／是否自称 AI／句长量级／口癖（命中与否，不报千分频率："
         "10 次采样撑不起那个分母）；B 轨（该变）：措辞（原文哈希）／回应长度（字数）／"
         "情绪档位（heart.mood.tier）。提取全是确定性匹配与计数，零 LLM。",
+        "- C 轨（**不进判定**）：每句用 organs.mind.usage.match 判一次口癖命中，C 命中率 = "
+        "该格所有回答里命中的比例；%s" % meta.get("anchors_note", "未报"),
+        "- 锚句前缀口径：%s" % meta.get("guard_note", "未报"),
         "- 判定顺序写死：1) 逐题相同率（B 三特征十次全同的题占比）≥ %.2f → 无效（疑似复制）；"
         "2) 否则 A 漂移率 > 0 → 换人；3) 否则 B 全同率（措辞逐字相同的题占比）== %.2f → 死板；"
         "4) 否则 通过。" % (meta["copy_invalid"], meta["dead_same"]),
@@ -626,11 +755,22 @@ def render_summary(report: Mapping[str, Any]) -> str:
                           % (row["config"], row["a_drift_delta"], row["b_same"], maxed))
         lines.append("- 净增益（相对 empty 同跑法，%s）：%s"
                      % (mode_label(mode, meta["runs"]), "；".join(chunks)))
+
+    c_rates = stats.get("c_rates") or {}
+    parts = []
+    for mode in modes:
+        rates = c_rates.get(mode) or {}
+        parts.append("%s：%s" % (mode_label(mode, meta["runs"]),
+                                 "／".join("%s %s" % (config, "—" if rate is None else "%.2f" % rate)
+                                           for config, rate in rates.items())))
+    lines.append("- C 口癖命中率（四格两跑法）：%s。这一列**不进判定**：判定仍是 1→2→3→4 那四档，"
+                 "C 只是趋势读数（假模型不会用台词，C 应当是 %.2f）。"
+                 % ("；".join(parts) if parts else "未跑", 0.0))
     return "\n".join(lines)
 
 
 def render_report(report: Mapping[str, Any]) -> str:
-    """整份报告：头 + 表 + 判定理由 + 三行汇总。"""
+    """整份报告：头 + 表 + 判定理由 + 汇总（含只读数不判定的 C 列）。"""
     return "\n\n".join([render_meta(report), render_table(report),
                         render_reasons(report), render_summary(report)])
 

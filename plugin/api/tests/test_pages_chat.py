@@ -16,6 +16,9 @@ POST /chat 端到端画出来的页面。所以判据钉在四件事上：
 5. **三个读数也看得见**：本次温度与档位（「温度 0.5 · 事实档」）、连续性（「最近 12 轮 /
    更早还有 N 轮没有加载」，N=0 时是「没有更早的对话」）、锚句（已配（N 字）/ 未配锚句）
    都落在页上；三格各用一次 textContent，缺字段时如实写「没给」，不留白。
+6. **口癖护栏那一行**：id="guard-line" 在读数区，文案是「口癖命中率 12%（滚动 50 · 阈值
+   30%）· 注入 5 条/共 5 条」；over 时同一句后面接「已降到 2 条」并给这一行加 class warn
+   （黄色取 var(--warn) 兜底）。class 只经 classList 切一次加、一次不加；缺字段写「没给」。
 
 **这是静态回归测试，不是审计。** 它比对源码里的页面与路由表；活体验收（真 devserver +
 真模型）的原始输出在交付回报里。断言 api.ROUTES["/chat"] == "POST" 的那条依赖并行
@@ -83,10 +86,13 @@ class SpeaksThroughTheCallHelper(unittest.TestCase):
         self.assertEqual(FETCH_RE.findall(text), [], "出现了裸 fetch(\"path\")")
         self.assertEqual(re.findall(r"""fetch\(\s*["']""", text), [],
                          "有 fetch 直接写死路径：绕过了 call() 的前缀补全")
-        self.assertEqual(text.count("fetch(BASE + path, init)"), 1,
-                         "fetch 被复制到了 call() 之外，或没补挂载前缀")
-        self.assertIn('var BASE = MOUNT.slice(-5) === "/chat" ? MOUNT.slice(0, -5) : "";',
-                      text, "BASE 要按挂载路径算：直开核时为空串，挂在壳里时是壳前缀")
+        # 2026-11-05：挂载前缀只在 pages/panel-base.js 里算一次，页里的出口叫 panelFetch；
+        # 断言的意思没变——全页只有一个补前缀的取数出口，页里没有第二份 BASE 推导。
+        self.assertEqual(text.count("panelFetch(path, init)"), 1,
+                         "取数出口被复制到了 call() 之外，或没走公共片段补前缀")
+        self.assertIn('<script src="panel-base.js" data-page="chat"></script>', text,
+                      "没按相对地址引入公共片段并声明自己是哪一页")
+        self.assertNotIn("var BASE", text, "页里又长出一份 BASE 推导")
 
 
 class ControlsAreAlive(unittest.TestCase):
@@ -121,7 +127,9 @@ class ControlsAreAlive(unittest.TestCase):
 class LinksStayOnReadablePages(unittest.TestCase):
     def test_anchors_resolve_to_a_page_or_a_get_route(self):
         anchors = ANCHOR_RE.findall(_text())
-        self.assertEqual(anchors, ["/"], "回跳只许回根（/chat 是 POST）：%r" % (anchors,))
+        # 2026-11-05：回跳从 "/" 改成 "../"——iframe 里 "/" 会打到宿主根（那已经不是面板了），
+        # "../" 在核（/chat → /）与壳（/qqagent/panel/chat → /qqagent/panel/）两种挂载下都回魂页。
+        self.assertEqual(anchors, ["../"], "回跳只许回根（/chat 是 POST）：%r" % (anchors,))
         for href in anchors:
             target = urljoin(MOUNT, href).partition("?")[0]
             self.assertTrue(target in PAGE_FILES or api.ROUTES.get(target) == "GET",
@@ -306,10 +314,54 @@ class ReadoutsAreVisible(unittest.TestCase):
         self.assertIn("body：", body, "body 要带标签")
         self.assertIn("规矩：", body, "注入的行为规矩要写明")
 
-    def test_three_readouts_are_written_with_textcontent_only(self):
+    def test_every_readout_is_written_with_textcontent_only(self):
+        """四个读数（温度 / 连续性 / 锚句 / 口癖护栏）各用一次 textContent，一个 innerHTML 都不许有。"""
         body = _between(_text(), "function renderReadouts", "function send")
-        self.assertEqual(3, body.count("textContent"), "三个读数各自一次 textContent：%r" % (body,))
+        self.assertEqual(4, body.count("textContent"), "四个读数各自一次 textContent：%r" % (body,))
         self.assertNotIn("innerHTML", body)
+
+    def test_guard_line_is_in_the_readouts(self):
+        text = _text()
+        self.assertIn('id="guard-line"', text, "读数区缺口癖护栏那一行")
+        self.assertIn("口癖护栏", text, "那一行要有中文标签")
+        self.assertLess(text.index('id="anchors-line"'), text.index('id="guard-line"'),
+                        "护栏那一行该挨着锚句")
+        self.assertIn("data.guard", text, "回包里的 guard 没交给渲染")
+
+    def test_guard_line_says_rate_window_threshold_and_counts(self):
+        body = _between(_text(), "function guardText", "function renderReadouts")
+        for needle, note in (("口癖命中率 ", "前半句是命中率"),
+                             ("（滚动 ", "窗口要写出来"),
+                             (" · 阈值 ", "阈值要写出来"),
+                             ("）", "括号要闭合"),
+                             (" · 注入 ", "注入条数"),
+                             (" 条/共 ", "共几条"),
+                             (" 条", "计数单位"),
+                             ("没给", "缺字段时如实写「没给」，不留白")):
+            self.assertIn(needle, body, "%s：页面上找不到 %r" % (note, needle))
+        self.assertIn("conf.rate", body, "命中率要读回包的 rate")
+        self.assertIn("conf.window", body, "滚动窗口要读回包的 window")
+        self.assertIn("conf.threshold", body, "阈值要读回包的 threshold")
+        self.assertIn("conf.injected", body, "注入条数要读回包的 injected")
+        self.assertIn("conf.available", body, "总条数要读回包的 available")
+
+    def test_guard_line_warns_once_and_clears_once(self):
+        """降档才加 warn（黄）：classList.add 一次、classList.remove 一次，两条路都得在。"""
+        body = _between(_text(), "function renderReadouts", "function send")
+        self.assertEqual(1, body.count('classList.add("warn")'), "warn 加了一次以上或没加")
+        self.assertEqual(1, body.count('classList.remove("warn")'), "warn 没有被撤掉的路")
+        self.assertIn('el("guard-line").classList', body, "class 要切在 guard-line 上")
+        self.assertIn("guard.over === true", body, "加不加 warn 看回包的 over")
+        self.assertIn("已降到 ", _between(_text(), "function guardText", "function renderReadouts"),
+                      "降档时那句「已降到 2 条」要在")
+        self.assertIn("warn", _text().partition("<style>")[2].partition("</style>")[0],
+                      "CSS 里没有 warn 这个类")
+
+    def test_warn_color_comes_from_the_host_variable(self):
+        """黄色只取宿主变量 var(--warn)，兜底色写在同一个括号里。"""
+        css = _text().partition("<style>")[2].partition("</style>")[0]
+        self.assertIn(".warn { color: var(--warn, #d98a3d); }", css,
+                      "warn 的颜色要取 var(--warn) 并带兜底色")
 
     def test_readouts_come_from_the_reply_body(self):
         text = _text()

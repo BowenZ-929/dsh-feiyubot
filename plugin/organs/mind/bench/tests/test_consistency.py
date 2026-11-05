@@ -10,11 +10,15 @@
 5. **假模型冒烟**：--dry（哈希确定性）／--template（固定模板）／--vary（轮次计数）都能跑完，
    表里有行、判定字段齐全、耗时短；template 那格必须判「无效」，vary 那格不许是无效或死板。
 6. **不联网、不需要 key**：全部假 transport 注入（配置与 key 都是假的，见 bench.FAKE_*）。
+7. **C 轨（口癖命中率）只读数、不进判定**：命中率全用 organs.mind.usage.match 算（测试里不重写
+   匹配规则）；表里有 C 列、汇总里有「不进判定」那一句；C 拉满也不改四档判定；假模型一律 0.00。
+8. **前缀字数现读 assembly.json**：同一份逻辑喂 5/9 就出 5/9，缺件才退回文档默认值并记下缺了哪项。
 """
 from __future__ import annotations
 
 import contextlib
 import io
+import json
 import time
 import unittest
 
@@ -236,6 +240,160 @@ class DrySmokeTest(unittest.TestCase):
         before = live.exists()
         self._run(bench.vary_transport(), questions=QUESTIONS[:1])
         self.assertEqual(before, live.exists(), "评测把装配说明写进了实盘")
+
+
+#: C 轨用的合成台词库（不是家·仓库那份）：前缀口径与 usage.match 的判据一致即可。
+ANCHORS = [{"say": "这个啊……以后再说吧。", "scene": "不想聊"},
+           {"say": "你忙你的，我在这儿。", "scene": "你要走"}]
+PREFIX_CHARS = 3
+OPENING_CHARS = 6
+PLAIN = "今天的云很好看，第 %d 遍。"
+
+
+def with_c(reply: str, *, anchors=ANCHORS, prefix_chars=PREFIX_CHARS,
+           opening_chars=OPENING_CHARS) -> dict:
+    """一条合成读数：A/B 照旧，C 走 bench.c_features（匹配规则只在 usage.match 里）。"""
+    got = sample(reply)
+    got["c"] = bench.c_features(reply, anchors, prefix_chars=prefix_chars,
+                                opening_chars=opening_chars)
+    return got
+
+
+def c_cell(replies) -> dict:
+    return cell({"q1": [with_c(reply) for reply in replies]})
+
+
+class CTrackTest(unittest.TestCase):
+    """C 轨：口癖命中率 = 该格所有回答里命中的比例，用 usage.match 算，不在这里重写匹配规则。"""
+
+    def setUp(self):
+        if bench.usage_module() is None:
+            self.skipTest("organs.mind.usage 还没落地：C 轨按「未落地」报，不补模块也不造假命中")
+
+    def test_all_answers_open_with_an_anchor(self):
+        got = c_cell([ANCHORS[0]["say"] + "第 %d 遍。" % run for run in range(10)])
+        self.assertEqual(1.0, got["c_rate"])
+        self.assertEqual((10, 10), (got["c_hits"], got["c_answers"]))
+        self.assertEqual("不想聊", bench.c_features(ANCHORS[0]["say"] + "好", ANCHORS,
+                                                    prefix_chars=PREFIX_CHARS,
+                                                    opening_chars=OPENING_CHARS)["scene"])
+
+    def test_no_answer_opens_with_an_anchor(self):
+        got = c_cell([PLAIN % run for run in range(10)])
+        self.assertEqual(0.0, got["c_rate"])
+        self.assertEqual(0, got["c_hits"])
+
+    def test_half_of_the_answers_hit(self):
+        replies = [ANCHORS[1]["say"] + "第 %d 遍。" % run if run % 2 == 0 else PLAIN % run
+                   for run in range(10)]
+        got = c_cell(replies)
+        self.assertEqual(0.5, got["c_rate"])
+        self.assertEqual(5, got["c_hits"])
+
+    def test_rate_is_over_every_answer_not_per_question(self):
+        """口癖命中率的分母是「这一格所有回答」：两题各 10 次、其中 5 次命中 → 0.25。"""
+        rows = {
+            "q1": [with_c(ANCHORS[0]["say"] + "第 %d 遍。" % run) if run < 5 else with_c(PLAIN % run)
+                   for run in range(10)],
+            "q2": [with_c(PLAIN % run) for run in range(10)],
+        }
+        got = bench.cell_stats({question: bench.question_stats(samples)
+                                for question, samples in rows.items()})
+        self.assertEqual(0.25, got["c_rate"])
+        self.assertEqual((5, 20), (got["c_hits"], got["c_answers"]))
+
+    def test_c_rate_does_not_touch_the_four_rules(self):
+        """C 拉满也不改判定：四条还是那四条，C 只是读数。"""
+        got = c_cell([ANCHORS[0]["say"] + "第 %d 遍。" % run for run in range(10)])
+        self.assertEqual(1.0, got["c_rate"])
+        self.assertEqual(4, got["rule"])
+        self.assertEqual("通过", got["verdict"])
+
+
+class CSurfaceTest(unittest.TestCase):
+    """表、汇总、JSON 里 C 都要露面，并且明说它不进判定。"""
+
+    def _report(self, c_rate=0.5):
+        cells = []
+        for mode in bench.MODES:
+            for config in bench.CONFIGS:
+                cells.append({"config": config, "mode": mode, "runs": 3, "questions": ["q1"],
+                              "dropped": 0,
+                              "anchors": {"file": "合成", "total": 2, "available": True},
+                              "guard": dict(bench.GUARD_DEFAULTS, from_assembly=True, missing=[]),
+                              "stats": {"a_drift_rate": 0.0, "b_same_rate": 0.0, "copy_rate": 0.0,
+                                        "drift_features": [], "c_rate": c_rate, "c_hits": 3,
+                                        "c_answers": 6, "verdict": "通过", "rule": 4,
+                                        "why": "合成数据"},
+                              "per_question": {}})
+        meta = {"model_label": "合成", "questions": ["q1"], "question_count": 1, "runs": 3,
+                "configs": list(bench.CONFIGS), "modes": list(bench.MODES),
+                "seed_same": 1, "seed_shuffled": 2, "now": bench.NOW, "who": bench.WHO,
+                "copy_invalid": bench.COPY_INVALID, "dead_same": bench.DEAD_SAME,
+                "answer_params": [], "recent_note": "", "assembly_note": "",
+                "anchors": {"file": "合成", "total": 2, "file_exists": True},
+                "usage_ready": True, "prefix_chars": 3, "opening_chars": 6,
+                "guard_note": "现读", "anchors_note": "合成"}
+        report = {"meta": meta, "cells": cells}
+        report["summary"] = bench.summary_stats(report)
+        return report
+
+    def test_table_has_the_c_column_next_to_a_and_b(self):
+        table = bench.render_table(self._report())
+        self.assertIn("C 命中 0.50", table)
+        self.assertIn("A 漂移 0.00 · B 全同 0.00 · C 命中 0.50", table)
+
+    def test_summary_reports_c_per_cell_and_says_it_is_not_judged(self):
+        summary = bench.render_summary(self._report())
+        self.assertIn("C 口癖命中率", summary)
+        self.assertIn("不进判定", summary)
+        self.assertIn("1→2→3→4", summary)
+        for config in bench.CONFIGS:
+            self.assertIn("%s 0.50" % config, summary)
+
+    def test_c_is_rendered_even_when_usage_is_not_there(self):
+        table = bench.render_table(self._report(c_rate=None))
+        self.assertIn("C 命中 —", table)
+
+    def test_guard_numbers_are_read_from_the_assembly_not_from_code(self):
+        got = bench.guard_settings({"anchors": {"guard": {"prefix_chars": 5, "opening_chars": 9}}})
+        self.assertEqual((5, 9), (got["prefix_chars"], got["opening_chars"]))
+        self.assertTrue(got["from_assembly"])
+
+    def test_missing_guard_falls_back_and_says_which_keys_were_missing(self):
+        got = bench.guard_settings({"anchors": {}})
+        self.assertEqual({"prefix_chars": 3, "opening_chars": 6},
+                         {key: got[key] for key in bench.GUARD_DEFAULTS})
+        self.assertEqual(["prefix_chars", "opening_chars"], got["missing"])
+        self.assertFalse(got["from_assembly"])
+
+
+class CJsonTest(unittest.TestCase):
+    """--json 的原始统计里：每格有 c_rate，每次回答有 hit/scene/opening。"""
+
+    def test_every_cell_and_every_answer_carries_c(self):
+        report = bench.run_bench(runs=2, transport=bench.hash_transport(),
+                                 questions=QUESTIONS[:1], data=DATA,
+                                 config_data=bench.FAKE_CONFIG, env_data=bench.FAKE_ENV)
+        json.dumps(report, ensure_ascii=False)          # 能序列化才谈得上 --json
+        ready = bench.usage_module() is not None
+        for row in report["cells"]:
+            stats = row["stats"]
+            self.assertIn("c_rate", stats)
+            self.assertEqual(stats["c_answers"], len(row["per_question"][QUESTIONS[0]]["samples"]))
+            for entry in row["per_question"].values():
+                for reading in entry["samples"]:
+                    self.assertEqual({"hit", "scene", "opening"}, set(reading["c"]))
+            if ready:
+                self.assertEqual(0.0, stats["c_rate"], "假模型不用台词：C 必须是 0.00（不造假命中）")
+            else:
+                self.assertIsNone(stats["c_rate"], "没落地就报 None，不拿 0 冒充没命中")
+
+    def test_anchors_are_read_once_for_the_whole_run(self):
+        report = bench.run_bench(runs=1, transport=bench.template_transport(),
+                                 questions=QUESTIONS[:1], data=DATA,
+                                 config_data=bench.FAKE_CONFIG, env_data=bench.FAKE_ENV)
+        self.assertEqual(bench.read_anchors()["total"], report["meta"]["anchors"]["total"])
 
 
 if __name__ == "__main__":                              # pragma: no cover

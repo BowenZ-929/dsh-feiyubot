@@ -30,7 +30,7 @@ from api.tests.helpers import copy_fixture
 from organs.brain import BrainStore
 from organs.home import anchors as home_anchors
 from organs.home import cards
-from organs.mind import conversation, llm, recent
+from organs.mind import conversation, llm, recent, usage
 from organs.soul import load
 
 CONFIG = {"provider": "fake", "model": "fake-model", "base_url": "http://example.invalid/v1",
@@ -49,7 +49,9 @@ LONG_REPLY = ("你问医院那回事，我记得的，是陪你妈去复查对�
               "周末要是不下雨，我陪你去一趟，顺便把上次落下的检查补上。") * 2
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
-                 "assembly", "continuity", "llm", "anchors", "memory"}
+                 "assembly", "continuity", "llm", "anchors", "guard", "memory"}
+GUARD_KEYS = {"window", "threshold", "min_rounds", "rounds", "hits", "rate",
+              "over", "injected", "available"}
 
 
 def _body(reply: str, captured: list = None, status: int = 200):
@@ -137,9 +139,15 @@ class ChatApiTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(LONG_REPLY, payload["reply"])
         chunks = payload["chunks"]
-        self.assertTrue(2 <= len(chunks) <= 3, "分泡该是 2–3 条：%r" % (chunks,))
+        mouth_policy = json.loads((MOUTH_DATA / "policy.json").read_text(encoding="utf-8"))
+        max_parts = int(mouth_policy["split"]["max_parts"])
+        max_chars = int(mouth_policy["split"]["max_chars"])
+        self.assertTrue(2 <= len(chunks) <= max_parts,
+                        "分泡该在 2–%d 条之间（现读嘴的 policy）：%r" % (max_parts, chunks))
         for chunk in chunks:
             self.assertTrue(chunk["text"])
+            self.assertLessEqual(len(chunk["text"]), max_chars,
+                                 "有一泡超过嘴的 split.max_chars：%r" % (chunk,))
             self.assertIsInstance(chunk["gap_before"], (int, float))
             self.assertIsInstance(chunk["send_at"], (int, float))
             self.assertIsNotNone(chunk["send_at"])
@@ -345,7 +353,8 @@ class ChatApiTest(unittest.TestCase):
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
         anchors = payload["anchors"]
-        self.assertEqual({"configured", "count", "instruction", "items"}, set(anchors))
+        self.assertEqual({"configured", "count", "available", "injected", "instruction",
+                          "items", "skipped"}, set(anchors))
         self.assertTrue(anchors["configured"])
         self.assertEqual(2, anchors["count"])
         self.assertEqual(conversation.load_assembly()["anchors"]["instruction"],
@@ -356,6 +365,67 @@ class ChatApiTest(unittest.TestCase):
         self.assertIn(by_scene["被夸"]["injected"], system)
         self.assertNotIn("尾巴翘起来晃了两下", system, "body 进了提示词")
         self.assertNotIn("哼，才知道啊。", system, "整句进了提示词")
+
+    # —— 口癖护栏 ————————————————————————————
+
+    FIVE = (
+        {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
+        {"scene": "被关心", "say": "行了行了，我又不是玻璃做的。", "body": "别开头、脸微微发红"},
+        {"scene": "不想聊", "say": "这个啊……以后再说吧。", "body": ""},
+        {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
+        {"scene": "你要走", "say": "你忙你的，我在这儿。", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
+    )
+
+    def _five_anchors(self):
+        """家·仓库里登记五张台词卡（端点侧只看得到回包，看不到家里的文件）。"""
+        home = Path(os.environ["HOME_ROOT"])
+        home_anchors.append_anchors(root=home, role="human", by="人", anchors=list(self.FIVE))
+
+    def _usage_seed(self, count: int, hits: int) -> None:
+        """造口癖账：与 conversation 读的是同一本（<QQAGENT_HOME>/mind/anchor_usage.jsonl）。"""
+        for index in range(count):
+            hit = index >= count - hits
+            usage.append(hit, "这个啊又来了", "不想聊" if hit else "")
+
+    def test_guard_is_in_the_body_and_values_come_from_the_data(self):
+        status, payload = self._send()
+        self.assertEqual(200, status)
+        self.assertEqual(GUARD_KEYS, set(payload["guard"]),
+                         "guard 的键是对外冻结的那一份：%s" % sorted(payload["guard"]))
+        conf = conversation.load_assembly()["anchors"]["guard"]
+        self.assertEqual(conf["window"], payload["guard"]["window"])
+        self.assertEqual(conf["threshold"], payload["guard"]["threshold"])
+        self.assertEqual(conf["min_rounds"], payload["guard"]["min_rounds"])
+        self.assertFalse(payload["guard"]["over"])
+
+    def test_over_threshold_downgrades_to_two_halves_over_http(self):
+        """60 轮全命中 → over：回包报 injected 2、skipped 3，提示词里只有 2 条半句。"""
+        self._five_anchors()
+        self._usage_seed(60, 60)
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        guard = payload["guard"]
+        self.assertTrue(guard["over"], "命中率 100% 却没降档")
+        self.assertEqual(50, guard["rounds"])
+        self.assertEqual(2, guard["injected"])
+        self.assertEqual(5, guard["available"])
+        anchors = payload["anchors"]
+        self.assertEqual(2, anchors["injected"])
+        self.assertEqual(5, anchors["available"])
+        self.assertEqual(3, len(anchors["skipped"]), "被跳过的 3 条要逐个点名")
+        system = capture[0]["messages"][0]["content"]
+        conf = conversation.load_assembly()["anchors"]
+        injected = [item["injected"] for item in anchors["items"]]
+        self.assertEqual(2, len(injected))
+        halves_in_prompt = [half for half in injected if half in system]
+        self.assertEqual(2, len(halves_in_prompt), "提示词里该正好 2 条半句")
+        skipped = [item for item in self.FIVE if item["scene"] in anchors["skipped"]]
+        self.assertEqual(3, len(skipped))
+        for item in skipped:
+            cut = int(math.ceil(len(item["say"]) * conf["inject"]["fraction"]))
+            self.assertNotIn(item["say"][:cut] + conf["inject"]["suffix"], system,
+                             "降档了还在注入：%s" % item["scene"])
 
     # —— 只有一份装配 ————————————————————————
 

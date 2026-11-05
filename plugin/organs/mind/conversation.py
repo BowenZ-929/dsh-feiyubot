@@ -23,6 +23,12 @@ prompt 的两段模板各认几个占位符（花括号，装配时逐键**纯�
 先回想，是因为这一轮该想起什么要在写提示词之前定下来；写记忆放在最后，是因为
 只有真说出口的那一句才配当亲历——被闸弃掉的话不进脑（它压根没说出口）。
 
+**口癖护栏**（anchors.guard）也守同一条次序：装配之前先读 usage.report 的滚动窗口，
+再按它的 injected 决定这一轮注入几条半句（命中率超阈值就降到 reduced_count 条）；
+她真说出口之后才把这一轮的「开头」追进 organs/mind/usage.py 那本账——先记后算会自己踩
+自己，被闸弃掉的轮（reply 空）不记：她没说出口，就没有开头。护栏的六个门槛全在
+assembly.json 的 anchors.guard 里，本文件一个数都不写。
+
 各段只搬已有器官的读数，一个判据都不自己造：
   soul    store.render()（魂六件）
   anchors 家·仓库里那张锚句卡（organs.home.cards.read_item 的公开 API，不绕过家的 access 闸）；
@@ -77,6 +83,7 @@ from ..mouth import warehouse
 from ..mouth.split import split as split_text
 from . import llm
 from . import recent
+from . import usage
 
 ASSEMBLY_NAME = "assembly.json"          # 装配说明书的文件名（实盘 / 出厂各一份）
 HUMAN_WHO = "人"                          # 没给 who 时，人的原话记在谁名下
@@ -168,12 +175,20 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
     instruction = reply.get("instruction")
     if not isinstance(instruction, str):
         raise ValueError("reply.instruction 要一段字：%s" % where)
+    fmt = reply.get("format")
+    if not isinstance(fmt, list):
+        raise ValueError("reply.format 要是字符串列表（空列表 = 不加规矩）：%s" % where)
+    clean_format = []
+    for rule in fmt:
+        if not isinstance(rule, str) or not rule.strip():
+            raise ValueError("reply.format 里有空的规矩：%s" % where)
+        clean_format.append(rule.strip())
     return {
         "order": [key.strip() for key in order],
         "sections": checked,
         "prompt": {"system": prompt["system"], "user": prompt["user"]},
         "reply": {"budget_by_tier": clean_budgets, "default": default,
-                  "instruction": instruction},
+                  "instruction": instruction, "format": clean_format},
         "recent": _check_recent(data.get("recent"), where),
         "anchors": _check_anchors(data.get("anchors"), where),
     }
@@ -232,6 +247,34 @@ def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
     if not isinstance(instruction, str) or not instruction.strip():
         raise ValueError("anchors.instruction 要一句话（注入给她的行为规矩，人能改）：%s" % where)
     clean["instruction"] = instruction.strip()
+    clean["guard"] = _check_guard(spec.get("guard"), where)
+    return clean
+
+
+def _check_guard(spec: Any, where: str) -> Dict[str, Any]:
+    """口癖护栏的六个门槛：缺一个、类型不对一律当场报——代码里不许有这些数的默认值。
+
+    min_rounds 允许 0（等于不设小样本门槛），其余五个都必须是正整数；(0, 1] 只给阈值。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("anchors.guard 要给 {window, threshold, opening_chars, "
+                         "prefix_chars, reduced_count, min_rounds}（口癖护栏的门槛）：%s" % where)
+    clean: Dict[str, Any] = {}
+    for name in ("window", "opening_chars", "prefix_chars", "reduced_count"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("anchors.guard.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    min_rounds = spec.get("min_rounds")
+    if isinstance(min_rounds, bool) or not isinstance(min_rounds, int) or min_rounds < 0:
+        raise ValueError("anchors.guard.min_rounds 要非负整数（防小样本误触，0 等于不设门槛）：%s"
+                         % where)
+    clean["min_rounds"] = min_rounds
+    threshold = spec.get("threshold")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) \
+            or not 0 < float(threshold) <= 1:
+        raise ValueError("anchors.guard.threshold 要是 (0, 1] 之间的数：%s" % where)
+    clean["threshold"] = float(threshold)
     return clean
 
 
@@ -239,7 +282,8 @@ def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
 
 
 def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
-           heart_root: Any = None, recent_root: Any = None, now: Optional[str] = None,
+           heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
+           now: Optional[str] = None,
            transport: Optional[Any] = None, config: Optional[Mapping[str, Any]] = None,
            env: Optional[Mapping[str, str]] = None,
            assembly: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -250,6 +294,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     transport / config / env 三个注入点原样转给 llm.complete：测试一律注入假 transport，
     绝不发真网络请求；本文件不写死任何模型名、地址与 key。
     recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
+    usage_root：口癖账的落点（None → <器官目录>/mind/anchor_usage.jsonl）。
     assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
 
     返回（键名对外冻结，pages/chat.html 照它渲染）：
@@ -260,8 +305,14 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
       continuity{turns_loaded, omitted, notice} /
       llm{model, temperature, temperature_tier} /
-      anchors{configured, note|chars,room,name} /
+      anchors{configured, count, available, injected, instruction, items[实际注入的],
+      skipped[没注入的 scene]|note} /
+      guard{window, threshold, min_rounds, rounds, hits, rate, over, injected, available} /
       memory{wrote[{id,who}]}
+
+    guard 的读数一律是**这一轮之前**的滚动窗口（口癖账还没记这一轮），八个键对外冻结。
+    落账放在最后一步：只有过了闸、reply 非空的那一轮才有「开头」可算——
+    被闸弃掉的轮（reply 空）**不记口癖账**，她没说出口，就没有开头。
     """
     if store is None:
         raise ValueError("魂未载入（store=None）：没有魂就没有装配的底色")
@@ -282,7 +333,14 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     omitted = int(loaded.get("omitted") or 0)
     note = recent.notice(omitted, conf["recent"]["notice"])
     recent_text = _recent_text(loaded.get("turns") or [], note, conf)
-    anchor_text, anchor_read = _anchor(conf)
+    # 口癖护栏：先读**这一轮之前**的滚动窗口，再定这一轮注入几条（先记后算会自己踩自己）。
+    # 家现行台词读一次，注入按 guard 裁，口癖统计仍看全量——两件事各用各的那一份。
+    anchors_rows = _anchor_rows()
+    guard_conf = _guard(conf)
+    guard_read = (usage.report(guard_conf, injected_available=len(anchors_rows),
+                               root=usage_root)
+                  if guard_conf is not None else _guard_missing())
+    anchor_text, anchor_read = _anchor(conf, anchors_rows, guard_read["injected"])
 
     # 2) 心：唯一合成点 + 一次判决；坏卡降级成只要 mood 那一块
     mood_read = mood_module.read(heart_root, at)
@@ -299,6 +357,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
 
     # 4) 提示词与回复预算
     tier = heart_words["mood"]["tier"]
+    reply_rule = "\n".join([conf["reply"]["instruction"]] + list(conf["reply"]["format"]))
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
                 "memory": memory_text, "heart": heart_text, "mouth": mouth_text}
@@ -313,7 +372,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     system = _fill(conf["prompt"]["system"], {
         "sections": "\n\n".join(blocks),
         "reply_budget": str(budget),
-        "reply_instruction": conf["reply"]["instruction"],
+        "reply_instruction": reply_rule,
     })
     user = _fill(conf["prompt"]["user"], {"text": said})
     messages = [{"role": "system", "content": system},
@@ -342,6 +401,13 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     # 7.5) 落账：这一轮的原文进最近几轮（reply 不管有没有说出口，人那句一定留着）
     recent.append({"ts": at, "who": who or HUMAN_WHO, "said": said, "reply": reply},
                   root=recent_root, cap=conf["recent"]["cap"])
+    # 8) 落口癖账：放在最后一步。被闸弃掉的轮（reply 空）不记——她没说出口就没有开头；
+    #    命中一律对**家现行全部台词**，不是只注入的那几条（口癖统计看的是全部台词）。
+    if not dropped and reply and isinstance(guard_conf, Mapping):
+        # 名字不与上面的闸命中（hit）撞车：两件事互不相干，共用一个变量就会互相踩。
+        spoken, scene = usage.match(reply, anchors_rows, int(guard_conf["prefix_chars"]))
+        usage.append(spoken, usage.opening(reply, int(guard_conf["opening_chars"])), scene,
+                     root=usage_root)
 
     return {
         "ok": True,
@@ -364,6 +430,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
         "llm": {"model": call_conf["model"], "temperature": temperature,
                 "temperature_tier": temperature_tier},
         "anchors": anchor_read,
+        "guard": guard_read,
         "memory": {"wrote": wrote},
     }
 
@@ -391,8 +458,44 @@ def _recent_text(turns: List[Mapping[str, Any]], note: str,
     return head + "\n" + note
 
 
-def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """锚句这一段：只认装配说明里那间房的哪张卡，并且只走家的公开 API。
+def _anchor_rows() -> List[Mapping[str, Any]]:
+    """家·仓库的现行台词（每 scene 一条，按现行顺序）：这一轮唯一的「她现在说什么」真源。
+
+    没配 / 卡不在 / 读不出来一律回空表（那一格写「未配锚句」）——不在这里造第二份，
+    也不替她补一句。
+    """
+    try:
+        got = home_anchors.read_all()
+    except (home_anchors.AnchorError, home_access.AccessDenied,
+            home_store.StoreError, OSError):
+        return []
+    if not got.get("file_exists"):
+        return []
+    return list(got.get("anchors") or [])
+
+
+def _guard(conf: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """口癖护栏的门槛：没配锚句就没有护栏（没有台词，也就无所谓「老用哪一句」）。"""
+    spec = conf.get("anchors")
+    if not isinstance(spec, Mapping):
+        return None
+    guard = spec.get("guard")
+    return guard if isinstance(guard, Mapping) else None
+
+
+def _guard_missing() -> Dict[str, Any]:
+    """没配护栏那一态：八个键照样交出去，值一律 null，over 是 False（不降档不记账）。
+
+    键名冻结的另一半：页面照同一套键渲染，缺字段就写「没给」，不留白也不报错。
+    """
+    return {"window": None, "threshold": None, "min_rounds": None, "rounds": None,
+            "hits": None, "rate": None, "over": False, "injected": None,
+            "available": None}
+
+
+def _anchor(conf: Mapping[str, Any], rows: List[Mapping[str, Any]],
+            limit: Optional[Any] = None) -> Tuple[str, Dict[str, Any]]:
+    """锚句这一段：只走家的公开读口，只给半句，按护栏的读数决定注入几条。
 
     没配 / 卡不在 / 读不出来三种情况都写「未配锚句」——这一格不许空着，也不许悄悄跳过：
     空着她就以为自己没有过一句锚。
@@ -400,17 +503,12 @@ def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     **只给半句**（这一条的理由来自人）：整句给她，她就照着念；给半句，她才得自己补完。
     进提示词的是「正文前 fraction 段 + suffix」（两个数都在 assembly.json 的
     anchors.inject 里）；返回体另带 body 全文——半句是给她看的，全文是给人看的。
+
+    limit 是这一轮**该注入几条**（来自 usage.report 的 injected）：降档时只取现行顺序的
+    前 limit 条，其余不进提示词但在返回体的 skipped 里逐个点名——别静默丢。
     """
     spec = conf.get("anchors")
     if not isinstance(spec, Mapping):
-        return _anchors_missing()
-    try:
-        got = home_anchors.read_all()
-    except (home_anchors.AnchorError, home_access.AccessDenied,
-            home_store.StoreError, OSError):
-        return _anchors_missing()
-    rows = got.get("anchors") or []
-    if not got.get("file_exists") or not rows:
         return _anchors_missing()
     fraction = float(spec["inject"]["fraction"])
     suffix = str(spec["inject"]["suffix"])
@@ -428,10 +526,15 @@ def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
         })
     if not items:
         return _anchors_missing()
+    keep = len(items) if limit is None else max(int(limit), 0)
+    shown = items[:keep]
+    if not shown:
+        return _anchors_missing()
     instruction = str(spec["instruction"])
-    text = '\n'.join([instruction] + ["- " + item["injected"] for item in items])
-    return text, {"configured": True, "count": len(items),
-                  "instruction": instruction, "items": items}
+    text = '\n'.join([instruction] + ["- " + item["injected"] for item in shown])
+    return text, {"configured": True, "count": len(items), "available": len(items),
+                  "injected": len(shown), "instruction": instruction, "items": shown,
+                  "skipped": [item["scene"] for item in items[keep:]]}
 
 
 def _anchors_missing() -> Tuple[str, Dict[str, Any]]:

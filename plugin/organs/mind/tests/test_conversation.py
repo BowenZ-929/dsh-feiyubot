@@ -19,6 +19,10 @@
     写了一张家·仓库的卡 → 提示词含锚句正文、configured True、chars 是真字数。
 11. **落账**：一轮之后 recent_turns.jsonl 多一条，said / reply 与返回体一致；
     被闸弃掉的那一轮 reply 记空串、人那句仍然存。
+12. **口癖护栏**：最近 50 轮老用锚句开场（命中率 > 30% 且轮数够 min_rounds）→ 降档只注入
+    2 条半句，其余在 anchors.skipped 里点名；命中率低就五条全给。guard 的八/九键对
+    页面冻结、值全来自 assembly.json 的 anchors.guard（改数据 → 读数跟着变）。
+    这一轮说出口之后账本多一行（hit 与回话开头一致）；被闸弃掉的轮账本不增行。
 
 全部注入假 transport：一个字节都不发真网络。心 / 嘴 / 装配的临时根都经环境变量切走，
 仓库里的真数据一个字节不写。
@@ -44,7 +48,7 @@ from organs.heart import model as heart_model
 from organs.heart import mood, sleep
 from organs.home import anchors as home_anchors
 from organs.home import cards
-from organs.mind import conversation, llm, recent
+from organs.mind import conversation, llm, recent, usage
 from organs.soul import load as load_soul
 
 PLUGIN = Path(__file__).resolve().parents[3]
@@ -250,8 +254,13 @@ class ConversationAnswerTest(unittest.TestCase):
         got = self._answer(reply=reply_text)
         tier = got["assembly"]["reply_budget"]["tier"]
         self.assertGreater(reply_conf["budget_by_tier"][tier], max_chars)
-        self.assertTrue(2 <= len(got["chunks"]) <= 3,
-                        "平常档的一段回复只切出 %d 泡：%r" % (len(got["chunks"]), got["chunks"]))
+        max_parts = int(mouth_policy["split"]["max_parts"])
+        self.assertTrue(2 <= len(got["chunks"]) <= max_parts,
+                        "平常档的一段回复切出 %d 泡（嘴现在的上限是 %d）：%r"
+                        % (len(got["chunks"]), max_parts, got["chunks"]))
+        for chunk in got["chunks"]:
+            self.assertLessEqual(len(chunk["text"]), max_chars,
+                                 "有一泡超过嘴的 split.max_chars：%r" % (chunk,))
         self.assertEqual(0.0, got["chunks"][0]["gap_before"], "首泡该立即发")
         for chunk in got["chunks"]:
             self.assertIsInstance(chunk["send_at"], float)
@@ -471,6 +480,21 @@ class ConversationAnswerTest(unittest.TestCase):
                              "预算 %d / recalled %r 时的档位与数据里的判据不符"
                              % (budget, bool(got["recalled"])))
 
+    # —— 9.5) 说话格式（生成侧就短，不靠出口切） ————————
+
+    def test_speaking_format_rules_reach_the_prompt(self):
+        """三条规矩写进 assembly.json 的 reply.format，逐条出现在提示词里。"""
+        fmt = conversation.load_assembly()["reply"]["format"]
+        self.assertGreaterEqual(len(fmt), 3, "三条说话格式规矩要在数据文件里")
+        capture = []
+        self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        for rule in fmt:
+            self.assertIn(rule, system, "这条说话格式没进提示词：%s" % rule)
+        self.assertIn("一次说一到两句", system)
+        self.assertIn("圆括号", system)
+        self.assertIn("最多一个动作", system)
+
     # —— 10) 锚句（家·仓库的五张台词卡） ————————————————
 
     FIVE = (
@@ -583,6 +607,177 @@ class ConversationAnswerTest(unittest.TestCase):
         row = recent.load(turns=12)["turns"][-1]
         self.assertEqual(QUESTION, row["said"], "被弃的那一轮，人那句也没存")
         self.assertEqual("", row["reply"], "被弃的话没说出口，不该当成她说的原文存下来")
+
+    # —— 12) 口癖护栏 ————————————————————————————
+
+    GUARD_KEYS = {"window", "threshold", "min_rounds", "rounds", "hits", "rate",
+                  "over", "injected", "available"}
+
+    def _usage_seed(self, count: int, hits: int) -> None:
+        """造 count 轮口癖账，最后 hits 轮命中。
+
+        默认落点就是 answer 会读的那一份（<QQAGENT_HOME>/mind/anchor_usage.jsonl），
+        所以这里不传 root——读的和写的必须是同一本账，否则护栏永远看不见历史。
+        """
+        for index in range(count):
+            hit = index >= count - hits
+            usage.append(hit, "这个啊又来了", "不想聊" if hit else "")
+
+    def _halves(self):
+        """家那几条半句，**按台词库的现行顺序**（read_all 给的顺序，不是 FIVE 的书写顺序）。
+
+        现行顺序是 latest_by_scene 排出来的（ts → scene），所以降档时注入的是它开头那两条——
+        从 read_all 现读，测试才不会替台词库另定一个顺序。
+        """
+        conf = conversation.load_assembly()["anchors"]
+        out = []
+        for row in home_anchors.read_all()["anchors"]:
+            say = str(row.get("say") or "")
+            cut = int(math.ceil(len(say) * conf["inject"]["fraction"]))
+            out.append((str(row.get("scene") or ""), say[:cut] + conf["inject"]["suffix"]))
+        return out
+
+    def test_frequent_opening_downgrades_to_the_first_two_halves(self):
+        """60 轮全命中 → over：只注入现行顺序的前 2 条，其余 3 条进 anchors.skipped。"""
+        self._anchors_home(list(self.FIVE))
+        self._usage_seed(60, 60)
+        capture = []
+        got = self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+
+        guard = got["guard"]
+        self.assertEqual(self.GUARD_KEYS, set(guard), "guard 的键是对外冻结的那一份")
+        self.assertTrue(guard["over"], "60 轮全命中却没降档")
+        self.assertEqual(50, guard["window"])
+        self.assertEqual(50, guard["rounds"], "读数只算最近 50 轮")
+        self.assertEqual(50, guard["hits"])
+        self.assertEqual(1.0, guard["rate"])
+        self.assertEqual(2, guard["injected"])
+        self.assertEqual(5, guard["available"])
+
+        halves = self._halves()
+        for scene, half in halves[:2]:
+            self.assertIn(half, system, "前两条该注入：%s" % scene)
+        for scene, half in halves[2:]:
+            self.assertNotIn(half, system, "降档了还在注入：%s" % scene)
+        self.assertEqual([scene for scene, _half in halves[2:]], got["anchors"]["skipped"],
+                         "被跳过的 3 条要逐个点名，不许静默丢")
+        self.assertEqual(2, got["anchors"]["injected"])
+        self.assertEqual(5, got["anchors"]["available"])
+        self.assertEqual(2, len(got["anchors"]["items"]), "items 只列实际注入的那几条")
+
+    def test_low_hit_rate_keeps_all_five_halves(self):
+        """60 轮里只有 6 轮命中（窗口内 6/50 = 12%）→ 不降档，五条半句全给。"""
+        self._anchors_home(list(self.FIVE))
+        self._usage_seed(60, 6)
+        capture = []
+        got = self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+
+        guard = got["guard"]
+        self.assertFalse(guard["over"], "12% 的命中率被判成超阈值了")
+        self.assertEqual(50, guard["rounds"])
+        self.assertEqual(6, guard["hits"])
+        self.assertAlmostEqual(0.12, guard["rate"])
+        self.assertEqual(5, guard["injected"])
+        self.assertEqual(5, got["anchors"]["injected"])
+        self.assertEqual([], got["anchors"]["skipped"])
+        for scene, half in self._halves():
+            self.assertIn(half, system, "没降档却不给这半句：%s" % scene)
+
+    def test_this_round_lands_in_the_usage_ledger(self):
+        """说出口之后账本多一行：opening 是回话开头，hit / scene 与家那五条对得上。"""
+        self._anchors_home(list(self.FIVE))
+        reply = "这个啊，又来了。"
+        got = self._answer(reply=reply)
+        self.assertEqual("pass", got["gate"]["decision"])
+
+        ledger = usage.read()
+        self.assertEqual(1, ledger["rounds"], "这一轮没进账")
+        row = ledger["rows"][-1]
+        conf = conversation.load_assembly()["anchors"]["guard"]
+        self.assertEqual(usage.opening(reply, conf["opening_chars"]), row["opening"],
+                         "opening 不是这一轮回话的开头")
+        self.assertTrue(row["hit"], "回话开头就是「这个啊」，却判成没命中")
+        self.assertEqual("不想聊", row["scene"], "命中要记那条台词的 scene")
+        self.assertTrue(row["ts"], "账本缺时刻")
+
+    def test_dropped_round_is_not_written_to_the_usage_ledger(self):
+        """被闸弃掉的那一轮没说出口：没有开头，就不许记一行。"""
+        root = self.tmp / "mouth_usage"
+        shutil.copytree(str(MOUTH_DATA), str(root))
+        clauses = json.loads((root / "clauses.json").read_text(encoding="utf-8"))
+        clauses["clauses"].insert(0, {
+            "id": "ai-self-reference",
+            "kind": "反例",
+            "pattern": "作为一个\\s*(AI|人工智能)\\s*语言模型",
+            "reason": "这是标准模型免责声明：她不是那个东西，不该冒出来",
+        })
+        (root / "clauses.json").write_text(json.dumps(clauses, ensure_ascii=False),
+                                           encoding="utf-8")
+        self._anchors_home(list(self.FIVE))
+        with mock.patch.dict(os.environ, {"MOUTH_DATA_DIR": str(root)}):
+            got = self._answer(reply="作为一个 AI 语言模型，我不能这样说。")
+        self.assertEqual("dropped", got["gate"]["decision"])
+        self.assertEqual("", got["reply"])
+        self.assertEqual(0, usage.read()["rounds"], "被闸弃掉的轮没说出口，不该记开头")
+
+    def test_guard_readings_come_from_the_assembly_file(self):
+        """换一份 guard 数据 → 读数跟着变（八/九个数一个都不在代码里）。"""
+        self._anchors_home(list(self.FIVE))
+        self._usage_seed(3, 2)
+        conf = conversation.load_assembly()
+        conf["anchors"]["guard"] = {"window": 7, "threshold": 0.5, "opening_chars": 4,
+                                    "prefix_chars": 2, "reduced_count": 1, "min_rounds": 1}
+        got = self._answer(assembly=conf)
+        guard = got["guard"]
+        self.assertEqual(self.GUARD_KEYS, set(guard))
+        self.assertEqual(7, guard["window"])
+        self.assertEqual(0.5, guard["threshold"])
+        self.assertEqual(1, guard["min_rounds"])
+        self.assertEqual(3, guard["rounds"])
+        self.assertEqual(2, guard["hits"])
+        self.assertAlmostEqual(2.0 / 3.0, guard["rate"])
+        self.assertTrue(guard["over"])
+        self.assertEqual(1, guard["injected"], "reduced_count 改了，注入条数没跟着改")
+        self.assertEqual(1, got["anchors"]["injected"])
+
+    def test_broken_guard_data_is_reported_not_defaulted(self):
+        """guard 缺键、类型不对 → ValueError（代码里不许有这几个数的兜底默认值）。"""
+        for breakage, needle in ((("drop", "prefix_chars"), "anchors.guard.prefix_chars"),
+                                 (("bad", "window"), "anchors.guard.window"),
+                                 (("bad", "threshold"), "anchors.guard.threshold")):
+            conf = conversation.load_assembly()
+            guard = conf["anchors"]["guard"]
+            if breakage[0] == "drop":
+                guard.pop(breakage[1])
+            else:
+                guard[breakage[1]] = "五十" if breakage[1] == "window" else 3
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn(needle, str(caught.exception),
+                          "缺 %s 时没有指名报错：%s" % (breakage[1], caught.exception))
+
+    def test_no_anchors_section_still_carries_the_guard_keys(self):
+        """没配锚句就没有护栏：八个键照样交出去，值一律 null（页面写「没给」），over 是 False。"""
+        conf = conversation.load_assembly()
+        conf["anchors"] = None
+        got = self._answer(assembly=conf)
+        self.assertEqual(self.GUARD_KEYS, set(got["guard"]))
+        self.assertFalse(got["guard"]["over"])
+        for key in ("window", "threshold", "min_rounds", "rounds", "hits", "rate",
+                    "injected", "available"):
+            self.assertIsNone(got["guard"][key], "没配护栏却给出一个数：%s" % key)
+
+    def test_guard_is_read_before_this_round_is_written(self):
+        """先是读数、后是落账：19 轮全命中时还没到 min_rounds（20），这一轮不该自己把自己顶上去。"""
+        self._anchors_home(list(self.FIVE))
+        self._usage_seed(19, 19)
+        got = self._answer()
+        self.assertEqual(19, got["guard"]["rounds"], "护栏把这一轮的账也算进读数了")
+        self.assertFalse(got["guard"]["over"])
+        self.assertEqual(20, got["guard"]["min_rounds"])
+        self.assertEqual(20, usage.read()["rounds"], "这一轮该在读数之后才落账")
 
 
 if __name__ == "__main__":
