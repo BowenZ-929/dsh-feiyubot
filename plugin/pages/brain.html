@@ -219,7 +219,18 @@
       <span class="muted" id="recall-state">还没回想</span>
     </div>
     <p class="note">回想是 GET；脑会顺手把命中条目的「想起次数」+1（遗忘曲线的输入），
-      这是脑自己的记账，不是人改记忆——这一页没有任何改记忆的控件。</p>
+      这是脑自己的记账，不是人改记忆。两栏：原话（quote）直给，她的理解（note）前面带「她理解：」；
+      理解可为空（空是正常，不是缺失），拿不准就只存原话并标 unclear。人只能改 note，改 note 不覆盖 quote。</p>
+    <div class="fields" style="margin:.6rem 0 .2rem">
+      <label for="note-id">记忆 id</label>
+      <input id="note-id" type="text" placeholder="要改哪一条记忆的 note">
+      <label for="note-text">她的理解（note，可空）</label>
+      <textarea id="note-text" rows="2" placeholder="留空 = 只存原话"></textarea>
+    </div>
+    <div class="card-actions">
+      <button class="btn" id="note-save" type="button">改理解（PATCH /brain/memory/&lt;id&gt;/note）</button>
+      <span class="muted" id="note-state">quote 不会被覆盖，历史留痕。</span>
+    </div>
     <div class="tiers">
       <div class="tier">
         <h3>今日 <small id="tier-today-count"></small></h3>
@@ -407,6 +418,11 @@
   // 人名可能是中文：路径段一律 encodeURIComponent，服务端 unquote 还原。
   function cardPath(personId) {
     return "/brain/people/" + encodeURIComponent(personId) + "/card";
+  }
+
+  // 改理解的路径同样只由这一个函数拼：记忆 id 可能是中文/占位串，必须 encodeURIComponent。
+  function notePath(memoryId) {
+    return "/brain/memory/" + encodeURIComponent(memoryId) + "/note";
   }
 
   function cardState(person) {
@@ -699,6 +715,10 @@
     var badge = node("span", "badge " + (sourceType === "日程模拟" ? "sim" : "lived"), sourceType);
     li.appendChild(badge);
     li.appendChild(node("span", null, entry.text || "（正文为空）"));
+    if (entry.unclear) { li.appendChild(node("span", "badge", "unclear")); }
+    if (entry.note) {
+      li.appendChild(node("span", "row-meta", "她理解：" + entry.note));
+    }
     li.appendChild(node("span", "row-meta", "谁 " + (entry.who || "未知")
       + " · " + shortTime(entry.ts)
       + (entry.count > 1 ? " · 合并 " + entry.count + " 次" : "")
@@ -1040,6 +1060,23 @@
   }
 
   el("recall-btn").addEventListener("click", function () { recall(); });
+  el("note-save").addEventListener("click", function () {
+    var id = el("note-id").value.trim();
+    var note = el("note-text").value;
+    if (!id) { say("改理解需要记忆 id（在四档条目里找）", "err"); return; }
+    el("note-state").textContent = "提交中…";
+    call("PATCH", notePath(id), { actor: ACTOR, note: note }).then(function (res) {
+      if (res.status === 200 && res.data.ok !== false) {
+        el("note-state").textContent = "已改：quote 逐字不动，历史多一行。";
+        el("note-text").value = "";
+        return refresh();
+      }
+      el("note-state").textContent = "被拒（" + res.status + "）："
+        + ((res.data && res.data.message) || "未知原因");
+    }).catch(function (err) {
+      el("note-state").textContent = "连不上后端：" + err;
+    });
+  });
   el("retry-btn").addEventListener("click", function () { refresh(); });
   el("recall-q").addEventListener("keydown", function (event) {
     if (event.key === "Enter") { event.preventDefault(); recall(); }

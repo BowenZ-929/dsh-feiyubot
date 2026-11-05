@@ -77,6 +77,12 @@ def pack(candidates: Sequence[Dict[str, Any]],
             "beta": candidate.get("beta"),
             "testimony": candidate.get("testimony", False),
             "backing_note": "无记录背书" if not candidate.get("evidence_key", "") else "",
+            "note": _cap_text(candidate.get("note", ""), limits.per_item_cap),
+            "note_full": candidate.get("note_full", candidate.get("note", "")),
+            "unclear": bool(candidate.get("unclear", False)),
+            "beta_note": candidate.get("beta_note"),
+            "note_testimony": False,
+            "note_display": candidate.get("note_display", ""),
         })
         used[bucket] += 1
         slots_used += 1

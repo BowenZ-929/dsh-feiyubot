@@ -469,9 +469,12 @@ class PanelSourceTest(unittest.TestCase):
         brain = (PAGES / "brain.html").read_text(encoding="utf-8")
         self.assertIn("脑 · 只读", brain)
         self.assertIn("§9.2", brain, "只读的理由要引 architecture §9.2")
-        for needle in ("<form", "<textarea", "<select", "contenteditable", 'call("put"',
+        for needle in ("<form", "<select", "contenteditable", 'call("put"',
                        'call("delete"'):
             self.assertNotIn(needle, brain.lower(), "brain.html 里出现了写控件：%s" % needle)
+        self.assertEqual(brain.lower().count("<textarea"), 1,
+                         "brain.html 只该有改理解那一个文本域")
+        self.assertIn('id="note-text"', brain, "唯一的文本域必须是改理解的 note")
 
         # 脑已接入：这一页是活的只读视图，五条 GET 的路径直接来自脑的路由表
         brain = (PAGES / "brain.html").read_text(encoding="utf-8")

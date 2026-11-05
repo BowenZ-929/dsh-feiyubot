@@ -85,14 +85,16 @@ class WritesAreTheProposalAndTheCard(unittest.TestCase):
         self.assertEqual(posts, ["/soul/proposal"],
                          "写入口不止一条，或打的不是接受提案：%r" % (posts,))
 
-    def test_exactly_one_patch_and_it_is_the_card(self):
-        """PATCH 只有一条，且打的是名片：call("PATCH", cardPath(...))。"""
+    def test_exactly_two_patches_card_and_note(self):
+        """PATCH 只有两条：名片（cardPath）与改理解（/brain/memory/<id>/note）。"""
         text = _text()
         card_calls = CARD_CALL_RE.findall(text)
         self.assertEqual(sorted(card_calls), ["GET", "PATCH"],
                          "名片的读/写该各一次（GET 历史 + PATCH 写四栏）：%r" % (card_calls,))
-        self.assertEqual(text.count('call("PATCH"'), 1, "PATCH 不止一处")
-        self.assertNotIn('call("PATCH", "', text, "PATCH 直接写死路径：人名没经 encodeURIComponent")
+        self.assertEqual(text.count('call("PATCH"'), 2, "PATCH 不是两条")
+        self.assertIn('call("PATCH", notePath(', text,
+                      "改理解的 PATCH 该经 notePath()（记忆 id 必须 encodeURIComponent）")
+        self.assertNotIn('call("PATCH", "', text, "PATCH 直接写死路径：人名/记忆 id 没经 encodeURIComponent")
 
     def test_card_path_is_encoded_and_has_no_prefix_bypass(self):
         """人名可以是中文：路径段必须 encodeURIComponent，且只由 cardPath() 一处拼。"""
@@ -171,7 +173,7 @@ class WritesAreTheProposalAndTheCard(unittest.TestCase):
         text = _text().lower()
         for verb in WRITE_VERBS:
             self.assertNotIn('"%s"' % verb, text, "页面出现了 %s 请求" % verb.upper())
-        self.assertEqual(text.count('"patch"'), 1, "PATCH 只该有名片那一条")
+        self.assertEqual(text.count('"patch"'), 2, "PATCH 只该有名片与改理解两条")
 
     def test_reject_is_pure_ui(self):
         """拒绝只记一条、不发请求：文案在页面上，且拒绝分支里没有 call(。"""
@@ -239,24 +241,23 @@ class NoControlCanChangeAffinityOrMemory(unittest.TestCase):
     def test_no_editable_regions(self):
         text = _text().lower()
         self.assertNotIn("contenteditable", text, "页面有可编辑区域")
-        self.assertNotIn("<textarea", text, "页面有文本域")
+        self.assertEqual(text.count("<textarea"), 1, "文本域只该有改理解那一个")
+        self.assertIn('id="note-text"', text, "唯一的文本域必须是改理解的 note")
         self.assertNotIn("<select", text, "页面有下拉框")
         self.assertNotIn("<form", text, "页面有表单（会带来提交按钮）")
         for handler in ("oninput=", "onchange=", "onkeyup="):
             self.assertNotIn(handler, text, "页面有内联编辑事件：%s" % handler)
 
-    def test_the_only_static_input_is_the_recall_query(self):
-        """静态标记里只有一个 <input>：回想查询框（type=search，不带 name）。
-
-        名片四栏的控件由 JS 现建（node(spec[2])），标记里不留输入框：这样「页面上多了个输入框」
-        只可能来自 CARD_FIELDS 那张白名单表。
-        """
+    def test_the_two_static_inputs_are_recall_query_and_note_id(self):
+        """静态标记里只有两个 <input>：回想查询框（type=search）与改理解的记忆 id。"""
         inputs = INPUT_RE.findall(_text())
-        self.assertEqual(len(inputs), 1, "输入控件不止一个：%r" % (inputs,))
-        tag = inputs[0]
-        self.assertIn('type="search"', tag, "唯一的输入框必须是只读查询（type=search）：%s" % tag)
-        self.assertIn('id="recall-q"', tag, "唯一的输入框必须是回想查询框：%s" % tag)
-        self.assertNotIn("name=", tag, "查询框不该带 name（它不是任何表单的提交字段）")
+        self.assertEqual(len(inputs), 2, "输入控件不是两个：%r" % (inputs,))
+        self.assertTrue(any('type="search"' in tag and 'id="recall-q"' in tag for tag in inputs),
+                        "回想查询框必须是 type=search 且 id=recall-q")
+        self.assertTrue(any('id="note-id"' in tag for tag in inputs),
+                        "改理解必须有记忆 id 输入框（id=note-id）")
+        self.assertFalse(any("name=" in tag for tag in inputs),
+                         "输入框不该带 name（它不是任何表单的提交字段）")
 
     def test_card_controls_are_built_from_the_whitelist_only(self):
         text = _text()
@@ -367,7 +368,7 @@ class ClickablesPointAtRealRoutes(unittest.TestCase):
     def test_every_static_button_has_a_handler(self):
         text = _text()
         ids = BUTTON_ID_RE.findall(text)
-        self.assertEqual(ids, ["recall-btn", "retry-btn"],
+        self.assertEqual(sorted(ids), ["note-save", "recall-btn", "retry-btn"],
                          "静态按钮变了，核对表要同步：%r" % (ids,))
         for button_id in ids:
             self.assertIn('el("%s").addEventListener' % button_id, text,

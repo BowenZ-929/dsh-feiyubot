@@ -101,6 +101,25 @@ def dispatch(route: str, params: Mapping[str, str], body: Any, brain: Any) -> Re
     return 200, brain.proposals()
 
 
+def dispatch_note(method: str, route: str, body: Any, brain: Any) -> Result:
+    """PATCH /brain/memory/<id>/note：人改理解，quote 逐字不动，历史留痕。"""
+    if brain is None:
+        return 503, {"ok": False, "message": "脑未载入：先起脑的数据目录（devserver --brain-root）"}
+    entry_id = route[len("/brain/memory/"):-len("/note")]
+    if not entry_id:
+        return 404, {"ok": False, "message": "没有这个端点：%s" % route}
+    if method != "PATCH":
+        return 405, {"ok": False, "message": "%s 只收 PATCH（改 note 不覆盖 quote）" % route}
+    if not isinstance(body, dict):
+        return 400, {"ok": False, "message": "body 必须是 JSON 对象"}
+    actor = body.get("actor", "").strip()
+    if not actor:
+        return 400, {"ok": False, "message": "需要 actor"}
+    result = brain.edit_note(entry_id, actor, body.get("note", ""),
+                             unclear=body.get("unclear"))
+    return (200 if result.get("ok") else 400), result
+
+
 def dispatch_card(method: str, route: str, body: Any, brain: Any) -> Result:
     """PATCH /brain/people/<id>/card：名片白名单字段人可写，熟稔不收；GET 读名片+历史。"""
     if brain is None:

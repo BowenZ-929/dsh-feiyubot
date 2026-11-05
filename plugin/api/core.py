@@ -65,6 +65,8 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
     params = dict(query) if query else _parse_query(raw_query)
     if route.startswith("/brain/people/") and route.endswith("/card"):
         return brain_api.dispatch_card(method, route, body, brain)
+    if route.startswith("/brain/memory/") and route.endswith("/note"):
+        return brain_api.dispatch_note(method, route, body, brain)
     if route not in ROUTES:
         return 404, {"ok": False, "message": "没有这个端点：%s" % route}
     if method != ROUTES[route]:

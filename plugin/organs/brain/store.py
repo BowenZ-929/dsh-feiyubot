@@ -42,6 +42,7 @@ EVICTIONS_FILE = "evictions.jsonl"
 TOPIC_CANDIDATES_FILE = "topic_candidates.json"
 PEOPLE_CARD_HISTORY = "people_card_history.jsonl"
 USAGE_FILE = "usage.jsonl"
+NOTE_HISTORY = "note_history.jsonl"
 CARD_FIELDS = {"称呼": "display", "雷点": "prefs", "备注": "notes", "照片说明": "photo_note"}
 
 TIERS_DEFAULT = {"today_max": 60, "today_demote_count": 20, "hot_max": 20, "hot_lines_max": 3}
@@ -186,6 +187,17 @@ def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
     if "evidence_key" not in row:
         # 亲历的原话出处就是这一行自己；日程模拟没有真实出处，留空 → 无记录背书
         row["evidence_key"] = row["id"] if row.get("source_type") == SOURCE_LIVED else ""
+    # 两栏：quote 是对方原话（逐字），note 是她的理解（可为空）。
+    # 旧数据只有 text → 按"只有原话"处理：quote=text、note=""，不猜不补。
+    if "quote" not in row:
+        row["quote"] = row.get("text", "")
+    row["text"] = row.get("quote", "")   # text 保留为 quote 的兼容别名
+    if "note" not in row:
+        row["note"] = ""
+    row.setdefault("unclear", False)
+    if "beta_note" not in row:
+        # β 只给 quote 满分；note 另记一档（beta 降一档）。空 note 不记 beta_note。
+        row["beta_note"] = (int(row.get("beta", BETA_DEFAULT)) - 1) if row.get("note") else None
     return row
 
 
@@ -222,7 +234,7 @@ class BrainStore:
                 "_note": "未接 NLP：回想到的未登录词（按整句暂存）进候选池，人在面板上收进 topics.json",
             })
         for name in (LONGTERM_FILE, SELF_FILE, PROPOSAL_LOG_FILE, EVICTIONS_FILE,
-                     PEOPLE_CARD_HISTORY, USAGE_FILE):
+                     PEOPLE_CARD_HISTORY, USAGE_FILE, NOTE_HISTORY):
             path = self._root / name
             if not path.is_file():
                 path.write_text("", encoding="utf-8")
@@ -247,6 +259,10 @@ class BrainStore:
                     "day": entry.get("day") or self._today.get("day", ""),
                     "who": entry.get("who", ""),
                     "text": entry.get("text", ""),
+                    "quote": entry.get("quote", entry.get("text", "")),
+                    "note": entry.get("note", ""),
+                    "unclear": entry.get("unclear", False),
+                    "beta_note": entry.get("beta_note"),
                     "count": entry.get("count", 1),
                     "source": "today",
                     "kind": "fact",
@@ -382,6 +398,10 @@ class BrainStore:
                 "day": entry.get("day", ""),
                 "who": entry.get("who", ""),
                 "text": entry.get("text", ""),
+                "quote": entry.get("quote", entry.get("text", "")),
+                "note": entry.get("note", ""),
+                "unclear": entry.get("unclear", False),
+                "beta_note": entry.get("beta_note"),
                 "count": entry.get("count", 1),
                 "source": "today",
                 "kind": "fact",
@@ -663,10 +683,12 @@ class BrainStore:
     def ingest(self, who: str, text: str, mood: Optional[Any] = None,
                display: Optional[str] = None, ts: Optional[str] = None,
                source_type: str = SOURCE_LIVED, alpha: int = ALPHA_DEFAULT,
-               beta: int = BETA_DEFAULT) -> Dict[str, Any]:
+               beta: int = BETA_DEFAULT, note: Optional[str] = None,
+               unclear: bool = False) -> Dict[str, Any]:
         """一条消息进：今日追加或合并一条 + 人名录认人更新。
 
-        source_type 只许 亲历 / 日程模拟；日程模拟只写她自己、不给证据出处。
+        text 就是 quote（对方原话）；note 是她的理解，可为空——空 note 是正常状态。
+        拿不准就 note="" + unclear=True，只存原话，不许硬编理解。
         """
         ts = ts or now_iso()
         who = (who or "").strip()
@@ -692,11 +714,15 @@ class BrainStore:
                 "ts": ts,
                 "who": who,
                 "text": text,
+                "quote": text,            # 原话逐字；note 是她的理解，可为空
                 "count": 1,
                 "status": STATUS_ACTIVE,   # 状态位和行同时落盘
                 "source_type": source_type if source_type in (SOURCE_LIVED, SOURCE_SCHEDULED) else SOURCE_LIVED,
                 "alpha": alpha,
                 "beta": beta,
+                "note": note or "",
+                "unclear": bool(unclear),
+                "beta_note": (int(beta) - 1) if note else None,
                 "evidence_key": "",   # 创建后再补：亲历指向自己这行原话，日程模拟留空
             }
             if mood is not None:
@@ -1031,6 +1057,42 @@ class BrainStore:
         self._write_people(data)
         return {"ok": True, "card": self._people_card(person_id),
                 "history_lines": history_lines}
+
+    def edit_note(self, entry_id: str, actor: str, note: str,
+                  unclear: Optional[bool] = None) -> Dict[str, Any]:
+        """人改 note：quote 逐字不动，note 留痕。空 note 是正常状态。"""
+        entry_id = (entry_id or "").strip()
+        actor = (actor or "").strip()
+        if not entry_id or not actor:
+            return _reject("entry_id 与 actor 不能为空")
+        note = note or ""
+        # 今日条目就地改；长期档追加同 id 新行（quote 逐字从最新行复制）。
+        for entry in self._today.get("entries") or []:
+            if entry.get("id") == entry_id:
+                old_note = entry.get("note", "")
+                entry["note"] = note
+                entry["unclear"] = bool(unclear) if unclear is not None else entry.get("unclear", False)
+                entry["beta_note"] = (int(entry.get("beta", BETA_DEFAULT)) - 1) if note else None
+                _atomic_write_json(self._root / TODAY_FILE, self._today)
+                _append_jsonl(self._root / NOTE_HISTORY, {
+                    "ts": now_iso(), "actor": actor, "entry_id": entry_id,
+                    "old_note": old_note, "new_note": note})
+                return {"ok": True, "entry_id": entry_id, "where": "today",
+                        "note": note, "quote": entry.get("quote", entry.get("text", ""))}
+        latest = self._latest_longterm(entry_id)
+        if latest is None:
+            return _reject("没有这条记忆：%s" % entry_id)
+        updated = dict(latest)
+        old_note = updated.get("note", "")
+        updated["note"] = note
+        updated["unclear"] = bool(unclear) if unclear is not None else updated.get("unclear", False)
+        updated["beta_note"] = (int(updated.get("beta", BETA_DEFAULT)) - 1) if note else None
+        _append_jsonl(self._root / LONGTERM_FILE, updated)
+        _append_jsonl(self._root / NOTE_HISTORY, {
+            "ts": now_iso(), "actor": actor, "entry_id": entry_id,
+            "old_note": old_note, "new_note": note})
+        return {"ok": True, "entry_id": entry_id, "where": "longterm",
+                "note": note, "quote": updated.get("quote", updated.get("text", ""))}
 
     # —— 回想 ————————————————————————————————
     def recall(self, query: str, who: Optional[str] = None,

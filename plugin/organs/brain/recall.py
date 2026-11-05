@@ -67,7 +67,8 @@ def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
     if source_type not in (SOURCE_LIVED, SOURCE_SCHEDULED):
         source_type = SOURCE_LIVED
     beta = entry.get("beta", BETA_DEFAULT)
-    testimony = source_type == SOURCE_LIVED and beta >= 0   # 虚构（日程模拟）只作谈资、不作证词
+    testimony = source_type == SOURCE_LIVED and beta >= 0   # 证词只认 quote（原话）
+    note = entry.get("note", "")
     return {
         "id": entry.get("id", ""),
         "source": source,
@@ -81,6 +82,12 @@ def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
         "alpha": entry.get("alpha", ALPHA_DEFAULT),
         "beta": beta,
         "testimony": testimony,
+        "note": note,
+        "note_full": note,
+        "unclear": bool(entry.get("unclear", False)),
+        "beta_note": entry.get("beta_note"),
+        "note_testimony": False,   # note 永不作证词
+        "note_display": ("她理解：" + note) if note else ("（unclear，未理解）" if entry.get("unclear") else "（无理解）"),
     }
 
 
