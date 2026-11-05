@@ -59,6 +59,9 @@ def status_writer_report() -> list:
                      "wired": writer is not None})
     return rows
 
+# 人名录不建卡的占位 who：不知道是谁 ≠ 有一个人叫"人"
+PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知")
+
 # 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天（只写她自己，不生成主人的事实）
 SOURCE_LIVED = "亲历"
 SOURCE_SCHEDULED = "日程模拟"

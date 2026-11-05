@@ -23,9 +23,9 @@ from . import people as people_mod
 from . import proposals as proposals_mod
 from . import recall as recall_mod
 from . import retention as retention_mod
-from .model import (ALPHA_DEFAULT, BETA_DEFAULT, SOURCE_LIVED,
-                    SOURCE_SCHEDULED, STATUS_ACTIVE, STATUS_ARCHIVED,
-                    STATUS_STALE, day_key, limits, now_iso)
+from .model import (ALPHA_DEFAULT, BETA_DEFAULT, PLACEHOLDER_WHOS,
+                    SOURCE_LIVED, SOURCE_SCHEDULED, STATUS_ACTIVE,
+                    STATUS_ARCHIVED, STATUS_STALE, day_key, limits, now_iso)
 
 TODAY_FILE = "today.json"
 LONGTERM_FILE = "longterm.jsonl"
@@ -702,8 +702,10 @@ class BrainStore:
         ts = ts or now_iso()
         who = (who or "").strip()
         text = (text or "").strip()
-        if not who or not text:
-            return _reject("who 与 text 不能为空")
+        if not who:
+            who = "人"   # 来源不明：记忆照记，who 记成占位符"人"，但人名录不建卡
+        if not text:
+            return _reject("text 不能为空")
         self._today, archived = self._ensure_today(ts)
         entries = self._today.setdefault("entries", [])
         merged = False
@@ -893,6 +895,34 @@ class BrainStore:
         return recent
 
     # —— 人名录 ————————————————————————————————
+    def _self_names(self) -> set:
+        """魂的自称表（display + synonyms），从魂的公开只读口取；读不到就空集 + warn。"""
+        try:
+            from organs import paths
+            from organs.soul import load as load_soul
+
+            try:
+                root = paths.organ_dir("soul") / "data"
+                store = load_soul(root)
+            except Exception:  # noqa: BLE001 - 实盘没有就退回出厂默认
+                root = paths.factory_dir("soul")
+                store = load_soul(root)
+            snapshot = store.snapshot()
+            return {snapshot.identity.display} | set(snapshot.identity.synonyms)
+        except Exception as exc:  # noqa: BLE001 - 读不到魂就只挡占位符，不拦其它人
+            import warnings
+
+            warnings.warn("脑·人名录：读魂的自称表失败（%s），只挡占位符" % exc, RuntimeWarning)
+            return set()
+
+    def _blocked_who(self, who: str) -> Optional[str]:
+        """返回 None = 可建卡；否则返回不建卡的原因。"""
+        if who in PLACEHOLDER_WHOS:
+            return "placeholder"
+        if who in self._self_names():
+            return "self"
+        return None
+
     def _people_data(self) -> Dict[str, Any]:
         return _read_json(self._root / PEOPLE_FILE, {"people": {}})
 
@@ -911,7 +941,17 @@ class BrainStore:
         ts = ts or now_iso()
         who = who.strip()
         if not who:
-            return _reject("who 不能为空")
+            return {"ok": True, "skipped": True, "reason": "placeholder",
+                    "who": who, "ts": ts}
+        blocked = self._blocked_who(who)
+        if blocked:
+            import warnings
+
+            if blocked == "self":
+                warnings.warn("脑·人名录：%s 是她的自称，不是通讯录里的人，不建卡" % who,
+                              RuntimeWarning)
+            return {"ok": True, "skipped": True, "reason": blocked,
+                    "who": who, "ts": ts}
         data = self._people_data()
         people = data.setdefault("people", {})
         person = people.get(who)
@@ -1012,6 +1052,28 @@ class BrainStore:
         people.pop(alias, None)
         self._write_people(data)
         return {"ok": True, "person": self._person_view(keep, now_iso())}
+
+    def clean_dirty_cards(self, backup: bool = True) -> Dict[str, Any]:
+        """顺手清脏卡：备份 people.json 后删掉占位符与她自己名下的卡。只删这两类，不动真卡。"""
+        path = self._root / PEOPLE_FILE
+        if not path.is_file():
+            return {"ok": True, "removed": [], "backup": None}
+        if backup:
+            import shutil
+
+            backup_path = path.with_suffix(".json.bak")
+            shutil.copyfile(path, backup_path)
+        else:
+            backup_path = None
+        data = _read_json(path, {"people": {}})
+        people = data.get("people", {})
+        removable = set(PLACEHOLDER_WHOS) | self._self_names()
+        removed = [key for key in list(people) if key in removable]
+        for key in removed:
+            people.pop(key, None)
+        _atomic_write_json(path, data)
+        return {"ok": True, "removed": removed,
+                "backup": str(backup_path) if backup_path else None}
 
     # —— 名片（人可写字段；熟稔是读数，绝不收） ————————————————————————————————
     def _people_card(self, person_id: str) -> Optional[Dict[str, Any]]:
