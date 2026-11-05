@@ -87,6 +87,11 @@
   table.rows th, table.rows td { border-top: 1px dashed var(--home-border); padding: .35rem .3rem;
           text-align: left; vertical-align: top; overflow-wrap: anywhere; }
   table.rows th { color: var(--home-muted); font-weight: 500; }
+  /* 进度条：只用一条宽度表示「到哪一步」，不画装饰；没有进度时外面显示「—」，不画空条 */
+  .bar { display: inline-block; width: 84px; height: 8px; margin-right: 6px; border-radius: 4px;
+         vertical-align: middle; overflow: hidden;
+         background: color-mix(in srgb, currentColor 14%, transparent); }
+  .bar i { display: block; height: 100%; background: currentColor; }
   pre { margin: .5rem 0 0; padding: .6rem .7rem; background: var(--home-bg); white-space: pre-wrap;
         overflow-wrap: anywhere; font: .84rem/1.5 var(--home-mono); border: 1px solid var(--home-border);
         border-radius: 6px; max-height: 22rem; overflow: auto; }
@@ -108,7 +113,7 @@
 </head>
 <body>
 <header class="banner">家 · 十间房 / 存取 / 审计。本面板无鉴权，只许绑 127.0.0.1；十间房固定，本页没有「新建房间」。</header>
-<nav class="links" aria-label="别的页">回 <a href="./">魂 · 面板</a>；只读两页：<a href="heart">心</a>、<a href="brain">脑</a></nav>
+<nav class="links" aria-label="别的页">回 <a href="./">魂 · 面板</a>；只读三页：<a href="heart">心</a>、<a href="about">关于他</a>、<a href="memory">记忆</a></nav>
 
 <main>
   <div>
@@ -206,8 +211,16 @@
         这里显示的就是盘上那一行。身体动作只写她自己；写到别人身上，那一次写入会整批被拒。</p>
     </section>
 
+    <section aria-labelledby="hand-h">
+      <h2 id="hand-h">她手上的事<small>工作台的卡片 ＋ 进度</small></h2>
+      <div id="hands-body"></div>
+      <p class="state" id="hands-state">载入中…</p>
+      <p class="note">进度是那张卡上的**一栏**（0-100），跟卡片同生共死：不是状态、不占新房间、不进心。
+        改了进度要留一行审计；没有进度就显示「—」，<strong>不显示 0</strong>——「还没登记」和「在起点」是两件事。</p>
+    </section>
+
     <section aria-labelledby="log-h">
-      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐七条读端点</small></h2>
+      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐八条读端点</small></h2>
       <button id="refresh-all" type="button">刷新全部</button>
       <pre id="log">就绪。</pre>
       <p class="state" id="status">载入中…</p>
@@ -674,6 +687,52 @@
       + (data.truncated ? " · 这次只取了一部分" : ""));
   }
 
+  // —— 她手上的事 ————————————————————————————————
+  function showHands(res) {
+    var body = el("hands-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var data = res.data || {};
+    var cards = data.items || [];
+    if (!cards.length) {
+      var pre0 = document.createElement("pre");
+      pre0.textContent = "工作台是空的：她现在手上没有事。";
+      body.appendChild(pre0);
+      mark("hands-state", "total=0");
+      return;
+    }
+    var table = document.createElement("table");
+    table.className = "rows";
+    var head = document.createElement("tr");
+    ["手上的事", "到哪一步", "谁改的"].forEach(function (text) {
+      var th = document.createElement("th");
+      th.textContent = text;
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    cards.forEach(function (card) {
+      var tr = document.createElement("tr");
+      var has = typeof card.progress === "number";
+      var step = document.createElement("td");
+      var bar = document.createElement("span");
+      bar.className = "bar";
+      var fill = document.createElement("i");
+      fill.style.width = (has ? card.progress : 0) + "%";
+      bar.appendChild(fill);
+      step.appendChild(bar);
+      step.appendChild(document.createTextNode(has ? card.progress + "%" : "—"));
+      var mine = document.createElement("td");
+      mine.textContent = has ? (card.progress_by || "—") : "—";
+      var name = document.createElement("td");
+      name.textContent = card.name + (card.note ? "\n" + card.note : "");
+      name.style.whiteSpace = "pre-wrap";
+      tr.appendChild(name); tr.appendChild(step); tr.appendChild(mine);
+      table.appendChild(tr);
+    });
+    body.appendChild(table);
+    mark("hands-state", "手上 " + data.total + " 件 · 有进度的 "
+      + cards.filter(function (c) { return typeof c.progress === "number"; }).length + " 件");
+  }
+
   // —— 放一件东西 ————————————————————————————————————
   function submitWrite() {
     var room = el("write-room").value;
@@ -724,6 +783,7 @@
       mark("audit-state", "载入中…");
       mark("warehouse-state", "载入中…");
       mark("anchors-state", "载入中…");
+      mark("hands-state", "载入中…");
     }
     return Promise.all([
       call("GET", "/home/rooms"),
@@ -732,7 +792,8 @@
       call("GET", "/home/drawer"),
       call("GET", "/home/archive/borrow"),
       call("GET", "/home/warehouse"),
-      call("GET", "/home/anchors")
+      call("GET", "/home/anchors"),
+      call("GET", "/home/list?room=" + encodeURIComponent("工作台"))
     ]).then(function (out) {
       var failures = 0;
 
@@ -796,6 +857,15 @@
         var anNode = el("anchors-state");
         anNode.className = "state bad";
         anNode.textContent = "读 /home/anchors 失败：" + problem(out[6]);
+      }
+
+      if (out[7].status === 200) { showHands(out[7]); }
+      else {
+        failures += 1;
+        el("hands-body").textContent = "";
+        var handNode = el("hands-state");
+        handNode.className = "state bad";
+        handNode.textContent = "读 /home/list?room=工作台 失败：" + problem(out[7]);
       }
 
       if (state.room) { openRoom(state.room); }

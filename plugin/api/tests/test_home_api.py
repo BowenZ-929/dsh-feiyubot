@@ -81,8 +81,8 @@ class HomeApiTest(unittest.TestCase):
         home = {route: method for route, method in api_core.ROUTES.items()
                 if route.startswith("/home")}
         self.assertEqual(home, home_api.HOME_ROUTES)
-        self.assertEqual(len(home), 13)
-        for route in ("/home/write", "/home/anchors/append", "/home/consume"):
+        self.assertEqual(len(home), 14)
+        for route in ("/home/write", "/home/anchors/append", "/home/consume", "/home/progress"):
             self.assertEqual(home[route], "POST")
         for route in ("/home/rooms", "/home/access", "/home/list", "/home/read", "/home/audit",
                       "/home/audit/verify", "/home/drawer", "/home/archive/borrow",

@@ -31,13 +31,22 @@ INDEX_NAME = "index.jsonl"
 
 # 七种卡：物件（放着的）、痕迹（写下的经过）、名片（一人一卡）、借阅条（借来的一份语料）、
 # 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）。
-CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费")
+CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费",
+                               "进度")
 
 # 家里能当正文读的后缀；别的后缀（图、音视频）只认指纹与路径，不读正文。
 TEXT_SUFFIXES: Tuple[str, ...] = (".md", ".jsonl")
 
 MENTION_KIND = "提到"
 CONSUME_KIND = "消费"
+PROGRESS_KIND = "进度"
+
+#: 进度是 **0-100 的整数**，不是文本、不是任意数。只选一套：可校验、可排序、面板能一眼读到「到哪一步」；
+#: 文字说明已经在 `note` 里，再开一套自由文本就是第二个真源。
+#: `None` 有确定含义：**显式「没有进度」**（把卡片上那一栏删掉），读回来就是 None，不许补成 0。
+PROGRESS_MIN = 0
+PROGRESS_MAX = 100
+_ABSENT = object()          # 「入参里根本没这个键」，与「显式给了 None」是两件事
 
 
 class CardError(Exception):
@@ -111,6 +120,22 @@ def _replace_with_later(items: List[Dict[str, Any]], by_card: Dict[str, Dict[str
             by_key[key] = merged
 
 
+def _check_progress(value: Any, *, where: str) -> Optional[int]:
+    """进度只收 0-100 的整数或 None。**不把 None 折成 0**：「没有进度」与「进度 0」是两件事——
+    一个是这栏没填，一个是填了、还在起点。折起来之后面板上就分不出「还没开始」和「没登记」。"""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CardError("BAD_PROGRESS", {"where": where, "progress": value},
+                        "progress 只收 0-100 的整数，或 null 表示没有进度：%r" % (value,))
+    if value < PROGRESS_MIN or value > PROGRESS_MAX:
+        raise CardError("PROGRESS_OUT_OF_RANGE",
+                        {"where": where, "progress": value,
+                         "min": PROGRESS_MIN, "max": PROGRESS_MAX},
+                        "progress 要在 %d-%d 之间：%r" % (PROGRESS_MIN, PROGRESS_MAX, value))
+    return value
+
+
 def _identity_keys(card: Dict[str, Any]) -> List[Tuple[Any, ...]]:
     """判同件：sha256 相同算同一件；没有 sha256 时退到 (房、路径、名字)。"""
     keys: List[Tuple[Any, ...]] = []
@@ -124,8 +149,9 @@ def _identity_keys(card: Dict[str, Any]) -> List[Tuple[Any, ...]]:
     return keys
 
 
-def _new_card(raw: Dict[str, Any], *, role: str, by: str, room_name: str, seq: int) -> Dict[str, Any]:
-    return {
+def _new_card(raw: Dict[str, Any], *, role: str, by: str, room_name: str, seq: int,
+              progress: Any = _ABSENT) -> Dict[str, Any]:
+    card = {
         "card_id": "%s-%d" % (room_name, seq),
         "room": room_name,
         "kind": raw["kind"],
@@ -140,6 +166,9 @@ def _new_card(raw: Dict[str, Any], *, role: str, by: str, room_name: str, seq: i
         "at": raw.get("at") or _now(),
         "params": dict(raw.get("params") or {}),
     }
+    if progress is not _ABSENT:
+        card["progress"] = progress          # None 也写进去：显式「没有进度」要留痕
+    return card
 
 
 def append_cards(root=None, *, role: str, by: str, cards: list) -> dict:
@@ -153,7 +182,7 @@ def append_cards(root=None, *, role: str, by: str, cards: list) -> dict:
     if not cards:
         return {"cards": [], "audit": []}
 
-    prepared: List[Tuple[Dict[str, Any], str, int]] = []
+    prepared: List[Tuple[Dict[str, Any], str, int, Any]] = []
     for raw in cards:
         if not isinstance(raw, dict):
             raise CardError("BAD_CARD", {"card": raw}, "卡必须是字典")
@@ -169,17 +198,21 @@ def append_cards(root=None, *, role: str, by: str, cards: list) -> dict:
         chars = 0 if chars is None else chars
         if not isinstance(chars, int) or isinstance(chars, bool) or chars < 0:
             raise CardError("BAD_CHARS", {"chars": chars}, "chars 必须是 >=0 的整数")
+        progress = _ABSENT
+        if "progress" in raw:
+            progress = _check_progress(raw.get("progress"), where="card")
         access.check_path_shape(room.name, name)
         access.check_write(role=role, room=room.name, name=name, chars=chars,
                            files=len(cards), root=root)
-        prepared.append((raw, room.name, chars))
+        prepared.append((raw, room.name, chars, progress))
 
     written: List[Dict[str, Any]] = []
     entries: List[Any] = []
-    for raw, room_name, chars in prepared:
+    for raw, room_name, chars, progress in prepared:
         store_module.ensure_dir(home / room_name)
         path = _index_path(home, room_name)
-        card = _new_card(raw, role=role, by=by, room_name=room_name, seq=_line_count(path) + 1)
+        card = _new_card(raw, role=role, by=by, room_name=room_name,
+                         seq=_line_count(path) + 1, progress=progress)
         store_module.append_line(path, card)
         entries.append(audit.append_entry(root=root, role=role, by=by, room=room_name,
                                           name=card["name"], chars=card["chars"],
@@ -211,8 +244,30 @@ def fold(rows: list, *, stats: Optional[Dict[str, Any]] = None) -> list:
         card["consumed"] = False
         card["left"] = 1
 
+        if card.get("kind") == PROGRESS_KIND:
+            target = _event_target(card, items, by_card, by_key)
+            if target is None:
+                if stats is not None:
+                    stats["orphan_progress"] = int(stats.get("orphan_progress", 0)) + 1
+                continue
+            try:
+                value = _check_progress(card["params"].get("progress"), where="event")
+            except CardError:
+                # 读路径不许因为盘上一行写坏就整间读不出来：如实计数，不降级成 0。
+                if stats is not None:
+                    stats["bad_progress"] = int(stats.get("bad_progress", 0)) + 1
+                continue
+            if value is None:
+                target.pop("progress", None)      # 显式「没有进度」：不留残值、也不补 0
+            else:
+                target["progress"] = value
+            target["progress_at"] = card.get("at")
+            target["progress_by"] = card.get("by")
+            target["progress_count"] = int(target.get("progress_count") or 0) + 1
+            continue
+
         if card.get("kind") == CONSUME_KIND:
-            target = _consume_target(card, items, by_card, by_key)
+            target = _event_target(card, items, by_card, by_key)
             if target is None:
                 if stats is not None:
                     stats["orphans"] = int(stats.get("orphans", 0)) + 1
@@ -259,10 +314,10 @@ def fold(rows: list, *, stats: Optional[Dict[str, Any]] = None) -> list:
     return items
 
 
-def _consume_target(card: Dict[str, Any], items: List[Dict[str, Any]],
+def _event_target(card: Dict[str, Any], items: List[Dict[str, Any]],
                     by_card: Dict[str, Dict[str, Any]],
                     by_key: Dict[Tuple[Any, ...], Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """消费行指向哪一件：先认 `params.ref`（card_id），退到同名且还没被拿走的那一件。
+    """事件行（消费／进度）指向哪一件：先认 `params.ref`（card_id），退到同名且还没被拿走的那一件。
 
     同名多件时**不猜**——返回 None 交上去当孤儿消费报出来，比随便拿一件更诚实。
     """
@@ -280,6 +335,84 @@ def _consume_target(card: Dict[str, Any], items: List[Dict[str, Any]],
     matches = [item for item in items
                if item.get("name") == name and not item.get("consumed")]
     return matches[0] if len(matches) == 1 else None
+
+
+def _pick_target(folded: List[Dict[str, Any]], *, card_id: Optional[str],
+                 name: Optional[str], room_name: str) -> Dict[str, Any]:
+    """从折好的卡片里挑出「就是这一件」。挑不准就响亮报，**不猜**。
+
+    消费与改进度共用这一套：同一间房里「哪一件」的道理只有一个，
+    两处各写一遍就迟早一处给候选、另一处随便挑一件。
+    """
+    if card_id is not None:
+        every = [item for item in folded if item.get("card_id") == card_id]
+        wanted: Any = card_id
+    else:
+        every = [item for item in folded if item.get("name") == name]
+        wanted = name
+    live = [item for item in every if not item.get("consumed")]
+    if not live:
+        # 「没有这一件」与「这一件已经被拿走了」是两件事：分开报，不然人会一直找一件拿不走的东西。
+        if every:
+            gone = every[0]
+            raise CardError("CARD_ALREADY_CONSUMED",
+                            {"room": room_name, "card_id": gone.get("card_id"),
+                             "name": gone.get("name"), "consumed_at": gone.get("consumed_at"),
+                             "consumed_by": gone.get("consumed_by"),
+                             "reason": gone.get("consume_reason")},
+                            "这件已经被拿走了（%s，由 %s）：%s"
+                            % (gone.get("consumed_at"), gone.get("consumed_by"), wanted))
+        raise CardError("CARD_NOT_FOUND",
+                        {"room": room_name, "card_id": card_id, "name": name},
+                        "这间里没有这一件：%s" % wanted)
+    if len(live) > 1:
+        raise CardError("CARD_AMBIGUOUS",
+                        {"room": room_name, "name": name,
+                         "candidates": [item.get("card_id") for item in live]},
+                        "同名的不止一件，得给 card_id 才拿得准：%s" % name)
+    return live[0]
+
+
+def set_progress(root=None, *, role: str, by: str, room: str, progress: Any,
+                 card_id: Optional[str] = None, name: Optional[str] = None,
+                 reason: str = "") -> dict:
+    """给她手上的那件事改进度：过两道门、追加一行 `进度` 事件、记一行审计。**卡片本体不动。**
+
+    进度不是状态、也不是新房间：它挂在那一张卡上（`docs/modules/home.md` 的 home-objects）。
+    只追加的老规矩照旧——改一次进度是往流水里写一行，读时 fold 把最新那行的值贴回卡上。
+    `progress=None` 是**显式「没有进度」**：把那一栏删掉，读回来就是没有，不补 0。
+    """
+    target_room = _target_room(room)
+    if (card_id is None) == (name is None):
+        raise CardError("BAD_ARGUMENT", {"card_id": card_id, "name": name},
+                        "改进度要指定一件：给 card_id 或给 name，二选一")
+    if not isinstance(reason, str):
+        raise CardError("BAD_ARGUMENT", {"reason": reason}, "reason 要是字符串")
+    value = _check_progress(progress, where="set")
+
+    # 门先于找件：与消费同一条纪律（否则等于允许从门外探测房间里有什么）。
+    access.check_write(role=role, room=target_room.name,
+                       name=str(name if name is not None else card_id), chars=len(reason),
+                       root=root)
+    home = store_module.home_root(root)
+    path = _index_path(home, target_room.name)
+    rows, _bad = _read_index(path)
+    target = _pick_target(fold(rows), card_id=card_id, name=name, room_name=target_room.name)
+    access.check_path_shape(target_room.name, str(target.get("name")))
+
+    store_module.ensure_dir(home / target_room.name)
+    card = _new_card({"kind": PROGRESS_KIND, "name": target.get("name"), "note": reason,
+                      "chars": len(reason),
+                      "params": {"ref": target.get("card_id"), "progress": value,
+                                 "reason": reason}},
+                     role=role, by=by, room_name=target_room.name,
+                     seq=_line_count(path) + 1)
+    store_module.append_line(path, card)
+    entry = audit.append_entry(root=root, role=role, by=by, room=target_room.name,
+                               name="%s:%s" % (PROGRESS_KIND, card["name"]),
+                               chars=len(reason), bytes=0)
+    return {"room": target_room.name, "card": card, "target": target,
+            "progress": value, "audit": entry}
 
 
 def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] = None,
@@ -306,35 +439,7 @@ def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] 
     path = _index_path(home, target_room.name)
     rows, _bad = _read_index(path)
     folded = fold(rows)
-    if card_id is not None:
-        every = [item for item in folded if item.get("card_id") == card_id]
-        live = [item for item in every if not item.get("consumed")]
-        wanted = card_id
-    else:
-        every = [item for item in folded if item.get("name") == name]
-        live = [item for item in every if not item.get("consumed")]
-        wanted = name
-    if not live:
-        # 「没有这一件」与「这一件已经被拿走了」是两件事：分开报，不然人会一直找一件拿不走的东西。
-        if every:
-            gone = every[0]
-            raise CardError("CARD_ALREADY_CONSUMED",
-                            {"room": target_room.name, "card_id": gone.get("card_id"),
-                             "name": gone.get("name"), "consumed_at": gone.get("consumed_at"),
-                             "consumed_by": gone.get("consumed_by"),
-                             "reason": gone.get("consume_reason")},
-                            "这件已经被拿走了（%s，由 %s）：%s"
-                            % (gone.get("consumed_at"), gone.get("consumed_by"), wanted))
-        raise CardError("CARD_NOT_FOUND",
-                        {"room": target_room.name,
-                         "card_id": card_id, "name": name},
-                        "这间里没有这一件：%s" % wanted)
-    if len(live) > 1:
-        raise CardError("CARD_AMBIGUOUS",
-                        {"room": target_room.name, "name": name,
-                         "candidates": [item.get("card_id") for item in live]},
-                        "同名的不止一件，得给 card_id 才拿得准：%s" % name)
-    target = live[0]
+    target = _pick_target(folded, card_id=card_id, name=name, room_name=target_room.name)
 
     access.check_path_shape(target_room.name, str(target.get("name")))
     store_module.ensure_dir(home / target_room.name)
@@ -392,7 +497,9 @@ def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
             "truncated": truncated, "bad_lines": bad, "items": shown,
             "consumed": consumed,
             "orphan_consumes": int(stats.get("orphans", 0)),
-            "repeat_consumes": int(stats.get("repeats", 0))}
+            "repeat_consumes": int(stats.get("repeats", 0)),
+            "orphan_progress": int(stats.get("orphan_progress", 0)),
+            "bad_progress": int(stats.get("bad_progress", 0))}
 
 
 def _allowed_suffixes(card: Dict[str, Any]) -> set:

@@ -10,6 +10,7 @@ import inspect
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from organs.home import access, anchors, audit, rooms, store
@@ -178,20 +179,19 @@ class AnchorsTest(unittest.TestCase):
         落到任何一位她说的话上。验完必须字节级还原——它就在代码树里，脏了会连累别人。
         """
         anchors.append_anchors(root=self.root, role="human", by="主人", anchors=five())
-        path = anchors.seed_path()
-        if not path.exists():
-            self.skipTest("这台机器上没有出厂默认那份")
-        original = path.read_bytes()
-        try:
-            path.write_text('{"scene": "被改坏的出厂默认", "say": "这句不该被任何人读到"}\n',
-                            encoding="utf-8")
+        broken = Path(self._tmp.name) / "broken-seed-anchors.jsonl"
+        broken.write_text('{"scene": "被改坏的出厂默认", "say": "这句不该被任何人读到"}\n',
+                          encoding="utf-8")
+        # 不动代码树里那份：它被 git 跟踪，改它会让并发的另一轮测试读到残局。
+        # 改「出厂默认指向哪儿」证明的是同一件事——读路径根本不问 seed_path。
+        with mock.patch.object(anchors, "seed_path", return_value=broken):
             got = anchors.read_all(root=self.root)
             self.assertEqual(5, got["total"])
             self.assertNotIn("被改坏的出厂默认", {c["scene"] for c in got["anchors"]})
             self.assertEqual(FIVE[0]["say"], {c["scene"]: c for c in got["anchors"]}["被夸"]["say"])
-        finally:
-            path.write_bytes(original)
-        self.assertEqual(original, path.read_bytes(), "验完必须把出厂那份还原成原样")
+            self.assertEqual(["被改坏的出厂默认"],
+                             [c["scene"] for c in anchors.latest_by_scene(anchors.read_seed()[0])],
+                             "sanity: 被改坏的是出厂那份")
 
     def test_read_paths_never_touch_the_seed(self) -> None:
         """源码级：四个读函数里不许出现 `seed_path`／`read_seed`／写死的 `"data"`。

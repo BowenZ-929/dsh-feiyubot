@@ -60,20 +60,25 @@ class FactoryVsLiveTest(unittest.TestCase):
                              "改了实盘，读出来的必须是新的那份")
         self.assertEqual(seed_before, access.seed_path().read_bytes(), "改实盘不许改到出厂那份")
 
+    def _broken(self, name: str, text: str) -> Path:
+        path = Path(self._tmp.name) / ("broken-" + name)
+        path.write_text(text, encoding="utf-8")
+        return path
+
     def test_access_seed_corruption_does_not_affect_reads(self):
+        """把出厂那份改坏 → 读实盘不受影响（真源只有一个）。
+
+        **不动代码树里那个文件**：它被 git 跟踪，改它等于让并发的另一轮测试读到残局
+        （这条踩过：一次被打断的运行把仓里的出厂 access.json 留成了空表）。
+        这里改的是「出厂默认指向哪儿」，要证明的是同一件事——读路径根本不问 seed_path。
+        """
         self._write_live_access(["工作台"])
-        path = access.seed_path()
-        original = path.read_bytes()
-        try:
-            path.write_text(json.dumps({"version": 1, "writable": []}), encoding="utf-8")
-            with _no_env_access():
-                self.assertEqual({"工作台"}, set(access.load_whitelist(self.live).writable),
-                                 "把出厂那份的 writable 改掉，读出来不许变")
-                self.assertEqual(set(), set(access.read_seed().writable),
-                                 "sanity: 被改坏的是出厂那份，它不仅影响不到实盘，自己也读得出被改过")
-        finally:
-            path.write_bytes(original)
-        self.assertEqual(original, path.read_bytes(), "验完必须把出厂那份还原成原样")
+        broken = self._broken("access.json", json.dumps({"version": 1, "writable": []}))
+        with mock.patch.object(access, "seed_path", return_value=broken), _no_env_access():
+            self.assertEqual({"工作台"}, set(access.load_whitelist(self.live).writable),
+                             "把出厂那份的 writable 改掉，读出来不许变")
+            self.assertEqual(set(), set(access.read_seed().writable),
+                             "sanity: 被改坏的是出厂那份，它自己也读得出被改过")
 
     def test_access_read_paths_never_touch_the_seed(self):
         source = inspect.getsource(access.load_whitelist)
@@ -103,15 +108,12 @@ class FactoryVsLiveTest(unittest.TestCase):
 
     def test_rooms_seed_corruption_does_not_affect_reads(self):
         self._write_live_rooms(rooms.rooms_json_text())
-        path = rooms.seed_path()
-        original = path.read_bytes()
-        try:
-            path.write_text('{"version": 1, "rooms": [{"name": "厨房"}]}', encoding="utf-8")
+        broken = self._broken("rooms.json", '{"version": 1, "rooms": [{"name": "厨房"}]}')
+        with mock.patch.object(rooms, "seed_path", return_value=broken):
             self.assertEqual(10, len(rooms.check_rooms_json(self.live)["rooms"]),
                              "把出厂那份镜像改坏，实盘读出来不许受影响")
-        finally:
-            path.write_bytes(original)
-        self.assertEqual(original, path.read_bytes(), "验完必须把出厂那份还原成原样")
+            self.assertEqual([{"name": "厨房"}], rooms.read_seed()["rooms"],
+                             "sanity: 被改坏的是出厂那份")
 
     def test_rooms_read_paths_never_touch_the_seed(self):
         source = inspect.getsource(rooms.check_rooms_json)
@@ -136,21 +138,20 @@ class FactoryVsLiveTest(unittest.TestCase):
                          "改实盘不许改到出厂那份")
 
     def test_limits_seed_corruption_does_not_affect_reads(self) -> None:
+        self.live.mkdir(exist_ok=True)
         path = self.live / access.LIMITS_NAME
         path.write_text(json.dumps({"version": 1, "writes_per_room_per_day": 7,
                                     "consumes_per_room_per_day": 8}), encoding="utf-8")
-        seed = access.limits_seed_path()
-        original = seed.read_bytes()
-        try:
-            seed.write_text('{"version": 1, "writes_per_room_per_day": 999, '
-                            '"consumes_per_room_per_day": 999}', encoding="utf-8")
+        broken = self._broken("limits.json",
+                              '{"version": 1, "writes_per_room_per_day": 999,'
+                              ' "consumes_per_room_per_day": 999}')
+        with mock.patch.object(access, "limits_seed_path", return_value=broken):
             loaded = access.load_limits(self.live)
             self.assertEqual((7, 8), (loaded.writes_per_room_per_day,
                                       loaded.consumes_per_room_per_day),
                              "把出厂那份额度改掉，读出来不许变")
-        finally:
-            seed.write_bytes(original)
-        self.assertEqual(original, seed.read_bytes(), "验完必须把出厂那份还原成原样")
+            self.assertEqual(999, access.read_limits_seed().writes_per_room_per_day,
+                             "sanity: 被改坏的是出厂那份")
 
     def test_limits_read_path_never_touches_the_seed(self) -> None:
         source = inspect.getsource(access.load_limits)

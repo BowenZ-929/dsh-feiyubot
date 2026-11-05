@@ -4,8 +4,10 @@
 - 七个魂端点各有一条成功路径；提案端点成功与被拒（只两条依据、改红线）都有；
 - 面板上心与脑只有只读入口：GET /heart 返回「未接入」，GET /brain 返回「已接入」，
   心与脑的路径上 POST/PUT/DELETE 一律 405（入口存在，但没有写），
-  pages/heart.html 无任何写控件；pages/brain.html 的写只有一条（接受提案 → 写魂不写脑），
-  pages/soul.html 里心与脑只以两条链接 + 只读说明 + 只读提案框出现；
+  pages/heart.html 无任何写控件；pages/ 里的脑页已删除（2026-11-06，见下），
+  它原来那张「只许一条写」的图随之失效——那条写（接受提案，写魂不写脑）
+  搬到了 pages/soul.html 的「她提的改动」块，判据在 tests/test_pages_fetch_targets.py；
+  pages/soul.html 里心与脑只以链接 + 只读说明 + 只读提案框出现；
 - 只读端点无副作用：GET 前后五个数据文件字节不变；
 - 面板改完这里就变：POST /soul/edit 改 tone → GET /soul/render 立刻是新句子（同一进程，不重启）。
 """
@@ -67,6 +69,8 @@ REQUIRED_ROUTES = (
     ("GET", "/heart/sleep"),
     # 第五轮接线段：/heart/refusals 给拒绝记录开了一条只读查询（谁加路由谁登记）
     ("GET", "/heart/refusals"),
+    # 第六轮接线段：/heart/proactive 把「主动开口之后有没有人理」搬上端点（谁加路由谁登记）
+    ("GET", "/heart/proactive"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
@@ -79,7 +83,7 @@ REQUIRED_ROUTES = (
     ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
     ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
     ("GET", "/home/anchors"), ("POST", "/home/anchors/append"),
-    ("POST", "/home/consume"), ("POST", "/home/write"),
+    ("POST", "/home/consume"), ("POST", "/home/progress"), ("POST", "/home/write"),
     # 核自报身份（2026-11-05）：跑的是哪一版、什么时候起的、源码有没有在它脚下被改过。
     ("GET", "/healthz"),
     # 脑线新落的两条只读端点（2026-11-05，四档列表与冷仓分页）：先在这儿认下来，
@@ -337,6 +341,16 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual([("POST", "/brain/judge")], write_routes,
                          "心只读；脑只有 POST /brain/judge 一个写方法（名片走动态路由，不在这张表）")
 
+    def test_proactive_route_is_registered_in_both_tables(self):
+        """谁加路由谁登记：HEART_ROUTES 与 REQUIRED_ROUTES 必须同时认得 /heart/proactive。
+
+        两张表各管一件事——前者定方法（只读、405 措辞也按它判）、后者守「关键端点
+        被谁悄悄删掉」。只登一处，就等于给这条线留了半张门票。
+        """
+        self.assertEqual("GET", core.heart_api.HEART_ROUTES["/heart/proactive"])
+        self.assertEqual("GET", api.ROUTES["/heart/proactive"])
+        self.assertIn(("GET", "/heart/proactive"), REQUIRED_ROUTES)
+
     def test_route_table_partitions_into_soul_brain_and_readonly_pages(self):
         """按前缀分组断言，不写死条数：别处加端点这里不该红，写错归属才该红。
 
@@ -360,9 +374,11 @@ class PanelSourceTest(unittest.TestCase):
         rest = set(api.ROUTES) - soul - brain - family - heart - day - chat
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
-        self.assertEqual({"/home/write", "/home/anchors/append", "/home/consume"},
+        self.assertEqual({"/home/write", "/home/anchors/append", "/home/consume",
+                          "/home/progress"},
                          {path for path in family if api.ROUTES[path] == "POST"},
-                         "家三条写路由：POST /home/write、/home/anchors/append、/home/consume")
+                         "家四条写路由：/home/write、/home/anchors/append、/home/consume、"
+                         "/home/progress")
         self.assertEqual({"GET"},
                          {api.ROUTES[path] for path in family} - {"POST"},
                          "家其余十条只读")
@@ -414,25 +430,32 @@ class PanelSourceTest(unittest.TestCase):
                          "路由表就是那张关键端点表：多了少了都得在这儿说清楚")
 
     def test_panel_page_write_controls_are_the_named_ones(self):
-        """面板的写控件逐个点名，不许多出来：本轮从四处收到两处。
+        """面板的写控件逐个点名，不许多出来。
 
-        口径变更（2026-11-06 前端重做，人拍板的信息架构）：魂页只留「改一句」与
-        「加一条红线」两个主操作。提案 JSON 与整档回滚不再挂在这一页——它们没有进
-        六项导航（魂 · 关于他 · 记忆 · 聊天 · 今天 · 设置），也没有在这页留死按钮；
-        端点还在路由表里，命令行照旧能用。撤线按钮仍由 JS 按条生成，不在源码里数。
+        口径变更（2026-11-06 前端重做，人拍板的信息架构）：魂页先只留「改一句」与
+        「加一条红线」两个主操作，提案与整档回滚被砍掉——理由是没有进六项导航。
+
+        **改回来（2026-11-06 二次）+ 判据**：那条理由是把「有没有导航位」当成了
+        「要不要这个入口」，两条都不成立：
+        - 「她提的改动」是她想改自己唯一的通路（她只能提、不能自己改）。没有接受入口，
+          「魂只有人能改」就只堵了一半——写入口只剩人，读的却是死信；
+        - 「改坏了能退」是底线，命令行能用不等于页面能用——人能点到的才叫入口。
+        所以现在固定按钮三个：改这一句 / 加这条红线 / 退回上一版；写请求五个：
+        /soul/edit 一次、/soul/redline 两次（逐条加、逐条撤）、/soul/proposal 一次
+        （接受提案，拒绝不发请求）、/soul/rollback 一次。撤线按钮仍由 JS 按条生成。
         """
         text = PAGE.read_text(encoding="utf-8")
         self.assertNotIn("127.0.0.1", text, "界面上不写核的地址：那是工程细节")
         # 两个文本框：待人姿态、新红线条目的禁令正文
         self.assertEqual(2, text.count("<textarea"), "可编辑的只有这两处")
-        # 两个固定提交钮：改这一句 / 加这条红线；撤线按钮按条生成
-        self.assertEqual(2, text.count("<button"), "只有两个固定提交按钮")
+        # 三个固定按钮：改这一句 / 加这条红线 / 退回上一版；撤线按钮与提案两钮都由 JS 生成
+        self.assertEqual(3, text.count("<button"), "固定提交按钮只剩这三个")
         self.assertNotIn("<form", text)
-        # 三个写请求、两个端点：/soul/edit 一次、/soul/redline 两次（逐条加、逐条撤）
-        self.assertEqual(3, text.count('call("POST"'), "全页只有三个写请求")
+        # 五个写请求：/soul/edit 1、/soul/redline 2（加、撤）、/soul/proposal 1、/soul/rollback 1
+        self.assertEqual(5, text.count('call("POST"'), "全页只有五个写请求")
         self.assertNotIn("/soul/migrate", text, "换形状是坏卡状态的路，不给面板入口")
-        self.assertNotIn("/soul/proposal", text, "提案不在这一页：没有进六项导航")
-        self.assertNotIn("/soul/rollback", text, "整档回滚不在这一页：没有进六项导航")
+        self.assertIn("/soul/proposal", text, "接受提案的入口必须在页上（没有它她改不了自己）")
+        self.assertIn("/soul/rollback", text, "整档回滚的入口必须在页上（改坏了能退是底线）")
         self.assertIn("/soul/render", text, "面板要显示她会被注入的样子")
         self.assertIn("/soul/history", text, "改动记录要有入口：谁为什么改")
         self.assertIn("/soul/check", text, "自检要在这页跑")
@@ -474,25 +497,15 @@ class PanelSourceTest(unittest.TestCase):
         for needle in ('"post"', '"put"', '"delete"'):
             self.assertNotIn(needle, text.lower(), "heart.html 的请求只能是 GET：%s" % needle)
 
-        # 脑页多一条写（接受提案，写魂不写脑），所以上面那张图不能整张套到它头上；
-        # 完整判据在 test_pages_brain.py：写只有 POST /soul/proposal，其余全 GET。
-        brain = (PAGES / "brain.html").read_text(encoding="utf-8")
-        self.assertIn("脑 · 只读", brain)
-        self.assertIn("§9.2", brain, "只读的理由要引 architecture §9.2")
-        for needle in ("<form", "<select", "contenteditable", 'call("put"',
-                       'call("delete"'):
-            self.assertNotIn(needle, brain.lower(), "brain.html 里出现了写控件：%s" % needle)
-        self.assertEqual(brain.lower().count("<textarea"), 1,
-                         "brain.html 只该有改理解那一个文本域")
-        self.assertIn('id="note-text"', brain, "唯一的文本域必须是改理解的 note")
-
-        # 脑已接入：这一页是活的只读视图，五条 GET 的路径直接来自脑的路由表
-        brain = (PAGES / "brain.html").read_text(encoding="utf-8")
-        for path in BRAIN_ROUTES:
-            if path in ("/brain", "/brain/recall"):
-                # /brain 是这一页自己（devserver 静态页）；回想要带 q，只在人点的时候拉
-                continue
-            self.assertIn('call("GET", "%s")' % path, brain, "brain.html 要拉 %s" % path)
+        # 脑页那一段删掉了（2026-11-06）：那一页已整页退役——
+        # 内容被 /about（关于他）与 /memory（记忆）整块接走，第二份副本只会走味。
+        # 页没了，原来那三条「脑页有几个文本域、拉哪几条 GET」的断言就没有对象可断言，
+        # 跟着删；它们看住的东西没丢——搬过去的取数分别由 about.html / memory.html
+        # 在 tests/test_pages_fetch_targets.py 的 MIN_TARGETS 里真打活进程验。
+        self.assertNotIn("/brain", devserver.PAGE_ROUTES,
+                         "脑页已退役：/brain 交回 JSON 端点，不再是一张静态页")
+        self.assertNotIn("brain", {path.stem for path in PAGES.glob("*.html")},
+                         "脑那页该已删除（不写死文件名，按目录现状断言）")
 
     def test_panel_page_reads_five_blocks_and_budget(self):
         text = PAGE.read_text(encoding="utf-8")
@@ -762,9 +775,12 @@ class DevserverPageTest(unittest.TestCase):
         # 新增 /day、/settings 两张占位页（导航里点得到、打开不是 404）与 /panel-base.js
         # （MOUNT/BASE 的唯一一份推导，按 .js 发 text/javascript）。
         # 2026-11-06 信息架构重切：多 /about 与 /memory 两页（脑页里的名片与记忆各自
-        # 独立成一页）；/brain 仍在，只是导航不再指向它——页还在、路由还在，断言照旧收着。
+        # 独立成一页）。
+        # 2026-11-06 脑页退场：那张静态页的登记（"/brain"）从这张表里删掉——内容已全部搬到
+        # /about 与 /memory，留着就是第二份会走味的副本。地址不空着：它落回
+        # api/brain.py 的 JSON 端点 GET /brain（见下面 DevserverHttpTest 那条）。
         self.assertEqual({"/": "soul.html", "/panel": "panel.html",
-                          "/heart": "heart.html", "/brain": "brain.html",
+                          "/heart": "heart.html",
                           "/home": "home.html", "/day": "day.html",
                           "/settings": "settings.html", "/chat": "chat.html",
                           "/about": "about.html", "/memory": "memory.html",
@@ -862,11 +878,13 @@ class DevserverHttpTest(unittest.TestCase):
         self.assertNotIn(b"<button", body.lower())
         self.assertNotIn("未接入：这一层还没有代码".encode("utf-8"), body)
 
+        # /brain 不再是一张页（2026-11-06 脑页退场）：这条地址回到 JSON 端点，
+        # 断真话——回来的是 JSON 且自报 brain，不再是 HTML 页。
         status, body, ctype = self._get("/brain")
         self.assertEqual(200, status)
-        self.assertIn("text/html", ctype)
-        self.assertIn("脑 · 只读".encode("utf-8"), body)
-        self.assertNotIn("未接入：这一层还没有代码".encode("utf-8"), body)
+        self.assertIn("application/json", ctype, "/brain 该回到 JSON 端点了，不是静态页")
+        self.assertEqual("brain", json.loads(body.decode("utf-8"))["agent"])
+        self.assertNotIn(b"<!doctype html", body.lower(), "/brain 还在发页面字节")
 
         for path in ("/heart", "/brain"):
             for method in ("POST", "PUT", "DELETE"):

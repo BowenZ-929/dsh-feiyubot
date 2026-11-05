@@ -46,6 +46,7 @@ HOME_ROUTES = {
     "/home/anchors": "GET",
     "/home/anchors/append": "POST",
     "/home/consume": "POST",
+    "/home/progress": "POST",
     "/home/write": "POST",
 }
 AGENT = "home"
@@ -59,6 +60,7 @@ _DOORS = ("structure", "whitelist")
 _REFUSED: Dict[str, int] = {
     # 400：入参或路径形状不对
     "ROOM_MISS": 400, "BAD_ARGUMENT": 400, "BODY_NOT_SELF": 400, "BAD_CARD": 400,
+    "BAD_PROGRESS": 400, "PROGRESS_OUT_OF_RANGE": 400,
     "PATH_EMPTY": 400, "PATH_CONTROL_CHAR": 400, "PATH_ABSOLUTE": 400, "PATH_SHAPE": 400,
     "PATH_TRAVERSAL": 400, "PATH_SEGMENT_TOO_LONG": 400, "PATH_TOO_DEEP": 400,
     "CHARS_OVER": 400, "FILES_OVER": 400, "READ_LINES_OVER": 400, "READ_CHARS_OVER": 400,
@@ -138,6 +140,8 @@ def _handle(route: str, params: Mapping[str, str], root: Any,
         return _anchors_append(root, body)
     if route == "/home/consume":
         return _consume(root, body)
+    if route == "/home/progress":
+        return _progress(root, body)
     return _warehouse(root)
 
 
@@ -535,6 +539,41 @@ def _consume(root: Any, body: Optional[Dict[str, Any]]) -> Result:
     return 200, {
         "ok": True, "readonly": False, "agent": AGENT,
         "room": outcome["room"], "left": outcome["left"],
+        "card": outcome["card"], "target": outcome["target"],
+        "audit": _rows([outcome["audit"]])[0],
+    }
+
+
+def _progress(root: Any, body: Optional[Dict[str, Any]]) -> Result:
+    """POST /home/progress：给她手上那件事改进度。卡片本体不动，只追加一行事件 + 一行审计。
+
+    `progress` 给 **null 就是「没有进度」**（把那一栏删掉）——不补 0，也不报错。
+    本层不判权限，门在 access；这里只把拒绝翻成 HTTP。
+    """
+    if not isinstance(body, dict):
+        raise _BadArgument("POST /home/progress 的 body 要是一个对象："
+                           "{\"role\",\"by\",\"room\",\"card_id\" 或 \"name\",\"progress\"}")
+    role = _clean(body.get("role"))
+    by = _clean(body.get("by"))
+    room = _clean(body.get("room"))
+    if role is None:
+        raise _BadArgument("body 要给 role（agent／organ／human）")
+    if by is None:
+        raise _BadArgument("body 要给 by（谁改的，会记进审计）")
+    if room is None:
+        raise _BadArgument("body 要给 room（哪一间）")
+    if "progress" not in body:
+        raise _BadArgument("body 要给 progress（0-100 的整数，或 null 表示没有进度）")
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise _BadArgument("reason 要是字符串")
+    outcome = cards.set_progress(root, role=role, by=by, room=room,
+                                 progress=body.get("progress"),
+                                 card_id=_clean(body.get("card_id")),
+                                 name=_clean(body.get("name")), reason=reason or "")
+    return 200, {
+        "ok": True, "readonly": False, "agent": AGENT,
+        "room": outcome["room"], "progress": outcome["progress"],
         "card": outcome["card"], "target": outcome["target"],
         "audit": _rows([outcome["audit"]])[0],
     }
