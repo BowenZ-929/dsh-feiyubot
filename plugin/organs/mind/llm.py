@@ -16,6 +16,12 @@
 三、失败一律 LLMError(kind, message)，str(exc) == message。kind 分得清才有不同的人话：
 no-key / auth / timeout / rate_limit / empty / http / config。空的 200 响应算 empty，
 不算成功；只有 timeout、rate_limit 与 HTTP >= 500 会重试，次数上限 = retries + 1。
+
+四、温度分两档，两个数与触发条件也全在 data/llm.json 的 temperature_tiers 里：默认档就是
+temperature（0.7），事实档是 temperature_tiers.factual（0.5），什么时候降档由
+temperature_tiers.trigger 那两条判据（recalled_nonempty / reply_budget_at_most）说了算。
+complete(temperature=None) 走配置里的默认值；调用方给了就以它为准（这一轮真用的那个温度）。
+代码里一个温度字面量都没有——改档位只改数据。
 """
 from __future__ import annotations
 
@@ -35,6 +41,10 @@ CONFIG_NAME = "llm.json"         # 模型设置的唯一真源
 POST_PATH = "/chat/completions"  # OpenAI 兼容协议：POST {base_url}/chat/completions
 BODY_CLIP = 200                  # 非 200 的响应体只留 200 字，够认人话，不塞满日志
 RETRY_KINDS = ("timeout", "rate_limit")   # 除了 http >= 500，只有这两类值得再试
+TIER_DEFAULT = "default"                 # 默认档：用 temperature 那一格
+TIER_FACTUAL = "factual"                 # 事实档：用 temperature_tiers.factual 那一格
+TRIGGER_RECALLED = "recalled_nonempty"   # 判据一：这一轮回想非空
+TRIGGER_BUDGET = "reply_budget_at_most"  # 判据二：这一轮回复预算不超过某个数
 
 # transport：注入点。签名 (url, headers, payload, timeout) -> (status: int, body: bytes)；
 # payload 是已经摊开的请求体 dict（默认实现负责 encode，测试直接读 payload["model"]）。
@@ -156,12 +166,56 @@ def load_config(path: Optional[Any] = None) -> Dict[str, Any]:
     raise LLMConfigError("找不到模型配置：%s 与 %s 都不存在" % (live, factory))
 
 
+def resolve_config(config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """这一轮真正要用的配置：没给就读数据文件，给了也照同一套规矩校验一遍。"""
+    return load_config() if config is None else _check_config(config, "传入的 config")
+
+
+def temperature_policy(config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """温度档位表：注入的配置自带 temperature_tiers 就用它，否则读数据文件那一份。
+
+    档位（0.7 / 0.5）与触发条件都只在数据里，本模块不留第二份默认值。
+    """
+    conf = resolve_config(config)
+    if conf.get("temperature_tiers") or config is None:
+        return conf
+    return load_config()
+
+
+def choose_temperature(conf: Mapping[str, Any], *, recalled_nonempty: bool,
+                       reply_budget: int) -> Tuple[str, float]:
+    """按数据里的触发条件挑这一轮的温度：命中取事实档，否则默认档。
+
+    返回 (档位名, 温度)。档位名就是返回体里那个 temperature_tier（"factual" / "default"）。
+    """
+    tiers = conf.get("temperature_tiers")
+    if not tiers:
+        return TIER_DEFAULT, float(conf["temperature"])
+    if _trigger_matches(tiers["trigger"], recalled_nonempty=recalled_nonempty,
+                        reply_budget=reply_budget):
+        return TIER_FACTUAL, float(tiers["factual"])
+    return TIER_DEFAULT, float(conf["temperature"])
+
+
+def _trigger_matches(trigger: Mapping[str, Any], *, recalled_nonempty: bool,
+                     reply_budget: int) -> bool:
+    """触发条件逐条比：两条已知判据（不许有第三条，_check_tiers 已经拦过）。"""
+    want = trigger.get(TRIGGER_RECALLED)
+    if want is not None and bool(want) != bool(recalled_nonempty):
+        return False
+    limit = trigger.get(TRIGGER_BUDGET)
+    if limit is not None and int(reply_budget) > int(limit):
+        return False
+    return True
+
+
 def complete(
     messages: List[Dict[str, Any]],
     *,
     config: Optional[Mapping[str, Any]] = None,
     env: Optional[Mapping[str, str]] = None,
     transport: Optional[Transport] = None,
+    temperature: Optional[float] = None,
 ) -> str:
     """把 messages 送出去，把她的那句话拿回来（OpenAI 兼容协议，urllib 投递）。
 
@@ -169,11 +223,12 @@ def complete(
     config：None 时按 load_config() 读数据文件；给了就当作校验对象直接用（测试换配置）。
     env：None 时读 os.environ；给 dict 就只认这份（测试换 key 来源，不碰本机环境）。
     transport：None 时走 urllib；给函数就完全走它（测试一律注入，绝不发真网络请求）。
+    temperature：None 时用配置里的 temperature（默认档）；给了就用它，照常进 payload。
 
     返回值是 choices[0].message.content 去首尾空白后的文本；空内容抛 empty，绝不返回 ""。
     重试只对 timeout / rate_limit / http >= 500，总尝试次数 = retries + 1。
     """
-    conf = load_config() if config is None else _check_config(config, "传入的 config")
+    conf = resolve_config(config)
     prepared = _check_messages(messages)
     key = read_key(conf, env)
     send: Transport = default_transport if transport is None else transport
@@ -182,7 +237,7 @@ def complete(
     payload = {
         "model": conf["model"],
         "messages": prepared,
-        "temperature": conf["temperature"],
+        "temperature": conf["temperature"] if temperature is None else _temperature(temperature),
         "max_tokens": conf["max_tokens"],
     }
     timeout = conf["timeout_ms"] / 1000.0
@@ -269,7 +324,46 @@ def _check_config(data: Any, where: str) -> Dict[str, Any]:
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
         raise LLMConfigError("模型配置字段 temperature 要数字：%s" % where)
     conf["temperature"] = float(temperature)
+    tiers = data.get("temperature_tiers")
+    conf["temperature_tiers"] = None if tiers is None else _check_tiers(tiers, where)
     return conf
+
+
+def _temperature(value: Any) -> float:
+    """调用方这一轮给的温度：只收数字（bool 不算），别的一律 config 错。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LLMConfigError("这一轮的温度要数字：%r" % (value,))
+    return float(value)
+
+
+def _check_tiers(data: Any, where: str) -> Dict[str, Any]:
+    """温度分档表：{factual: 数, trigger: {两条已知判据}}。
+
+    trigger 里出现第三条判据就报错，不静默忽略——数据里写了而代码不认，等于这一档永远不生效。
+    """
+    if not isinstance(data, dict):
+        raise LLMConfigError("temperature_tiers 要一份对象：%s" % where)
+    factual = data.get("factual")
+    if isinstance(factual, bool) or not isinstance(factual, (int, float)):
+        raise LLMConfigError("temperature_tiers.factual 要数字：%s" % where)
+    trigger = data.get("trigger")
+    if not isinstance(trigger, dict):
+        raise LLMConfigError("temperature_tiers.trigger 要一份对象：%s" % where)
+    clean: Dict[str, Any] = {}
+    for key, value in trigger.items():
+        if key == TRIGGER_RECALLED:
+            if not isinstance(value, bool):
+                raise LLMConfigError("temperature_tiers.trigger.%s 要 true/false：%s"
+                                     % (key, where))
+            clean[key] = value
+        elif key == TRIGGER_BUDGET:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise LLMConfigError("temperature_tiers.trigger.%s 要正整数：%s" % (key, where))
+            clean[key] = value
+        else:
+            raise LLMConfigError("temperature_tiers.trigger 里有代码不认识的判据 %r：%s"
+                                 % (key, where))
+    return {"factual": float(factual), "trigger": clean}
 
 
 def _check_messages(messages: Any) -> List[Dict[str, str]]:

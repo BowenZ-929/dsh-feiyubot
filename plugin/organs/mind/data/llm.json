@@ -5,6 +5,13 @@
   "timeout_ms": 30000,
   "retries": 2,
   "key_env": "QQAGENT_LLM_KEY",
-  "temperature": 0.8,
+  "temperature": 0.7,
+  "temperature_tiers": {
+    "factual": 0.5,
+    "trigger": {
+      "recalled_nonempty": true,
+      "reply_budget_at_most": 90
+    }
+  },
   "max_tokens": 400
 }

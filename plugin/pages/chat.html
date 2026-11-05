@@ -147,6 +147,14 @@
       <dl class="kv">
         <dt>回复上限</dt><dd id="assembly-budget-text">还没说话</dd>
       </dl>
+      <h3>这一轮的温度、连续性与锚句</h3>
+      <p class="owner">三个读数都只回显：温度档位是程序按数据选的，最近几轮是程序从账上读的，
+        锚句是人写在家的仓库里的。</p>
+      <dl class="kv">
+        <dt>温度</dt><dd id="llm-temperature">还没说话</dd>
+        <dt>连续性</dt><dd id="continuity-line">还没说话</dd>
+        <dt>锚句</dt><dd id="anchors-line">还没说话</dd>
+      </dl>
     </section>
   </aside>
 </main>
@@ -228,16 +236,29 @@
 
   function bubble(cls, text) { return node("div", "bubble " + cls, text); }
 
-  // 她的话按 chunks 分条：一泡一个气泡，间隔写在气泡角上（gap_before 秒 / send_at 时刻）。
+  // send_at 有两种真身：核里嘴的 pace.fill 给的是「从这批开始算起第几秒」（float），
+  // 别处也可能给时刻字符串。按类型分开渲染，绝不把数字当时刻直接拼出来。
+  function stampText(sendAt, index) {
+    if (typeof sendAt === "number") {
+      return index === 0 ? "首发" : "第 " + sendAt.toFixed(1) + " 秒";
+    }
+    if (typeof sendAt === "string" && sendAt !== "") { return sendAt; }
+    return "时间没带上";
+  }
+
+  // 她的话按 chunks 分条：一泡一个气泡，间隔（gap_before 秒）与发车点写在气泡角上。
   function renderChunks(chunks) {
     var thread = el("thread");
     for (var i = 0; i < chunks.length; i += 1) {
       var chunk = chunks[i];
       var wrap = bubble("her", chunk.text);
       var gap = chunk.gap_before;
-      var gapText = (typeof gap === "number") ? "+" + gap.toFixed(1) + "s" : "同一泡";
-      var stamp = chunk.send_at ? String(chunk.send_at) : "时间没带上";
-      wrap.appendChild(node("div", "chunk-meta", i === 0 ? stamp : gapText + " · " + stamp));
+      var parts = [];
+      if (i > 0) {
+        parts.push((typeof gap === "number") ? "+" + gap.toFixed(1) + "s" : "同一泡");
+      }
+      parts.push(stampText(chunk.send_at, i));
+      wrap.appendChild(node("div", "chunk-meta", parts.join(" · ")));
       thread.appendChild(wrap);
     }
     if (!chunks.length) { thread.appendChild(bubble("her", "（这次没有分泡的回复）")); }
@@ -299,7 +320,10 @@
   }
 
   // 装配结果：逐段显示中文名与 chars/cap（超了标「超限」）；不认识的 key 照实显示，不静默丢。
-  var SECTION_TEXT = { soul: "魂六件", memory: "脑装包", heart: "心读数", mouth: "嘴语气" };
+  var SECTION_TEXT = { soul: "魂六件", anchors: "锚句", recent: "最近几轮",
+                       memory: "脑装包", heart: "心读数", mouth: "嘴语气" };
+  // 温度档位词：后端给 factual / default，这里只翻成人话，认不出就原样显示。
+  var TIER_TEXT = { factual: "事实档", "default": "默认档" };
 
   function sectionText(key) {
     var name = SECTION_TEXT[key];
@@ -344,6 +368,56 @@
       : String(tier) + " · 最多 " + ((chars === undefined || chars === null) ? "没给字数" : String(chars) + " 字");
   }
 
+  // 这一轮真用的温度与档位：「温度 0.5 · 事实档」；缺字段时如实写「没给」，不留白。
+  function temperatureText(llm) {
+    var conf = llm || {};
+    var temp = conf.temperature;
+    var tier = conf.temperature_tier;
+    var words = TIER_TEXT[tier];
+    if (!words) {
+      words = (tier === undefined || tier === null || tier === "") ? "没给档位" : String(tier);
+    }
+    if (typeof temp !== "number") {
+      return (temp === undefined || temp === null || temp === "")
+        ? "没给温度 · " + words
+        : String(temp) + " · " + words;
+    }
+    return "温度 " + temp.toFixed(1) + " · " + words;
+  }
+
+  // 连续性：「最近 12 轮 / 更早还有 3 轮没有加载」；一轮都没省就写「没有更早的对话」。
+  function continuityText(continuity) {
+    var conf = continuity || {};
+    var loaded = conf.turns_loaded;
+    var head = (loaded === undefined || loaded === null)
+      ? "没给轮数"
+      : "最近 " + String(loaded) + " 轮";
+    var notice = conf.notice;
+    var tail = (typeof notice === "string" && notice !== "") ? notice : "没有更早的对话";
+    return head + " / " + tail;
+  }
+
+  // 锚句：配了就写清几个字，没配就照后端那句话写「未配锚句」——不许留白。
+  function anchorsText(anchors) {
+    var conf = anchors || {};
+    if (conf.configured === true) {
+      var chars = conf.chars;
+      return "已配（" + ((chars === undefined || chars === null)
+        ? "没给字数"
+        : String(chars) + " 字") + "）";
+    }
+    if (conf.configured === false) {
+      return conf.note ? String(conf.note) : "未配锚句";
+    }
+    return "没给";
+  }
+
+  function renderReadouts(data) {
+    el("llm-temperature").textContent = temperatureText(data.llm);
+    el("continuity-line").textContent = continuityText(data.continuity);
+    el("anchors-line").textContent = anchorsText(data.anchors);
+  }
+
   function send(text) {
     if (busy) { return; }
     var said = String(text === undefined || text === null ? "" : text).trim();
@@ -369,6 +443,7 @@
       renderHeart(data.heart || {});
       renderGate(data.gate || {});
       renderAssembly(data.assembly || {});
+      renderReadouts(data);
     }, function () {
       setBusy(false);
       showError("http", "连不上核：devserver 起了吗？");

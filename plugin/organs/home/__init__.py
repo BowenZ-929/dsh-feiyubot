@@ -8,6 +8,7 @@ audit 管只增的账，cards 管索引卡，residents 管抽屉／借阅条／�
 from __future__ import annotations
 
 from . import access
+from . import anchors
 from . import audit
 from . import cards
 from . import residents
@@ -15,6 +16,7 @@ from . import rooms
 from . import store
 from .access import (AccessDenied, Whitelist, check_path_shape, check_read, check_write,
                      load_whitelist)
+from .anchors import AnchorError, append_anchors, latest_by_scene, read_all as read_anchors
 from .audit import AuditShrunk, Entry, append_entry, read_tail, verify
 from .cards import CardError, append_cards, fold, list_room, read_item
 from .residents import (borrow_ledger, read_drawer, read_learned, register_artwork,
@@ -25,7 +27,8 @@ from .rooms import (DEFAULT_WRITABLE, READONLY_ROOMS, ROOM_NAMES, ROOMS, Room, R
 from .store import atomic_write_text, append_line, encode_name, home_root, sha256_file
 
 __all__ = [
-    "access", "audit", "cards", "residents", "rooms", "store",
+    "access", "anchors", "audit", "cards", "residents", "rooms", "store",
+    "AnchorError", "append_anchors", "latest_by_scene", "read_anchors",
     "AccessDenied", "Whitelist", "check_path_shape", "check_read", "check_write",
     "load_whitelist",
     "AuditShrunk", "Entry", "append_entry", "read_tail", "verify",

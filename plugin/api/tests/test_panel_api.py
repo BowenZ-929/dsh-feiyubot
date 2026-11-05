@@ -68,6 +68,7 @@ REQUIRED_ROUTES = (
     ("GET", "/home/rooms"), ("GET", "/home/access"), ("GET", "/home/list"),
     ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
     ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
+    ("GET", "/home/anchors"), ("POST", "/home/anchors/append"),
     ("POST", "/home/write"),
     # 核自报身份（2026-11-05）：跑的是哪一版、什么时候起的、源码有没有在它脚下被改过。
     ("GET", "/healthz"),
@@ -343,12 +344,12 @@ class PanelSourceTest(unittest.TestCase):
         rest = set(api.ROUTES) - soul - brain - family - heart - day - chat
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
-        self.assertEqual({"/home/write"},
+        self.assertEqual({"/home/write", "/home/anchors/append"},
                          {path for path in family if api.ROUTES[path] == "POST"},
-                         "家只有一条写路由：POST /home/write")
+                         "家只有两条写路由：POST /home/write 与 POST /home/anchors/append")
         self.assertEqual({"GET"},
                          {api.ROUTES[path] for path in family} - {"POST"},
-                         "家其余九条只读")
+                         "家其余十条只读")
         mouth = set(core.mouth_api.MOUTH_ROUTES)
         version_set = set(core.version_api.VERSION_ROUTES)
         self.assertEqual(set(core.heart_api.HEART_ROUTES), heart,

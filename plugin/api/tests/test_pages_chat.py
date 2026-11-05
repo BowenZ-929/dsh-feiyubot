@@ -13,6 +13,9 @@ POST /chat 端到端画出来的页面。所以判据钉在四件事上：
 4. **心只给档位词**：mood.tier / voice.tone / engage.state / gate.decision /
    hit.clause_id·reason 都在页上；renderHeart 里没有任何数值换算（toFixed / Number /
    Math / parseFloat），整页也不出现 mood.now、mood.value、energy 这类读数。
+5. **三个读数也看得见**：本次温度与档位（「温度 0.5 · 事实档」）、连续性（「最近 12 轮 /
+   更早还有 N 轮没有加载」，N=0 时是「没有更早的对话」）、锚句（已配（N 字）/ 未配锚句）
+   都落在页上；三格各用一次 textContent，缺字段时如实写「没给」，不留白。
 
 **这是静态回归测试，不是审计。** 它比对源码里的页面与路由表；活体验收（真 devserver +
 真模型）的原始输出在交付回报里。断言 api.ROUTES["/chat"] == "POST" 的那条依赖并行
@@ -135,6 +138,28 @@ class ChunksBecomeBubbles(unittest.TestCase):
         self.assertIn("gap.toFixed(1)", text, "间隔要显示成 +1.2s 这种可读形式")
         self.assertIn('bubble("her"', text, "每一泡一个气泡")
 
+    def test_send_at_number_and_string_take_different_branches(self):
+        """核里嘴给的 send_at 是「从这批开始算起第几秒」（float），别处可能给时刻字符串。
+
+        数字要渲染成「首发」/「第 3.0 秒」，字符串原样显示，缺失写一句——三条分支都得在，
+        否则第一泡会显示 "0"、第二泡 "3.0s · 3"，看着像坏掉的时间戳。
+        """
+        text = _text()
+        self.assertEqual(text.count("function stampText"), 1, "send_at 要由一处按类型渲染")
+        self.assertIn("stampText(chunk.send_at, i)", text, "分泡时把 send_at 交给类型判断")
+        self.assertIn('typeof sendAt === "number"', text, "缺数字分支（核里给的是第几秒）")
+        self.assertIn('typeof sendAt === "string"', text, "缺字符串分支（别处可能给时刻）")
+        self.assertIn("首发", text, "第一泡按秒数渲染要写「首发」")
+        self.assertIn('"第 "', text, "后续泡按秒数渲染写「第 3.0 秒」")
+        self.assertIn("时间没带上", text, "send_at 缺失时要写一句，不能留空")
+
+    def test_seconds_are_never_glued_as_a_clock_string(self):
+        """老写法（gapText + " · " + String(send_at)）会把秒数当时刻拼出来：钉它不许回来。"""
+        text = _text()
+        self.assertNotIn('gapText + " · " + stamp', text, "把秒数当时刻直接拼的老写法回来了")
+        self.assertNotIn("var stamp = chunk.send_at", text, "先 String() 再接时刻的老写法回来了")
+        self.assertIn('parts.join(" · ")', text, "间隔与发车点用数组拼，类型已经分过")
+
     def test_renders_only_what_the_contract_sends(self):
         text = _text()
         for key in ("data.chunks", "data.recalled", "data.heart", "data.gate"):
@@ -231,6 +256,60 @@ class AssemblyIsVisible(unittest.TestCase):
         self.assertIn("budget.tier", text, "回复预算要显示档位")
         self.assertIn("budget.chars", text, "回复预算要显示字数上限")
         self.assertIn("没给档位", text, "缺档位时要写一句，不许显示空白")
+
+
+class ReadoutsAreVisible(unittest.TestCase):
+    """温度 / 连续性 / 锚句三个读数也要能被看见：字面在、分支在、缺字段时不空白。
+
+    判据不只看标题在：temperature_tier 与 temperature 真的被读到，turns_loaded 与 notice
+    分两段拼，anchors 的 configured 真假两条路都走到，三个读数各用一次 textContent。
+    """
+
+    def test_block_sits_next_to_the_assembly_record(self):
+        text = _text()
+        self.assertIn("这一轮的温度、连续性与锚句", text, "缺这块读数的标题")
+        self.assertLess(text.index("这次怎么装的"), text.index("这一轮的温度、连续性与锚句"),
+                        "读数块该挨着「这次怎么装的」")
+        for box in ("llm-temperature", "continuity-line", "anchors-line"):
+            self.assertIn('id="%s"' % box, text, "缺读数格子：%s" % box)
+
+    def test_temperature_and_tier_reach_the_page(self):
+        body = _between(_text(), "function temperatureText", "function continuityText")
+        self.assertIn("conf.temperature", body, "温度要从回包的 llm 里读")
+        self.assertIn("temperature_tier", body, "档位要从回包的 llm 里读")
+        self.assertIn('"温度 "', body, "读数的形状是「温度 0.5 · 事实档」")
+        self.assertIn("没给温度", body, "缺温度时要写一句，不许空白")
+        self.assertIn("没给档位", body, "缺档位时要写一句，不许空白")
+        text = _text()
+        for words in ("事实档", "默认档"):
+            self.assertIn(words, text, "档位中文名缺：%s" % words)
+
+    def test_continuity_line_says_loaded_and_omitted(self):
+        body = _between(_text(), "function continuityText", "function anchorsText")
+        self.assertIn("turns_loaded", body, "要显示最近几轮加载了几条")
+        self.assertIn('"最近 "', body, "前半句是「最近 N 轮」")
+        self.assertIn("conf.notice", body, "后半句是后端给的 notice 原文")
+        self.assertIn("没有更早的对话", body, "notice 是空串（omitted 为 0）时要写这一句")
+        self.assertIn("没给轮数", body, "连轮数都没有时也要写一句")
+
+    def test_anchors_line_has_both_states(self):
+        body = _between(_text(), "function anchorsText", "function renderReadouts")
+        self.assertIn("conf.configured === true", body, "缺「已配」这一支")
+        self.assertIn("已配（", body, "配了要写「已配（N 字）」")
+        self.assertIn("conf.configured === false", body, "缺「未配」这一支")
+        self.assertIn("未配锚句", body, "没配要照后端那句话写「未配锚句」")
+        self.assertIn("没给", body, "整个字段都没有时如实写「没给」")
+
+    def test_three_readouts_are_written_with_textcontent_only(self):
+        body = _between(_text(), "function renderReadouts", "function send")
+        self.assertEqual(3, body.count("textContent"), "三个读数各自一次 textContent：%r" % (body,))
+        self.assertNotIn("innerHTML", body)
+
+    def test_readouts_come_from_the_reply_body(self):
+        text = _text()
+        self.assertIn("renderReadouts(data)", text, "回包里那三块没交给渲染")
+        for key in ("data.llm", "data.continuity", "data.anchors"):
+            self.assertIn(key, text, "回包里的 %s 没被读到" % key)
 
 
 class ThreeStatesArePresent(unittest.TestCase):

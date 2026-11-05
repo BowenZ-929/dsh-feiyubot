@@ -251,6 +251,70 @@ class SuccessTest(LLMTest):
         self.assertEqual(call["timeout"], 30.0)        # timeout_ms 30000 -> 30 秒
 
 
+class TemperatureTest(LLMTest):
+    """温度的三种来路：没给走配置默认值、给数字就覆盖、给了坏值当场 config 错。"""
+
+    def test_default_temperature_comes_from_the_config(self):
+        keep = FakeTransport(ok("在"))
+        complete(MESSAGES, config=conf(temperature=0.7), env={"QQAGENT_LLM_KEY": "k"},
+                 transport=keep)
+        self.assertEqual(0.7, keep.calls[0]["payload"]["temperature"])
+
+    def test_explicit_temperature_wins_and_still_goes_into_the_payload(self):
+        keep = FakeTransport(ok("在"))
+        complete(MESSAGES, config=conf(temperature=0.7), env={"QQAGENT_LLM_KEY": "k"},
+                 transport=keep, temperature=0.5)
+        self.assertEqual(0.5, keep.calls[0]["payload"]["temperature"])
+
+    def test_bad_temperature_is_a_config_error(self):
+        with self.assertRaises(LLMConfigError):
+            complete(MESSAGES, config=conf(), env={"QQAGENT_LLM_KEY": "k"},
+                     transport=FakeTransport(), temperature="冷一点")
+
+    def test_factory_temperature_is_the_default_tier(self):
+        """不传 temperature 时，出厂数据那一格（0.7）就是默认档。"""
+        keep = FakeTransport(ok("在"))
+        with mock.patch.dict(llm.os.environ, {}, clear=True):
+            complete(MESSAGES, env={"QQAGENT_LLM_KEY": "k"}, transport=keep)
+        self.assertEqual(0.7, keep.calls[0]["payload"]["temperature"])
+
+    def test_tier_choice_follows_the_data_trigger(self):
+        """两条判据都在数据里：回想非空 + 预算不超 90 才降成事实档。"""
+        with mock.patch.dict(llm.os.environ, {}, clear=True):
+            policy = llm.temperature_policy()
+        self.assertEqual(("factual", 0.5), llm.choose_temperature(
+            policy, recalled_nonempty=True, reply_budget=90))
+        self.assertEqual(("default", 0.7), llm.choose_temperature(
+            policy, recalled_nonempty=True, reply_budget=220))
+        self.assertEqual(("default", 0.7), llm.choose_temperature(
+            policy, recalled_nonempty=False, reply_budget=40))
+
+    def test_injected_config_with_its_own_tiers_is_the_policy(self):
+        """注入的配置自带 temperature_tiers 就用它——不必去读盘上的那一份。"""
+        mine = conf(temperature=0.9)
+        mine["temperature_tiers"] = {"factual": 0.1,
+                                     "trigger": {"recalled_nonempty": True,
+                                                 "reply_budget_at_most": 5}}
+        self.assertEqual(0.1, llm.temperature_policy(mine)["temperature_tiers"]["factual"])
+        self.assertEqual(("factual", 0.1), llm.choose_temperature(
+            llm.temperature_policy(mine), recalled_nonempty=True, reply_budget=5))
+
+    def test_unknown_trigger_key_is_a_config_error(self):
+        """数据里写了代码不认的判据就当场报：静默忽略等于这一档永远不生效。"""
+        data = conf()
+        data["temperature_tiers"] = {"factual": 0.5,
+                                     "trigger": {"moon_is_full": True}}
+        with self.assertRaises(LLMConfigError) as caught:
+            llm.temperature_policy(data)
+        self.assertIn("moon_is_full", caught.exception.message)
+
+    def test_factual_is_not_a_boolean(self):
+        data = conf()
+        data["temperature_tiers"] = {"factual": True, "trigger": {"recalled_nonempty": True}}
+        with self.assertRaises(LLMConfigError):
+            llm.temperature_policy(data)
+
+
 class MessageShapeTest(LLMTest):
     def test_empty_messages_is_config_error(self):
         with self.assertRaises(LLMError) as caught:
@@ -280,8 +344,16 @@ class ConfigFileTest(LLMTest):
         self.assertEqual(factory["timeout_ms"], 30000)
         self.assertEqual(factory["retries"], 2)
         self.assertEqual(factory["key_env"], "QQAGENT_LLM_KEY")
-        self.assertEqual(factory["temperature"], 0.8)
+        self.assertEqual(factory["temperature"], 0.7)
         self.assertEqual(factory["max_tokens"], 400)
+
+    def test_factory_file_carries_the_two_temperature_tiers(self):
+        """两个温度（0.7 / 0.5）与触发条件都只在数据里：这一条钉的是数据，不是代码常量。"""
+        with mock.patch.dict(llm.os.environ, {}, clear=True):
+            tiers = load_config()["temperature_tiers"]
+        self.assertAlmostEqual(0.5, tiers["factual"])
+        self.assertEqual({"recalled_nonempty": True, "reply_budget_at_most": 90},
+                         tiers["trigger"])
 
     def test_live_file_overrides_factory(self):
         live = self.write(self.tmp / "live" / "mind" / "llm.json",

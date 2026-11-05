@@ -1,4 +1,4 @@
-"""家的十条路由：把十间房、存取接口、只增的审计与三样住户接到 HTTP 上。
+"""家的十二条路由：把十间房、存取接口、只增的审计、三样住户与台词卡接到 HTTP 上。
 
 形状照 api/mouth.py：一张 HOME_ROUTES 表 + dispatch(route, params, store, brain, body=None)。
 store 是**家的根**（一个路径）；本层的每一项都要读盘，所以它没载入时一律回 200 +
@@ -28,7 +28,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from organs.home import access, audit, cards, residents, rooms
+from organs.home import access, anchors, audit, cards, residents, rooms
 from organs.home import store as home_store
 
 from .core import Result
@@ -43,6 +43,8 @@ HOME_ROUTES = {
     "/home/drawer": "GET",
     "/home/archive/borrow": "GET",
     "/home/warehouse": "GET",
+    "/home/anchors": "GET",
+    "/home/anchors/append": "POST",
     "/home/write": "POST",
 }
 AGENT = "home"
@@ -55,7 +57,7 @@ _DOORS = ("structure", "whitelist")
 # 库里的拒绝码 → HTTP。认不得的算 500：宁可报错，也不把「读不出来」说成 4xx 的入参问题。
 _REFUSED: Dict[str, int] = {
     # 400：入参或路径形状不对
-    "ROOM_MISS": 400, "BAD_ARGUMENT": 400,
+    "ROOM_MISS": 400, "BAD_ARGUMENT": 400, "BODY_NOT_SELF": 400,
     "PATH_EMPTY": 400, "PATH_CONTROL_CHAR": 400, "PATH_ABSOLUTE": 400, "PATH_SHAPE": 400,
     "PATH_TRAVERSAL": 400, "PATH_SEGMENT_TOO_LONG": 400, "PATH_TOO_DEEP": 400,
     "CHARS_OVER": 400, "FILES_OVER": 400, "READ_LINES_OVER": 400, "READ_CHARS_OVER": 400,
@@ -101,6 +103,8 @@ def dispatch(route: str, params: Mapping[str, str], store: Any, brain: Any,
         return _failed(exc.code, exc.message, exc.detail)
     except cards.CardError as exc:
         return _failed(exc.code, exc.message, exc.detail)
+    except anchors.AnchorError as exc:
+        return _failed(exc.code, exc.message, exc.detail)
     except home_store.StoreError as exc:
         return _failed(exc.code, str(exc.detail), {"code": exc.code})
     except (OSError, ValueError) as exc:
@@ -127,6 +131,10 @@ def _handle(route: str, params: Mapping[str, str], root: Any,
         return _drawer(root)
     if route == "/home/archive/borrow":
         return _borrow(root)
+    if route == "/home/anchors":
+        return _anchors_list(root, params)
+    if route == "/home/anchors/append":
+        return _anchors_append(root, body)
     return _warehouse(root)
 
 
@@ -150,6 +158,7 @@ def _rooms_table(root: Any) -> Result:
             "writable_by_structure": room.writable_default,
             "writable_now": _now_writable(room, whitelist),
             "count": count,
+            "anchors": anchors.count(root, room.name),
             "cap": cap,
             "headroom": None if cap is None else cap - count,
         })
@@ -472,3 +481,46 @@ def _unconnected(route: str, why: str, wrote: bool = False) -> Result:
         payload["wrote"] = 0
         payload["message"] += "；这一批一张卡都没写，也没有审计行"
     return 200, payload
+
+def _anchors_list(root: Any, params: Mapping[str, str]) -> Result:
+    """GET /home/anchors：仓库里的台词卡，按 scene 取最新一条。
+
+    读侧不看白名单（她能写哪几间与她或别人能读什么无关）；文件不在不是错误，
+    如实分报 file_exists 与 lines，不把「还没人给她定台词」说成「0 条台词」。
+    """
+    offset = max(_int_param(params, "offset", 0), 0)
+    limit = min(max(_int_param(params, "limit", 200), 1), access.READ_MAX_LINES)
+    got = anchors.read_all(root, offset=offset, limit=limit)
+    return 200, {
+        "ok": True, "readonly": True, "agent": AGENT,
+        "room": got["room"], "file": got["file"], "file_exists": got["file_exists"],
+        "total": got["total"], "lines": got["lines"], "bad": got["bad"],
+        "truncated": got["truncated"], "anchors": got["anchors"],
+    }
+
+
+def _anchors_append(root: Any, body: Optional[Dict[str, Any]]) -> Result:
+    """POST /home/anchors/append：登记一张以上的台词卡。只追加，改一句就追加一行新的。
+
+    **本层不判一次写权**：门与五道上限全在 access（房间固定是仓库），
+    这里只把 AnchorError 翻成 HTTP，不许兜底成允许。
+    """
+    if not isinstance(body, dict):
+        raise _BadArgument("POST /home/anchors/append 的 body 要是一个对象："
+                           "{\"role\",\"by\",\"anchors\":[{\"scene\",\"say\",\"body\"}]}")
+    role = _clean(body.get("role"))
+    by = _clean(body.get("by"))
+    batch = body.get("anchors")
+    if role is None:
+        raise _BadArgument("body 要给 role（agent／organ／human）")
+    if by is None:
+        raise _BadArgument("body 要给 by（谁定的，会记进审计）")
+    if not isinstance(batch, list) or not batch:
+        raise _BadArgument("body 要给 anchors（一张以上；空批等于什么都没登记）")
+    outcome = anchors.append_anchors(root, role=role, by=by, anchors=batch)
+    return 200, {
+        "ok": True, "readonly": False, "agent": AGENT,
+        "room": outcome["room"], "file": outcome["file"],
+        "count": outcome["count"], "anchors": outcome["anchors"],
+        "audit": _rows(outcome["audit"]),
+    }

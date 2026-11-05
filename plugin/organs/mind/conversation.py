@@ -3,16 +3,18 @@
 这是**全仓唯一的装配点**：QQ 通道将来直接调 answer()，不再自己拼第二遍。装配的规矩
 一个数都不写在本文件里，全在 organs/mind/data/assembly.json：
 
-  order      四段拼装的先后（soul / memory / heart / mouth）
+  order      各段拼装的先后（soul / anchors / recent / memory / heart / mouth）
   sections   {key: {"label": 段落标题, "cap": 字数上限}}
   prompt     system / user 两段模板（占位符见下）
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
+  recent     turns（读几轮）/ cap（每侧截多少字）/ notice（「更早还有 N 轮」那句模板）
+  anchors    {"label", "cap", "room", "name"}：锚句从家·哪一间房的哪一张卡读
 读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先（存在才读），否则读
 出厂 organs/mind/data/assembly.json。
 
 prompt 的两段模板各认几个占位符（花括号，装配时逐键**纯替换**，不做 format——
 数据里多一个花括号不该把这一轮炸掉）：
-  system  {sections}          四段拼好的正文，每段带 sections[key].label 当标题
+  system  {sections}          各段拼好的正文，每段带 sections[key].label 当标题
           {reply_budget}      这一档的回复字数上限（来自 reply.budget_by_tier）
           {reply_instruction} 回复口径那句话（来自 reply.instruction）
   user    {text}              本人这一次的原话
@@ -23,6 +25,9 @@ prompt 的两段模板各认几个占位符（花括号，装配时逐键**纯�
 
 各段只搬已有器官的读数，一个判据都不自己造：
   soul    store.render()（魂六件）
+  anchors 家·仓库里那张锚句卡（organs.home.cards.read_item 的公开 API，不绕过家的 access 闸）；
+          没配 / 卡不在 / 读不出来一律写「未配锚句」，不静默跳过——那一格空着她会以为没有过
+  recent  organs/mind/recent.py：最近几轮原文；omitted > 0 时把「更早还有 N 轮」放在段尾
   memory  brain.recall(query=text, who=who or None)：既进提示词，也原样进返回体
           recalled[]（页面要显示「想起了什么 + 证据指针」）
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
@@ -32,6 +37,10 @@ prompt 的两段模板各认几个占位符（花括号，装配时逐键**纯�
 
 坏卡不是崩溃：mood 照读，effective_state 抛 CardError 就降级成只要 mood 那一块——
 与 api/heart.py 的既有口径同一条（面板能显示「拒载」，这一轮照旧说得出话）。
+
+温度分档也在这里定：档位（默认 / 事实）与触发条件全在 data/llm.json 的 temperature_tiers，
+本轮 recalled 非空且回复预算不超过阈值就降成事实档，实际用的那个温度传进 llm.complete，
+并原样进返回体的 llm.temperature / llm.temperature_tier。
 
 LLMError 不在这里翻译：原样上抛，由 api/chat.py 按 kind 翻成状态码与人话。
 """
@@ -44,14 +53,19 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .. import paths
 from ..brain import model as brain_model
+from ..home import access as home_access
+from ..home import cards
+from ..home import store as home_store
 from ..heart import card as card_module
 from ..heart import effective as effective_module
 from ..heart import energy as energy_module
 from ..heart import engage as engage_module
+from ..heart import intent as intent_module
 from ..heart import model as heart_model
 from ..heart import mood as mood_module
 from ..heart import offset as offset_module
 from ..heart import ports as ports_module
+from ..heart import sleep as sleep_module
 from ..mouth import address as address_module
 from ..mouth import drops as drops_module
 from ..mouth import gate as gate_module
@@ -60,6 +74,7 @@ from ..mouth import tone as tone_module
 from ..mouth import warehouse
 from ..mouth.split import split as split_text
 from . import llm
+from . import recent
 
 ASSEMBLY_NAME = "assembly.json"          # 装配说明书的文件名（实盘 / 出厂各一份）
 HUMAN_WHO = "人"                          # 没给 who 时，人的原话记在谁名下
@@ -67,6 +82,9 @@ DEFAULT_WHO = "主人"                      # 门的读数要一个名字：没�
 PENDING_WORD = "待定"                     # 待定轴（耐心 / 记性）没有档位词，照 effective.render_text 的说法
 REPLY_KEY = "reply"                       # reply_budget.key：这笔预算出自 assembly.json 的哪一节
 NO_MEMORY = "这次没想起什么。"
+NO_TURNS = "还没有更早的对话"                # 盘上一条历史都没有时，recent 段不写空白
+ANCHORS_MISSING = "未配锚句"                  # 没配 / 卡不在 / 读不出来，三态同一句话
+ANCHORS_HINT = "锚句由人写，程序不替她造。"
 SEED_SEP = "|"                            # 节奏的种子：who 与时刻拼起来，同一轮两次调用得到同一组间隔
 
 
@@ -154,22 +172,66 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         "prompt": {"system": prompt["system"], "user": prompt["user"]},
         "reply": {"budget_by_tier": clean_budgets, "default": default,
                   "instruction": instruction},
+        "recent": _check_recent(data.get("recent"), where),
+        "anchors": _check_anchors(data.get("anchors"), where),
     }
+
+
+def _check_recent(spec: Any, where: str) -> Dict[str, Any]:
+    """最近几轮那一段的三条规矩：读几轮、每侧截多少字、段尾那句模板。"""
+    if not isinstance(spec, dict):
+        raise ValueError("装配说明缺 recent（读几轮 / 截多少字 / notice 模板）：%s" % where)
+    clean: Dict[str, Any] = {}
+    for name in ("turns", "cap"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("recent.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    template = spec.get("notice")
+    if not isinstance(template, str) or not template.strip():
+        raise ValueError("recent.notice 要一句非空的模板：%s" % where)
+    if recent.NOTE_SLOT not in template:
+        raise ValueError("recent.notice 里缺 %s（不写占位符，那句话就永远是同一句假话）：%s"
+                         % (recent.NOTE_SLOT, where))
+    clean["notice"] = template
+    return clean
+
+
+def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
+    """锚句那一格：**可以没有**（没有就是「未配锚句」），写了就要写全。"""
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError("anchors 要一份对象（label / cap / room / name）：%s" % where)
+    clean: Dict[str, Any] = {}
+    for name in ("label", "room", "name"):
+        value = spec.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("anchors.%s 要一段非空的字：%s" % (name, where))
+        clean[name] = value.strip()
+    cap = spec.get("cap")
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        raise ValueError("anchors.cap 要正整数：%s" % where)
+    clean["cap"] = cap
+    return clean
 
 
 # —— 唯一入口 ————————————————————————————————————
 
 
 def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
-           heart_root: Any = None, now: Optional[str] = None,
+           heart_root: Any = None, recent_root: Any = None, now: Optional[str] = None,
            transport: Optional[Any] = None, config: Optional[Mapping[str, Any]] = None,
-           env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+           env: Optional[Mapping[str, str]] = None,
+           assembly: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """装配一轮并说出口：返回页面要的那份成功体；模型这边的失败原样上抛（由 api 翻译）。
 
     store / brain 是底线：没有魂就没有底色，没有记忆就不开口——这里当场报，不假装说了一轮。
     now 给了就按它算（测试把时间往前推靠它），没给就用器官自己的钟（brain.model.now_iso）。
     transport / config / env 三个注入点原样转给 llm.complete：测试一律注入假 transport，
     绝不发真网络请求；本文件不写死任何模型名、地址与 key。
+    recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
+    assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
 
     返回（键名对外冻结，pages/chat.html 照它渲染）：
       ok / reply / chunks[{text,gap_before,send_at}] / recalled[{id,text,source,
@@ -177,6 +239,9 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
       voice{tone,direction,bans}, axes{轴: 档位词}, engage{state,reason}}
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
+      continuity{turns_loaded, omitted, notice} /
+      llm{model, temperature, temperature_tier} /
+      anchors{configured, note|chars,room,name} /
       memory{wrote[{id,who}]}
     """
     if store is None:
@@ -186,18 +251,25 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     said = str(text or "").strip()
     if not said:
         raise ValueError("text 不能为空：没有一句话就没有这一轮")
-    conf = load_assembly()
+    conf = _check_assembly(assembly, "传入的 assembly") if assembly is not None else load_assembly()
     at = now if isinstance(now, str) and now else brain_model.now_iso()
 
     # 1) 魂与脑：先回想（这一轮该想起什么，要在写提示词之前定下来）
     soul_text = store.render()
     recalled, memory_text = _recall(brain, said, who)
 
+    # 1.5) 最近几轮与锚句：连续性两个读数都在写提示词之前定下来
+    loaded = recent.load(root=recent_root, turns=conf["recent"]["turns"])
+    omitted = int(loaded.get("omitted") or 0)
+    note = recent.notice(omitted, conf["recent"]["notice"])
+    recent_text = _recent_text(loaded.get("turns") or [], note, conf)
+    anchor_text, anchor_read = _anchor(conf)
+
     # 2) 心：唯一合成点 + 一次判决；坏卡降级成只要 mood 那一块
     mood_read = mood_module.read(heart_root, at)
     offsets = offset_module.overview(root=heart_root, now=at)
     eff = _effective(heart_root, at, mood_read, offsets)
-    energy_read = energy_module.read(heart_root, at)
+    energy_read = energy_module.read(heart_root, at, **_sleep_terms(heart_root, at))
     judgement = _engage(heart_root, at, eff, energy_read, brain, who)
     heart_words = _heart_words(eff, judgement)
     heart_text = _heart_text(eff, heart_words)
@@ -209,8 +281,8 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     # 4) 提示词与回复预算
     tier = heart_words["mood"]["tier"]
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
-    contents = {"soul": soul_text, "memory": memory_text,
-                "heart": heart_text, "mouth": mouth_text}
+    contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
+                "memory": memory_text, "heart": heart_text, "mouth": mouth_text}
     blocks: List[str] = []
     sections: List[Dict[str, Any]] = []
     for key in conf["order"]:
@@ -228,8 +300,15 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
 
+    # 4.5) 温度分档：两个温度与触发条件都从 data/llm.json 读，代码里没有字面量
+    call_conf = llm.resolve_config(config)
+    policy = llm.temperature_policy(config)
+    temperature_tier, temperature = llm.choose_temperature(
+        policy, recalled_nonempty=bool(recalled), reply_budget=budget)
+
     # 5) 发模型（LLMError 原样上抛）
-    said_back = llm.complete(messages, config=config, env=env, transport=transport)
+    said_back = llm.complete(messages, config=call_conf, env=env, transport=transport,
+                             temperature=temperature)
 
     # 6) 过嘴：切分 + 节奏 + 闸（重写器 None：本轮命中即弃）
     batch, verdict, ledger = _pass_mouth(said_back, who, at)
@@ -241,6 +320,9 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
     wrote = _remember(brain, store, who, said, reply, dropped, at)
+    # 7.5) 落账：这一轮的原文进最近几轮（reply 不管有没有说出口，人那句一定留着）
+    recent.append({"ts": at, "who": who or HUMAN_WHO, "said": said, "reply": reply},
+                  root=recent_root, cap=conf["recent"]["cap"])
 
     return {
         "ok": True,
@@ -258,11 +340,62 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
             "sections": sections,
             "reply_budget": {"key": REPLY_KEY, "tier": tier, "chars": budget},
         },
+        "continuity": {"turns_loaded": len(loaded.get("turns") or []),
+                       "omitted": omitted, "notice": note},
+        "llm": {"model": call_conf["model"], "temperature": temperature,
+                "temperature_tier": temperature_tier},
+        "anchors": anchor_read,
         "memory": {"wrote": wrote},
     }
 
 
 # —— 各段 ————————————————————————————————————
+
+
+def _recent_text(turns: List[Mapping[str, Any]], note: str,
+                 conf: Mapping[str, Any]) -> str:
+    """最近几轮这段进提示词的样子：一条一轮的原文（谁 + 原话），段尾接「更早还有 N 轮」。
+
+    notice 先占位再截正文：段尾那句是这一轮最要紧的一句，被 cap 锯掉就等于没装进去。
+    """
+    body = recent.render(turns) or NO_TURNS
+    spec = conf["sections"].get("recent")
+    if not note:
+        return body
+    if not isinstance(spec, Mapping):
+        return body + "\n" + note
+    cap = spec["cap"]
+    room = cap - len(note) - 1
+    if room <= 0:
+        return note[:cap]
+    head = body if len(body) <= room else body[:room]
+    return head + "\n" + note
+
+
+def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """锚句这一段：只认装配说明里那间房的哪张卡，并且只走家的公开 API。
+
+    没配 / 卡不在 / 读不出来三种情况都写「未配锚句」——这一格不许空着，也不许悄悄跳过：
+    空着她就以为自己没有过一句锚。
+    """
+    spec = conf.get("anchors")
+    if not isinstance(spec, Mapping):
+        return _anchors_missing()
+    try:
+        got = cards.read_item(None, room=str(spec["room"]), name=str(spec["name"]))
+    except (cards.CardError, home_access.AccessDenied, home_store.StoreError, OSError):
+        return _anchors_missing()
+    body = got.get("body")
+    if not isinstance(body, str) or not body.strip():
+        return _anchors_missing()
+    return body, {"configured": True, "chars": len(body),
+                  "room": str(spec["room"]), "name": str(spec["name"])}
+
+
+def _anchors_missing() -> Tuple[str, Dict[str, Any]]:
+    """未配锚句那一态：提示词里写明那句话，返回体给机器一个 false（不是空串）。"""
+    return ("%s。%s" % (ANCHORS_MISSING, ANCHORS_HINT),
+            {"configured": False, "note": ANCHORS_MISSING})
 
 
 def _recall(brain: Any, said: str, who: str) -> Tuple[List[Dict[str, Any]], str]:
@@ -296,14 +429,50 @@ def _effective(heart_root: Any, at: str, mood_read: Mapping[str, Any],
                                                     mood_read["now"])}
 
 
+def _sleep_terms(heart_root: Any, at: str) -> Dict[str, Any]:
+    """睡眠账给 energy 的两个派生量：生效窗口与睡眠回血封顶。
+
+    照 api/heart.py 的 _sleep_terms：两个数都由 sleep 读时现算，本层只搬运、不重算。
+    少传这两个，面板的精力读数与说话这边的读数在睡眠账非默认时就会分叉。
+    """
+    return {"sleep_window": sleep_module.effective_window(heart_root, at),
+            "wake_cap": sleep_module.wake_cap(heart_root, at)}
+
+
+def _intent_context(readout: Any, name: str, at: str,
+                    energy_read: Mapping[str, Any]) -> Dict[str, Any]:
+    """意图排序的上下文：今日条数、熟稔、精力那两口数（照 api/heart.py 的 _intent_context）。
+
+    精力也注入：这一层已经按睡眠账的窗口结算过一次，排序层拿同一个数算清醒度，
+    否则它会自己再读一次 energy——两次结算一条先后，档位与系数就可能与面板分叉。
+    """
+    context: Dict[str, Any] = {
+        "who": name,
+        "today_count": readout.today_count(name, at),
+        "familiarity": readout.familiarity(name, at),
+    }
+    if isinstance(energy_read, Mapping):
+        context["energy_value"] = energy_read.get("value")
+        context["energy_tier"] = energy_read.get("tier")
+    return context
+
+
 def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
             energy_read: Mapping[str, Any], brain: Any, who: str) -> Dict[str, Any]:
-    """一次判决：只 decide，不 decide_and_log（核不写门的日志，那是心的账）。"""
+    """一次判决：只 decide，不 decide_and_log（核不写门的日志，那是心的账）。
+
+    入参与 api/heart.py 的 _engage 一毫不差：窗口、意图排序（第 5 道软门要它）、
+    按睡眠账结算过的精力、熟稔与今日条数。少喂一项，门判出的理由就跟面板不一样——
+    同一个人同一刻，面板说「不是时候」，她这边却说「夜里」。
+    """
     readout = ports_module.from_brain(brain)
     name = who or DEFAULT_WHO
+    intents = intent_module.rank(heart_root, at,
+                                 context=_intent_context(readout, name, at, energy_read))
     judgement = engage_module.EngageInput.from_effective(
         dict(eff),
         window=engage_module.window_signal(heart_root, at),
+        intents=intents,
         energy=energy_read["value"],
         familiarity=readout.familiarity(name, at),
         today_count=readout.today_count(name, at),

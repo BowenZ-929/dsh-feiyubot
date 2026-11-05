@@ -22,10 +22,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import hashlib
+
 from api import api
 from api.tests.helpers import copy_fixture
 from organs.brain import BrainStore
-from organs.mind import conversation
+from organs.home import cards
+from organs.mind import conversation, llm, recent
 from organs.soul import load
 
 CONFIG = {"provider": "fake", "model": "fake-model", "base_url": "http://example.invalid/v1",
@@ -37,12 +40,14 @@ MOUTH_DATA = PLUGIN / "organs" / "mouth" / "data"
 
 MEMORY_TEXT = "我上次去医院是陪我妈复查，我对花生过敏"
 QUESTION = "你还记得医院那回事吗？"
-LONG_REPLY = ("今天挺好的。你问医院那回事，我记得的，是陪你妈去复查对吧。"
+# 一份≈平常档预算长度、且超过嘴的 split.max_chars 的回复：真链路里该切成 2–3 泡。
+LONG_REPLY = ("你问医院那回事，我记得的，是陪你妈去复查对吧。"
               "花生过敏我也记着，别再吃带花生的点心了，上次你嘴肿了半天。"
-              "中午吃了面，汤有点咸，晚上想喝粥。") * 3
+              "中午吃了面，汤有点咸，晚上想喝粥。"
+              "周末要是不下雨，我陪你去一趟，顺便把上次落下的检查补上。") * 2
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
-                 "assembly", "memory"}
+                 "assembly", "continuity", "llm", "anchors", "memory"}
 
 
 def _body(reply: str, captured: list = None, status: int = 200):
@@ -79,6 +84,11 @@ class ChatApiTest(unittest.TestCase):
         })
         patches.start()
         self.addCleanup(patches.stop)
+        # 本机 <仓库>/home/.env 里可能真有 key：把 llm 认的那个 home 钉到临时目录，
+        # 否则「没配 key 该是 503」那条会被本机密钥悄悄变成「请求发出去了」（同 test_llm 的做法）。
+        home_patch = mock.patch.object(llm.paths, "HOME", self.tmp / "repo-home")
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
         self.store = load(copy_fixture("valid", str(self.tmp)))
         self.brain = BrainStore(self.tmp / "brain")
 
@@ -274,6 +284,68 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(2, len(wrote))
         self.assertEqual([row["evidence_key"] for row in rows[-2:]],
                          [item["id"] for item in wrote])
+
+    # —— 连续性与温度 ————————————————————————
+
+    def test_continuity_llm_and_anchors_are_in_the_body(self):
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+
+        self.assertEqual({"turns_loaded", "omitted", "notice"}, set(payload["continuity"]))
+        self.assertEqual(0, payload["continuity"]["turns_loaded"])
+        self.assertEqual(0, payload["continuity"]["omitted"])
+        self.assertEqual("", payload["continuity"]["notice"], "没省任何一轮时 notice 该是空串")
+
+        self.assertEqual({"model", "temperature", "temperature_tier"}, set(payload["llm"]))
+        self.assertEqual(CONFIG["model"], payload["llm"]["model"])
+        self.assertIn(payload["llm"]["temperature_tier"], ("default", "factual"))
+        self.assertEqual(capture[0]["temperature"], payload["llm"]["temperature"],
+                         "回包里的温度与真发出去的那个不一致")
+
+        self.assertFalse(payload["anchors"]["configured"], "仓库里没有锚句卡，却报成配了")
+        self.assertEqual(conversation.ANCHORS_MISSING, payload["anchors"]["note"])
+
+    def test_fifteen_rounds_show_the_omitted_notice_over_http(self):
+        for index in range(15):
+            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % (index % 10), "who": "主人",
+                           "said": "第%d句" % index, "reply": "第%d答" % index})
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        continuity = payload["continuity"]
+        self.assertEqual(12, continuity["turns_loaded"])
+        self.assertEqual(3, continuity["omitted"])
+        notice = conversation.load_assembly()["recent"]["notice"].replace(recent.NOTE_SLOT, "3")
+        self.assertEqual(notice, continuity["notice"])
+        self.assertIn(notice, capture[0]["messages"][0]["content"], "提示词里没有那句「更早还有」")
+
+    def test_five_rounds_carry_no_notice(self):
+        for index in range(5):
+            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % index, "who": "主人",
+                           "said": "第%d句" % index, "reply": "第%d答" % index})
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual(5, payload["continuity"]["turns_loaded"])
+        self.assertEqual(0, payload["continuity"]["omitted"])
+        self.assertEqual("", payload["continuity"]["notice"])
+
+    def test_configured_anchor_arrives_at_the_endpoint(self):
+        """家·仓库里写一张锚句卡：端点的回包报成配了，字数与房间照实给。"""
+        body = "夜里说的话，天亮再算。"
+        home = self.tmp / "cards-home"
+        source = self.tmp / "anchor.md"
+        source.write_text(body, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME_ROOT": str(home)}):
+            cards.append_cards(None, role="human", by="人", cards=[{
+                "kind": "物件", "room": "仓库", "name": "锚句", "path": str(source),
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "bytes": source.stat().st_size, "chars": len(body),
+            }])
+            status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual({"configured": True, "chars": len(body),
+                          "room": "仓库", "name": "锚句"}, payload["anchors"])
 
     # —— 只有一份装配 ————————————————————————
 

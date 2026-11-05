@@ -186,8 +186,17 @@
       <p class="state" id="warehouse-state">载入中…</p>
     </section>
 
+    <section aria-labelledby="an-h">
+      <h2 id="an-h">仓库台词<small>人给她定的口头禅，按场合取最新一句</small></h2>
+      <div id="anchors-body"></div>
+      <p class="state" id="anchors-state">载入中…</p>
+      <p class="note">台词库在 <code>仓库/anchors.jsonl</code>，只追加：改一句是加一行新的，旧的那句
+        原样留着，读时按场合取最新一条。台词是人给她定的原文，页面与代码都不存副本——
+        这里显示的就是盘上那一行。身体动作只写她自己；写到别人身上，那一次写入会整批被拒。</p>
+    </section>
+
     <section aria-labelledby="log-h">
-      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐六条读端点</small></h2>
+      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐七条读端点</small></h2>
       <button id="refresh-all" type="button">刷新全部</button>
       <pre id="log">就绪。</pre>
       <p class="state" id="status">载入中…</p>
@@ -615,6 +624,46 @@
     }
   }
 
+  // —— 仓库台词 ————————————————————————————————————
+  function showAnchors(res) {
+    var body = el("anchors-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var data = res.data || {};
+    var cards = data.anchors || [];
+    if (!cards.length) {
+      var pre0 = document.createElement("pre");
+      pre0.textContent = data.file_exists === false
+        ? "还没有台词库：" + (data.file || "仓库/anchors.jsonl") + "（不是 0 条台词，是没人给她定过）"
+        : "（台词库是空的）";
+      body.appendChild(pre0);
+      mark("anchors-state", "total=0 · file_exists=" + data.file_exists);
+      return;
+    }
+    var table = document.createElement("table");
+    table.className = "rows";
+    var head = document.createElement("tr");
+    ["场合", "她说", "身体"].forEach(function (text) {
+      var th = document.createElement("th");
+      th.textContent = text;
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    cards.forEach(function (card) {
+      var tr = document.createElement("tr");
+      [card.scene, card.say, card.body || "（无）"].forEach(function (value) {
+        var cell = document.createElement("td");
+        cell.textContent = value;
+        cell.style.whiteSpace = "pre-wrap";
+        tr.appendChild(cell);
+      });
+      table.appendChild(tr);
+    });
+    body.appendChild(table);
+    mark("anchors-state", "现行 " + data.total + " 条 · 盘上 " + data.lines
+      + " 行（只追加：改一句多一行） · bad_lines=" + data.bad
+      + (data.truncated ? " · 这次只取了一部分" : ""));
+  }
+
   // —— 放一件东西 ————————————————————————————————————
   function submitWrite() {
     var room = el("write-room").value;
@@ -664,6 +713,7 @@
       mark("borrow-state", "载入中…");
       mark("audit-state", "载入中…");
       mark("warehouse-state", "载入中…");
+      mark("anchors-state", "载入中…");
     }
     return Promise.all([
       call("GET", "/home/rooms"),
@@ -671,7 +721,8 @@
       call("GET", "/home/audit?limit=200"),
       call("GET", "/home/drawer"),
       call("GET", "/home/archive/borrow"),
-      call("GET", "/home/warehouse")
+      call("GET", "/home/warehouse"),
+      call("GET", "/home/anchors")
     ]).then(function (out) {
       var failures = 0;
 
@@ -726,6 +777,15 @@
         var whNode = el("warehouse-state");
         whNode.className = "state bad";
         whNode.textContent = "读 /home/warehouse 失败：" + problem(out[5]);
+      }
+
+      if (out[6].status === 200) { showAnchors(out[6]); }
+      else {
+        failures += 1;
+        el("anchors-body").textContent = "";
+        var anNode = el("anchors-state");
+        anNode.className = "state bad";
+        anNode.textContent = "读 /home/anchors 失败：" + problem(out[6]);
       }
 
       if (state.room) { openRoom(state.room); }
