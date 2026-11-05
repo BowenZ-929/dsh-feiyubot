@@ -77,6 +77,39 @@ def _read_index(path: Path) -> Tuple[List[Dict[str, Any]], int]:
     return store_module.read_lines(path)
 
 
+#: 打了这个 params 标记的卡是「现状卡」：同件后追加的那一行顶掉前一行，而不是并成 mentions。
+LAST_WINS_PARAM = "pointer"
+
+
+def _last_wins(card: Dict[str, Any]) -> bool:
+    """这张卡是不是「只追加、读时取最新」的那种（指针卡）。
+
+    指针卡记的是「盘上那份现在是什么指纹」，旧行是历史。若把新行当成「又被提到一次」
+    并进旧行，读回的就永远是第一次登记的那个 sha——文件明明改对了也报对不上，
+    只能靠人翻流水自己找。口径与台词卡（`anchors`）一致：**按追加顺序取最新，不比 ts**
+    ——`ts` 是人给的，可错、可重复，拿它当权威等于让写错的时间戳盖掉后写的那行。
+    """
+    return bool((card.get("params") or {}).get(LAST_WINS_PARAM))
+
+
+def _replace_with_later(items: List[Dict[str, Any]], by_card: Dict[str, Dict[str, Any]],
+                        by_key: Dict[Tuple[Any, ...], Dict[str, Any]],
+                        existing: Dict[str, Any], card: Dict[str, Any]) -> None:
+    """用后追加的那一行顶掉旧行的内容；位置不动（房内顺序不跳），mentions 累加。"""
+    merged = dict(card)
+    merged["mentions"] = int(existing.get("mentions") or 0) + 1
+    index = next((i for i, item in enumerate(items) if item is existing), None)
+    if index is None:            # 理论上不可达：existing 一定来自 items
+        items.append(merged)
+    else:
+        items[index] = merged
+    for source in (existing, merged):
+        if source.get("card_id"):
+            by_card[str(source["card_id"])] = merged
+        for key in _identity_keys(source):
+            by_key[key] = merged
+
+
 def _identity_keys(card: Dict[str, Any]) -> List[Tuple[Any, ...]]:
     """判同件：sha256 相同算同一件；没有 sha256 时退到 (房、路径、名字)。"""
     keys: List[Tuple[Any, ...]] = []
@@ -184,7 +217,10 @@ def fold(rows: list) -> list:
             if existing is not None:
                 break
         if existing is not None:
-            existing["mentions"] += 1
+            if _last_wins(card):
+                _replace_with_later(items, by_card, by_key, existing, card)
+            else:
+                existing["mentions"] += 1
             continue
 
         items.append(card)

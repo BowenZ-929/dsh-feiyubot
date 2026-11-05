@@ -232,6 +232,12 @@ def seed_mouth_pointers(root=None) -> dict:
     return result
 
 
+def short_sha(value: Any) -> str:
+    """指纹的 12 位短形，给人看的那种。空值如实说「（空）」，不拿空串冒充一个指纹。"""
+    text = str(value or "")
+    return text[:12] if text else "（空）"
+
+
 def warehouse_pointers(root=None) -> dict:
     """读回指针卡，并对每份现场重算 sha256/字节数：对不上就 aligned=False + POINTER_STALE。
 
@@ -262,9 +268,14 @@ def warehouse_pointers(root=None) -> dict:
             continue
         digest = store.sha256_file(path)
         size = path.stat().st_size
-        if digest != (item.get("sha256") or "") or size != int(item.get("bytes") or 0):
+        recorded = str(item.get("sha256") or "")
+        if digest != recorded or size != int(item.get("bytes") or 0):
             entry.update({"aligned": False, "code": "POINTER_STALE",
-                          "note": "现算的指纹跟卡上不一致（改了就是改了，不自动更新卡）",
+                          "note": "现算 %s（%d 字节）跟卡上 %s（%s 字节）不一致；"
+                                  "改了就是改了，不自动更新卡"
+                                  % (short_sha(digest), size, short_sha(recorded),
+                                     item.get("bytes")),
+                          "card_sha256": recorded, "card_bytes": int(item.get("bytes") or 0),
                           "actual_sha256": digest, "actual_bytes": size})
         pointers.append(entry)
 

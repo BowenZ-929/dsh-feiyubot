@@ -311,10 +311,16 @@ def _warehouse(root: Any) -> Result:
                               "指针（%s）。本端点只读，不替你登记。" % residents.MOUTH_ENV)
         return 200, payload
     if data["stale"]:
+        stale_rows = [item for item in data["pointers"] if item.get("code") == "POINTER_STALE"]
         return 409, {
             "ok": False, "code": "POINTER_STALE", "agent": AGENT,
             "message": "现算的 sha256／字节数跟卡上对不上：%s。改了就是改了——本端点只报，"
-                       "不自动更新卡。" % "、".join(data["stale"]),
+                       "不自动更新卡。" % "；".join(
+                           "%s（现算 %s… / 卡上 %s…，%s 字节 / 卡上 %s 字节）"
+                           % (item.get("name"), str(item.get("actual_sha256") or "")[:12],
+                              str(item.get("card_sha256") or "")[:12],
+                              item.get("actual_bytes"), item.get("card_bytes"))
+                           for item in stale_rows),
             "aligned": False,
             "stale": list(data["stale"]), "missing": list(data["missing"]),
             "detail": {"pointers": data["pointers"], "data_root": data["data_root"],
