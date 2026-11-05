@@ -28,6 +28,11 @@
     窗口外的更早轮不算禁令；返回体 banned{rounds, action_lines, openings} 与历史对得上。
 14. **动作给池子**：action 段的规矩与部位池逐项来自 assembly.json（改数据 → 提示词跟着变），
     代码里一个部位词都没有；banned / action 两块缺键或类型不对一律 ValueError。
+15. **对账（补数据也补声明）**：脑里今日「他说」记了、最近几轮这份账上却没落的轮，装配前
+    按 msg_id 回填成 fidelity="reconciled"，提示词里那两行带「（补记）」、她那句写
+    「（没有记到她那句）」（不替她编）；返回体 continuity.reconciled 说清补了几条、
+    rounds 逐轮给 {ts, fidelity, msg_id}；对不上打一行「缺 N 轮」的 warning。
+    四条都在账上就一条都不标、一行日志都不打；回填幂等（同一个 msg_id 只补一次）。
 
 全部注入假 transport：一个字节都不发真网络。心 / 嘴 / 装配的临时根都经环境变量切走，
 仓库里的真数据一个字节不写。
@@ -35,6 +40,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import json
 import os
@@ -48,6 +54,7 @@ from urllib.parse import urlencode
 
 from api import api
 from organs.brain import BrainStore
+from organs.brain import model as brain_model
 from organs.heart import energy
 from organs.heart import model as heart_model
 from organs.heart import mood, sleep
@@ -448,6 +455,313 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn(conversation.NO_TURNS, system, "一条历史都没有时 recent 段是空白")
         self.assertEqual(0, got["continuity"]["turns_loaded"])
         self.assertEqual("", got["continuity"]["notice"])
+
+    # —— 15) 对账：脑里记了、这份账上没落 ————————————
+
+    SPOKEN = ["我今早去医院拿片子", "回来的路上碰到老陈", "他问我妈复查得怎么样",
+              "我说下周三再去一趟"]
+
+    def _rig(self, name: str, missed: bool, legacy: bool = False):
+        """造一个脑（今日「他说」四条）与最近几轮那份账（前三条亲历落好，msg_id 指回脑）。
+
+        missed=True：第四条账上没有（进程重启 / 写盘失败那一态）——装配该把它补回来；
+        missed=False：四条都在账上——一条都不许标。
+        legacy=True：账上的行按**升级前**的形状写（没有 msg_id 这一栏），
+        它们只是没有凭据、不是丢了的轮——装配该认领回 id，而不是标成补记。
+        """
+        root = self.tmp / name
+        ids = []
+        for index, text in enumerate(self.SPOKEN):
+            got = self.brain.ingest(who="主人", text=text, ts=_at(index * 12))
+            ids.append(got["entry"]["id"])
+        for index in range(3 if missed else 4):
+            row = {"ts": _at(index * 12), "who": "主人",
+                   "said": self.SPOKEN[index], "reply": "第%d答" % index}
+            if not legacy:
+                row["msg_id"] = ids[index]
+            recent.append(row, root=root)
+        return root, ids
+
+    def _ledger(self, root: Path) -> list:
+        return recent.load(root=root, turns=99)["turns"]
+
+    def _warned(self, run) -> list:
+        """把 qqagent.mind 的日志抓下来（一条都不许漏，所以按 handler 收，不按 level 过滤）。"""
+        records: list = []
+        handler = logging.Handler()
+        handler.emit = lambda record: records.append(record.getMessage())
+        logger = logging.getLogger("qqagent.mind")
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        run()
+        return records
+
+    def test_a_round_the_ledger_missed_is_backfilled_marked_and_named(self):
+        root, ids = self._rig("reconcile_missed", missed=True)
+        capture = []
+        with self.assertLogs("qqagent.mind", level="WARNING") as logs:
+            got = self._answer(captured=capture, recent_root=root, now=_at(60))
+
+        rows = self._ledger(root)
+        filled = [row for row in rows if row["fidelity"] == recent.RECONCILED]
+        self.assertEqual(1, len(filled), "脑里多出来的那一轮没回填")
+        self.assertEqual(ids[3], filled[0]["msg_id"], "回填那条的 msg_id 不是脑里那条的 id")
+        self.assertEqual(self.SPOKEN[3], filled[0]["said"], "回填的不是脑里那句原话")
+        self.assertEqual("", filled[0]["reply"], "回填时替她编了一句她说的话")
+        self.assertEqual(3, rows.index(filled[0]),
+                         "缺的是最新那一轮，补记该在末尾（塞到最前面就把「刚才」写成「最早」）")
+        stamps = [row["ts"] for row in rows]
+        self.assertEqual(sorted(stamps), stamps, "回填后这份账的 ts 不是单调不减")
+
+        system = capture[0]["messages"][0]["content"]
+        block = _section(system, conversation.load_assembly()["sections"]["recent"]["label"])
+        marked = [line for line in block.splitlines() if recent.BACKFILL_MARK in line]
+        self.assertEqual(2, len(marked), "补记那一轮的两行没都带上「（补记）」")
+        self.assertIn(self.SPOKEN[3], marked[0])
+        self.assertIn(recent.MISSING_REPLY, marked[1], "她那句没写「没有记到」，像是编了一句")
+        live = [line for line in block.splitlines() if self.SPOKEN[0] in line]
+        self.assertEqual(1, len(live))
+        self.assertNotIn(recent.BACKFILL_MARK, live[0], "亲历那一轮也被标成了补记")
+        tail = [line for line in block.splitlines() if line.strip()][-2:]
+        self.assertEqual(marked, tail, "（补记）那两行没落在 recent 段末尾（顺序把「刚才」变成了「最早」）")
+
+        continuity = got["continuity"]
+        self.assertEqual(1, continuity["reconciled"], "返回体没说清补了几条")
+        self.assertEqual({"turns_loaded", "omitted", "notice", "reconciled", "rounds"},
+                         set(continuity), "既有四键一个都不许动，只许多出这两栏")
+        hit = [row for row in continuity["rounds"] if row["msg_id"] == ids[3]]
+        self.assertEqual(1, len(hit))
+        self.assertEqual({"ts", "fidelity", "msg_id"}, set(hit[0]))
+        self.assertEqual(recent.RECONCILED, hit[0]["fidelity"], "rounds 里那一轮没标 reconciled")
+        self.assertEqual(_at(36), hit[0]["ts"])
+        stamps = [row["ts"] for row in continuity["rounds"]]
+        self.assertEqual(sorted(stamps), stamps, "rounds 的 ts 不是单调不减")
+
+        said = [line for line in logs.output if "缺 1 轮" in line]
+        self.assertEqual(1, len(said), "对不上却没留痕（或留了不止一行）：%r" % (logs.output,))
+
+    def test_when_the_ledger_has_every_round_nothing_is_marked(self):
+        root, ids = self._rig("reconcile_whole", missed=False)
+        capture = []
+        box: list = []
+        lines = self._warned(
+            lambda: box.append(self._answer(captured=capture, recent_root=root, now=_at(60))))
+        got = box[0]
+
+        rows = self._ledger(root)
+        self.assertEqual([], [row for row in rows if row["fidelity"] == recent.RECONCILED],
+                         "四条都在账上，却还是标了补记")
+        self.assertEqual(5, len(rows), "四条亲历 + 这一轮亲历那一行：不该再多")
+        self.assertEqual([], [line for line in lines if "缺" in line], "没缺东西却刷了一行对账")
+
+        system = capture[0]["messages"][0]["content"]
+        self.assertNotIn(recent.BACKFILL_MARK, system, "提示词里出现了「（补记）」")
+        self.assertNotIn(recent.MISSING_REPLY, system, "提示词里出现了「没有记到」")
+        self.assertEqual(0, got["continuity"]["reconciled"])
+        self.assertEqual([], [row for row in got["continuity"]["rounds"]
+                              if row["fidelity"] == recent.RECONCILED])
+        self.assertEqual(4, got["continuity"]["turns_loaded"])
+
+    def test_backfill_happens_only_once(self):
+        """幂等：同一个 msg_id 只补一次——第二次装配多出来的只有它自己亲历的那一行。"""
+        root, ids = self._rig("reconcile_twice", missed=True)
+        with self.assertLogs("qqagent.mind", level="WARNING"):
+            self._answer(recent_root=root, now=_at(60))
+        first = self._ledger(root)
+        self.assertEqual(1, len([row for row in first if row["fidelity"] == recent.RECONCILED]))
+
+        box: list = []
+        lines = self._warned(lambda: box.append(self._answer(recent_root=root, now=_at(120))))
+        got = box[0]
+        second = self._ledger(root)
+        self.assertEqual(len(first) + 1, len(second),
+                         "第二次装配多出来的只该是它自己亲历的那一行")
+        self.assertEqual(1, len([row for row in second if row["fidelity"] == recent.RECONCILED]),
+                         "补记被写了第二遍")
+        self.assertEqual(1, len([row for row in second if row["msg_id"] == ids[3]]),
+                         "同一条补记在盘上出现了两次")
+        self.assertEqual([], [line for line in lines if "缺" in line], "第二次装配又刷了一行对账")
+        self.assertEqual(1, got["continuity"]["reconciled"], "补记那一轮从提示词里掉了")
+
+    # —— 17) 另外两种「其实记过 / 不是刚才」 ————————————
+
+    def test_brain_rows_sharing_a_ledger_ts_are_not_backfilled_again(self):
+        """她早年那句回话被错标成 side=他说，ts 与账上人那一轮完全相同：同一轮，别补。"""
+        root = self.tmp / "reconcile_same_ts"
+        stamp = _at(0)
+        human = self.brain.ingest(who="主人", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
+        self.brain.ingest(who="江迟", text="江迟。\n（尾巴尖轻轻摆了一下）", ts=stamp,
+                          side=brain_model.SIDE_OTHER)
+        recent.append({"ts": stamp, "who": "主人", "said": "我今早去医院拿片子",
+                       "reply": "江迟。"}, root=root)
+        capture = []
+        box: list = []
+        lines = self._warned(
+            lambda: box.append(self._answer(captured=capture, recent_root=root, now=_at(60))))
+        got = box[0]
+
+        rows = self._ledger(root)
+        self.assertEqual([], [row for row in rows if row["fidelity"] == recent.RECONCILED],
+                         "同 ts 的那一轮被当成缺的补了进来")
+        self.assertEqual(human, rows[0]["msg_id"], "人那一句没认领回 id")
+        self.assertEqual(2, len(rows), "只该有账上那一轮 + 这一轮亲历那一行")
+        self.assertEqual([], [line for line in lines if "缺" in line], "同一轮却吼了「缺 N 轮」")
+        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"])
+        self.assertEqual(0, got["continuity"]["reconciled"])
+
+    def test_a_future_entry_is_not_treated_as_just_now(self):
+        """ts 晚于本轮装配时刻的条（明天才发生的事）不是「刚才那一轮」，不回填。"""
+        root = self.tmp / "reconcile_future"
+        self.brain.ingest(who="主人", text="他要求过叫他什么", ts=_at(90))
+        capture = []
+        box: list = []
+        lines = self._warned(
+            lambda: box.append(self._answer(captured=capture, recent_root=root, now=_at(60))))
+        got = box[0]
+
+        rows = self._ledger(root)
+        self.assertEqual(1, len(rows), "未来那一条被补进了最近几轮")
+        self.assertEqual(recent.LIVE, rows[0]["fidelity"])
+        self.assertEqual([], [line for line in lines if "缺" in line], "未来那一条吼了「缺 N 轮」")
+        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"])
+        self.assertEqual(0, got["continuity"]["reconciled"])
+
+    def _her_display(self) -> str:
+        return self.store.snapshot().identity.display
+
+    def test_her_own_line_mis_sided_as_his_is_never_backfilled(self):
+        """她当年那句回话被记成 side=他说：那是她的话，不许当「他说的一轮」补回来。"""
+        root = self.tmp / "reconcile_her_line"
+        display = self._her_display()
+        stamp = _at(0)
+        human = self.brain.ingest(who="主人", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
+        recent.append({"ts": stamp, "who": "主人", "said": "我今早去医院拿片子",
+                       "reply": "江迟。"}, root=root, cap=99999)
+        # 账上少了这一行（ts=T）：脑里同一时刻有两条——真·对方（QQ 号）与她自己的回话
+        self.brain.ingest(who="3425635473", text="大肥鱼是你喜欢的名字吗", ts=_at(24))
+        self.brain.ingest(who=display, text="不喜欢，听着就沉。", ts=_at(24),
+                          side=brain_model.SIDE_OTHER)
+        capture = []
+        box: list = []
+        with self.assertLogs("qqagent.mind", level="WARNING") as logs:
+            box.append(self._answer(captured=capture, recent_root=root, now=_at(60)))
+        got = box[0]
+
+        rows = self._ledger(root)
+        filled = [row for row in rows if row["fidelity"] == recent.RECONCILED]
+        self.assertEqual(1, len(filled), "她自己那句被当成「他说」补了回来（或对方那条没补）")
+        self.assertEqual("3425635473", filled[0]["who"], "补记的发言者不是对方")
+        self.assertEqual("大肥鱼是你喜欢的名字吗", filled[0]["said"])
+        self.assertNotIn(display, [row["who"] for row in filled], "补记的发言者写成了她自己")
+        self.assertIn(human, [row["msg_id"] for row in rows])
+
+        block = _section(capture[0]["messages"][0]["content"],
+                         conversation.load_assembly()["sections"]["recent"]["label"])
+        self.assertEqual(2, block.count(recent.BACKFILL_MARK), "（补记）只该落在对方那一条上")
+        marked = [line for line in block.splitlines() if recent.BACKFILL_MARK in line]
+        self.assertIn("3425635473", marked[0])
+        self.assertNotIn(display, "\n".join(marked), "补记那一行的发言者是她自己")
+        self.assertEqual(1, got["continuity"]["reconciled"])
+        self.assertEqual(1, len([line for line in logs.output if "缺 1 轮" in line]))
+
+    def test_her_own_line_is_skipped_even_when_its_ts_is_free(self):
+        """她自己的回话即使 ts 与账上任何一行都不同，也不回填。"""
+        root = self.tmp / "reconcile_her_only"
+        self.brain.ingest(who=self._her_display(), text="江迟。\n（尾巴尖轻轻摆了一下）",
+                          ts=_at(0), side=brain_model.SIDE_OTHER)
+        capture = []
+        box: list = []
+        lines = self._warned(
+            lambda: box.append(self._answer(captured=capture, recent_root=root, now=_at(60))))
+        got = box[0]
+
+        rows = self._ledger(root)
+        self.assertEqual(1, len(rows), "她自己的那句被补成了一轮")
+        self.assertEqual(recent.LIVE, rows[0]["fidelity"])
+        self.assertEqual([], [line for line in lines if "缺" in line], "她自己的话却吼了「缺 N 轮」")
+        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"])
+        self.assertEqual(0, got["continuity"]["reconciled"])
+
+    # —— 16) 旧行认领：升级前的行不是补的 ————————————
+
+    def test_legacy_rows_are_claimed_back_to_live_not_marked_as_backfilled(self):
+        """账上的旧行没有 msg_id，但脑里那条 (ts, said) 对得上：认领回 id，不许标补记。"""
+        root, ids = self._rig("reconcile_legacy", missed=False, legacy=True)
+        capture = []
+        box: list = []
+        lines = self._warned(
+            lambda: box.append(self._answer(captured=capture, recent_root=root, now=_at(60))))
+        got = box[0]
+
+        rows = self._ledger(root)
+        self.assertEqual([], [row for row in rows if row["fidelity"] == recent.RECONCILED],
+                         "旧行被误标成补记（它们只是没有凭据，不是丢了的轮）")
+        self.assertEqual(ids[:4], [row["msg_id"] for row in rows[:4]], "旧行没认领回 msg_id")
+        self.assertEqual({recent.LIVE}, {row["fidelity"] for row in rows},
+                         "认领把 fidelity 改了")
+        self.assertEqual([], [line for line in lines if "缺" in line], "认领不该出声")
+        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"],
+                         "提示词里出现了「（补记）」")
+        self.assertEqual(0, got["continuity"]["reconciled"])
+
+    def test_claiming_happens_once_and_really_missing_rows_are_still_backfilled(self):
+        """认领之后还缺的那条照补：旧行认领 + 真缺回填，两件事各归各。"""
+        root, ids = self._rig("reconcile_legacy_lost", missed=True, legacy=True)
+        with self.assertLogs("qqagent.mind", level="WARNING") as logs:
+            got = self._answer(recent_root=root, now=_at(60))
+        rows = self._ledger(root)
+        filled = [row for row in rows if row["fidelity"] == recent.RECONCILED]
+        self.assertEqual(1, len(filled), "真缺的那一条没补（或把旧行也补了）")
+        self.assertEqual(ids[3], filled[0]["msg_id"])
+        self.assertEqual(3, rows.index(filled[0]), "缺的最新那一轮没排在末尾")
+        self.assertEqual(ids[:3], [row["msg_id"] for row in rows[:3]], "旧行没认领回 msg_id")
+        self.assertEqual(1, len([line for line in logs.output if "缺 1 轮" in line]))
+
+    def test_a_legacy_row_whose_ts_and_said_match_nothing_is_a_real_backfill(self):
+        """旧行的 (ts, said) 在脑里对不上（ts 被改过 / 真丢了）：仍按缺的补，标补记。"""
+        root, ids = self._rig("reconcile_altered", missed=True, legacy=True)
+        path = recent.path_of(root)
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        rows[0]["ts"] = _at(-6)         # ts 被改过：脑里那条 ts 与账上任何一行都对不上了
+        path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                        encoding="utf-8")
+        with self.assertLogs("qqagent.mind", level="WARNING") as logs:
+            got = self._answer(recent_root=root, now=_at(60))
+        filled = [row for row in self._ledger(root) if row["fidelity"] == recent.RECONCILED]
+        self.assertEqual(2, len(filled), "改过的旧行与真缺的那条都该补")
+        self.assertEqual([ids[0], ids[3]], [row["msg_id"] for row in filled])
+        self.assertEqual(1, len([line for line in logs.output if "缺 2 轮" in line]))
+        self.assertEqual(2, got["continuity"]["reconciled"])
+
+    def test_claiming_does_not_rewrite_the_ledger_a_second_time(self):
+        root, ids = self._rig("reconcile_legacy_once", missed=False, legacy=True)
+        self._answer(recent_root=root, now=_at(60))
+        once = recent.path_of(root).read_text(encoding="utf-8")
+        rows = self._ledger(root)
+        self.assertEqual(rows, conversation._reconcile(
+            self.brain, {"turns": rows, "omitted": 0, "total": len(rows)},
+            root, conversation.load_assembly(), _at(60))["turns"])
+        self.assertEqual(once, recent.path_of(root).read_text(encoding="utf-8"),
+                         "第二次装配又把文件改写了一遍（认领不幂等）")
+
+    def test_reconciling_the_same_ledger_twice_adds_no_line(self):
+        """幂等的硬证据：同一份账对两次，盘上一个字节都不多（行数不增）。"""
+        root, ids = self._rig("reconcile_again", missed=True)
+        conf = conversation.load_assembly()
+        rows = recent.load(root=root, turns=99)["turns"]
+        with self.assertLogs("qqagent.mind", level="WARNING"):
+            conversation._reconcile(self.brain, {"turns": rows, "omitted": 0,
+                                                 "total": len(rows)}, root, conf, _at(60))
+        once = recent.path_of(root).read_text(encoding="utf-8")
+        self.assertEqual(4, len(once.splitlines()), "第一次对账没把缺的那一轮补进来")
+
+        again = recent.load(root=root, turns=99)["turns"]
+        self.assertEqual(again, conversation._reconcile(
+            self.brain, {"turns": again, "omitted": 0, "total": len(again)},
+            root, conf, _at(60))["turns"], "第二次对账动了盘上的轮次")
+        self.assertEqual(once, recent.path_of(root).read_text(encoding="utf-8"),
+                         "第二次对账又写了一遍文件（不幂等）")
+        self.assertEqual(4, len(once.splitlines()), "行数变了")
 
     # —— 13) 近轮禁用与动作池 ————————————————————————
 

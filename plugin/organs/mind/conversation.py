@@ -62,6 +62,7 @@ LLMError 不在这里翻译：原样上抛，由 api/chat.py 按 kind 翻成状�
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import datetime
 from pathlib import Path
@@ -95,6 +96,7 @@ from . import recent
 from . import repeat
 from . import usage
 
+LOGGER = logging.getLogger("qqagent.mind")   # 对账对不上要留痕：一行 warning，不刷屏
 ASSEMBLY_NAME = "assembly.json"          # 装配说明书的文件名（实盘 / 出厂各一份）
 HUMAN_WHO = "人"                          # 没给 who 时，人的原话记在谁名下
 DEFAULT_WHO = "主人"                      # 门的读数要一个名字：没给就按主人算（与心·api 同一个兜底）
@@ -402,7 +404,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
       voice{tone,direction,bans}, axes{轴: 档位词}, engage{state,reason}}
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
-      continuity{turns_loaded, omitted, notice} /
+      continuity{turns_loaded, omitted, notice, reconciled, rounds[{ts,fidelity,msg_id}]} /
       banned{rounds, action_lines[{text,count}], openings[开场前 N 字]} /
       action{pool, rule, quota{window,max,used,blocked}} /
       llm{model, temperature, temperature_tier} /
@@ -425,12 +427,19 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     conf = _check_assembly(assembly, "传入的 assembly") if assembly is not None else load_assembly()
     at = now if isinstance(now, str) and now else brain_model.now_iso()
 
+    # 0) 最近几轮先读、先对账：脑里记了、这份账上却没落的轮，**这一轮就得看见**。
+    #    这一读必须排在 recall 之前——recall 会按它自己的钟顺手换日（换日就把「今日在役」
+    #    那几条归档了），排在它后面读到的是换过之后的那一天，补记于是永远补不上。
+    loaded = recent.load(root=recent_root, turns=conf["recent"]["turns"])
+    # 她自己的自称表现读一次：对账要靠它把「她自己的回话」认出来（见 _reconcile 第三条剔除）
+    her_names = _her_names(store)
+    loaded = _reconcile(brain, loaded, recent_root, conf, at, her_names)
+
     # 1) 魂与脑：先回想（这一轮该想起什么，要在写提示词之前定下来）
     soul_text = store.render()
     recalled, memory_text = _recall(brain, said, who)
 
-    # 1.5) 最近几轮与锚句：连续性两个读数都在写提示词之前定下来
-    loaded = recent.load(root=recent_root, turns=conf["recent"]["turns"])
+    # 1.5) 锚句与连续性：几个读数都在写提示词之前定下来
     omitted = int(loaded.get("omitted") or 0)
     note = recent.notice(omitted, conf["recent"]["notice"])
     recent_text = _recent_text(loaded.get("turns") or [], note, conf)
@@ -515,10 +524,11 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     hit = verdict.hits[0] if verdict.hits else None
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
-    wrote = _remember(brain, store, who, said, reply, dropped, at)
-    # 7.5) 落账：这一轮的原文进最近几轮（reply 不管有没有说出口，人那句一定留着）
-    recent.append({"ts": at, "who": who or HUMAN_WHO, "said": said, "reply": reply},
-                  root=recent_root, cap=conf["recent"]["cap"])
+    wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at)
+    # 7.5) 落账：这一轮的原文进最近几轮（reply 不管有没有说出口，人那句一定留着）。
+    # msg_id 取人那句进脑回来的 id：下一次装配对账就靠它把「脑里有、账上也有」认出来。
+    recent.append({"ts": at, "who": who or HUMAN_WHO, "said": said, "reply": reply,
+                   "msg_id": msg_id}, root=recent_root, cap=conf["recent"]["cap"])
     # 8) 落口癖账：放在最后一步。被闸弃掉的轮（reply 空）不记——她没说出口就没有开头；
     #    命中一律对**家现行全部台词**，不是只注入的那几条（口癖统计看的是全部台词）。
     if not dropped and reply and isinstance(guard_conf, Mapping):
@@ -544,7 +554,12 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
             "reply_budget": {"key": REPLY_KEY, "tier": tier, "chars": budget},
         },
         "continuity": {"turns_loaded": len(loaded.get("turns") or []),
-                       "omitted": omitted, "notice": note},
+                       "omitted": omitted, "notice": note,
+                       "reconciled": recent.reconciled(history),
+                       "rounds": [{"ts": str(row.get(recent.TS) or ""),
+                                   "fidelity": str(row.get(recent.FIDELITY) or recent.LIVE),
+                                   "msg_id": str(row.get(recent.MSG_ID) or "")}
+                                  for row in history]},
         "banned": banned_read,
         "action": action_read,
         "llm": {"model": call_conf["model"], "temperature": temperature,
@@ -576,6 +591,119 @@ def _recent_text(turns: List[Mapping[str, Any]], note: str,
         return note[:cap]
     head = body if len(body) <= room else body[:room]
     return head + "\n" + note
+
+
+def _her_names(store: Any) -> set:
+    """她的自称表（identity.display + synonyms），从魂的公开只读口（snapshot）现读。
+
+    对账要用它把「她自己的回话」认出来——脑里那几条早年 side 还没接上，被记成了
+    他说的；补回来就是拿她说的话当对方说的，比漏补更糟。读不到魂就返回空集：
+    对账宁可少挡（下一条 ts 规则多半还挡得住），也不许因此让她闭口。
+    """
+    try:
+        identity = store.snapshot().identity
+        return {str(identity.display)} | {str(name) for name in identity.synonyms}
+    except Exception:      # noqa: BLE001
+        return set()
+
+
+def _reconcile(brain: Any, loaded: Mapping[str, Any], root: Any,
+               conf: Mapping[str, Any], at: str,
+               her_names: Any = ()) -> Dict[str, Any]:
+    """对账：脑里今日「他说」的条，最近几轮这份账上没有的（按 msg_id 对）回填进来。
+
+    为什么要对：脑和这份账是两次写。进程重启、写盘失败时，脑里已经记了这一轮，
+    这份账上却没有——模型于是以为那一段没说发生过。补回来是**补数据**，
+    所以补的每一条都标 fidelity="reconciled"，由 recent.render 在提示词里带「（补记）」；
+    她那句一律记空串，渲染成「（没有记到她那句）」——不替她编一句她没说过的话。
+
+    **先认领旧行，再对账**：升级前写下的行没有 msg_id，只按 msg_id 对会把它们全当成
+    丢了的轮、全量标成「（补记）」——误标与不标一样坏，而且更糟（她与人都会以为那些是补的）。
+    所以先拿 (ts, said) 给旧行补上凭据（fidelity 不动，仍是 live，认领不出声），
+    认领完还剩下的才是真缺的，才回填、才标补记、才打那一行 warning。
+
+    三条剔除（都是「这一轮其实记过 / 根本不是刚才」）：
+    · msg_id 已经在了：上一次回填的、或这一轮亲历落的——幂等靠它，不靠重新算；
+    · ts 与账上任何一行完全相同：同一轮。早些年 her 的回话被错标成 side=他说，
+      那几条的 ts 就是账上人那一轮的时刻——补进来等于把一轮写成两轮（第三种误标）；
+    · ts 晚于本轮装配时刻 at：明天才发生的事不是「刚才那一轮」，补进来她就会把
+      还没发生的事当成刚说过；
+    · who 是她自己（魂的 identity.display / synonyms 现读）：那本来是**她的回话**，
+      早年 side 还没接上才被记成「他说」。补进来等于拿她说的话当对方说的——
+      比漏补更糟，而且发言者会写成她的名字。
+
+    时段：只看 ts >= 最近 N 轮里最早那一轮（recent 为空就取今日全部）。
+    对不上要留痕：有回填就打一行 warning，带「缺 N 轮」；N=0 一个字都不打（不刷屏）。
+    """
+    names = set(her_names or ())
+    said_rows = [row for row in (_said_row(entry) for entry in _said_today(brain, at))
+                 if row["who"] not in names]
+    # 旧行认领：这一步不出声（它不是「缺」，是当年没有凭据）；认领过就重读，后面按新凭据对。
+    if recent.claim(said_rows, root=root, cap=conf["recent"]["cap"]):
+        loaded = recent.load(root=root, turns=conf["recent"]["turns"])
+    turns = list(loaded.get("turns") or [])
+    known = {str(row.get(recent.MSG_ID) or "") for row in turns} - {""}
+    taken = set(recent.stamps(root=root))      # 整份账的时刻，不只是读进提示词那几轮
+    since = str(turns[0].get(recent.TS) or "") if turns else ""
+    missing = [row for row in said_rows
+               if row["msg_id"] and row["msg_id"] not in known
+               and (not since or row["ts"] >= since)
+               and row["ts"] not in taken          # 同 ts 即同一轮：不重复补
+               and not _after(row["ts"], at)]      # 未来时刻不是「刚才」
+    if not missing:
+        return dict(loaded)
+    missing.sort(key=lambda row: row["ts"])
+    written = recent.insert_reconciled(
+        [{"ts": row["ts"], "who": row["who"], "said": row["said"], "reply": "",
+          "msg_id": row["msg_id"]} for row in missing],
+        root=root, cap=conf["recent"]["cap"])
+    if not written:
+        return dict(loaded)
+    # 一行就够：带「缺 N 轮」，N 是这一次真补进去的条数（不是猜的条数）
+    LOGGER.warning("最近几轮与脑对不上：缺 %d 轮（已从脑回填，标为补记，她那句记空）",
+                   len(written))
+    return recent.load(root=root, turns=conf["recent"]["turns"])
+
+
+def _after(stamp: str, at: str) -> bool:
+    """stamp 是不是晚于本轮装配时刻；能解析就按真时刻比，解析不了退回字符串比。"""
+    try:
+        return datetime.fromisoformat(stamp) > datetime.fromisoformat(at)
+    except (TypeError, ValueError):
+        return stamp > at
+
+
+def _said_today(brain: Any, at: str) -> List[Mapping[str, Any]]:
+    """脑里今日在役的「他说」那几条；脑没这条通道（假脑 / 只读一半）就当他没说过。"""
+    reader = getattr(brain, "today_entries", None)
+    if not callable(reader):
+        return []
+    try:
+        try:
+            entries = reader(at)
+        except TypeError:      # 只认一个可选时刻的假脑：退回不带参数那一次
+            entries = reader()
+    except Exception:      # noqa: BLE001  对账读不动不该让她闭口：这一轮照旧装配
+        return []
+    return [entry for entry in (entries or [])
+            if isinstance(entry, Mapping)
+            and str(entry.get("side") or brain_model.SIDE_OTHER) == brain_model.SIDE_OTHER]
+
+
+def _said_row(entry: Mapping[str, Any]) -> Dict[str, str]:
+    """脑里一条「他说」变成这一层认的形状：ts / who / said / msg_id 四个键。
+
+    认领与回填共用这一份口径：两处各自拼一遍，迟早一处用 text 一处用 quote。
+    """
+    return {"ts": str(entry.get(recent.TS) or ""),
+            "who": str(entry.get("who") or ""),
+            "said": str(entry.get("text") or entry.get("quote") or ""),
+            "msg_id": _entry_id(entry)}
+
+
+def _entry_id(entry: Mapping[str, Any]) -> str:
+    """脑里那一条的 id：亲历条的 evidence_key 就是它自己，缺了退到 id（与 _wrote_row 同口径）。"""
+    return str(entry.get("evidence_key") or entry.get("id") or "")
 
 
 def _banned_text(turns: List[Mapping[str, Any]], conf: Mapping[str, Any],
@@ -960,23 +1088,28 @@ def _day() -> str:
 
 
 def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
-              dropped: bool, at: str) -> List[Dict[str, str]]:
+              dropped: bool, at: str) -> Tuple[List[Dict[str, str]], str]:
     """落脑：人的原话先记；她真说出口的那句再记（被弃的那句没说出口，不进脑）。
 
     时刻与 schema 全走脑自己的 ingest：这里不新开表、不另造一行形状。
     id 用的是 ingest 回来的 evidence_key——亲历这一条的 id 就是它自己的证据指针。
+    第二半是**人那一句**的 id，交给最近几轮那一份账当 msg_id（对账靠它对齐）；
+    人那句没落成（脑拒了）就是空串：没有凭据，下一轮对账认不出来也不要假装认出来了。
     """
     wrote: List[Dict[str, str]] = []
     human = brain.ingest(who=who or HUMAN_WHO, text=said, ts=at)
+    msg_id = ""
     if human.get("ok"):
-        wrote.append(_wrote_row(human))
+        row = _wrote_row(human)
+        wrote.append(row)
+        msg_id = row["id"]
     if dropped or not reply:
-        return wrote
+        return wrote, msg_id
     hers = brain.ingest(who=store.snapshot().identity.display, text=reply, ts=at,
                           side=brain_model.SIDE_SELF)
     if hers.get("ok"):
         wrote.append(_wrote_row(hers))
-    return wrote
+    return wrote, msg_id
 
 
 def _wrote_row(result: Mapping[str, Any]) -> Dict[str, str]:
