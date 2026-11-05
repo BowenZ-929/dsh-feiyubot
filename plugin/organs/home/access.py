@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .rooms import READONLY_ROOMS, ROOM_NAMES, RoomMiss, find, room_dir
-from .store import home_root, read_lines
+from .store import factory_path, home_root, read_lines
 
 MAX_CHARS_PER_WRITE = 2000
 MAX_FILES_PER_WRITE = 20
@@ -95,6 +95,21 @@ def load_whitelist(root=None, explicit=None) -> Whitelist:
         return _read_file(path, "env:" + env)
     path = Path(home_root(root)) / ACCESS_NAME
     return _read_file(path, "root:" + str(path))
+
+
+def seed_path() -> Path:
+    """**出厂默认**那份白名单：随包发、只读参数，不是真源。
+
+    它只回答「新机器该装成什么」，不回答「她今天能写哪几间」。读后者只经
+    `load_whitelist()` → `home_root()/access.json`；改这份不影响任何一位她。
+    """
+    return factory_path(ACCESS_NAME)
+
+
+def read_seed() -> Whitelist:
+    """读出厂默认那份，**仅供补件／对照**。它答的不是「她今天能写哪几间」。"""
+    path = seed_path()
+    return _read_file(path, "seed:" + str(path))
 
 
 def _read_file(path: Path, source: str) -> Whitelist:

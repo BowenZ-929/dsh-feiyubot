@@ -18,14 +18,57 @@ from organs.home.store import (
 
 class HomeRootTest(unittest.TestCase):
     def test_explicit_root_wins_over_env(self):
-        with mock.patch.dict(os.environ, {"HOME_ROOT": "/tmp/env-home"}, clear=False):
-            self.assertEqual(Path("/tmp/given"), home_root("/tmp/given"))
-            self.assertEqual(Path("/tmp/env-home"), home_root())
+        with tempfile.TemporaryDirectory() as tmp:
+            env_root = Path(tmp) / "env-home"
+            env_root.mkdir()
+            with mock.patch.dict(os.environ, {"HOME_ROOT": str(env_root)}, clear=False):
+                self.assertEqual(Path("/tmp/given"), home_root("/tmp/given"))
+                self.assertEqual(env_root, home_root())
 
-    def test_falls_back_to_home_organs(self):
+    def test_default_is_the_live_organ_dir(self):
         """没给参数、没有 HOME_ROOT：实盘根是 <仓库>/home/organs/home，包内 data/ 只是出厂默认参数。"""
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(paths.organ_dir("home"), home_root())
+
+    # —— 三条门禁：不留退路，缺了就响 ————————————————————
+
+    def test_empty_env_is_loud_instead_of_falling_back(self):
+        """HOME_ROOT 设成空串 ≠ 没设：不许悄悄换成默认根（那正是第二条真源的路）。"""
+        with mock.patch.dict(os.environ, {"HOME_ROOT": "   "}, clear=False):
+            with self.assertRaises(StoreError) as caught:
+                home_root()
+        self.assertEqual("HOME_ROOT_EMPTY", caught.exception.code)
+        self.assertIn("别设", caught.exception.detail, "拒的话要说人话：要么给实盘，要么别设")
+
+    def test_env_pointing_into_the_repo_is_refused(self):
+        """指到包内出厂默认目录 → 门禁拒。这是「改出厂等于改实盘」那条路的入口。"""
+        with mock.patch.dict(os.environ, {"HOME_ROOT": str(paths.factory_dir("home"))}, clear=False):
+            with self.assertRaises(StoreError) as caught:
+                home_root()
+        self.assertEqual("HOME_ROOT_IN_REPO", caught.exception.code)
+
+    def test_explicit_root_into_the_repo_is_refused_too(self):
+        """显式参数不查存在，但门禁照样过——否则绕过门禁只要加个参数。"""
+        with self.assertRaises(StoreError) as caught:
+            home_root(str(paths.factory_dir("home")))
+        self.assertEqual("HOME_ROOT_IN_REPO", caught.exception.code)
+
+    def test_env_pointing_at_a_missing_dir_is_refused(self):
+        """要存在：不替她造一个根，猜出来的根迟早和真源分叉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "nope"
+            with mock.patch.dict(os.environ, {"HOME_ROOT": str(missing)}, clear=False):
+                with self.assertRaises(StoreError) as caught:
+                    home_root()
+            self.assertEqual("HOME_ROOT_MISSING", caught.exception.code)
+            self.assertFalse(missing.exists(), "拒了就不许顺手把它建出来")
+
+    def test_there_is_no_factory_fallback_left(self):
+        """默认根只认 <仓库>/home/organs/home：不许落回包内 data/。"""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            live = home_root()
+        self.assertEqual(paths.organ_dir("home"), live)
+        self.assertNotEqual(paths.factory_dir("home"), live)
 
 
 class AtomicWriteTest(unittest.TestCase):

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .store import atomic_write_text, home_root
+from .store import atomic_write_text, factory_path, home_root
 
 
 @dataclass(frozen=True)
@@ -129,6 +129,25 @@ def write_rooms_json(root=None) -> Path:
     path = Path(home_root(root)) / ROOMS_JSON_NAME
     atomic_write_text(path, rooms_json_text())
     return path
+
+
+def seed_path() -> Path:
+    """**出厂默认**那份盘上镜像：随包发、只读参数，不是真源。真源永远是这份代码（ROOMS）。"""
+    return factory_path(ROOMS_JSON_NAME)
+
+
+def read_seed() -> dict:
+    """读出厂默认那份镜像，**仅供对照／补件**。它答的不是「她这台机器的房名表是什么样」。"""
+    path = seed_path()
+    if not path.exists():
+        raise RoomsJsonError("ROOMS_JSON_MISSING", str(path))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise RoomsJsonError("ROOMS_JSON_BAD", str(exc))
+    if not isinstance(data, dict):
+        raise RoomsJsonError("ROOMS_JSON_BAD", "顶层不是对象")
+    return data
 
 
 def check_rooms_json(root=None) -> dict:

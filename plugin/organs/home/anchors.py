@@ -72,7 +72,7 @@ def seed_path():
     它只在「把这五句装进一台新机器」时被读一次。实盘里已经有台词时它一点用都没有，
     改了它也不会改到任何一位她——所以读「她现在说什么」永远不许走这条路。
     """
-    return Path(__file__).resolve().parent / "data" / ANCHORS_ROOM / ANCHORS_FILE
+    return home_store.factory_path(Path(ANCHORS_ROOM) / ANCHORS_FILE)
 
 
 def read_seed() -> Tuple[List[Dict[str, Any]], int]:

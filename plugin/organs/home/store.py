@@ -37,13 +37,66 @@ class StoreError(Exception):
 
 
 def home_root(root=None) -> Path:
-    """家的根：构造参数 > HOME_ROOT > <仓库>/home/organs/home。"""
+    """家的根：构造参数 > HOME_ROOT > <仓库>/home/organs/home。**没有回退到出厂默认的路。**
+
+    三条硬规矩，缺一条「唯一真源」就立不住：
+
+    1. **不回落**。解析不出来就抛，绝不退回 `plugin/organs/home/data`。回落就是第二条真源：
+       干净检出时实盘与出厂那份会指到同一个文件，那时「改出厂等于改实盘」，
+       `anchors` / `access` / `rooms` 三份「改出厂读不变」的断言会全部失效。
+    2. **门禁**。落在 <仓库> 里却不在 <仓库>/home 下的路径一律拒——那是出厂默认参数目录（只读），
+       不是活人的实盘。与 `api/roots.py` 第 1 条同向；这里不额外要求「必须放在仓库里」，
+       因为检验与部署都把实盘放在仓库外。
+    3. **要存在**。`HOME_ROOT` 与默认根都必须是一个已存在的目录，否则拒绝启动，不替人建一个。
+       显式构造参数不查存在（调用方自己点过名），但门禁照样过。
+    """
     if root is not None:
-        return Path(root)
-    env = os.environ.get(ENV_ROOT, "")
-    if env:
-        return Path(env)
-    return paths.organ_dir("home")
+        return _guard(Path(root), "构造参数")
+    env = os.environ.get(ENV_ROOT)
+    if env is not None:
+        if not env.strip():
+            raise StoreError("HOME_ROOT_EMPTY",
+                             "设了 %s 却是空的：要么给它一个已存在的实盘目录，"
+                             "要么干脆别设，用默认的 %s——空值不会被当成「用默认」悄悄放过去"
+                             % (ENV_ROOT, paths.organ_dir("home")))
+        return _guard(Path(env), ENV_ROOT, must_exist=True)
+    return _guard(paths.organ_dir("home"), "默认实盘根", must_exist=True)
+
+
+def _guard(path: Path, origin: str, *, must_exist: bool = False) -> Path:
+    """门禁：仓库内的路径只认 <仓库>/home 底下；出厂默认参数目录永远不能当实盘。"""
+    raw = path.expanduser()
+    resolved = _resolve(raw)
+    hub = _resolve(paths.HOME)
+    repo = _resolve(paths.REPO_ROOT)
+    in_hub = resolved == hub or hub in resolved.parents
+    in_repo = resolved == repo or repo in resolved.parents
+    if in_repo and not in_hub:
+        raise StoreError("HOME_ROOT_IN_REPO",
+                         "%s 解析到 %s：那是出厂默认参数目录（只读），不是她的实盘。"
+                         "实盘必须在 %s 下，或者用 %s 指到仓库外一个已存在的目录。"
+                         % (origin, resolved, hub, ENV_ROOT))
+    if must_exist and not raw.is_dir():
+        raise StoreError("HOME_ROOT_MISSING",
+                         "%s 解析到 %s，可那个目录不存在：要么把它建好，要么把 %s 指到已存在的实盘。"
+                         "程序不替她造一个根——猜出来的根迟早和真源分叉。" % (origin, raw, ENV_ROOT))
+    return raw
+
+
+def _resolve(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:      # 路径太怪／权限不够：按字面比，让门禁自己说话
+        return path
+
+
+def factory_path(relative) -> Path:
+    """**出厂默认**（随包发、只读参数）：plugin/organs/home/data/<relative>。
+
+    它与实盘的区别是「可重算／可重装」，不是「另一份真源」。读「她现在是什么样」的路
+    一律不许走这里——谁想读它，得先说明自己在补件。
+    """
+    return paths.factory_dir("home") / Path(str(relative))
 
 
 def ensure_dir(path: Path) -> None:
