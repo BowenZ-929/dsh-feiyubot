@@ -784,7 +784,7 @@ class BrainStore:
         if side == SIDE_SELF:
             person = {"skipped": True, "reason": "self-side"}
         else:
-            person = self.interact(who, display=display, ts=ts)
+            person = self.interact(who, display=display, ts=ts, text=text)
         return {"ok": True, "merged": merged, "entry": dict(entries[-1]),
                 "archived_count": len(archived), "person": person}
 
@@ -976,10 +976,16 @@ class BrainStore:
         view["familiarity"] = people_mod.familiarity(
             person.get("interactions", {}), now_ts,
             limits.familiarity_lambda, limits.familiarity_days)
+        view["total_chats"] = sum(int(n) for n in person.get("interactions", {}).values())
         return view
 
     def interact(self, who: str, display: Optional[str] = None,
-                 ts: Optional[str] = None) -> Dict[str, Any]:
+                 ts: Optional[str] = None,
+                 text: Optional[str] = None) -> Dict[str, Any]:
+        """通道消息认人：建档 / 更新别名与最近互动 / 累计次数与聊过的话题。
+
+        只建真发过言的人；占位符与她的自称不建卡（_blocked_who 守卫）。
+        """
         ts = ts or now_iso()
         who = who.strip()
         if not who:
@@ -999,17 +1005,33 @@ class BrainStore:
         person = people.get(who)
         if person is None:
             person = {"id": who, "display": display or who, "aliases": [],
-                      "first_seen": ts, "last_interaction": ts, "cold": False,
-                      "shadow": False, "interactions": {}, "prefs": [], "notes": []}
+                      "first_seen": ts, "last_interaction": ts, "cold": True,
+                      "shadow": False, "interactions": {}, "topics": [],
+                      "prefs": [], "notes": []}
             people[who] = person
         else:
-            if display:
+            # 群昵称 ≠ 真实姓名：display 用当前群昵称，见过的旧叫法进 aliases 累积。
+            if display and display != person.get("display"):
+                old_display = person.get("display", "")
+                aliases = person.setdefault("aliases", [])
+                if old_display and old_display != who and old_display not in aliases:
+                    aliases.append(old_display)
+                if display != who and display not in aliases:
+                    aliases.append(display)
                 person["display"] = display
             person["last_interaction"] = ts
             if person.get("shadow"):
                 person["shadow"] = False
         day = day_key(ts)
         person["interactions"][day] = int(person["interactions"].get(day, 0)) + 1
+        if text:
+            topics = edges_mod.extract_topics(text or "", self._topics())
+            bucket = person.setdefault("topics", [])
+            for topic in topics:
+                if topic not in bucket:
+                    bucket.append(topic)
+        total = sum(int(n) for n in person["interactions"].values())
+        person["cold"] = total <= 1   # 只聊过一次 = cold：不主动找、不引用他的事
         self._write_people(data)
         return self._person_view(person, ts)
 
