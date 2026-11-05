@@ -4,11 +4,13 @@
 `organs/*` 与 `api/*` 载进内存，源码改了不重启就还在跑旧代码。规矩（CONTRIBUTING §1.3）
 拦不住人，但让进程自己报一句「我的源码指纹和你磁盘上的不一样」，一眼就能看出来。
 
-三个值：
+四件事，分得开才算诚实：
 - `started_at`：进程起来的时间（重启就变）
-- `git_head`：启动时读到的 HEAD 短哈希（提交了才变）
-- `source_digest`：启动时算的源码指纹；`source_digest_now` 是**每次请求现算**的。
-  两者不等 = 源码在进程脚下被改过 = 该重启核了。
+- `git_head` / `git_head_now`：启动时读到的 HEAD 与此刻的 HEAD；**两者不等 = stale**。
+- `dirty`：工作树有未提交改动。它**不参与 stale**——dirty 时进程可能跑旧字节，但那只是
+  「建议重启」，不是「一定在跑旧代码」。把它算进 stale，等于每改一行就报一次假警，
+  而假警多了，真 stale 就没人看。
+- `source_digest` / `source_digest_now`：源码指纹，只作诊断，不再决定 stale。
 
 只读端点 `GET /healthz`。不碰 organs，只读它们的源码文件算指纹。
 """
@@ -58,6 +60,18 @@ def source_digest() -> str:
     return digest.hexdigest()
 
 
+def _git_dirty() -> bool:
+    """工作树有没有未提交改动。不是 git 仓库 / 没装 git / 命令失败一律 False（自报身份不该让核起不来）。"""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and bool(done.stdout.strip())
+
+
 def _git_head() -> str:
     """HEAD 短哈希。不是 git 仓库、没装 git、或命令失败都退回 unknown——自报身份不该让核起不来。"""
     try:
@@ -78,6 +92,17 @@ BOOT_DIGEST = source_digest()
 def report() -> Dict[str, Any]:
     """现算一次，和启动时那份比：不等就是「你在跑旧代码」。"""
     now = source_digest()
+    head_now = _git_head()
+    dirty = _git_dirty()
+    # stale 只认「提交变了」：进程启动时记下的 HEAD 与此刻不同。HEAD 读不到（不是仓库）就当没变。
+    stale = bool(GIT_HEAD != "unknown" and head_now != "unknown" and head_now != GIT_HEAD)
+    if stale:
+        advice = "进程跑的是旧提交（%s → %s）：必须重启核（pkill -f api.devserver 再起）" % (
+            GIT_HEAD, head_now)
+    elif dirty:
+        advice = "提交没变，但有未提交改动：重启核更保险（不清也算干净，只是跑的是旧字节）"
+    else:
+        advice = "跑的就是当前提交，且工作树没有未提交改动"
     return {
         "ok": True,
         "agent": "version",
@@ -85,12 +110,13 @@ def report() -> Dict[str, Any]:
         "started_at": STARTED_AT,
         "pid": PID,
         "git_head": GIT_HEAD,
+        "git_head_now": head_now,
+        "dirty": dirty,
         "source_digest": BOOT_DIGEST[:12],
         "source_digest_now": now[:12],
-        "stale": now != BOOT_DIGEST,
+        "stale": stale,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "advice": ("源码在进程脚下被改过：重启核（pkill -f api.devserver 再起）"
-                   if now != BOOT_DIGEST else "跑的就是磁盘上这一版"),
+        "advice": advice,
     }
 
 

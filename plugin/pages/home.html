@@ -79,6 +79,7 @@
   .bad { color: var(--home-err); font-weight: 600; }
   /* 页脚：核自报版本。只报不藏——旧代码要能一眼看见。 */
   .build { margin: 1.4rem 0 0; padding-top: .7rem; border-top: 1px dashed var(--home-line, #dcdcdc);
+  .build.warn { color: var(--home-warn, #d98a3d); }
            font: .78rem/1.6 ui-monospace, Menlo, monospace; color: #6b6b6b; overflow-wrap: anywhere; }
   .ok { color: var(--home-brand); }
   .note { margin: .8rem 0 0; color: var(--home-warn); background: var(--home-warn-bg);
@@ -908,9 +909,14 @@
       var line = "核 " + d.git_head + " · 启动 " + d.started_at + " · 源码 " + d.source_digest
         + "（进程 " + d.pid + "）";
       if (d.stale) {
-        node.textContent = "⚠ 进程旧了：" + line + " —— 磁盘上现在是 " + d.source_digest_now
+        // stale：提交变了 = 进程跑的是旧代码，必须重启
+        node.textContent = "⚠ 进程旧了：" + line + " —— 现在是 " + d.git_head_now
           + "，" + d.advice;
         node.className = "build bad";
+      } else if (d.dirty) {
+        // dirty：有未提交改动，只是「重启更保险」，不是陈旧
+        node.textContent = line + " · 有未提交改动（dirty）—— " + d.advice;
+        node.className = "build warn";
       } else {
         node.textContent = line + " —— " + d.advice;
         node.className = "build";

@@ -29,7 +29,8 @@ class HealthzTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIs(payload["ok"], True)
         self.assertIs(payload["readonly"], True)
-        for key in ("started_at", "pid", "git_head", "source_digest", "source_digest_now", "stale"):
+        for key in ("started_at", "pid", "git_head", "git_head_now", "dirty",
+                    "source_digest", "source_digest_now", "stale"):
             self.assertIn(key, payload)
         self.assertEqual(payload["pid"], version.PID)
         self.assertEqual(payload["started_at"], version.STARTED_AT)
@@ -42,20 +43,44 @@ class HealthzTest(unittest.TestCase):
             self.assertEqual(status, 405, "%s /healthz 必须 405" % method)
             self.assertIn("只收 GET", payload["message"])
 
-    def test_digest_is_stable_when_source_is_unchanged(self):
-        self.assertEqual(version.source_digest(), version.source_digest())
-        self.assertFalse(version.report()["stale"], "没改源码就不该报陈旧")
+    def test_stale_is_about_the_commit_not_the_source_tree(self):
+        """判据是「进程跑的是不是旧代码」，不是「源码一个字节都没动」。
 
-    def test_stale_flips_when_source_changes(self):
-        """把「启动指纹」换掉，就等于源码在进程脚下变过——`stale` 必须为真。"""
-        original = version.BOOT_DIGEST
+        工作树有未提交改动（本仓常态）时，只要提交没变，stale 必须是 False——
+        否则每改一行都报假警，最后没人看这条。
+        """
+        original = version.GIT_HEAD
         try:
-            version.BOOT_DIGEST = "0" * 64
+            version.GIT_HEAD = version._git_head()
+            report = version.report()
+            self.assertIs(report["stale"], False, "提交没变却报陈旧：%r" % (report["advice"],))
+        finally:
+            version.GIT_HEAD = original
+        self.assertEqual(version.source_digest(), version.source_digest(),
+                         "指纹仍要稳定（只作诊断）")
+
+    def test_dirty_alone_does_not_make_it_stale(self):
+        """有未提交改动 = dirty，不是 stale：它是「重启更保险」，不是「一定是旧代码」。"""
+        original = version.GIT_HEAD
+        try:
+            version.GIT_HEAD = version._git_head()
+            report = version.report()
+        finally:
+            version.GIT_HEAD = original
+        self.assertIsInstance(report["dirty"], bool)
+        self.assertIs(report["stale"], False, report["advice"])
+        self.assertIn("重启", report["advice"])
+
+    def test_stale_flips_when_the_commit_changes(self):
+        """HEAD 与启动时不同，才是真的「在跑旧代码」。"""
+        original = version.GIT_HEAD
+        try:
+            version.GIT_HEAD = "deadbee"
             report = version.report()
             self.assertIs(report["stale"], True)
             self.assertIn("重启核", report["advice"])
         finally:
-            version.BOOT_DIGEST = original
+            version.GIT_HEAD = original
 
     def test_digest_covers_organ_sources(self):
         """指纹要盖住 organs/*.py，否则「改了判据没重启」不会报警。"""
@@ -78,6 +103,7 @@ class FooterShowsVersion(unittest.TestCase):
             self.assertIn('call("GET", "/healthz")', text, "%s 的页脚没有去读 /healthz" % page)
             self.assertIn("stale", text, "%s 的页脚分不出进程新旧" % page)
             self.assertIn("进程旧了", text, "%s 没有「进程旧了」的红字分支" % page)
+            self.assertIn("dirty", text, "%s 的页脚没有把 dirty 单独读出来" % page)
 
     def test_brain_page_is_really_gone(self):
         """名字从上面的名单里划掉，得有个看得见的凭据：文件真的没了。
