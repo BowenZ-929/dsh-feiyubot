@@ -1,8 +1,10 @@
 """评测脚本自己的验收：漂移识别、全同识别、四条判定各触发一次、假模型冒烟。
 
 判据（每条都对应交付里的一句话）：
-1. **A 轨的取值域由数据定死**：称呼/自称/自称AI/口癖/句长档都从 data/questions.json 的词表与档界来，
-   代码里没有第二份词表。
+1. **A 轨按闭集判**：自称/称呼的取值只有「集内」「越界:<词>」两种形状，闭集分别是魂
+   identity.self_names 与称呼表 + 数据里那个中性第二人称；集合内换词不漂、跳出集合才漂；
+   完全没有自称/称呼记「集内」。自称AI/口癖/句长档照旧（档界与词表都在 data/questions.json，
+   代码里没有第二份词表）；句长只在跨档时算漂移。
 2. **漂移识别**：10 次里任一 A 特征出现过不同取值 = 该题漂移，且报出是哪几个特征。
 3. **全同识别**：10 次逐字相同 = 该题全同（措辞），三特征全同才算「疑似复制」那一格。
 4. **四条判定各触发一次**（顺序写死）：1 无效（含「完全相同 → 无效轮」）／2 换人／3 死板／4 通过，
@@ -19,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import tempfile
 import time
 import unittest
 
@@ -28,10 +31,22 @@ DATA = bench.load_data()
 RULES = DATA["rules"]
 QUESTIONS = DATA["questions"]
 
+#: 测试用的闭集：合成一份，不跟着实盘卡变（实盘闭集由 ClosedSetTest 单独验）。
+#: 取值域刻意窄（自称只认魂名单里的三个词、称呼只认「你」），这样下面的用例不依赖
+#: 魂的自称名单和称呼表现在收了哪些词——那两份会变，用例不该跟着变。
+CLOSED = {
+    "self": {"words": ["我", "本鱼", "迟迟"],
+             "scan": ["人家", "咱家", "咱", "小的", "本人", "我", "本鱼", "迟迟"],
+             "source": "合成（自称闭集）", "fallback": False},
+    "address": {"words": ["你"],
+                "scan": ["您", "主人", "宝宝", "宝贝", "亲爱的", "你"],
+                "source": "合成（称呼闭集）", "fallback": False},
+}
+
 
 def sample(reply: str, tier: str = "平常") -> dict:
-    """一条合成读数：A 轨从回复原文提，B 轨三特征照返回体的形状拼。"""
-    return {"a": bench.a_features(reply, RULES),
+    """一条合成读数：A 轨从回复原文提（闭集用合成那份），B 轨三特征照返回体的形状拼。"""
+    return {"a": bench.a_features(reply, RULES, CLOSED),
             "b": bench.b_features({"reply": reply, "heart": {"mood": {"tier": tier}}})}
 
 
@@ -48,20 +63,30 @@ def cell(per_question) -> dict:
 
 
 class AFeatureTest(unittest.TestCase):
-    """A 轨：取值域全在数据里，提取是确定性的。"""
+    """A 轨：取值域全在数据与闭集里，提取是确定性的。"""
 
-    def test_words_and_buckets_come_from_the_data(self):
+    def test_out_of_set_words_are_named(self):
         text = "主人呀，小的记住了。作为一个AI我不好说。"
-        got = bench.a_features(text, RULES)
-        self.assertIn("主人", got["称呼口径"])
-        self.assertIn("小的", got["自称"])
+        got = bench.a_features(text, RULES, CLOSED)
+        self.assertEqual("越界:主人", got["称呼口径"])
+        self.assertEqual("越界:小的", got["自称"])
         self.assertEqual("是", got["自称AI"])
         self.assertEqual("是", got["口癖"])
         self.assertIn(got["句长量级"], RULES["length"]["labels"])
-        for word in got["称呼口径"].split("、") + got["自称"].split("、"):
-            if word != "无":
-                self.assertTrue(word in RULES["address"]["words"] or word in RULES["self"]["words"],
-                                "冒出一个不在数据词表里的词：%s" % word)
+
+    def test_in_set_words_are_not_drift_and_out_of_set_ones_are(self):
+        """闭集的两种形状：集合内换词还是「集内」，集合外才有「越界:<词>」。"""
+        self.assertEqual("集内", bench.a_features("我记住了。", RULES, CLOSED)["自称"])
+        self.assertEqual("集内", bench.a_features("本鱼记住了。", RULES, CLOSED)["自称"])
+        self.assertEqual("集内", bench.a_features("迟迟记住了。", RULES, CLOSED)["自称"])
+        self.assertEqual("越界:人家", bench.a_features("人家记住了。", RULES, CLOSED)["自称"])
+        self.assertEqual("集内", bench.a_features("你早呀。", RULES, CLOSED)["称呼口径"])
+        self.assertEqual("越界:主人", bench.a_features("主人早呀。", RULES, CLOSED)["称呼口径"])
+
+    def test_only_the_first_out_of_set_word_is_reported(self):
+        got = bench.a_features("主人呀，人家记住了。", RULES, CLOSED)
+        self.assertEqual("越界:主人", got["称呼口径"])
+        self.assertEqual("越界:人家", got["自称"])
 
     def test_bucket_edges_are_read_from_the_data(self):
         edges = RULES["length"]["edges"]
@@ -70,10 +95,88 @@ class AFeatureTest(unittest.TestCase):
         self.assertEqual(labels[1], bench._bucket(edges[0] + 1, RULES["length"]))
         self.assertEqual(labels[-1], bench._bucket(edges[-1] + 1000, RULES["length"]))
 
-    def test_clean_answer_has_no_hits_and_no_ai(self):
-        got = bench.a_features("今天的云很好看。", RULES)
-        self.assertEqual({"称呼口径": "无", "自称": "无", "自称AI": "否",
+    def test_clean_answer_is_in_set_not_out_of_set(self):
+        """一个自称/称呼都没有 = 「集内」，不是越界，也不算漂移。"""
+        got = bench.a_features("今天的云很好看。", RULES, CLOSED)
+        self.assertEqual({"称呼口径": "集内", "自称": "集内", "自称AI": "否",
                           "口癖": "否", "句长量级": RULES["length"]["labels"][0]}, got)
+
+
+class ClosedSetTest(unittest.TestCase):
+    """闭集从哪儿读、读不到怎么退、以及三种漂移判法（集内换词／越界／跨档）。"""
+
+    def test_self_closed_set_is_the_soul_card_not_a_word_list_in_code(self):
+        got = bench.read_self_names()
+        self.assertFalse(got["fallback"], "仓库里的魂卡应当读得到：%s" % got.get("reason"))
+        self.assertIn("identity.self_names", got["source"])
+        self.assertTrue(got["words"], "魂的自称名单读成了空的")
+
+    def test_address_closed_set_is_the_mouth_table_plus_the_neutral_second_person(self):
+        got = bench.read_address_names(RULES)
+        self.assertFalse(got["fallback"], "称呼表应当读得到：%s" % got.get("reason"))
+        self.assertIn("address_table", got["source"])
+        for word in RULES["address"]["closed_extra"]:
+            self.assertIn(word, got["words"], "数据里那个中性第二人称没并进闭集")
+
+    def test_unreadable_closed_sets_fall_back_and_say_so(self):
+        with tempfile.TemporaryDirectory() as empty:
+            closed = bench.read_closed_sets(RULES, soul_root=empty, mouth_root=empty)
+        self.assertTrue(closed["self"]["fallback"])
+        self.assertTrue(closed["address"]["fallback"])
+        self.assertEqual(RULES["self"]["fallback"], closed["self"]["words"])
+        self.assertEqual(RULES["address"]["fallback"], closed["address"]["words"])
+        self.assertIn("退回", bench.closed_fallback_note(closed))
+        self.assertIn("自称", bench.closed_fallback_note(closed))
+        # 退回了 fallback 就判不出越界：扫到的词必然都在这份表里（这是「退回了」的代价，如实报）。
+        self.assertEqual("集内", bench.a_features("人家记住了。", RULES, closed)["自称"])
+
+    def test_live_closed_sets_say_they_did_not_fall_back(self):
+        note = bench.closed_fallback_note(bench.read_closed_sets(RULES))
+        self.assertIn("没有退回 fallback", note)
+        self.assertIn("扫词表", note)
+
+    def test_swapping_words_inside_the_set_is_not_drift(self):
+        replies = ["我记住了。第 %d 遍。" % run if run % 2 else "本鱼记住了。第 %d 遍。" % run
+                   for run in range(10)]
+        row = bench.question_stats(series(replies))
+        self.assertFalse(row["drift"], "「我」换「本鱼」在闭集内，不该算漂移（%r）" % row["drift_features"])
+        self.assertFalse(row["same_text"], "措辞每轮都不同——那是 B 轨的事")
+
+    def test_leaving_the_set_is_drift(self):
+        replies = ["我记住了。第 %d 遍。" % run if run % 2 else "人家记住了。第 %d 遍。" % run
+                   for run in range(10)]
+        row = bench.question_stats(series(replies))
+        self.assertTrue(row["drift"])
+        self.assertEqual(["自称"], row["drift_features"])
+        self.assertEqual({"集内", "越界:人家"}, set(row["a_values"]["自称"]))
+
+    def test_address_leaving_the_set_is_drift_too(self):
+        replies = ["你早呀。第 %d 遍。" % run if run % 2 else "主人早呀。第 %d 遍。" % run
+                   for run in range(10)]
+        row = bench.question_stats(series(replies))
+        self.assertEqual(["称呼口径"], row["drift_features"])
+
+    def test_length_drifts_only_when_the_bucket_changes(self):
+        """同一档里字数怎么变都不算漂移；跨过档界才算——档界在数据里。"""
+        edges = RULES["length"]["edges"]
+        inside = ["嗯" * (edges[0] - run) + "。" for run in range(1, 9)]   # 全在「短」这一档
+        row = bench.question_stats(series(inside))
+        self.assertNotIn("句长量级", row["drift_features"], "同一档内的字数变化不该算漂移")
+        across = ["嗯" * (edges[0] - 1) + "。", "嗯" * (edges[0] + 2) + "。"] * 5
+        row = bench.question_stats(series(across))
+        self.assertIn("句长量级", row["drift_features"], "跨档了就该算漂移")
+
+    def test_report_header_states_the_three_things(self):
+        closed = bench.read_closed_sets(RULES)
+        header = "\n".join(["- A 轨怎么判（不该变）：%s" % bench.a_rule_note(RULES),
+                             "- A 轨的闭集从哪读：%s" % bench.closed_source_note(closed),
+                             "- A 轨有没有退回 fallback：%s" % bench.closed_fallback_note(closed)])
+        self.assertIn("集内", header)
+        self.assertIn("越界", header)
+        self.assertIn("跨档", header)
+        self.assertIn("identity.self_names", header)
+        self.assertIn("address_table", header)
+        self.assertIn("没有退回 fallback", header)
 
 
 class DriftAndSameTest(unittest.TestCase):
@@ -333,7 +436,10 @@ class CSurfaceTest(unittest.TestCase):
                 "answer_params": [], "recent_note": "", "assembly_note": "",
                 "anchors": {"file": "合成", "total": 2, "file_exists": True},
                 "usage_ready": True, "prefix_chars": 3, "opening_chars": 6,
-                "guard_note": "现读", "anchors_note": "合成"}
+                "guard_note": "现读", "anchors_note": "合成",
+                "a_note": "合成口径：集内／越界／跨档", "closed_note": "合成闭集",
+                "fallback_note": "合成：没有退回 fallback",
+                "closed": bench.read_closed_sets(RULES)}
         report = {"meta": meta, "cells": cells}
         report["summary"] = bench.summary_stats(report)
         return report
@@ -350,6 +456,12 @@ class CSurfaceTest(unittest.TestCase):
         self.assertIn("1→2→3→4", summary)
         for config in bench.CONFIGS:
             self.assertIn("%s 0.50" % config, summary)
+
+    def test_header_carries_the_three_a_track_lines(self):
+        header = bench.render_meta(self._report())
+        self.assertIn("A 轨怎么判（不该变）：合成口径", header)
+        self.assertIn("A 轨的闭集从哪读", header)
+        self.assertIn("A 轨有没有退回 fallback", header)
 
     def test_c_is_rendered_even_when_usage_is_not_there(self):
         table = bench.render_table(self._report(c_rate=None))
@@ -388,6 +500,27 @@ class CJsonTest(unittest.TestCase):
                 self.assertEqual(0.0, stats["c_rate"], "假模型不用台词：C 必须是 0.00（不造假命中）")
             else:
                 self.assertIsNone(stats["c_rate"], "没落地就报 None，不拿 0 冒充没命中")
+
+    def test_a_values_in_json_say_in_set_or_out_of_set(self):
+        """--json 里 A 轨每条都看得到「集内／越界:xx」，闭集来源也跟着进 meta。"""
+        report = bench.run_bench(runs=2, transport=bench.template_transport(),
+                                 questions=QUESTIONS[:1], data=DATA,
+                                 config_data=bench.FAKE_CONFIG, env_data=bench.FAKE_ENV)
+        json.dumps(report, ensure_ascii=False)
+        meta = report["meta"]
+        self.assertIn("identity.self_names", meta["closed_note"])
+        self.assertIn("address_table", meta["closed_note"])
+        for name in ("self", "address"):
+            self.assertTrue(meta["closed"][name]["words"])
+            self.assertFalse(meta["closed"][name]["fallback"])
+        for row in report["cells"]:
+            for entry in row["per_question"].values():
+                for reading in entry["samples"]:
+                    for key in ("自称", "称呼口径"):
+                        self.assertTrue(reading["a"][key] == "集内"
+                                        or reading["a"][key].startswith("越界:"),
+                                        "--json 里 A 轨取值看不清是集内还是越界：%r"
+                                        % reading["a"][key])
 
     def test_anchors_are_read_once_for_the_whole_run(self):
         report = bench.run_bench(runs=1, transport=bench.template_transport(),

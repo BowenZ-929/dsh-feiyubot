@@ -10,8 +10,15 @@
   **心与嘴四格都在**：那是她此刻的状态与说话的规矩，不是人设与记忆。
 - 每一轮（run）：全新临时脑 + 全新 recent_root + 全新心根（出厂卡）；**同一轮内共享累积的最近 N 轮
   与脑记忆**。顺序本身是连续性的来源，别把每题跑成一次独立会话。
-- 两条轨道（提取全是确定性正则/计数，零 LLM，一个词表都不写在本文件里，全在 data/questions.json）：
+- 两条轨道（提取全是确定性匹配与计数，零 LLM）：
   A 不该变：称呼口径／自称／是否自称 AI／句长量级（按数据档界落桶）／口癖（命中与否）
+  **A 轨按闭集判漂移，不按「命中词拼接」**：自称的闭集是魂 identity.self_names（display +
+  synonyms，经 organs.soul 的公开读口现读；实盘卡优先、出厂卡兜底），称呼的闭集是称呼表
+  address_table 里的称呼词（四档 + 回退 + 彩蛋，经 organs.mouth.warehouse.load 现读）加上数据里
+  那个中性第二人称。集合内换词（魂名单里「我」↔「本鱼」）不算漂移；出现集合外的自称/称呼才算，
+  只报第一个越界词。完全没有自称/称呼记「集内」——不是越界，也不算漂移。两处闭集都读不到时退回
+  data/questions.json 里的 self／address fallback，并在报告头写明退回了（默认值不是配置）。
+  句长量级只在**跨档**时算漂移，不逐字比长度。
   B 该变：措辞（原文哈希）／回应长度（字数）／情绪档位（heart.mood.tier）
 - C 轨（读数，**不进判定**）：每句回答用 organs.mind.usage.match 判一次「是不是拿台词库的
   锚句开的场」，一格报**口癖命中率** = 该格所有回答里命中的比例。锚句整轮开始时读一次
@@ -150,16 +157,132 @@ def _bucket(size: int, rule: Mapping[str, Any]) -> str:
     return labels[-1]
 
 
-def a_features(text: Any, rules: Mapping[str, Any]) -> Dict[str, str]:
-    """A 轨一句读数：称呼口径／自称／是否自称 AI／句长量级／口癖（命中与否）。
+# —— A 轨的闭集（「不该变」的那几个值由几张卡定死，代码里一个词都不写） ————————
 
-    全是确定性匹配与计数，零 LLM；每种取值的取值域都由数据里的词表与档界定死，所以
-    「10 次里出现过不同取值」就是漂移，不需要另立阈值。
+
+#: 魂的器官名：实盘卡（QQAGENT_HOME/organs/soul）优先，读不到才看出厂卡（organs/soul/data）。
+SOUL_ORGAN = "soul"
+#: 称呼表在嘴的仓库里的名字（经 organs.mouth.warehouse.load 读）。
+ADDRESS_TABLE = "address_table"
+
+
+def _dedup(items: Sequence[Any]) -> List[str]:
+    """按先后去重：扫描顺序决定「第一个越界词」报哪个，所以顺序是给定的，不是集合的。"""
+    out: List[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def read_self_names(root: Optional[Any] = None) -> Dict[str, Any]:
+    """自称闭集：魂 identity.self_names 的 display + synonyms，从 organs.soul 的公开读口现读。
+
+    实盘卡优先、出厂卡兜底；两处都读不到就返回空词表与一句原因，由 closed_set 退回数据里的
+    fallback——不在这里补一个词，补了就是第二处真源。
+    """
+    roots = [Path(root)] if root is not None else [paths.organ_dir(SOUL_ORGAN),
+                                                   paths.factory_dir(SOUL_ORGAN)]
+    reason = ""
+    for candidate in roots:
+        try:
+            identity = load_soul(candidate).snapshot().identity
+            names = _dedup([identity.display] + list(identity.synonyms))
+        except Exception as exc:           # 缺卡／坏卡／红线不过：都只是「这一处读不到」
+            reason = "%s（%s）" % (candidate, type(exc).__name__)
+            continue
+        if names:
+            return {"words": names, "source": "魂 identity.self_names（%s）" % candidate,
+                    "reason": "", "fallback": False}
+        reason = "%s（identity.self_names 是空的）" % candidate
+    return {"words": [], "source": "", "reason": reason, "fallback": True}
+
+
+def _address_words(table: Mapping[str, Any]) -> List[str]:
+    """称呼表里的称呼词：四档 addresses + fallback.address + easter_egg.address，表里没有的不补。"""
+    words: List[str] = []
+    for tier in table.get("tiers") or []:
+        words.extend(list((tier or {}).get("addresses") or []))
+    for key in ("fallback", "easter_egg"):
+        block = table.get(key) or {}
+        words.append(block.get("address") if isinstance(block, Mapping) else "")
+    return words
+
+
+def read_address_names(rules: Mapping[str, Any], root: Optional[Any] = None) -> Dict[str, Any]:
+    """称呼闭集：称呼表里的称呼词 + 数据里那个中性第二人称（rules.address.closed_extra）。
+
+    表缺件／坏件就返回空词表与一句原因，由 closed_set 退回数据里的 fallback。
+    """
+    extra = _words(rules["address"], "closed_extra")
+    try:
+        from organs.mouth.warehouse import load as mouth_load, path_of as mouth_path
+        table = mouth_load(ADDRESS_TABLE, root)
+        path = mouth_path(ADDRESS_TABLE, root)
+        names = _dedup(_address_words(table) + list(extra))
+        if names:
+            return {"words": names,
+                    "source": "称呼表 %s（四档称呼词 + 回退 + 彩蛋 + %s）"
+                              % (path, "、".join(extra)),
+                    "reason": "", "fallback": False}
+        reason = "%s（称呼表里的称呼词是空的）" % path
+    except Exception as exc:               # 缺件／坏件：读不到就是读不到
+        reason = "%s（%s）" % (ADDRESS_TABLE, type(exc).__name__)
+    return {"words": [], "source": "", "reason": reason, "fallback": True}
+
+
+def closed_set(raw: Mapping[str, Any], fallback: Sequence[str], label: str) -> Dict[str, Any]:
+    """一组闭集：卡里读得到就用卡里的名单，读不到就退回数据里那份，并把「退回了」写进来源。
+
+    scan（扫词表）= 数据里那份词的先后 + 闭集里多出来的词。两份都不可少：数据决定「扫得见哪些
+    词」，闭集决定「哪些算合规」——少了前者就看不见集合外的话，少了后者就判不出越界。
+    """
+    words = _dedup(raw.get("words") or [])
+    if words:
+        return {"words": words, "scan": _dedup(list(fallback) + words),
+                "source": str(raw.get("source") or label), "fallback": False}
+    return {"words": _dedup(fallback), "scan": _dedup(fallback),
+            "source": "%s 读不到（%s），退回数据里的 fallback" % (label, raw.get("reason") or "—"),
+            "fallback": True}
+
+
+def read_closed_sets(rules: Mapping[str, Any], *, soul_root: Optional[Any] = None,
+                     mouth_root: Optional[Any] = None) -> Dict[str, Any]:
+    """A 轨的两套闭集：自称认魂的自称名单，称呼认称呼表 + 数据里那个中性第二人称。
+
+    整轮读一次（轮内不重读）：评测期间实盘根被切到临时目录，轮内读会读错地方。
+    """
+    return {"self": closed_set(read_self_names(soul_root),
+                              _words(rules["self"], "fallback"),
+                              "魂 identity.self_names"),
+            "address": closed_set(read_address_names(rules, mouth_root),
+                                 _words(rules["address"], "fallback"),
+                                 "称呼表 address_table")}
+
+
+def _classify(body: str, scan: Sequence[str], closed: Sequence[str]) -> str:
+    """闭集判读：扫到的词全在闭集里就是「集内」，否则报第一个越界词；一个没扫到也记「集内」。"""
+    allowed = {word for word in closed if word}
+    for word in scan:
+        if word and word in body and word not in allowed:
+            return "越界:%s" % word
+    return "集内"
+
+
+def a_features(text: Any, rules: Mapping[str, Any],
+               closed: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:
+    """A 轨一句读数：称呼口径／自称（按闭集判：集内／越界:<词>）／是否自称 AI／句长量级／口癖。
+
+    全是确定性匹配与计数，零 LLM。前两个特征的取值域只有「集内」与「越界:<词>」两种形状：
+    集合内换词不改取值（不漂），跳出集合才改；后三个照旧（命中／档界／命中）。
+    closed 不给就现读一次闭集——整轮评测应当在外面读好再传进来（轮内环境是临时根）。
     """
     body = _squash(text)
+    sets = dict(closed) if closed is not None else read_closed_sets(rules)
     return {
-        "称呼口径": _hits(body, _words(rules["address"], "words")),
-        "自称": _hits(body, _words(rules["self"], "words")),
+        "称呼口径": _classify(body, sets["address"]["scan"], sets["address"]["words"]),
+        "自称": _classify(body, sets["self"]["scan"], sets["self"]["words"]),
         "自称AI": "是" if _hits(body, _words(rules["ai_marker"], "words")) != "无" else "否",
         "句长量级": _bucket(len(body), rules["length"]),
         "口癖": "是" if _hits(body, _words(rules["tic"], "words")) != "无" else "否",
@@ -470,13 +593,15 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
              seed: int = SEED_SAME, now: str = NOW, who: str = WHO,
              config_data: Optional[Mapping[str, Any]] = None,
              env_data: Optional[Mapping[str, Any]] = None,
-             anchors: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+             anchors: Optional[Mapping[str, Any]] = None,
+             closed: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """跑一格（配置 × 跑法）：每一轮全新脑 + 全新 recent_root + 全新心根，轮内共享累积。"""
     per_question: Dict[str, List[Dict[str, Any]]] = {question: [] for question in questions}
     dropped = 0
-    # 锚句整轮读一次（在外面读：isolated_environment 会把家根切到临时目录，那里没有台词库）；
-    # 前缀字数从这一格的装配说明里现读。
+    # 锚句与两套闭集整轮读一次（在外面读：isolated_environment 会把家根切到临时目录，
+    # 那里既没有台词库、也没有魂的实盘卡）；前缀字数从这一格的装配说明里现读。
     anchor_book = dict(anchors) if anchors is not None else read_anchors()
+    closed_sets = dict(closed) if closed is not None else read_closed_sets(rules)
     cards = list(anchor_book.get("anchors") or [])
     usage = usage_module()
     guard = guard_settings(assembly_for(config))
@@ -498,7 +623,7 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
                     dropped += 1
                 per_question[question].append({
                     "run": run, "reply": reply,
-                    "a": a_features(reply, rules),
+                    "a": a_features(reply, rules, closed_sets),
                     "b": b_features(got),
                     "c": c_features(reply, cards, prefix_chars=guard["prefix_chars"],
                                     opening_chars=guard["opening_chars"], module=usage)})
@@ -508,6 +633,7 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
             "anchors": {"file": anchor_book.get("file"), "total": len(cards),
                         "available": usage is not None},
             "guard": guard,
+            "closed": closed_sets,
             "stats": cell_stats(rows),
             "per_question": {question: {"stats": rows[question],
                                         "samples": per_question[question]}
@@ -522,7 +648,8 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
               model_label: str = "假模型 dry（回答 = 提示词哈希）",
               config_data: Optional[Mapping[str, Any]] = None,
               env_data: Optional[Mapping[str, Any]] = None,
-              anchors: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+              anchors: Optional[Mapping[str, Any]] = None,
+              closed: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """整张表跑一遍：配置 × 跑法，一格一格来（格子之间不共享脑、不共享心、不共享最近 N 轮）。
 
     锚句**整轮开始前读一次**（就在这儿，没进 isolated_environment：家根切走之后读不到台词库），
@@ -532,6 +659,8 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
     picked = [str(item) for item in (questions or source["questions"])]
     rules = source["rules"]
     anchor_book = dict(anchors) if anchors is not None else read_anchors()
+    # 闭集整轮读一次（在 isolated_environment 之外：家根一被切走就读不到魂的实盘卡）。
+    closed_sets = dict(closed) if closed is not None else read_closed_sets(rules)
     cells: List[Dict[str, Any]] = []
     with isolated_environment():
         for mode in modes:
@@ -541,7 +670,7 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
                                       seed=shuffle_seed if mode == "shuffled" else seed,
                                       now=now, who=who,
                                       config_data=config_data, env_data=env_data,
-                                      anchors=anchor_book))
+                                      anchors=anchor_book, closed=closed_sets))
     params = answer_params()
     meta = {
         "model_label": model_label,
@@ -568,6 +697,11 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
         "anchors": {"file": anchor_book.get("file"), "total": anchor_book.get("total"),
                     "file_exists": anchor_book.get("file_exists")},
         "usage_ready": usage_module() is not None,
+        # A 轨的三件事：怎么判、闭集从哪读、有没有退回 fallback（原样进 --json）。
+        "a_note": a_rule_note(rules),
+        "closed_note": closed_source_note(closed_sets),
+        "fallback_note": closed_fallback_note(closed_sets),
+        "closed": closed_sets,
     }
     guard = dict(cells[0]["guard"]) if cells else dict(GUARD_DEFAULTS)
     meta["prefix_chars"] = guard.get("prefix_chars")
@@ -680,6 +814,39 @@ def render_reasons(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def a_rule_note(rules: Mapping[str, Any]) -> str:
+    """报告头第一件：A 轨现在的判定口径（集内／越界／跨档）。"""
+    edges = "、".join(str(edge) for edge in rules["length"].get("edges") or [])
+    labels = "／".join(str(label) for label in rules["length"].get("labels") or [])
+    return ("**按闭集判漂移**：称呼 → 集内／越界:<词>，自称 → 集内／越界:<词>；"
+            "**集合内换词不算漂移**（魂名单里「我」↔「本鱼」这种），**跳出集合才算**"
+            "（出现集合外的自称/称呼，只报第一个越界词）；完全没有自称/称呼记「集内」——"
+            "不是越界，也不算漂移。句长量级按档界 ≤%s（%s）落桶，**只在跨档时**算漂移"
+            "（不逐字比长度）；自称 AI 命中即「是」；口癖只判命不命中。"
+            % (edges, labels))
+
+
+def closed_source_note(closed: Mapping[str, Any]) -> str:
+    """报告头第二件：两套闭集分别从哪儿读的（连词数一起写，好核）。"""
+    self_set, address_set = closed["self"], closed["address"]
+    return ("自称 ← %s（%d 个词：%s）；称呼 ← %s（%d 个词：%s）"
+            % (self_set["source"], len(self_set["words"]), "、".join(self_set["words"]),
+               address_set["source"], len(address_set["words"]), "、".join(address_set["words"])))
+
+
+def closed_fallback_note(closed: Mapping[str, Any]) -> str:
+    """报告头第三件：有没有退回 fallback（退回时判不出越界，得如实说）。"""
+    fell = ["自称" if name == "self" else "称呼"
+            for name in ("self", "address") if closed[name].get("fallback")]
+    if not fell:
+        return ("没有退回 fallback：两套闭集都是现读的，改魂的自称名单或称呼表，下一次评测就换口径。"
+                "data/questions.json 里的 self／address 两份词表这时候只是扫词表——它决定"
+                "「扫得见哪些词」，不决定「哪些算合规」。")
+    return ("⚠ 退回了 fallback：%s 读不到闭集，用 data/questions.json 里的 fallback 顶替；"
+            "退回时「集合外」判不出来（扫到的词必然都在这份表里），那一路只算连通性冒烟，不是数字。"
+            % "、".join(fell))
+
+
 def render_meta(report: Mapping[str, Any]) -> str:
     """报告头：读数口径、种子、判定顺序、以及装配注入的现状（改不动的地方如实写）。"""
     meta = report["meta"]
@@ -693,9 +860,11 @@ def render_meta(report: Mapping[str, Any]) -> str:
         % (meta["question_count"], meta["runs"], meta["seed_same"], meta["seed_shuffled"],
            meta["now"]),
         "- 心与嘴四格都在：那是她此刻的状态与说话的规矩，不是人设与记忆（所以四格都带心与嘴）。",
-        "- A 轨（不该变）：称呼口径／自称／是否自称 AI／句长量级／口癖（命中与否，不报千分频率："
-        "10 次采样撑不起那个分母）；B 轨（该变）：措辞（原文哈希）／回应长度（字数）／"
-        "情绪档位（heart.mood.tier）。提取全是确定性匹配与计数，零 LLM。",
+        "- A 轨怎么判（不该变）：%s" % meta.get("a_note", "口径未报"),
+        "- A 轨的闭集从哪读：%s" % meta.get("closed_note", "未报"),
+        "- A 轨有没有退回 fallback：%s" % meta.get("fallback_note", "未报"),
+        "- B 轨（该变）：措辞（原文哈希）／回应长度（字数）／情绪档位（heart.mood.tier）。"
+        "提取全是确定性匹配与计数，零 LLM。",
         "- C 轨（**不进判定**）：每句用 organs.mind.usage.match 判一次口癖命中，C 命中率 = "
         "该格所有回答里命中的比例；%s" % meta.get("anchors_note", "未报"),
         "- 锚句前缀口径：%s" % meta.get("guard_note", "未报"),

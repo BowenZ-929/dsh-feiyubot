@@ -121,7 +121,7 @@ def recall(query: str, today_entries: Sequence[Dict[str, Any]],
 
     scored: List[Dict[str, Any]] = []
     for entry in candidates:
-        score = literal_score(q, entry.get("text", ""))
+        score = literal_score(q, entry.get("text") or entry.get("note") or "")
         if score <= 0:
             continue
         if who and entry.get("who") == who:
@@ -152,7 +152,7 @@ def recall(query: str, today_entries: Sequence[Dict[str, Any]],
     deduped: List[Dict[str, Any]] = []
     seen = set()
     for item in scored:
-        key = (item.get("who"), item.get("text"))
+        key = (item.get("who"), item.get("text") or item.get("note"))
         if key in seen:
             continue
         seen.add(key)

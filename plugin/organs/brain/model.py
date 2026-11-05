@@ -62,7 +62,8 @@ def status_writer_report() -> list:
 # 人名录不建卡的占位 who：不知道是谁 ≠ 有一个人叫"人"
 PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知")
 
-# 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天；迁移 = 旧家摘要搬进来（不作证词）
+# 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天；迁移 = 旧家摘要搬进来——
+# 那是**她当时的理解**，不是她的亲眼所见：quote 一栏为空、正文落在 note，两条都不作证词。
 SOURCE_LIVED = "亲历"
 SOURCE_SCHEDULED = "日程模拟"
 SOURCE_MIGRATED = "迁移"

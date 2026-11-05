@@ -42,7 +42,9 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           配额按「最近 quota.window 轮里有几轮带动作」算（repeat.count_with_actions）——
           已达 quota.max 就只写 quota.blocked 那一句，池子与规矩一个字都不给
   memory  brain.recall(query=text, who=who or None)：既进提示词，也原样进返回体
-          recalled[]（页面要显示「想起了什么 + 证据指针」）
+          recalled[]（页面要显示「想起了什么 + 证据指针 + 她的理解」）。每条记忆进提示词是
+          两行：原文一行（括号里是来源｜来源类型｜证据），她的理解 note_display 另起一行、
+          缩进两格——原话与她的理解不许糊成一行，那是脑里分开写的两栏
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
           **不 decide_and_log**）；提示词与返回体都**只给档位词**，一个数都不出门
   mouth   address.resolve + tone.from_store（口径行进提示词），过闸用 gate.enforce
@@ -99,6 +101,8 @@ DEFAULT_WHO = "主人"                      # 门的读数要一个名字：没�
 PENDING_WORD = "待定"                     # 待定轴（耐心 / 记性）没有档位词，照 effective.render_text 的说法
 REPLY_KEY = "reply"                       # reply_budget.key：这笔预算出自 assembly.json 的哪一节
 NO_MEMORY = "这次没想起什么。"
+NO_QUOTE = "（无原话，只有她的理解）"        # 原话空、只有她的理解那一行：第一行不能空着（空行会被读成「没想起」）
+NOTE_INDENT = "  "                        # 她的理解另起一行、缩进两格：与原文那行一眼分开，又不另起一节
 NO_TURNS = "还没有更早的对话"                # 盘上一条历史都没有时，recent 段不写空白
 ANCHORS_MISSING = "未配锚句"                  # 没配 / 卡不在 / 读不出来，三态同一句话
 ANCHORS_HINT = "锚句由人写，程序不替她造。"
@@ -384,7 +388,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
 
     返回（键名对外冻结，pages/chat.html 照它渲染）：
       ok / reply / chunks[{text,gap_before,send_at}] / recalled[{id,text,source,
-      source_type,evidence_key,score,who}] / heart{mood{tier,direction},
+      source_type,evidence_key,score,who,note_display}] / heart{mood{tier,direction},
       voice{tone,direction,bans}, axes{轴: 档位词}, engage{state,reason}}
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
@@ -715,21 +719,37 @@ def _anchors_missing() -> Tuple[str, Dict[str, Any]]:
 
 
 def _recall(brain: Any, said: str, who: str) -> Tuple[List[Dict[str, Any]], str]:
-    """脑装包：既进提示词，也原样进返回体（页面要显示「想起了什么 + 证据指针」）。"""
+    """脑装包：既进提示词，也原样进返回体（页面要显示「想起了什么 + 证据指针」）。
+
+    记忆行在脑里是两栏：quote（对方原话，逐字）与 note（她的理解，可为空）。note_display
+    由脑的 recall 装配好（「她理解：…」/「（无理解）」/「（unclear，未理解）」），本层只搬运、
+    一个前缀都不自己加——「召回时标明这是她的理解」这条判据的真源在脑，不在这里。
+    """
     result = brain.recall(query=said, who=who or None)
     items = result.get("items") or []
     recalled = [{"id": item.get("id", ""),
                  "text": item.get("text", ""),
+                 "display_text": item.get("display_text", item.get("text", "")),
                  "source": item.get("source", ""),
                  "source_type": item.get("source_type", ""),
                  "evidence_key": item.get("evidence_key", ""),
                  "score": item.get("score", 0.0),
-                 "who": item.get("who", "")} for item in items]
+                 "who": item.get("who", ""),
+                 "note_display": item.get("note_display", "")} for item in items]
     if not recalled:
         return recalled, NO_MEMORY
-    lines = ["- %s（来源：%s｜来源类型：%s｜证据：%s）"
-             % (row["text"], row["source"], row["source_type"],
-                row["evidence_key"] or "无") for row in recalled]
+    lines: List[str] = []
+    for row in recalled:
+        # 第一行：原话 + 来源括号。display_text 由脑的 recall 造好——
+        # 迁移来的「（无原话，来自旧家记录）」也在这里，装配侧不自造第二份。
+        lines.append("- %s（来源：%s｜来源类型：%s｜证据：%s）"
+                     % (row["display_text"] or row["text"] or NO_QUOTE,
+                        row["source"], row["source_type"],
+                        row["evidence_key"] or "无"))
+        # 第二行：她的理解另起一行、缩进两格。没有理解就不写这一行（空串不进提示词，
+        # 多出来的空行会把一条记忆劈成两条）。note_display 自带前缀，这里不再加一次。
+        if row["note_display"]:
+            lines.append(NOTE_INDENT + row["note_display"])
     return recalled, "\n".join(lines)
 
 
