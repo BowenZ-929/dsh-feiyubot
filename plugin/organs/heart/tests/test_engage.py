@@ -706,5 +706,78 @@ class IntentGateTest(unittest.TestCase):
             self.assertNotIn(banned, text, "decide 该保持纯函数：%s" % banned)
 
 
+class ProactiveMutedGateTest(unittest.TestCase):
+    """第 6 道软门：主动开口连着没人理 → 只关**主动**那一侧。
+
+    muted 是 proactive.is_muted() 的返回，调用方传进来；decide 仍然不读盘、不改 streak。
+    这一道是单向的：被动回复永不受它影响——被叫了就得答，她安静的是"没人理还继续说"。
+    """
+
+    MUTED = {"muted": True, "remaining_min": 720.0, "streak": 3, "muted_until": None}
+    FREE = {"muted": False, "remaining_min": 0.0, "streak": 0, "muted_until": None}
+
+    def test_proactive_is_silent_while_muted(self) -> None:
+        res = engage.decide(make_input(intent=model.INTENT_PROACTIVE, muted=self.MUTED))
+        self.assertEqual(res["state"], model.STATE_SILENT)
+        self.assertEqual(res["reason"], model.REASON_PROACTIVE_MUTED)
+        self.assertEqual(res["hits"], [model.REASON_PROACTIVE_MUTED])
+        self.assertEqual(res["soft"], [model.REASON_PROACTIVE_MUTED])
+        self.assertFalse(res["soft_skipped"])
+        self.assertEqual([], res["hard"])
+
+    def test_passive_is_never_touched_in_the_same_moment(self) -> None:
+        res = engage.decide(make_input(intent=model.INTENT_PASSIVE, muted=self.MUTED))
+        self.assertEqual(res["state"], model.STATE_SPEAK, "被叫了就得答")
+        self.assertEqual(res["hits"], [])
+        self.assertIsNone(res["reason"])
+
+    def test_unmuted_proactive_speaks(self) -> None:
+        res = engage.decide(make_input(intent=model.INTENT_PROACTIVE, muted=self.FREE))
+        self.assertEqual(res["state"], model.STATE_SPEAK)
+        self.assertEqual(res["hits"], [])
+
+    def test_no_muted_readout_means_no_sixth_gate(self) -> None:
+        res = engage.decide(make_input(intent=model.INTENT_PROACTIVE))
+        self.assertEqual(res["state"], model.STATE_SPEAK)
+        self.assertEqual(res["hits"], [])
+
+    def test_broken_muted_shapes_are_ignored(self) -> None:
+        for broken in ({}, {"muted": "yes"}, {"muted": 1}, [], "muted", None):
+            res = engage.decide(make_input(intent=model.INTENT_PROACTIVE, muted=broken))
+            self.assertEqual(res["hits"], [], broken)
+            self.assertEqual(res["state"], model.STATE_SPEAK, broken)
+
+    def test_reason_is_in_soft_reasons(self) -> None:
+        self.assertIn(model.REASON_PROACTIVE_MUTED, model.SOFT_REASONS)
+        self.assertIn(model.REASON_PROACTIVE_MUTED, model.REASONS)
+        self.assertNotIn(model.REASON_PROACTIVE_MUTED, model.HARD_REASONS)
+
+    def test_it_stacks_with_other_soft_gates_and_wins_as_the_strongest(self) -> None:
+        res = engage.decide(make_input(today_count=20, intent=model.INTENT_PROACTIVE,
+                                       muted=self.MUTED))
+        self.assertEqual(res["state"], model.STATE_SILENT)
+        self.assertEqual(res["reason"], model.REASON_PROACTIVE_MUTED)
+        self.assertEqual(res["hits"],
+                         [model.REASON_TODAY_VOLUME, model.REASON_PROACTIVE_MUTED])
+
+    def test_hard_gate_still_short_circuits_the_sixth_gate(self) -> None:
+        res = engage.decide(make_input(now=NIGHT, intent=model.INTENT_PROACTIVE,
+                                       muted=self.MUTED))
+        self.assertEqual(res["state"], model.STATE_SILENT)
+        self.assertEqual(res["hits"], [model.REASON_NIGHT])
+        self.assertTrue(res["soft_skipped"])
+        self.assertEqual(res["soft"], [])
+
+    def test_caller_supplied_readout_comes_back_unchanged(self) -> None:
+        res = engage.decide(make_input(intent=model.INTENT_PROACTIVE, muted=self.MUTED))
+        self.assertEqual(res["readouts"]["intent"], model.INTENT_PROACTIVE)
+
+    def test_decide_does_not_read_the_proactive_file(self) -> None:
+        text = Path(engage.__file__).read_text(encoding="utf-8")
+        for banned in ("import proactive", "PROACTIVE_FILE", "proactive.sent",
+                       "proactive.outcome", "proactive.the_other_side_spoke"):
+            self.assertFalse(banned in text, "decide 该保持纯函数：%s" % banned)
+
+
 if __name__ == "__main__":
     unittest.main()
