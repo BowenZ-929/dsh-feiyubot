@@ -43,6 +43,7 @@ from organs.brain import BrainStore
 from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.mind import conversation, llm, recent, usage
+from organs.mouth import address as mouth_address
 from organs.mouth import audit as mouth_audit
 from organs.mouth import refusal as mouth_refusal
 from organs.mouth import repeat as mouth_repeat
@@ -90,7 +91,7 @@ REWRITE_KEYS = {"status", "why", "from", "to"}
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
-                 "guard", "memory"}
+                 "guard", "memory", "addressed"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
 ACTION_KEYS = {"pool", "rule", "quota"}
 QUOTA_KEYS = {"window", "max", "used", "blocked", "stripped", "kept_because_empty"}
@@ -284,8 +285,9 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertTrue(payload["recalled"], "一句带「医院」的话该想起那条记忆")
         row = payload["recalled"][0]
-        self.assertEqual({"id", "text", "source", "source_type", "evidence_key", "score", "who"},
-                         set(row))
+        self.assertTrue({"id", "text", "source", "source_type", "evidence_key", "score", "who"}
+                        .issubset(set(row)),
+                        "回包 recalled 至少带这些证据字段，实际：%r" % (sorted(set(row)),))
         self.assertEqual(MEMORY_TEXT, row["text"])
         self.assertEqual(entry["entry"]["evidence_key"], row["evidence_key"])
         self.assertEqual(entry["entry"]["id"], row["id"])

@@ -9,8 +9,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import pack as pack_mod
-from .model import (ALPHA_DEFAULT, BETA_DEFAULT, SOURCE_LIVED,
-                    SOURCE_SCHEDULED, pack_limits)
+from .model import (ALPHA_DEFAULT, BETA_DEFAULT, SIDE_OTHER,
+                    SOURCE_LIVED, SOURCE_MIGRATED, SOURCE_SCHEDULED,
+                    pack_limits)
 
 TIME_TODAY = ("今天", "刚才", "刚刚", "这会儿")
 # 只放硬过去词：说过/记得/原来不是时间词，走 both（今天和长期都查）
@@ -64,11 +65,17 @@ def _route(query: str) -> str:
 
 def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
     source_type = entry.get("source_type") or SOURCE_LIVED
-    if source_type not in (SOURCE_LIVED, SOURCE_SCHEDULED):
-        source_type = SOURCE_LIVED
+    if source_type not in (SOURCE_LIVED, SOURCE_SCHEDULED, SOURCE_MIGRATED):
+        source_type = SOURCE_LIVED   # 读取侧兜底；写入侧 _normalize_row 会直接报错
     beta = entry.get("beta", BETA_DEFAULT)
     testimony = source_type == SOURCE_LIVED and beta >= 0   # 证词只认 quote（原话）
     note = entry.get("note", "")
+    side = entry.get("side", SIDE_OTHER)
+    quote = entry.get("quote", entry.get("text", ""))
+    if source_type == SOURCE_MIGRATED:
+        display_text = (quote + "（旧家记录）") if quote else "（无原话，来自旧家记录）"
+    else:
+        display_text = quote
     return {
         "id": entry.get("id", ""),
         "source": source,
@@ -82,6 +89,8 @@ def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
         "alpha": entry.get("alpha", ALPHA_DEFAULT),
         "beta": beta,
         "testimony": testimony,
+        "side": side,
+        "display_text": display_text,
         "note": note,
         "note_full": note,
         "unclear": bool(entry.get("unclear", False)),

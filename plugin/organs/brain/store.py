@@ -24,7 +24,8 @@ from . import proposals as proposals_mod
 from . import recall as recall_mod
 from . import retention as retention_mod
 from .model import (ALPHA_DEFAULT, BETA_DEFAULT, PLACEHOLDER_WHOS,
-                    SOURCE_LIVED, SOURCE_SCHEDULED, STATUS_ACTIVE,
+                    SIDE_OTHER, SIDE_SELF, SIDE_TYPES, SOURCE_LIVED,
+                    SOURCE_SCHEDULED, SOURCE_TYPES, STATUS_ACTIVE,
                     STATUS_ARCHIVED, STATUS_STALE, day_key, limits, now_iso)
 
 TODAY_FILE = "today.json"
@@ -190,7 +191,10 @@ def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
     row["id"] = row.get("id") or entry_id
     row["status"] = row.get("status") or STATUS_ACTIVE
     source_type = row.get("source_type") or SOURCE_LIVED
-    row["source_type"] = source_type if source_type in (SOURCE_LIVED, SOURCE_SCHEDULED) else SOURCE_LIVED
+    if source_type not in SOURCE_TYPES:
+        raise BrainReadError("未知 source_type：%r（只许 %s）"
+                             % (source_type, "/".join(SOURCE_TYPES)))
+    row["source_type"] = source_type
     row["alpha"] = row.get("alpha", ALPHA_DEFAULT)
     row["beta"] = row.get("beta", BETA_DEFAULT)
     if "evidence_key" not in row:
@@ -204,6 +208,7 @@ def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
     if "note" not in row:
         row["note"] = ""
     row.setdefault("unclear", False)
+    row.setdefault("side", SIDE_OTHER)
     if "beta_note" not in row:
         # β 只给 quote 满分；note 另记一档（beta 降一档）。空 note 不记 beta_note。
         row["beta_note"] = (int(row.get("beta", BETA_DEFAULT)) - 1) if row.get("note") else None
@@ -272,6 +277,7 @@ class BrainStore:
                     "note": entry.get("note", ""),
                     "unclear": entry.get("unclear", False),
                     "beta_note": entry.get("beta_note"),
+                    "side": entry.get("side", SIDE_OTHER),
                     "count": entry.get("count", 1),
                     "source": "today",
                     "kind": "fact",
@@ -316,12 +322,12 @@ class BrainStore:
         """某人的最近 3–5 条在役记忆，带 ts / retention / clarity，供人物页显示日期。"""
         rows: List[Dict[str, Any]] = []
         for entry in self.today_entries(now_ts):
-            if entry.get("who") == who:
+            if entry.get("who") == who and entry.get("side", SIDE_OTHER) != SIDE_SELF:
                 row = dict(entry)
                 row["source"] = "today"
                 rows.append(row)
         for entry in self.longterm_active_entries():
-            if entry.get("who") == who:
+            if entry.get("who") == who and entry.get("side", SIDE_OTHER) != SIDE_SELF:
                 row = dict(entry)
                 row["source"] = "longterm"
                 rows.append(row)
@@ -411,6 +417,7 @@ class BrainStore:
                 "note": entry.get("note", ""),
                 "unclear": entry.get("unclear", False),
                 "beta_note": entry.get("beta_note"),
+                "side": entry.get("side", SIDE_OTHER),
                 "count": entry.get("count", 1),
                 "source": "today",
                 "kind": "fact",
@@ -693,16 +700,19 @@ class BrainStore:
                display: Optional[str] = None, ts: Optional[str] = None,
                source_type: str = SOURCE_LIVED, alpha: int = ALPHA_DEFAULT,
                beta: int = BETA_DEFAULT, note: Optional[str] = None,
-               unclear: bool = False) -> Dict[str, Any]:
+               unclear: bool = False, side: str = SIDE_OTHER) -> Dict[str, Any]:
         """一条消息进：今日追加或合并一条 + 人名录认人更新。
 
         text 就是 quote（对方原话）；note 是她的理解，可为空——空 note 是正常状态。
         拿不准就 note="" + unclear=True，只存原话，不许硬编理解。
+        side：他说（默认可召回）／她说（她自己的话，默认不召回，引用走 selfnarration）。
         """
         ts = ts or now_iso()
         who = (who or "").strip()
         text = (text or "").strip()
-        if not who:
+        if side == SIDE_SELF:
+            who = who or "她说"
+        elif not who:
             who = "人"   # 来源不明：记忆照记，who 记成占位符"人"，但人名录不建卡
         if not text:
             return _reject("text 不能为空")
@@ -734,6 +744,7 @@ class BrainStore:
                 "note": note or "",
                 "unclear": bool(unclear),
                 "beta_note": (int(beta) - 1) if note else None,
+                "side": side if side in SIDE_TYPES else SIDE_OTHER,
                 "evidence_key": "",   # 创建后再补：亲历指向自己这行原话，日程模拟留空
             }
             if mood is not None:
@@ -744,7 +755,10 @@ class BrainStore:
         if not merged:
             self._add_edges_for(entries[-1])
         self._demote_today(ts)
-        person = self.interact(who, display=display, ts=ts)
+        if side == SIDE_SELF:
+            person = {"skipped": True, "reason": "self-side"}
+        else:
+            person = self.interact(who, display=display, ts=ts)
         return {"ok": True, "merged": merged, "entry": dict(entries[-1]),
                 "archived_count": len(archived), "person": person}
 
@@ -795,7 +809,9 @@ class BrainStore:
         """数据导入器：旧存量行（缺 status/来源/α/β/evidence_key）归一化后追加进长期档。"""
         imported = 0
         for row in rows:
-            if not isinstance(row, dict) or not row.get("text"):
+            if not isinstance(row, dict):
+                continue
+            if not row.get("text") and "quote" not in row:
                 continue
             entry_id = row.get("id") or _new_id("t-", self._taken_ids())
             normalized = _normalize_row(row, entry_id=entry_id)
@@ -1175,15 +1191,19 @@ class BrainStore:
         """回想：读时结算遗忘曲线 → 今日/热/长期三路字面检索 → 装包；命中回写想起次数。"""
         now_ts = now_ts or now_iso()
         self._settle_retention(now_ts)
-        today = self.today_entries(now_ts)
+        today = [entry for entry in self.today_entries(now_ts)
+                 if entry.get("side", SIDE_OTHER) != SIDE_SELF]
+        longterm = [entry for entry in self.longterm_active_entries()
+                    if entry.get("side", SIDE_OTHER) != SIDE_SELF]
         hot_candidates: List[Dict[str, Any]] = []
         for row in self.hot_rows():
             if recall_mod.literal_score(query, row.get("line", "")) > 0:
                 for source_id in row.get("source_ids", []):
                     found = self._latest_longterm(source_id)
-                    if found and found.get("status") == STATUS_ACTIVE:
+                    if found and found.get("status") == STATUS_ACTIVE \
+                            and found.get("side", SIDE_OTHER) != SIDE_SELF:
                         hot_candidates.append(found)
-        result = recall_mod.recall(query, today, self.longterm_active_entries(),
+        result = recall_mod.recall(query, today, longterm,
                                    hot_entries=hot_candidates, who=who)
         self._write_back_hits(result.get("items", []), now_ts)
         self._add_topic_candidates(result.get("items", []), now_ts)

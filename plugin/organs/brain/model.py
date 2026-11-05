@@ -62,10 +62,16 @@ def status_writer_report() -> list:
 # 人名录不建卡的占位 who：不知道是谁 ≠ 有一个人叫"人"
 PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知")
 
-# 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天（只写她自己，不生成主人的事实）
+# 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天；迁移 = 旧家摘要搬进来（不作证词）
 SOURCE_LIVED = "亲历"
 SOURCE_SCHEDULED = "日程模拟"
-SOURCE_TYPES = (SOURCE_LIVED, SOURCE_SCHEDULED)
+SOURCE_MIGRATED = "迁移"
+SOURCE_TYPES = (SOURCE_LIVED, SOURCE_SCHEDULED, SOURCE_MIGRATED)
+
+# 说话侧：他说（对方，默认可召回）／她说（她自己的话，默认不召回，引用走 selfnarration）
+SIDE_OTHER = "他说"
+SIDE_SELF = "她说"
+SIDE_TYPES = (SIDE_OTHER, SIDE_SELF)
 
 # α（重要度）与 β（可信度）默认值：β<0 只当线索、不作证词；虚构（日程模拟）只作谈资
 ALPHA_DEFAULT = 1

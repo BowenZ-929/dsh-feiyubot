@@ -8,10 +8,10 @@
   /* 颜色全部取宿主变量并带兜底值（docs/reference/ui.md §1.5）；深色跟随宿主 data-theme 与系统偏好。 */
   :root {
     color-scheme: light;
-    --bg: var(--dsw-alias-bg-l1, #fbfbfb);
-    --panel: var(--dsw-alias-bg-l2, #ffffff);
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
     --line: var(--dsw-alias-border-l2, #dcdcdc);
-    --fg: var(--dsw-alias-text-l1, #1b1b1b);
+    --fg: var(--dsw-alias-text-l1, CanvasText);
     --dim: var(--dsw-alias-text-l2, #666666);
     --brand: var(--dsw-alias-brand, #4d6bfe);
     --warn: var(--dsw-alias-warn, #d98a3d);
@@ -714,7 +714,7 @@
     var sourceType = entry.source_type || "亲历";
     var badge = node("span", "badge " + (sourceType === "日程模拟" ? "sim" : "lived"), sourceType);
     li.appendChild(badge);
-    li.appendChild(node("span", null, entry.text || "（正文为空）"));
+    li.appendChild(node("span", null, entry.display_text || entry.text || "（正文为空）"));
     if (entry.unclear) { li.appendChild(node("span", "badge", "unclear")); }
     if (entry.note) {
       li.appendChild(node("span", "row-meta", "她理解：" + entry.note));
