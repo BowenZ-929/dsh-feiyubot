@@ -21,7 +21,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 VERSION_ROUTES: Dict[str, str] = {"/healthz": "GET"}
 
@@ -60,16 +60,54 @@ def source_digest() -> str:
     return digest.hexdigest()
 
 
-def _git_dirty() -> bool:
-    """工作树有没有未提交改动。不是 git 仓库 / 没装 git / 命令失败一律 False（自报身份不该让核起不来）。"""
+#: dirty 只看代码与文档树：参考资料（仓库根下 参考文档和仓库/ 这类）不是代码，
+#: 它天天被人改，算进来只会让 dirty 长期亮着——信号只该反映它能代表的东西。
+DIRTY_SCOPE: Tuple[str, ...] = ("plugin/", "docs/", "tools/", "shell/")
+DIRTY_FILES: Tuple[str, ...] = ("her.sh",)
+
+
+def _scoped(path: str) -> bool:
+    """这条改动算不算"代码与文档树"里的。"""
+    return path in DIRTY_FILES or path.startswith(DIRTY_SCOPE)
+
+
+def _dirty_report(raw: str) -> Tuple[bool, int]:
+    """把 git status --porcelain -z 的输出分成两堆：(代码树有没有改, 非代码文件改了几个)。
+
+    -z 的路径是原样的 UTF-8，不会被加引号转义（中文目录名也能正确分类）；
+    重命名/复制条目占两段（新名 + 旧名），一起算作这一条改动。
+    """
+    paths: List[str] = []
+    tokens = [token for token in raw.split("\0") if token]
+    index = 0
+    while index < len(tokens):
+        entry = tokens[index]
+        status = entry[:2]
+        paths.append(entry[3:] if len(entry) > 3 else "")
+        if status[:1] in ("R", "C") and index + 1 < len(tokens):
+            paths.append(tokens[index + 1])
+            index += 1
+        index += 1
+    dirty = any(_scoped(path) for path in paths)
+    other = sum(1 for path in paths if not _scoped(path))
+    return dirty, other
+
+
+def _git_dirty() -> Tuple[bool, int]:
+    """(代码树有没有未提交改动, 非代码文件改了几个)。
+
+    不是 git 仓库 / 没装 git / 命令失败一律 (False, 0)（自报身份不该让核起不来）。
+    """
     try:
         done = subprocess.run(
-            ["git", "-C", str(REPO_DIR), "status", "--porcelain"],
+            ["git", "-C", str(REPO_DIR), "status", "--porcelain", "-z"],
             capture_output=True, text=True, timeout=3,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0 and bool(done.stdout.strip())
+        return False, 0
+    if done.returncode != 0:
+        return False, 0
+    return _dirty_report(done.stdout)
 
 
 def _git_head() -> str:
@@ -93,16 +131,20 @@ def report() -> Dict[str, Any]:
     """现算一次，和启动时那份比：不等就是「你在跑旧代码」。"""
     now = source_digest()
     head_now = _git_head()
-    dirty = _git_dirty()
+    dirty, dirty_other = _git_dirty()
     # stale 只认「提交变了」：进程启动时记下的 HEAD 与此刻不同。HEAD 读不到（不是仓库）就当没变。
     stale = bool(GIT_HEAD != "unknown" and head_now != "unknown" and head_now != GIT_HEAD)
+    others = ("另有 %d 个非代码文件有改动（参考资料之类，不计入 dirty）" % dirty_other
+              if dirty_other else "")
     if stale:
         advice = "进程跑的是旧提交（%s → %s）：必须重启核（pkill -f api.devserver 再起）" % (
             GIT_HEAD, head_now)
     elif dirty:
-        advice = "提交没变，但有未提交改动：重启核更保险（不清也算干净，只是跑的是旧字节）"
+        advice = "提交没变，但代码与文档树有未提交改动：重启核更保险（跑的是旧字节）"
     else:
-        advice = "跑的就是当前提交，且工作树没有未提交改动"
+        advice = "跑的就是当前提交，代码与文档树没有未提交改动"
+    if others:
+        advice = advice + "；" + others
     return {
         "ok": True,
         "agent": "version",
@@ -112,6 +154,7 @@ def report() -> Dict[str, Any]:
         "git_head": GIT_HEAD,
         "git_head_now": head_now,
         "dirty": dirty,
+        "dirty_other": dirty_other,
         "source_digest": BOOT_DIGEST[:12],
         "source_digest_now": now[:12],
         "stale": stale,

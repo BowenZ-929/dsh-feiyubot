@@ -30,7 +30,7 @@ class HealthzTest(unittest.TestCase):
         self.assertIs(payload["ok"], True)
         self.assertIs(payload["readonly"], True)
         for key in ("started_at", "pid", "git_head", "git_head_now", "dirty",
-                    "source_digest", "source_digest_now", "stale"):
+                    "dirty_other", "source_digest", "source_digest_now", "stale"):
             self.assertIn(key, payload)
         self.assertEqual(payload["pid"], version.PID)
         self.assertEqual(payload["started_at"], version.STARTED_AT)
@@ -42,6 +42,29 @@ class HealthzTest(unittest.TestCase):
             status, payload = api.handle(method, "/healthz", {}, store=None)
             self.assertEqual(status, 405, "%s /healthz 必须 405" % method)
             self.assertIn("只收 GET", payload["message"])
+
+    def test_dirty_only_counts_code_and_docs(self):
+        """dirty 只反映代码与文档树：参考资料目录里改 rtf 不该把脏灯点亮。"""
+        sample = (
+            " M 参考文档和仓库/data.rtf\0"
+            "?? 参考文档和仓库/guide.rtf\0"
+        )
+        dirty, other = version._dirty_report(sample)
+        self.assertIs(dirty, False, "只改参考资料就报 dirty")
+        self.assertEqual(2, other)
+
+    def test_dirty_lights_up_for_code_and_docs(self):
+        for path in ("plugin/api/version.py", "docs/plan.md", "her.sh",
+                     "tools/x.py", "shell/index.ts"):
+            dirty, other = version._dirty_report(" M %s\0" % path)
+            self.assertIs(dirty, True, "%s 改了却没报 dirty" % path)
+            self.assertEqual(0, other)
+
+    def test_rename_entries_are_counted_once(self):
+        sample = "R  plugin/api/new.py\0plugin/api/old.py\0"
+        dirty, other = version._dirty_report(sample)
+        self.assertIs(dirty, True)
+        self.assertEqual(0, other)
 
     def test_stale_is_about_the_commit_not_the_source_tree(self):
         """判据是「进程跑的是不是旧代码」，不是「源码一个字节都没动」。
