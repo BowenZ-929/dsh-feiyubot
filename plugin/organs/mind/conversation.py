@@ -47,6 +47,7 @@ LLMError 不在这里翻译：原样上抛，由 api/chat.py 按 kind 翻成状�
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -213,6 +214,16 @@ def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         raise ValueError("anchors.cap 要正整数：%s" % where)
     clean["cap"] = cap
+    inject = spec.get("inject")
+    if not isinstance(inject, dict):
+        raise ValueError("anchors.inject 要给 {fraction, suffix}（「只给半句」的规矩）：%s" % where)
+    fraction = inject.get("fraction")
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float))             or not 0 < float(fraction) <= 1:
+        raise ValueError("anchors.inject.fraction 要是 (0, 1] 之间的数：%s" % where)
+    suffix = inject.get("suffix")
+    if not isinstance(suffix, str) or not suffix.strip():
+        raise ValueError("anchors.inject.suffix 要一段非空的字（半句后面接什么）：%s" % where)
+    clean["inject"] = {"fraction": float(fraction), "suffix": suffix}
     return clean
 
 
@@ -377,6 +388,10 @@ def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
     没配 / 卡不在 / 读不出来三种情况都写「未配锚句」——这一格不许空着，也不许悄悄跳过：
     空着她就以为自己没有过一句锚。
+
+    **只给半句**（这一条的理由来自人）：整句给她，她就照着念；给半句，她才得自己补完。
+    进提示词的是「正文前 fraction 段 + suffix」（两个数都在 assembly.json 的
+    anchors.inject 里）；返回体另带 body 全文——半句是给她看的，全文是给人看的。
     """
     spec = conf.get("anchors")
     if not isinstance(spec, Mapping):
@@ -388,8 +403,13 @@ def _anchor(conf: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     body = got.get("body")
     if not isinstance(body, str) or not body.strip():
         return _anchors_missing()
-    return body, {"configured": True, "chars": len(body),
-                  "room": str(spec["room"]), "name": str(spec["name"])}
+    inject = spec["inject"]
+    cut = int(math.ceil(len(body) * float(inject["fraction"])))
+    cut = min(max(cut, 1), len(body))
+    injected = body if cut >= len(body) else body[:cut] + str(inject["suffix"])
+    return injected, {"configured": True, "chars": len(body),
+                      "injected": injected, "body": body,
+                      "room": str(spec["room"]), "name": str(spec["name"])}
 
 
 def _anchors_missing() -> Tuple[str, Dict[str, Any]]:

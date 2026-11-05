@@ -494,6 +494,8 @@ def _anchors_list(root: Any, params: Mapping[str, str]) -> Result:
     return 200, {
         "ok": True, "readonly": True, "agent": AGENT,
         "room": got["room"], "file": got["file"], "file_exists": got["file_exists"],
+        "seed_file": str(anchors.seed_path()),
+        "source": "live",
         "total": got["total"], "lines": got["lines"], "bad": got["bad"],
         "truncated": got["truncated"], "anchors": got["anchors"],
     }

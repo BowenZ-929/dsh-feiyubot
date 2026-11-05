@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import os
 import shutil
@@ -507,8 +508,37 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual("锚句", got["anchors"]["name"])
         self.assertTrue(got["anchors"]["configured"], "卡在家·仓库里，却没读到：%r" % (got["anchors"],))
         self.assertEqual(len(body), got["anchors"]["chars"])
-        self.assertIn(body, system, "锚句正文没进提示词")
+        self.assertEqual(body, got["anchors"]["body"], "全文要原样给回来（人要看整句）")
+        inject = conversation.load_assembly()["anchors"]["inject"]
+        cut = int(math.ceil(len(body) * inject["fraction"]))
+        expected = body[:cut] + inject["suffix"]
+        self.assertEqual(expected, got["anchors"]["injected"])
+        self.assertIn(expected, system, "半句没进提示词")
+        self.assertNotIn(body, system, "整句进了提示词，她就会照着念")
         self.assertNotIn(conversation.ANCHORS_MISSING, system)
+
+    def test_anchor_is_injected_as_half_a_sentence(self):
+        """人定的规矩：整句给她她就念，给半句她才得自己补完。
+
+        「哼，才知道啊。」要注入成「哼，才知……」，body 全文另给。
+        """
+        body = "哼，才知道啊。"
+        home = self.tmp / "home_half"
+        source = self.tmp / "anchor_half.md"
+        source.write_text(body, encoding="utf-8")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        with mock.patch.dict(os.environ, {"HOME_ROOT": str(home)}):
+            cards.append_cards(None, role="human", by="人", cards=[{
+                "kind": "物件", "room": "仓库", "name": "锚句", "path": str(source),
+                "sha256": digest, "bytes": source.stat().st_size, "chars": len(body),
+            }])
+            capture = []
+            got = self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        self.assertEqual("哼，才知……", got["anchors"]["injected"])
+        self.assertEqual(body, got["anchors"]["body"])
+        self.assertIn("哼，才知……", system)
+        self.assertNotIn(body, system)
 
     # —— 11) 落账 ————————————————————————————
 

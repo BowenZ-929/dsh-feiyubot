@@ -402,9 +402,14 @@
     var conf = anchors || {};
     if (conf.configured === true) {
       var chars = conf.chars;
-      return "已配（" + ((chars === undefined || chars === null)
+      var head = "已配（" + ((chars === undefined || chars === null)
         ? "没给字数"
         : String(chars) + " 字") + "）";
+      var injected = conf.injected
+        ? "注入：「" + String(conf.injected) + "」（只给半句，她自己补）"
+        : "注入：没给";
+      var full = conf.body ? "全文：「" + String(conf.body) + "」" : "全文：没给";
+      return head + "｜" + injected + "｜" + full;
     }
     if (conf.configured === false) {
       return conf.note ? String(conf.note) : "未配锚句";

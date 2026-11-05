@@ -1,6 +1,12 @@
 """家·仓库的台词卡：人给她定的口头禅，一行一张，只追加。
 
-**真源是 `仓库/anchors.jsonl`**，别处不许留副本——嘴注入时按需读，取用即走。
+**真源是实盘的那一份**（`store.home_root()` 下的 `仓库/anchors.jsonl`），别处不许留副本——
+嘴注入时按需读，取用即走。
+
+包内 `data/仓库/anchors.jsonl` 是**出厂默认（seed 用）**，不是真源：读「她现在说什么」只经
+`anchors_path()`。`anchors_path()` 是构造参数 > `HOME_ROOT` > 包内 `data/` 三级解析的产物，
+所以干净检出时两条路会指向同一个文件——那是兜底，不是定义。**出厂那份改了不影响实盘**；
+要证明这一点，验的时候必须给一个显式的实盘根。
 判据：`soul-manner`「不写具体话术、不写口癖清单」，`architecture.md` §399 台词库归家·仓库。
 所以它不进魂，也不许被复制进任何配置或文档。
 
@@ -19,6 +25,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import access, audit
@@ -51,8 +58,26 @@ def _now() -> str:
 
 
 def anchors_path(root=None):
-    """这台机器上这份台词库在哪。名字固定，不许按 scene 分文件——那样「一份」就成了十份。"""
+    """**实盘**那份台词库在哪：一律经 `store.home_root()` 解析，本函数不认包内那条路。
+
+    名字固定，不许按 scene 分文件——那样「一份」就成了十份。
+    读路径只许走这里（以及由它派生的读取函数），谁都不许硬编码 `plugin/.../data/...`。
+    """
     return home_store.home_root(root) / ANCHORS_ROOM / ANCHORS_FILE
+
+
+def seed_path():
+    """**出厂默认**那份：随包发的 seed 料，不是真源。
+
+    它只在「把这五句装进一台新机器」时被读一次。实盘里已经有台词时它一点用都没有，
+    改了它也不会改到任何一位她——所以读「她现在说什么」永远不许走这条路。
+    """
+    return Path(__file__).resolve().parent / "data" / ANCHORS_ROOM / ANCHORS_FILE
+
+
+def read_seed() -> Tuple[List[Dict[str, Any]], int]:
+    """读出厂默认那份，**仅供 seed**。返回值与 `read_all` 同形，但它答的不是「她现在说什么」。"""
+    return home_store.read_lines(seed_path())
 
 
 def check_body(body: str) -> None:

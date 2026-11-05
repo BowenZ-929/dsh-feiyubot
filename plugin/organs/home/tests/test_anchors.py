@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import tempfile
 import unittest
@@ -137,16 +138,71 @@ class AnchorsTest(unittest.TestCase):
         self.assertEqual(0, got["lines"])
         self.assertEqual(0, got["total"])
 
-    def test_committed_anchors_match_the_five(self) -> None:
-        """真 data/ 里那份（入库的）若在，必须就是这五句——防有人手改跑偏。"""
-        path = PACKAGE / "data" / "仓库" / "anchors.jsonl"
-        if not path.exists():
-            self.skipTest("真 data/ 里还没有台词库（干净检出时不入库之外的机器上才会没有）")
-        got = anchors.read_all(PACKAGE / "data")
-        by_scene = {card["scene"]: card for card in got["anchors"]}
+    def test_seed_copy_carries_the_five(self) -> None:
+        """出厂默认那份（seed 用）若在，必须就是这五句——防有人手改跑偏。
+
+        注意它读的是 `read_seed()`，不是 `read_all()`：出厂那份答的是「新机器该装什么」，
+        不是「她现在说什么」。
+        """
+        rows, bad = anchors.read_seed()
+        if not rows:
+            self.skipTest("这台机器上没有出厂默认那份")
+        self.assertEqual(0, bad)
+        by_scene = {card["scene"]: card for card in anchors.latest_by_scene(rows)}
         self.assertEqual({card["scene"] for card in FIVE}, set(by_scene))
         for want in FIVE:
             self.assertEqual(want["say"], by_scene[want["scene"]]["say"])
+
+    # —— 真源只有一个：实盘 ——————————————————————————————
+
+    def test_default_read_goes_through_the_home_root(self) -> None:
+        """读「她现在说什么」的路一律经 `store.home_root()` 解析出的根，不认任何写死的路径。"""
+        self.assertEqual(store.home_root() / "仓库" / "anchors.jsonl", anchors.anchors_path())
+
+    def test_live_copy_is_the_source_of_truth(self) -> None:
+        """方向一：**改实盘** → 读跟着变；同时出厂那份一个字节都不许被碰。"""
+        anchors.append_anchors(root=self.root, role="human", by="主人", anchors=five())
+        seed_before = anchors.seed_path().read_bytes()
+        changed = dict(FIVE[0], say=FIVE[0]["say"][:-1] + "？")
+        anchors.append_anchors(root=self.root, role="human", by="主人", anchors=[changed])
+        got = anchors.read_all(root=self.root)
+        self.assertEqual(changed["say"], {c["scene"]: c for c in got["anchors"]}["被夸"]["say"],
+                         "改了实盘，读出来的必须是新那句")
+        self.assertEqual(seed_before, anchors.seed_path().read_bytes(),
+                         "改实盘不许改到出厂那份")
+
+    def test_seed_corruption_does_not_affect_reads(self) -> None:
+        """方向二：**把出厂那份改坏** → 读实盘完全不受影响。
+
+        这条是「真源只有一个」的机器证明：出厂那份只是 seed 料，谁把它改成什么都不会
+        落到任何一位她说的话上。验完必须字节级还原——它就在代码树里，脏了会连累别人。
+        """
+        anchors.append_anchors(root=self.root, role="human", by="主人", anchors=five())
+        path = anchors.seed_path()
+        if not path.exists():
+            self.skipTest("这台机器上没有出厂默认那份")
+        original = path.read_bytes()
+        try:
+            path.write_text('{"scene": "被改坏的出厂默认", "say": "这句不该被任何人读到"}\n',
+                            encoding="utf-8")
+            got = anchors.read_all(root=self.root)
+            self.assertEqual(5, got["total"])
+            self.assertNotIn("被改坏的出厂默认", {c["scene"] for c in got["anchors"]})
+            self.assertEqual(FIVE[0]["say"], {c["scene"]: c for c in got["anchors"]}["被夸"]["say"])
+        finally:
+            path.write_bytes(original)
+        self.assertEqual(original, path.read_bytes(), "验完必须把出厂那份还原成原样")
+
+    def test_read_paths_never_touch_the_seed(self) -> None:
+        """源码级：四个读函数里不许出现 `seed_path`／`read_seed`／写死的 `"data"`。
+
+        功能测试证明「现在没读到」，这条证明「结构上读不到」——以后有人顺手加一行也过不去。
+        """
+        for func in (anchors.anchors_path, anchors.read_all, anchors.latest_by_scene, anchors.count):
+            source = inspect.getsource(func)
+            for banned in ("seed_path", "read_seed", '"data"', "'data'"):
+                self.assertNotIn(banned, source, "%s 里出现了 %s：读路径不许碰出厂那份"
+                                 % (func.__name__, banned))
 
     def test_verbatim_is_not_copied_elsewhere(self) -> None:
         """「不复制原文到别处」：代码、模板、文档里都不许出现这五句，只许留在台词库。"""

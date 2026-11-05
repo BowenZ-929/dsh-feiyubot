@@ -58,6 +58,10 @@
     "label": "锚句",
     "cap": 200,
     "room": "仓库",
-    "name": "锚句"
+    "name": "锚句",
+    "inject": {
+      "fraction": 0.5,
+      "suffix": "……"
+    }
   }
 }

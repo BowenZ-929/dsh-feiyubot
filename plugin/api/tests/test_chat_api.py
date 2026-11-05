@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -344,7 +345,10 @@ class ChatApiTest(unittest.TestCase):
             }])
             status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
         self.assertEqual(200, status)
+        inject = conversation.load_assembly()["anchors"]["inject"]
+        cut = int(math.ceil(len(body) * inject["fraction"]))
         self.assertEqual({"configured": True, "chars": len(body),
+                          "injected": body[:cut] + inject["suffix"], "body": body,
                           "room": "仓库", "name": "锚句"}, payload["anchors"])
 
     # —— 只有一份装配 ————————————————————————
