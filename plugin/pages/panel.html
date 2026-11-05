@@ -20,9 +20,11 @@
   }
   html[data-theme="dark"] { color-scheme: dark; }
   html, body { height: 100%; }
+  html { background: var(--bg); }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         display: flex; flex-direction: column; }
+         display: flex; flex-direction: column;
+         min-height: 100vh; }
   nav { display: flex; flex-wrap: wrap; gap: var(--gap-1); align-items: center;
         padding: var(--gap-1) var(--gap-2); background: var(--panel);
         border-bottom: 1px solid var(--line); }

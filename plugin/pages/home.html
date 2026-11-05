@@ -44,8 +44,10 @@
     --home-warn-bg: var(--dsw-alias-warning-bg, #2c2818);
     --home-err: var(--dsw-alias-danger-fg, #ff8f8f);
   }
+  html { background: var(--home-bg); }
   body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 0 1.2rem 3rem; color: var(--home-fg); background: var(--home-bg); }
+         margin: 0; padding: 0 1.2rem 3rem; color: var(--home-fg); background: var(--home-bg);
+         min-height: 100vh; }
   header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
                   padding: .55rem 1.2rem; background: var(--home-warn-bg);
                   border-bottom: 1px solid var(--home-border); color: var(--home-warn); font-weight: 600; }
@@ -93,6 +95,12 @@
   #log { margin: .9rem 0 0; font: .82rem/1.5 var(--home-mono); white-space: pre-wrap;
          overflow-wrap: anywhere; color: var(--home-fg); background: var(--home-bg);
          border: 1px solid var(--home-border); border-radius: 6px; padding: .5rem .6rem; min-height: 2.4rem; }
+
+  /* 网格不许出现「某一行只填一列」的空洞：跨列的整块明确 span 满宽，末尾落单的那张也铺满 */
+  @media (min-width: 60rem) {
+    main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
+    main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  }
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
      直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->

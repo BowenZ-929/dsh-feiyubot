@@ -22,8 +22,10 @@
   }
   html[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html { background: var(--bg); }
   body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
-         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
+         min-height: 100vh; }
   .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
             border: 1px solid var(--line); border-radius: var(--radius);
             background: var(--panel); color: var(--dim); }
@@ -66,6 +68,12 @@
   #card-save { margin: var(--gap-1) 0 0; border-color: var(--brand);
                background: var(--brand); color: var(--on-brand); }
   button:disabled { opacity: .5; cursor: progress; }
+
+  /* 网格不许出现「某一行只填一列」的空洞：跨列的整块明确 span 满宽，末尾落单的那张也铺满 */
+  @media (min-width: 60rem) {
+    main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
+    main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  }
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
      壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->

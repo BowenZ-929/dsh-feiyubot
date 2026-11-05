@@ -20,8 +20,10 @@
   }
   html[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html { background: var(--bg); }
   body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
-         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
+         min-height: 100vh; }
   .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
             border: 1px solid var(--line); border-radius: var(--radius);
             background: var(--panel); color: var(--dim); }

@@ -37,8 +37,10 @@
     --dim: var(--dsw-alias-text-l2, #9aa2b1);
   }
   * { box-sizing: border-box; }
+  html { background: var(--bg); }
   body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 0 1.2rem 3rem; color: var(--fg); background: var(--bg); }
+         margin: 0; padding: 0 1.2rem 3rem; color: var(--fg); background: var(--bg);
+         min-height: 100vh; }
   header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
                   padding: .55rem 1.2rem; background: var(--panel);
                   border-bottom: 1px solid var(--line); color: var(--fg); font-weight: 600;
