@@ -2,6 +2,10 @@
 
 覆盖的是 api/mouth.py 与 api/core.py 的接线：路由表、返回形状、405/400/404、
 brain=None / store=None、心的读数只从查询参数来、闸命中即弃、以及「没有写盘路径」这条自查。
+
+第三批第二轮又给 /mouth/gate 加了四个可选参数（inject / refuse / tier / hard_cap），
+**没有新路由**：这里逐条守住「不给新参数时与从前逐字一致」、三本账各记一行、
+以及「没比过的审计不许显示成通过」这三件事。
 """
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import quote
 
 from api import api
 from api import core as api_core
@@ -33,6 +38,30 @@ TEXT_300 = ("昨晚下了一场雨，早上路边的梧桐叶全亮了。我端�
             "一整个上午都没再想起别的事。我又想起来，他说话的时候手上那根扫帚一直没放下，"
             "就那么斜着抵在地上。天色慢慢亮起来，街上的人多了一点，谁也没注意到我们俩在说叶子。"
             "风又起了。")[:300]
+
+# —— /mouth/gate 那四个可选参数的素材（都不踩条款；字数按字符算，标点也算一个字） ——————
+GATE_PASS_TEXT = "走吧，路口那家面馆还开着。"
+SOUL_LINE = "她说话从来不绕弯子，也不替别人做决定。"        # 一段「魂」原文：照搬它就是复述
+OVER_TARGET_TEXT = "走吧，路口那家面馆还开着，我请你吃碗热的，吃完再慢慢走回去。"   # 30 字
+CAP_80_TEXT = ("走吧，路口那家面馆还开着。我请你吃一碗热的，吃完再慢慢走回去，路上不用赶，"
+               "风也不大，路灯刚亮，街上没什么人，正好说说话。你要是不想动，我就端过来。"
+               "我在楼下等你。")                                                    # 80 字
+
+# 不给新参数时的基线（改动前实测的那一份）：键集合只许多一节 audit，其余逐字不许变。
+GATE_BASELINE = {
+    "ok": True, "readonly": True, "agent": "mouth", "hit": None, "decision": "pass",
+    "reason": "没命中任何条款，这句照发。", "text": GATE_PASS_TEXT, "rewriter": False,
+    "disabled_ids": ["explainer-connector"],
+}
+GATE_BASELINE_NOTE = ("这一轮没有重写器：命中就弃（decision=dropped），api 层不代写一次；"
+                      "弃掉的 text 是空串，不会被当成 pass 发出去。drops 这一节是弃言账本的读数："
+                      "today 是今天弃了几次（pass 的那次也照报），exists=false 表示账本还没建、"
+                      "errors 是读不出来的坏行数；disabled_ids 是这次被停用、没参与匹配的条款。")
+
+
+def _inj(kind: str, text: str) -> str:
+    """把一段注入原文编成 inject 的查询串取值（URL 编码的 JSON 数组）。"""
+    return quote(json.dumps([{"kind": kind, "text": text}], ensure_ascii=False))
 
 
 class MouthApiTest(unittest.TestCase):
@@ -367,6 +396,159 @@ class MouthApiTest(unittest.TestCase):
         self.assertNotIn("memory_draft", payload, "被拦下的改名不该给出一份投给脑的草稿")
         self.assertEqual(table["self_guard"]["rename_note"], payload["note"],
                          "note 没说是哪一条拦下的")
+
+    # —— 9d. /mouth/gate 的四个可选参数（没有新端点，顺序：拒绝 → 闸 → 长度） ————————
+
+    def test_gate_without_new_params_keeps_the_old_shape(self):
+        """不给 inject/refuse/tier：旧键旧值逐字不变（note 与 drops 也算），只多一节 audit。"""
+        status, payload = self._call("GET", "/mouth/gate?text=" + GATE_PASS_TEXT)
+        self.assertEqual(200, status)
+        self.assertEqual({"ok", "readonly", "agent", "hit", "decision", "reason", "text",
+                          "rewriter", "disabled_ids", "drops", "note", "audit"}, set(payload),
+                         "不给新参数时键集合只许多一节 audit")
+        for key, want in GATE_BASELINE.items():
+            self.assertEqual(want, payload[key], key)
+        trace = str(self._trace / "drops.jsonl")
+        self.assertEqual({"today": 0, "last_clause_id": None, "trace": trace, "exists": False,
+                          "errors": 0,
+                          "line": "今天还没有因闸弃言（账本 %s 还不存在，等于今天还没记过）。" % trace},
+                         payload["drops"])
+        self.assertEqual(GATE_BASELINE_NOTE, payload["note"], "note 变了：不给新参数时返回要逐字一致")
+        self.assertEqual("audit-unavailable", payload["audit"]["status"],
+                         "没给 inject 就是没比过，audit 要如实报 audit-unavailable")
+
+    def test_gate_refuse_topic_says_one_of_the_three_lines(self):
+        """refuse=topic：说法取自数据、闸判 pass、事件四键齐、sent=false（这层没有心）、账本多一行。"""
+        ledger = mouth_api.refusal.path_of()
+        self.assertFalse(ledger.exists())
+        status, payload = self._call("GET", "/mouth/gate?refuse=topic")   # 拒绝不要求 text
+        self.assertEqual(200, status)
+        section = payload["refusal"]
+        self.assertEqual({"text", "shape", "full_name", "event", "sent",
+                          "gate_decision", "reason"}, set(section))
+        said = [mouth_api.refusal.say(one) for one in ("topic", "mood", "nobody")]
+        self.assertIn(section["text"], said, "拒绝说法必须来自 data/refusal.json 那三句")
+        self.assertEqual("topic", section["shape"])
+        self.assertEqual("refused-topic", section["full_name"])
+        self.assertEqual("pass", section["gate_decision"])
+        self.assertFalse(section["sent"], "HTTP 这层没有心：sent 必须如实是 false")
+        self.assertEqual({"ts", "shape", "full_name", "why"}, set(section["event"]))
+        rows = ledger.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(rows), "拒了就要在 refuse.jsonl 里留一行")
+        row = json.loads(rows[0])
+        self.assertEqual(section["event"]["ts"], row["ts"])
+        self.assertEqual("refused-topic", row["full_name"])
+        self.assertFalse(row["sent"])
+
+    def test_gate_refuse_unknown_shape_is_400_and_names_it(self):
+        """refuse 给了个数据里没有的形状：400 并指名，不静默挑一个、也不往账本里写。"""
+        status, payload = self._call("GET", "/mouth/gate?refuse=bogus")
+        self.assertEqual(400, status)
+        self.assertFalse(payload["ok"])
+        self.assertIn("bogus", payload["message"])
+        self.assertFalse(mouth_api.refusal.path_of().exists(), "认不得的形状不该进拒绝账本")
+
+    def test_gate_inject_recited_soul_is_dropped(self):
+        """inject 给一段魂、文本照搬 → 弃掉；audit.status=ok 且命中「复述设定段」。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=" + SOUL_LINE + "&inject=" + _inj("魂", SOUL_LINE))
+        self.assertEqual(200, status)
+        self.assertEqual("dropped", payload["decision"])
+        self.assertEqual("", payload["text"], "弃掉的话不许留半句")
+        self.assertEqual("ok", payload["audit"]["status"])
+        self.assertEqual("复述设定段", payload["audit"]["hit"]["kind"])
+        self.assertEqual("魂", payload["audit"]["hit"]["seg_kind"])
+        self.assertGreaterEqual(payload["audit"]["lcs_len"], payload["audit"]["threshold"])
+        self.assertEqual(1, payload["drops"]["today"], "弃了照旧进弃言账本")
+
+    def test_gate_without_inject_reports_audit_unavailable(self):
+        """没给 inject：审计判不了，status 是 audit-unavailable（**不等于 ok**），这句照样 pass。"""
+        status, payload = self._call("GET", "/mouth/gate?text=" + GATE_PASS_TEXT)
+        self.assertEqual(200, status)
+        self.assertNotEqual("ok", payload["audit"]["status"], "没比过的审计不许报成通过")
+        self.assertEqual("audit-unavailable", payload["audit"]["status"])
+        self.assertIsNone(payload["audit"]["hit"])
+        self.assertEqual("pass", payload["decision"])
+
+    def test_gate_bad_inject_is_400_with_the_array_wording(self):
+        """inject 读不出 JSON、或解出来不是数组：都是 400，且说清「inject 要一个 JSON 数组」。"""
+        for raw in ("{不是JSON", '{"kind": "魂"}'):
+            path = "/mouth/gate?text=" + GATE_PASS_TEXT + "&inject=" + quote(raw)
+            status, payload = self._call("GET", path)
+            self.assertEqual(400, status, raw)
+            self.assertIn("inject 要一个 JSON 数组", payload["message"], raw)
+            self.assertFalse(mouth_api.drops.path_of().exists(), "400 不该往弃言账本里写")
+
+    def test_gate_unknown_inject_kind_is_400_with_library_wording(self):
+        """kind 不认识：400，并且 message 里是 audit 的报错原文（不许 500 蒙混、不许当设定类）。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=" + GATE_PASS_TEXT + "&inject=" + _inj("胡写", SOUL_LINE))
+        self.assertEqual(400, status)
+        self.assertIn("胡写", payload["message"])
+        self.assertIn("复述审计", payload["message"])
+        self.assertIn("不认识", payload["message"])
+
+    def test_gate_style_over_target_at_tier1_passes_at_tier4(self):
+        """同一句 30 字：tier=1 超目标（改不了、放行并记账），tier=4 落在区间里 → pass。"""
+        status, first = self._call(
+            "GET", "/mouth/gate?text=" + OVER_TARGET_TEXT + "&tier=1&hard_cap=150")
+        self.assertEqual(200, status)
+        self.assertEqual({"decision", "target_lo", "target_hi", "chars", "rewrites",
+                          "over_hard_cap", "reason"}, set(first["style"]))
+        self.assertEqual("over_target", first["style"]["decision"])
+        self.assertEqual(OVER_TARGET_TEXT, first["text"], "这一轮没有重写器：text 原样")
+        self.assertEqual(0, first["style"]["rewrites"], "不许伪造一次改写")
+        self.assertEqual((8, 24), (first["style"]["target_lo"], first["style"]["target_hi"]))
+        self.assertFalse(first["style"]["over_hard_cap"])
+        self.assertIn("改不了", first["style"]["reason"])
+        self.assertIn("拒绝 → 闸", first["note"], "给了新参数时 note 要说清顺序")
+        rows = mouth_api.style.path_of().read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(rows), "超目标要进长度账本，pass 那次不记")
+        self.assertEqual("over_target", json.loads(rows[0])["decision"])
+
+        status, fourth = self._call(
+            "GET", "/mouth/gate?text=" + OVER_TARGET_TEXT + "&tier=4&hard_cap=150")
+        self.assertEqual(200, status)
+        self.assertEqual((24, 120), (fourth["style"]["target_lo"], fourth["style"]["target_hi"]))
+        self.assertEqual("pass", fourth["style"]["decision"], "同一句在第 4 档的区间里")
+        self.assertEqual(1, len(mouth_api.style.path_of().read_text(
+            encoding="utf-8").splitlines()), "pass 不该往长度账本里添行")
+
+    def test_gate_style_over_hard_cap_keeps_the_text(self):
+        """80 字撞上核给的 60 字上限：over_hard_cap=true，但嘴不截断，text 原样交核。"""
+        status, payload = self._call(
+            "GET", "/mouth/gate?text=" + CAP_80_TEXT + "&tier=4&hard_cap=60")
+        self.assertEqual(200, status)
+        self.assertEqual(80, len(CAP_80_TEXT))
+        self.assertTrue(payload["style"]["over_hard_cap"])
+        self.assertEqual("over_target", payload["style"]["decision"])
+        self.assertEqual(CAP_80_TEXT, payload["text"], "截断是核的事，嘴不截")
+        self.assertEqual(80, payload["style"]["chars"])
+
+    def test_gate_hard_cap_without_tier_is_400_and_tier_alone_is_allowed(self):
+        """只给 hard_cap 不给 tier → 400（没档位就没有目标区间）；只给 tier 是允许的。"""
+        status, payload = self._call("GET", "/mouth/gate?text=" + GATE_PASS_TEXT + "&hard_cap=60")
+        self.assertEqual(400, status)
+        self.assertIn("tier", payload["message"])
+        self.assertIn("不许猜", payload["message"])
+        self.assertNotIn("style", payload, "400 的那次不该带 style 那一节")
+        status, payload = self._call("GET", "/mouth/gate?text=" + CAP_80_TEXT + "&tier=4")
+        self.assertEqual(200, status)
+        self.assertFalse(payload["style"]["over_hard_cap"],
+                         "核没给上限就不许报超上限（不拿目标区间冒充上限）")
+        self.assertEqual(CAP_80_TEXT, payload["text"])
+
+    def test_new_gate_params_do_not_bypass_405_or_missing_text(self):
+        """新参数不改变既有行为：非 GET 仍 405；没 refuse 又缺 text 仍 400。"""
+        status, payload = self._call("POST", "/mouth/gate?refuse=topic&tier=1&hard_cap=150", {})
+        self.assertEqual(405, status)
+        self.assertIn("只读", payload["message"])
+        for path in ("/mouth/gate?inject=" + _inj("魂", SOUL_LINE),
+                     "/mouth/gate?tier=1&hard_cap=150",
+                     "/mouth/gate?text=%20%20%20&tier=4"):
+            status, payload = self._call("GET", path)
+            self.assertEqual(400, status, path)
+            self.assertIn("text", payload["message"], path)
 
     # —— 10. 未知端点 ————————————————————————————————
 

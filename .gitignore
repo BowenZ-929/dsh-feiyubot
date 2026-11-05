@@ -51,4 +51,8 @@ plugin/organs/day/data/*
 !plugin/organs/day/data/schedule.json
 !plugin/organs/day/data/delivery.json
 
+# 嘴：三份参数（audit 阈值 / refusal 说法 / style_target 区间）入库；
+# 运行时账本（弃言账、拒绝账、超长账）不入库——它们是状态，天天变。
+plugin/organs/mouth/trace/
+
 # 心：自己目录里的 .gitignore 管自己（卡与说明入库，跑出来的状态不入库）。

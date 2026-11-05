@@ -315,6 +315,19 @@ def _sink(trace: Any) -> Callable[[str, str], None]:
     return note
 
 
+def _style_sink() -> Callable[[str, str], None]:
+    """把长度这一层的记账接到 style.jsonl 上：判词与那句人话由库给，时刻与路径在这一层。
+
+    只在「记账」那几次被叫一遍（超目标、改不了、超硬上限）；pass 与 rewritten 不叫——
+    没超的事不必进账本。跟弃言账本同一个口径：写不进去照实抛，由 _gate 回 500。
+    """
+    trace = style.path_of()
+
+    def note(decision: str, reason: str) -> None:
+        style.record(trace, decision, reason, datetime.now())
+    return note
+
+
 def _day() -> str:
     """今天的日期（ISO，十位）：账本按这个前缀认「今天」，不收时区。"""
     return datetime.now().date().isoformat()
@@ -335,6 +348,47 @@ def _missing_text(route: str) -> Result:
     """缺原文：400，说清要给 text（不拿空串往下算，也不给默认话）。"""
     return 400, {"ok": False, "readonly": True, "agent": AGENT,
                  "message": "%s 要给 text（原文）：缺了或全是空白，等于没话可以干跑" % route}
+
+
+def _bad(message: str) -> Result:
+    """入参不合格：400 并把那句人话原样带出去。
+
+    坏入参是调用方的事，不是服务器的事：不许 500 蒙混（500 说明「我们这边坏了」，
+    可这次坏的是请求），也不许静默当成「没给」往下算——那等于替调用方猜了一个意思。
+    """
+    return 400, {"ok": False, "readonly": True, "agent": AGENT, "message": message}
+
+
+def _inject(params: Mapping[str, str]) -> Optional[list]:
+    """查询串里的 inject：URL 编码的 JSON 数组；没给返回 None（交给审计报 audit-unavailable）。
+
+    解析失败、或解出来不是数组，都当场抛 ValueError 并说清「inject 要一个 JSON 数组」。
+    **不许静默当成没给**：当成没给，审计就永远显示 unavailable，调用方还以为是自己没送对料。
+    数组里每一项的形状（kind 认不认识、text 空不空）不在这里判——那是 audit 的判据，
+    它会抛 AuditBroken 并在报错里指名是哪一段，由 _gate 原样翻成 400。
+    """
+    raw = params.get("inject")
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        loaded = json.loads(raw)
+    except ValueError as exc:            # JSONDecodeError 是 ValueError 的一种
+        raise ValueError("%s；这一段读不出 JSON：%s" % (INJECT_HINT, exc)) from None
+    if not isinstance(loaded, list):
+        raise ValueError("%s；解出来是 %s，不是数组（一段好端端的话也请包进数组里）"
+                         % (INJECT_HINT, type(loaded).__name__))
+    return loaded
+
+
+def _whole(raw: Any, name: str) -> Optional[int]:
+    """查询串里的一个整数（hard_cap）：没给或空串就是 None，给了读不出整数就抛 ValueError。"""
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(str(raw).strip(), 10)
+    except ValueError:
+        raise ValueError("%s 要给一个整数（核给的字数上限），读到 %r 读不出整数"
+                         % (name, raw)) from None
 
 
 def _readings(params: Mapping[str, str]) -> Tuple[str, Optional[float], Optional[Result]]:
@@ -445,6 +499,57 @@ def _renamed_draft(called: Any, who: str, table: dict) -> Dict[str, Any]:
         return {}
     return {"renamed": True,
             "memory_draft": address.rename_memory(called.who or who, called.address, table=table)}
+
+
+def _audit_section(seen: Any) -> Dict[str, Any]:
+    """照抄审计那一节：status / hit / 最长撞了几个字 / 阈值 / 一句人话。
+
+    **status 原样透出**，包括 "audit-unavailable"：没拿到注入原文就是没比过，把它写成
+    「通过」等于替她背了一次没人做过的检查。hit 只有在 status 为 "ok" 且真的撞够阈值时才非 null。
+    """
+    one = seen.hit
+    return {
+        "status": seen.status,
+        "hit": {"kind": one.kind, "matched": one.matched,
+                "seg_kind": one.seg_kind, "reason": one.reason} if one else None,
+        "lcs_len": seen.lcs_len,
+        "threshold": seen.threshold,
+        "reason": seen.reason,
+    }
+
+
+def _refusal_section(refused: Any, verdict: Any) -> Dict[str, Any]:
+    """拒绝那一节：说法、形状、事件、投没投、闸怎么判的、一句人话。
+
+    text 与 gate_decision 取的是**外层那一遍闸**（含照抄审计）的判词——那才是这句要过的那道；
+    refusal.enforce 那一遍只用来取说法、事件与人话（不给 sink，所以不记账，两遍不会各记一次）。
+    """
+    return {
+        "text": verdict.text,
+        "shape": refused.shape,
+        "full_name": refused.full_name,
+        "event": refused.event,
+        "sent": refused.sent,
+        "gate_decision": verdict.decision,
+        "reason": refused.reason,
+    }
+
+
+def _style_section(counted: Any) -> Dict[str, Any]:
+    """长度那一节：判词、目标区间、最后多少字、重写了几次、有没有超核的上限、一句人话。
+
+    rewrites 恒为 0：这一轮没有重写器，超目标只能如实报「改不了、放行并记账」，
+    api 层不伪造一次改写。over_hard_cap 为 true 时 text 也没被截断——截断是核的事。
+    """
+    return {
+        "decision": counted.decision,
+        "target_lo": counted.target_lo,
+        "target_hi": counted.target_hi,
+        "chars": counted.chars,
+        "rewrites": counted.rewrites,
+        "over_hard_cap": counted.over_hard_cap,
+        "reason": counted.reason,
+    }
 
 
 def _unconnected(route: str, why: str) -> Result:

@@ -209,7 +209,12 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 | `GET /mouth/split` | `text`（必填，原文）、`seed`（可选，间隔抖动的种子） | `parts[]`（`text`/`gap_before`/`send_at`/`degraded`/`reason`）+ `summary` + `chars` + `visible_chars` | 只把切分与节奏算一遍；阈值全在 `organs/mouth/data/policy.json`，不写盘 |
 | `GET /mouth/address` | `who`（人名录 id）、`familiarity`（可选，覆盖这一次的读数）、`rename`（可选，对方这一轮要求的叫法） | `who`/`display`/`tier`/`relation`/`address`/`frequency`/`banned_self`/`note` + `renamed` + `source`（`人名录`/`会话覆盖`/`本轮改名`/`回退`）+ `memory_draft`（当场换时给出：投给脑的那条亲历记忆） | 只读人名录取一次称呼；查不到人就按生人档回退，不写回人名录。改名**当场换**，但端点**不落盘**；要落到记忆里，靠出口把 `memory_draft` 交给脑 |
 | `GET /mouth/tone` | `who`、`familiarity`、`mood`、`energy`、`engage`、`offset`、`rename`（可选） | `addressee{…}` + `tone{tier,label,line,stance,self_name,heart_source,softness,ban_joke}`；给了 `rename` 时顶层另带 `renamed` 与 `memory_draft` | 心的读数只从查询参数来；没给就是 `heart:未接入`，不假装有读数；改名同样只算不写 |
-| `GET /mouth/gate` | `text`（必填，原文） | `hit{clause_id,kind,reason,matched}` 或 `null` + `decision` + `reason` + `disabled_ids` + `drops{today,last_clause_id,line,exists,errors,trace}` | 条款全在 `organs/mouth/data/clauses.json`；没有重写器，命中即 `dropped`，不代写也不放行；弃言在账本里留痕（见下） |
+| `GET /mouth/gate` | `text`（没给 `refuse` 时必填，原文）、`inject`（可选，URL 编码的 JSON 数组 `[{"kind":"魂","text":"…"}]`，交给照抄审计）、`refuse`（可选，`topic`/`mood`/`nobody`）、`tier`（可选，1..4，嘴的目标档位，与 `/mouth/tone` 的 `tone.tier` 同一套）、`hard_cap`（可选，整数，核给的上限；给了它就必须连 `tier` 一起给） | `hit{clause_id,kind,reason,matched}` 或 `null` + `decision` + `reason` + `disabled_ids` + `drops{today,last_clause_id,line,exists,errors,trace}` + `audit{status,hit,lcs_len,threshold,reason}`（恒在；`status` 为 `audit-unavailable` 时原样透出，**不许当成通过**）+ `refusal{text,shape,full_name,event,sent,gate_decision,reason}`（给了 `refuse` 才有；这层没有心，所以 `sent:false`）+ `style{decision,target_lo,target_hi,chars,rewrites,over_hard_cap,reason}`（给了 `tier` 才有；这一轮没有重写器，`rewrites` 恒 0） | 条款在 `organs/mouth/data/clauses.json`、拒绝说法在 `refusal.json`、目标区间在 `style_target.json`；没有重写器，命中即 `dropped`，不代写也不放行；超目标只如实报「改不了、放行并记账」，超硬上限也不截断（截断是核的事）；弃言、拒绝、长度三份账照记——**干跑也会记账**，三份都吃 `MOUTH_TRACE_DIR` |
+
+`GET /mouth/gate` 的判的顺序钉死：**拒绝 → 闸（含照抄审计）→ 目标长度**——先决定说不说、
+再决定这么说行不行、最后才管长短。四个新参数（`inject` / `refuse` / `tier` / `hard_cap`）
+都不给时，返回与从前逐字一致（只多一节 `audit`）；`inject` 读不出数组是 400，段里 `kind` 不认识
+也是 400（带的正是 `organs/mouth/audit.py` 的报错原文，不是 500）。
 
 两处跨端点的字段：
 
