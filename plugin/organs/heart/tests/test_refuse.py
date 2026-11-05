@@ -168,7 +168,7 @@ class RefuseTest(unittest.TestCase):
         self.assertEqual(blocked, {
             "ok": False,
             "code": "quota-exhausted",
-            "message": "今日额度已满（3/3）",
+            "message": "今天的次数用完了（3/3）",
             "remaining_min": None,
         })
         self.assertTrue([w for w in caught if "额度" in str(w.message)],

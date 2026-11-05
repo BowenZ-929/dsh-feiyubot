@@ -15,6 +15,19 @@ kind 给机器分岔，message 是模型那边的人话原文（str(LLMError) ==
 /mouth/gate 那个干跑端点只判不投（它的 delivered 恒为 false、would_deliver 只算不写）：一个拒绝
 要么落在这一层（真说过话），要么谁都不写（只是干跑），没有第三种。
 
+**冷却里主动拒（这一轮加的）：出口先问一次心。** answer() 之前——也就是装配与那一问之前——先拿
+对方这句认话题（refusal.topic_in + 心自己那份词表，与投递那一层同一个认法）：认得出就问心一次
+（heart.refuse.check，**只读**）。那个话题还在冷却里，这一轮就**短路**：不调模型（省下的是一次真
+调用——心已经说不接这个话题，再问一遍模型只会让她换个说法把同一句话说一遍）、不投事件（心那边的
+账上已经记着这一次拒绝了，这一层再投一次就是同一件事记两遍）、直接产出 data/refusal.json 里
+refused-topic 那一句（说法归拒绝那边，嘴这边不造新文案）。几泡、每泡停多久仍走现有的 split +
+pace.fill，不另造一套；这一句照样过八股闸（她的话都过闸，冷却不是免检章），但**不做复述审计**：
+这一轮没有装配、也没有任何注入原文，她没有可抄的东西，拿入站那句话去比她只会被冤枉——闸收到
+inject=None，如实记 audit-unavailable（不是通过）。重写那一步这一轮也不发请求（_frozen_rewriter）：
+冷却那一句是数据里的原话，改一个字就是另一句，而这一轮的硬约束正是「一次模型都不调」。
+认不出话题（或冷却判据读不动）就不判、照常说话：没有话题就没有「不接的那一句」，替她猜一个话题
+去拒比不拒更糟。
+
 **闸在 /chat 生效（这一轮加的）**：answer() 返回之后、组装响应之前，逐泡再过一遍闸
 （条款 → 动作括注 → 内容重复 → 复述审计），命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里
 删掉，剩下的重算 send_at，全被弃掉就是 chunks=[]、reply=""（每一泡弃言各记一行弃言账）。所以
@@ -61,9 +74,15 @@ resolve 退到中性叫法，那一轮既不投记忆、也不记会话账。返
 addressed: {who, address, source}。（提示词那一段称呼由 organs/mind/conversation.py 自己按人名录
 算，不在本次边界内——会话覆盖目前落在出口读数与脑那条记忆上。）
 
-成功体里多一节 refusal（**不破坏既有键**）：{kind, shape, verdict_reason, delivered{delivered,
-topic, until, remaining_min, reason}}。没判出拒绝时**这一节不出现**——不加一个空壳，免得人把
-「判过了、不是拒绝」与「没判」读成一件事；正面答了的那句本来也不该挂个 refusal。
+成功体里多一节 refusal（**不破坏既有键**）。**冷却那一格恒在**：{cooling, topic, note}——
+以前「什么也没判出来」时这一节整节不出现，于是人分不清「判过了、没在冷却」与「压根没看」；现在
+cooling 永远答得出来（true / false，抽不到话题时 false + topic:null），note 说清这一轮冷却这一关
+判成了什么、为什么。**真判出拒绝时才再追四样**：{kind, shape, verdict_reason, delivered{delivered,
+topic, until, remaining_min, reason}}——那四样是拒绝的读数，不是冷却的读数，没判出来就不加空壳。
+冷却那一轮（短路那一轮）另外多几格：{cooling: true, topic, remaining_min, reason, line, say,
+event: null, note}，line 是面板那一句人话（模板与单位在 data/cooldown.json），say 是她这一轮真说的
+那一句，reason 是心给的理由（refused-topic）。**event 恒为 null 是有意的**：这一轮不投事件，
+所以它没有事件可给——写成「投了、只是没落盘」就是编。
 
 **这一轮借了家里哪几份词条、各用掉几条也随成功体出去**（同样是加一节、不动既有键）：多一节
 borrow {status, files:[{source, borrow_id, learned}], note}。名单是 api/chat.py 的 _books() 真读过
@@ -91,7 +110,10 @@ from organs.mind import conversation
 from organs.mind import llm
 from organs.mind import recent as mind_recent
 from organs.mind.llm import LLMError
-from organs.mouth import action_note, address, audit, borrow, drops, gate, refusal, repeat, warehouse
+from organs.mouth import action_note, address, audit, borrow, cooldown, drops
+from organs.mouth import gate, refusal, repeat, warehouse
+from organs.mouth.pace import fill as pace_fill          # 节奏：与装配同一个函数，不另造一套
+from organs.mouth.split import split as split_text       # 切分：包里的 split 是函数名，这里直接点模块
 from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
 from organs.mouth import rewrite as rewrite_rules      # 参数名就叫 rewrite，模块用别名进来免得被挡住
 from organs.mouth.gate import ClauseBroken
@@ -158,6 +180,10 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     body 非 dict、text 缺失或全空白 → 400；store / brain 未载入 → 503（说不出话的两种原因
     分开报：没有魂是没底色，没有脑是没记忆）。LLMError 之后一律非 200 + ok:false。
 
+    **在冷却里的话题先短路**：认得出话题、心又说它还在冷却 → 不调模型、不投事件，直接交回那一句
+    拒绝（_cooled_payload）。这一步排在 answer() 前面，所以那一轮一次模型调用都没有；认不出话题
+    或判据读不动就往下走，照常说话。
+
     成功之后先过闸：拿 answer() 装配进去的那几段原文（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句 /
     对方原话）与装配体逐泡过一遍闸，结果就地落回 payload（chunks / reply / gate）。闸坏了不 fail-open：
     判据读不动就整轮弃掉，并在 gate 里如实说为什么。
@@ -176,6 +202,10 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     # 闸要的「她最近几条回话」在答题之前读：answer() 最后一步会把这一轮追加进同一份账，
     # 之后再读就把本轮当成了历史——她这句会跟自己比一次，于是每一句都成复读。
     history = _her_recent()
+    # 冷却先问一次心：在冷却里就整轮短路，模型一次都不调（见 _cooled_payload 的说明）。
+    cooled = _cooling_state(text)
+    if cooled["cooling"]:
+        return 200, _cooled_payload(cooled, text, store, history, _who(body))
     try:
         payload = conversation.answer(text, who=_who(body), store=store, brain=brain)
     except LLMError as exc:
@@ -184,9 +214,7 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
         return status, {"ok": False, "kind": exc.kind, "message": exc.message}
     _address_round(payload, text, brain, _who(body))
     _gate_round(payload, text, store, history)
-    section = _judge(text, payload.get("reply"))
-    if section is not None:
-        payload["refusal"] = section
+    payload["refusal"] = _refusal_section(cooled, _judge(text, payload.get("reply")))
     _borrow_round(payload)
     return 200, payload
 
@@ -250,8 +278,14 @@ def _remember_rename(brain: Any, who: str, called: str) -> None:
 # —— 闸：逐泡过一遍，结果落回返回体 ————————————————
 
 def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
-                history: Optional[List[str]]) -> None:
+                history: Optional[List[str]], *, assembled: bool = True) -> None:
     """answer() 之后、交出去之前：把 chunks 里的每一泡单独过一遍闸，结论就地写回 payload。
+
+    assembled 标的是「这一轮有没有装配」：冷却那一轮（_cooled_payload）是 False，于是
+    **凑不出注入原文（inject=None），复述审计如实记 audit-unavailable**——她没有可抄的东西，
+    这一关根本没比过，写成通过就是替她背一次没人做过的检查；重写也不发请求（0 次模型调用），
+    命中就保留原话发出。条款 / 动作括注 / 内容重复 / 红线这几关照旧判，一格都不少。
+
 
     六件事：
 
@@ -291,7 +325,8 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     quota = _quota(payload)
     section = dict(payload.get("gate") or {})
     section.update({"parts": [], "in_parts": len(chunks), "out_parts": 0,
-                    "blocked": [], "quota": quota, "note": GATE_NOTE})
+                    "blocked": [], "quota": quota,
+                    "note": GATE_NOTE if assembled else GATE_NOTE + COOLING_GATE_NOTE})
     payload["gate"] = section
     if not chunks:
         section["note"] = (GATE_NOTE + "这一轮没有泡可过闸：reply 是空串，"
@@ -299,7 +334,7 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
         return
     try:
         books = _books()
-        inject = _inject(asked, payload, store, books["audit"])
+        inject = _inject(asked, payload, store, books["audit"]) if assembled else None
     except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, gate.ClauseBroken,
             audit.AuditBroken, action_note.ActionBroken, repeat.RepeatBroken,
             OSError, ValueError, KeyError, TypeError) as exc:
@@ -322,10 +357,11 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     changed = False
     for index, chunk in enumerate(chunks):
         rewritten = _outcome()
+        rewrite_one = (_rewriter(chunk["text"], asked=asked, books=books, inject=inject,
+                                 recent=history, quota=quota, outcome=rewritten)
+                       if assembled else _frozen_rewriter(books["rewrite"], rewritten))
         verdict = gate.enforce(
-            chunk["text"], books["clauses"],
-            _rewriter(chunk["text"], asked=asked, books=books, inject=inject,
-                      recent=history, quota=quota, outcome=rewritten),
+            chunk["text"], books["clauses"], rewrite_one,
             sink, inject=inject, policy=books["audit"],
             action=books["action"], recent=history,
             repeat_table=books["repeat"], quota=quota,
@@ -372,6 +408,140 @@ def _not_gated(payload: Dict[str, Any], exc: Exception) -> None:
                     "note": GATE_NOTE + "这一次判据读不动（%s：%s），按「改不了就不许发」整轮弃掉，"
                                         "一句都没出去。" % (type(exc).__name__, exc)})
     payload["gate"] = section
+
+
+# —— 冷却：先问一次心，在冷却里就短路 ————————————————
+
+#: 回包里 refusal.note 取数据里哪一条（三种情形各一条，全在 data/cooldown.json 的 notes 节里）
+NOTE_COOLING = "cooling"
+NOTE_CLEAR = "clear"
+NOTE_NO_TOPIC = "no_topic"
+
+COOLING_UNREAD = "这一轮没判成冷却（%s）：判据读不动时照常说话——「没读到」不是「在冷却里」。"
+
+# 冷却那一轮交给闸的说明：没有装配就没有注入原文，复述审计这一关没跑（不是通过）；重写也不发请求。
+COOLING_GATE_NOTE = ("这一轮在冷却里：没有装配、也没有任何注入原文，所以复述审计这一关没跑"
+                     "（audit-unavailable，不是通过）；重写那一步也不发请求——命中就保留原话发出。")
+
+
+def _cooling_state(asked: str) -> Dict[str, Any]:
+    """对方这句话是不是在说一个正在冷却的话题：是就交回这一轮的读数，不是就交回「没在冷却」。
+
+    认法只有一条，与投递那一层逐字相同：refusal.topic_in(asked, heart_refuse.vocabulary()) 从
+    心自己那份词表里抽出话题名 → heart_refuse.check([topic]) 问心一次（**只读**，一个字节都不写）
+    → items 里那一格 cooling 为真就是冷却中。**抽不到话题名就不判**：没有话题就没有「不接的那一句」，
+    替她猜一个话题去拒，比不拒更糟——认不出就说认不出。
+
+    读不动（冷却数据缺件坏件、心的账读不出来、词表读不到）只记一行 WARNING，并当成「没在冷却」：
+    这一层判不出来的时候说话要紧——「没读到」不是「在冷却里」，所以不拿沉默去兜一次没做成的检查。
+    回包的 refusal.note 会如实写这一轮没判成，人看得出来。
+
+    返回 {"cooling", "topic", "item", "note"}；cooling 为真时另带 say 与 line 两句现成的人话。
+    """
+    try:
+        table = warehouse.load("cooldown")
+        topic = refusal.topic_in(asked, heart_refuse.vocabulary())
+        if topic is None:
+            return {"cooling": False, "topic": None, "item": None,
+                    "note": cooldown.note(table, NOTE_NO_TOPIC)}
+        state = heart_refuse.check([topic])
+        item = next((one for one in (state.get("items") or [])
+                     if isinstance(one, Mapping) and one.get("topic") == topic), None)
+        if not item or not item.get("cooling"):
+            return {"cooling": False, "topic": topic, "item": item,
+                    "note": cooldown.note(table, NOTE_CLEAR)}
+        remaining = item.get("remaining_min")
+        return {"cooling": True, "topic": topic, "item": item,
+                "say": cooldown.say(topic, item, table),
+                "line": cooldown.line(topic, remaining, item.get("reason"), table),
+                "note": cooldown.note(table, NOTE_COOLING)}
+    except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, cooldown.CooldownBroken,
+            OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("POST /chat 判冷却没成：%s", exc)
+        return {"cooling": False, "topic": None, "item": None,
+                "note": COOLING_UNREAD % exc}
+
+
+def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
+                    history: Optional[List[str]], who: str) -> Dict[str, Any]:
+    """冷却里那一轮的回包：**不调模型、不投事件**，把那一句拒绝切好、过闸、交出去。
+
+    为什么这么短路：
+    - **不调模型**：心已经说不接这个话题了，再问一遍模型只会让她换个说法把同一句话重说一遍
+      ——省下的是一次真调用（这也是验收里「假 transport 的调用计数为 0」那一格）。
+    - **不投事件**：心那边的账上已经记着这一次拒绝了，这一层再投一次就是同一件事记两遍。所以
+      这一轮的 refuse.jsonl 与她 refusals.json 都不会多一行（这也是被测过的一条）。
+    - **切分与节奏仍走现成的两处**（split.split + pace.fill，seed 与装配同一套拼法）：几泡、
+      每泡停多久，跟她平常说话是同一份判据，不另造一套预览与实发会对不上的算法。
+    - **这一句仍要过八股闸**（_gate_round，assembled=False）：她的话都过闸，冷却不是免检章。
+    - **不做复述审计**：这一轮没有装配、没有任何注入原文，她没有可抄的东西；拿入站那句话去比
+      只会冤枉她，所以交给闸的 inject 是 None，闸如实记 audit-unavailable（不是通过）。
+
+    refusal 节在这一轮多几格：line 是面板那一句人话，say 是她真说的那一句，event 恒为 null——
+    这一轮不投事件，没有事件可给。判据读不动（policy / action_note 缺件）照实往上抛：连切分都
+    做不了的时候假装说了一句，比报错更糟。
+    """
+    policy = warehouse.load("policy")
+    said = str(state["say"])
+    batch = pace_fill(split_text(said, policy, warehouse.load("action_note")), policy,
+                      "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "reply": said,
+        "chunks": [{"text": part.text, "gap_before": part.gap_before,
+                    "send_at": part.send_at} for part in batch.parts],
+        "gate": {"decision": "pass", "hit": None},
+        "refusal": _cooled_section(state),
+    }
+    _gate_round(payload, asked, store, history, assembled=False)
+    return payload
+
+
+def _cooled_section(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """冷却那一轮的 refusal 节：{cooling: true, topic, remaining_min, reason, line, say, event, note}。
+
+    event 恒为 null：这一轮没有投事件（心那边已经在算这次拒绝了），写成「投了、只是没落盘」就是编。
+    """
+    item = state.get("item") or {}
+    return {"cooling": True, "topic": state.get("topic"),
+            "remaining_min": item.get("remaining_min"), "reason": item.get("reason"),
+            "line": state.get("line"), "say": state.get("say"), "event": None,
+            "note": state.get("note")}
+
+
+def _refusal_section(cooled: Mapping[str, Any],
+                     judged: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """拼照常说话那一轮的 refusal 节：冷却那一格恒在，拒绝那四样只有真判出来时才有。
+
+    **cooling 恒在（true / false）是改过的口径**：以前什么也没判出来时这一节整节不出现，于是
+    调用方分不清「判过了、没在冷却」与「压根没看」。现在 cooling 永远答得出来，note 说清这一轮
+    冷却这一关判成了什么；kind / shape / verdict_reason / delivered 仍是「判出拒绝才有」——
+    那四样是拒绝的读数，不是冷却的读数，没判出来就不加空壳。
+    """
+    section: Dict[str, Any] = {"cooling": False, "topic": cooled.get("topic"),
+                               "note": cooled.get("note")}
+    if judged:
+        section.update(judged)
+    return section
+
+
+def _frozen_rewriter(table: Mapping[str, Any],
+                     outcome: Dict[str, Any]) -> Callable[[str], str]:
+    """冷却那一轮的重写器：一次请求都不发，命中就照实说「这一轮没有可用的重写器」。
+
+    为什么不干脆给闸 None：闸拿 None 时按它自己的规矩把命中那一泡弃掉（改不了就不发），而冷却
+    那一句正是她该说的那句话——整句消失比说话带点毛病糟得多。接一支只会抛的笔，闸就走
+    keep_unrewritten 那条路：decision 仍是 pass、text 是进门那句、kept_after_rewrite=true，
+    账本照记一行（reason 取自 data/rewrite.json 的 why.no_rewriter：这一轮压根没有可用的重写器）。
+    而这一轮的硬约束是**一次模型都不调**，所以这里必须抛，不许问模型。
+    """
+    def frozen(body: str) -> str:
+        why = rewrite_rules.no_rewriter_why(table)
+        outcome.update({"status": rewrite_rules.STATUS_FAILED, "why": why,
+                        "from": rewrite_rules.excerpt(body, table), "to": ""})
+        raise rewrite_rules.Unrewritable(why)
+
+    return frozen
 
 
 # —— 重写：命中之后改一次，不改就留原话 ————————————————————

@@ -309,13 +309,13 @@ def ingest(topic: str, reason: str, root: Any = None,
     used = state["used_today"]
     if used >= quota:
         warnings.warn(
-            "心·refuse：今日额度已满（%d/%d），话题 %r 这次不落库——额度是刹车，"
+            "心·refuse：今天的次数用完了（%d/%d），话题 %r 这次不落库——额度是刹车，"
             "不是一直拒的许可" % (used, quota, topic),
             RuntimeWarning, stacklevel=2)
         return {
             "ok": False,
             "code": "quota-exhausted",
-            "message": "今日额度已满（%d/%d）" % (used, quota),
+            "message": "今天的次数用完了（%d/%d）" % (used, quota),
             "remaining_min": None,
         }
 

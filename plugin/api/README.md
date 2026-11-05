@@ -246,10 +246,39 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
                            "remaining_min": 720.0, "reason": "…"}}}
 ```
 
-没判出拒绝时**这一节不出现**（不加空壳）：正面答了的那句、被闸弃掉（`reply` 是空串）的轮都属于这种。
+**这一节现在恒在，且冷却那一格永远答得出来**（本轮改的口径）：以前「什么也没判出来」时整节不
+出现，于是人分不清「判过了、没在冷却」与「压根没看」；现在多一格 `cooling`（true / false）与一句
+`note`。`kind` / `shape` / `verdict_reason` / `delivered` 仍是「判出拒绝才有」——那四样是拒绝
+的读数，不是冷却的读数，没判出来就不加空壳：正面答了的那句、被闸弃掉（`reply` 是空串）的轮都只剩
+`{cooling:false, topic, note}`。
 话题名沿用同一认法（`refusal.topic_in` + 心的词表）：`asked` 里找不到话题名就
 `delivered.delivered:false` 并说明为什么——拒绝事件照样在 `refuse.jsonl` 记一行（`sent:false`），
 她拒了这件事与这一笔有没有落到心上是两件事。
+
+**冷却里她会主动拒（本轮加的）：`/chat` 在装配之前先问一次心。** `conversation.answer()` 之前，
+`api/chat.py` 拿对方这句认话题（`refusal.topic_in` + 心的词表，与投递那一层同一个认法），认得出就
+`heart.refuse.check([topic])` 问一次心（**只读，一个字节都不写**）：还在冷却里就整轮**短路**——
+不调模型（省一次真调用：心已经说不接这个话题，再问一遍模型只会把同一句话换个说法）、不投事件
+（心那边的账上已经记着这一次拒绝，再投一次就是同一件事记两遍，所以 `refuse.jsonl` 与
+`refusals.json` 都不会多一行），直接产出 `organs/mouth/data/refusal.json` 里 `refused-topic` 那一句
+（说法归拒绝那边，嘴这边不造新文案）。几泡、每泡停多久仍走 `split.split` + `pace.fill`（与平常说话
+同一份判据）；这一句照样过八股闸，但 `inject=None`：这一轮没有装配、没有注入原文，复述审计如实记
+`audit-unavailable`（**不是通过**）；重写那一步**一次请求都不发**，命中就保留原话
+（`rewrite.status` 是 `not-tried` / `failed`）。认不出话题、或冷却判据读不动，就不判、照常说话
+（「没读到」不是「在冷却里」）。
+
+```json
+{"refusal": {"cooling": false, "topic": "医院", "note": "这一轮不在冷却里：…"}}
+{"refusal": {"cooling": true, "topic": "医院", "remaining_min": 720.0, "reason": "refused-topic",
+             "line": "她在拒绝「医院」，理由 refused-topic，还剩 12.0 小时",
+             "say": "这个话题先不聊。", "event": null, "note": "冷却中：…"}}
+```
+
+冷却那一轮的 `event` 恒为 `null`——**这一轮不投事件**，写成「投了、只是没落盘」就是编。面板那一句
+人话的模板、两个单位（小时 / 分钟）与「多少分钟以上才按小时说」全在
+`organs/mouth/data/cooldown.json` 的 `line` 节（`template` / `minutes` / `hours` / `hours_from_min`）；
+页面 `pages/chat.html` 的「命中门」因此多一行 `refusal-line`，原样转述 `refusal.line`——
+话题、理由、还剩多久，页面一个词都不自己拼。
 
 **借阅读数也随成功体出去（这一轮加的）**：多一节 `borrow`（不破坏既有键）：
 
