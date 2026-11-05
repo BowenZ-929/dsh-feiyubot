@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import threading
@@ -41,6 +42,13 @@ ALLOWED_HEART_DATA = {".gitignore", ".gitkeep", "baseline-card.json",
 BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
                 "/brain/recall", "/brain/selfnarration", "/brain/proposals")
 # 关键端点：方法 + 路径。条数由 api.ROUTES 自己算（见 RouteRegistryTest），这里只钉"必须在"。
+#: 允许「两种真话」的 GET：409 在这里**不是故障**，是系统在如实报告。
+#: /home/warehouse 每次被读都现场重算指针卡的 sha256，对不上就回 409 POINTER_STALE
+#: ——「改了就是改了，只报不修」正是它的判据。把它钉进"必须 200"会怎样：
+#: 嘴或心每改一次数据文件这条就红一次，而红的原因恰是系统在正常工作；
+#: 那种「正确行为导致测试红」会训练人去 reseed 让它变绿，等于把诚实报告当噪音。
+HONEST_TWO_ANSWERS = {"/home/warehouse": (200, 409)}
+
 REQUIRED_ROUTES = (
     ("GET", "/soul"), ("GET", "/soul/check"), ("GET", "/soul/history"),
     ("GET", "/soul/pin"), ("GET", "/soul/revisions"),
@@ -564,6 +572,20 @@ class PanelContractTest(unittest.TestCase):
                 elif path in unconnected:
                     self.assertEqual(501, status, path)
                     self.assertIn("未接入", payload.get("message", ""), path)
+                elif path in HONEST_TWO_ANSWERS:
+                    allowed = HONEST_TWO_ANSWERS[path]
+                    self.assertIn(status, allowed,
+                                  "%s 只许回 %s：409 是「改了就是改了」的如实回答，不是故障"
+                                  % (path, allowed))
+                    self.assertIsInstance(payload, dict, path)
+                    for key in ("ok", "code"):
+                        self.assertIn(key, payload, "%s 的两种回执都要带 %s" % (path, key))
+                    if status == 409:
+                        self.assertEqual("POINTER_STALE", payload.get("code"), path)
+                        self.assertFalse(payload.get("ok"), path)
+                        self.assertTrue(payload.get("stale"), "%s 回 409 就得说出是哪几份" % path)
+                    else:
+                        self.assertTrue(payload.get("ok"), path)
                 else:
                     self.assertEqual(200, status, path)
             else:
@@ -582,6 +604,57 @@ class PanelContractTest(unittest.TestCase):
         self.assertEqual(unconnected & registered_get, answered_unconnected,
                          "501 的 GET 与未接入名单对不上：要么有路由被永久豁免，"
                          "要么模块落地了名单没跟上")
+
+    def test_warehouse_may_honestly_answer_409(self):
+        """单列：/home/warehouse 允许 200（aligned）或 409（POINTER_STALE），两种都带 ok 与 code，不许 500。
+
+        两种结果都用临时家造出来，**不依赖实盘现状**——依赖实盘就等于让嘴或心改一次数据红一次，
+        而那种红恰恰证明系统在正常工作。
+        """
+        base = Path(self._tmp.name) / "warehouse-case"
+        root = base / "home"
+        for name in ("玄关", "客厅", "名片盒", "工作台", "仓库", "信箱",
+                     "卧室", "橱柜", "抽屉", "台历"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        target = base / "policy.json"
+        target.write_text('{"v": 2}', encoding="utf-8")
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        size = target.stat().st_size
+
+        def write_pointer(sha: str, byte_count: int) -> None:
+            (root / "仓库" / "index.jsonl").write_text(json.dumps({
+                "card_id": "仓库-1", "room": "仓库", "kind": "借阅条", "name": target.name,
+                "path": str(target), "sha256": sha, "bytes": byte_count, "chars": 0,
+                "note": "指针卡", "by": "home", "role": "organ",
+                "at": "2026-11-05T00:00:00+00:00", "params": {"pointer": True}},
+                ensure_ascii=False) + "\n", encoding="utf-8")
+
+        # 对齐那一支：200 + ok + code
+        write_pointer(digest, size)
+        status, payload = api.handle("GET", "/home/warehouse", None, str(root))
+        self.assertEqual(200, status, payload)
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual("ok", payload.get("code"))
+        self.assertTrue(payload.get("aligned"))
+
+        # 对不上那一支：409 + ok:false + code，且这两个键一个都不许少
+        write_pointer("0" * 64, size + 1)
+        status, payload = api.handle("GET", "/home/warehouse", None, str(root))
+        self.assertEqual(409, status, payload)
+        self.assertFalse(payload.get("ok"))
+        self.assertEqual("POINTER_STALE", payload.get("code"))
+        self.assertEqual(["policy.json"], payload.get("stale"))
+        self.assertIn(digest[:12], payload.get("message", ""), "消息里要有现算的 12 位")
+        self.assertIn("000000000000", payload.get("message", ""), "消息里要有卡上的 12 位")
+        self.assertNotEqual(500, status)
+
+    def test_honest_two_answers_never_grows_silently(self):
+        """名单要长，得连带写出理由：只认 GET、必须在路由表上、且当前就这一条。"""
+        self.assertEqual({"/home/warehouse"}, set(HONEST_TWO_ANSWERS),
+                         "多一条「允许 409」的端点就是多一处诚实报告，理由要写进本文件")
+        for path, allowed in HONEST_TWO_ANSWERS.items():
+            self.assertEqual("GET", api.ROUTES.get(path), "%s 不是 GET 路由" % path)
+            self.assertEqual((200, 409), allowed)
 
     def test_render_handler_reads_audience_from_query(self):
         routes = dict(((method, path), handler)

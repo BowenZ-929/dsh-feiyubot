@@ -303,7 +303,9 @@ def _borrow(root: Any) -> Result:
 def _warehouse(root: Any) -> Result:
     """仓库指针卡 + 现场重算 sha256：对不上回 409，只报不自动更新卡。"""
     data = residents.warehouse_pointers(root)
-    payload: Dict[str, Any] = {"ok": True, "readonly": True, "agent": AGENT}
+    # ok 与 code 两个键**两种回执都必须有**（200 与 409）：调用方要能用同一套判据读它，
+    # 而不是"200 时看 ok、409 时看 code"。409 的真话见下面 stale 那一支。
+    payload: Dict[str, Any] = {"ok": True, "code": "ok", "readonly": True, "agent": AGENT}
     payload.update(data)
     if not data["total"]:
         payload["status"] = "未接入"
