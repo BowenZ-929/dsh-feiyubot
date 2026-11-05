@@ -27,8 +27,17 @@ check 的返回类型（Optional[RepeatHit]）装不下第三种状态，所以 
 **返回的不是布尔。** 命中给一条 RepeatHit：哪一路（开场那一路 / 动作行那一路）、撞上的那几个字、
 上一次是 recent 里的第几条（0 起）、一句人话。布尔说不出「为什么拦」，日志与面板就没法复盘。
 
+**有一条豁免，而且只有这一条：对方明说要她重复。** 他说「再说一遍」「重复」「刚才那句」
+「你刚才说」这类话时，原样把那句再说一遍正是他要的——这时候还把重复判废，等于把她照办的那一下
+也吞掉。判法分两步，缺一步都不算：**先真的撞上了重复**（同一动作行或同一开场），**再**看对方
+这一句是不是在要她重复（request_markers 里的正则表，逐条 re.search）。两步都成立才返回一条
+RepeatSkip（**不是** RepeatHit）：这一关只记账、不判废，状态是 STATUS_SKIPPED，话照发。
+为什么两步都要：只认「说了再说一遍」就跳过，等于每次他一开口说这话这一关就白设；而且没撞上重复
+的时候根本没有「判废」需要放掉，记那一笔账只是噪音。asked 为空一律不算请求——**不许默认豁免**。
+
 判据全在 organs/mouth/data/repeat.json（经 warehouse.load("repeat") 只读借入）：两个数、两张字符
-表、两条判据的名字、闸用的两个名字（clause_id 与 kind）、弃言账里认这一条用的记号、全部人话模板；
+表、两条判据的名字、闸用的三个名字（clause_id 与 kind，外加跳过记账用的 skip_clause_id）、
+请求标记表、弃言账里认这一条用的记号、全部人话模板；
 本文件不写死一个数、不写死一句说法。缺键、坏形状当场抛 RepeatBroken，**不补默认值**——补一个
 默认数，代码里就又多了一处真源。
 
@@ -36,16 +45,18 @@ check 的返回类型（Optional[RepeatHit]）装不下第三种状态，所以 
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .warehouse import load
 
 STATUS_OK = "ok"                     # 真的比过了：这一轮拿到了最近几条输出
 STATUS_NOT_CHECKED = "not-checked"   # 没拿到历史，这一关没跑；不是通过
+STATUS_SKIPPED = "skipped-by-request"  # 撞上了重复，但对方要她再说一遍：只记账，不判废
 
-__all__ = ["RepeatBroken", "RepeatHit", "STATUS_OK", "STATUS_NOT_CHECKED",
-           "check", "clear_reason", "names"]
+__all__ = ["RepeatBroken", "RepeatHit", "RepeatSkip", "STATUS_OK", "STATUS_NOT_CHECKED",
+           "STATUS_SKIPPED", "check", "clear_reason", "names"]
 
 
 class RepeatBroken(ValueError):
@@ -80,6 +91,27 @@ class RepeatHit:
 
 
 @dataclass(frozen=True)
+class RepeatSkip:
+    """一次「本来会判废、但对方明说要她再说一遍」的读数：跳过，不是命中。
+
+    为什么单独一个类型、而不是往 RepeatHit 里加一个布尔：命中与跳过是两件事——命中要把这句拦下来，
+    跳过要把这句放出去。塞进同一个类型，闸那边就得先读一个字段才知道手上是什么，早晚有一天会读反；
+    而 check 的返回类型装得下两种读数、装不下「都发生了」，所以两边各一个类型，闸用 isinstance 分。
+
+    字段（闸按这个接，改字段等于改接口）：
+      hit        本来会判废的那一条（撞上的那几个字、上一次在第几条、那一句人话）
+      clause_id  闸记账用的名字，取自数据（hit.skip_clause_id 那一项）：跳过记的不是判废那一笔
+      status     这一关的状态，固定 STATUS_SKIPPED（skipped-by-request）
+      reason     一句人话，里面带着 skipped-by-request，账本与面板直接用这句
+    """
+
+    hit: RepeatHit
+    clause_id: str
+    status: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class _Rules:
     """判据表拆成一堆可以直接用的值：数据里没有的一样都不补。"""
 
@@ -91,22 +123,35 @@ class _Rules:
     kind_action: str
     clause_id: str
     gate_kind: str
+    skip_clause_id: str
+    request_markers: Tuple[Any, ...]
     tag: str
     reason_opening: str
     reason_action: str
+    skip_reason: str
     reason_clear: str
 
 
 def check(text: str, recent: Optional[Sequence[str]],
-          table: Optional[Mapping[str, Any]] = None) -> Optional[RepeatHit]:
-    """看她这句是不是在最近 rounds 条里已经把同一动作行、或同一开场念过一遍：命中给证据，否则 None。
+          table: Optional[Mapping[str, Any]] = None,
+          asked: str = "") -> Optional[Union[RepeatHit, RepeatSkip]]:
+    """看她这句是不是在最近 rounds 条里已经把同一动作行、或同一开场念过一遍：给证据、或给跳过，否则 None。
 
     table 是判据表（warehouse.load("repeat") 读出来的那份），传 None 就现读仓库里的默认表；
-    recent 是她最近若干条输出的原文（旧的在先），**None 表示这一轮拿不到历史**。
+    recent 是她最近若干条输出的原文（旧的在先），**None 表示这一轮拿不到历史**；
+    asked 是对方这一轮说的那句话——他明说要她重复时，撞上重复也只记账、不判废。
 
-    recent 为 None 时返回 None——那是「没判」，不是「判过没重复」。这个返回类型装不下第三种状态，
-    所以判没判由调用方看状态（STATUS_OK / STATUS_NOT_CHECKED）并挂到 Verdict.repeat_status 上；
-    在这里塞一条假命中，等于把「没命中」与「判不了」挤进同一条通道，调用方再也分不开。
+    三种读数分开：
+
+    - **RepeatHit**：撞上了，对方也没要求重复 → 这一关判废。
+    - **RepeatSkip**：撞上了，但对方明说要她再说一遍（asked 命中 request_markers）→ 只记账、不判废。
+      **先撞上、再问请求**：没撞上就没有「判废」可放，不记这一笔账，也不返回跳过。
+    - **None**：没撞上，或者 recent 为 None（这一轮拿不到历史、这一关没跑）。
+
+    recent 为 None 时返回 None——那是「没判」，不是「判过没重复」。这个返回类型装不下全部状态，
+    所以判没判由调用方看状态（STATUS_OK / STATUS_NOT_CHECKED / STATUS_SKIPPED）并挂到
+    Verdict.repeat_status 上；在这里塞一条假命中，等于把「没命中」与「判不了」挤进同一条通道，
+    调用方再也分不开。asked 为空一律不豁免（不许默认豁免）。
 
     recent 的形状坏掉（不是清单、某一项不是字符串）当场抛 RepeatBroken 并指名第几条。
     """
@@ -117,10 +162,28 @@ def check(text: str, recent: Optional[Sequence[str]],
     if not window:
         return None
     body = _text_of(text)
-    found = _same_action_line(body, window, rules)
-    if found is not None:
+    found = _same_action_line(body, window, rules) or _same_opening(body, window, rules)
+    if found is None:
+        return None
+    if not _requested(asked, rules):
         return found
-    return _same_opening(body, window, rules)
+    return RepeatSkip(hit=found, clause_id=rules.skip_clause_id, status=STATUS_SKIPPED,
+                      reason=_fill(rules.skip_reason, "skip_reason",
+                                   matched=found.matched, prev_no=found.prev_index + 1,
+                                   rounds=rules.rounds, tag=rules.tag, kind=found.kind))
+
+
+def _requested(asked: Any, rules: _Rules) -> bool:
+    """对方这一句是不是在要她重复刚才那句：正则表在数据里，代码里一个字都不列。
+
+    asked 为空（None、空串、全空白）一律不算请求：**不许默认豁免**——默认豁免等于这一关白设。
+    只要命中表里任何一条就算请求，不必问「他要重的是不是这一句」：这一关判的是她有没有重复，
+    不是对方那句话指得准不准。
+    """
+    body = _text_of(asked)
+    if not body.strip():
+        return False
+    return any(marker.search(body) is not None for marker in rules.request_markers)
 
 
 def clear_reason(table: Optional[Mapping[str, Any]] = None) -> str:
@@ -261,9 +324,12 @@ def _rules(table: Optional[Mapping[str, Any]] = None) -> _Rules:
                    kind_action=_word(kinds, "action_line"),
                    clause_id=_word(hit, "clause_id"),
                    gate_kind=_word(hit, "kind"),
+                   skip_clause_id=_word(hit, "skip_clause_id"),
+                   request_markers=_patterns(book, "request_markers"),
                    tag=_word(book, "tag"),
                    reason_opening=_word(reason, "opening"),
                    reason_action=_word(reason, "action_line"),
+                   skip_reason=_word(book, "skip_reason"),
                    reason_clear=_word(reason, "clear"))
     if rules.kind_opening == rules.kind_action:
         raise RepeatBroken("数据", "里 kinds.opening 与 kinds.action_line 是同一个词 %r："
@@ -301,6 +367,27 @@ def _chars(data: Mapping[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise RepeatBroken("数据", "的 %r 必须是一串非空字符（表里的字符会被逐个去掉）。" % key)
     return value
+
+
+def _patterns(data: Mapping[str, Any], key: str) -> Tuple[Any, ...]:
+    """取一张正则表（请求标记），逐条编译好；非清单、空项、编译不过都算坏数据，当场抛。
+
+    为什么当坏数据抛、而不是跳过那一条：跳过一条标记，就等于有一种请求方式永远不豁免——
+    这种漏法没有声音，人只会觉得「她怎么又不听我的」。报错里点名是哪一条。
+    """
+    value = _need(data, key)
+    if isinstance(value, str) or not isinstance(value, (list, tuple)) or not value:
+        raise RepeatBroken("数据", "的 %r 必须是非空清单（每项一条正则），不是一整串字。" % key)
+    out: List[Any] = []
+    for index, one in enumerate(list(value)):
+        if not isinstance(one, str) or not one.strip():
+            raise RepeatBroken("数据", "的 %r 里第 %d 条不是一句非空正则。" % (key, index + 1))
+        try:
+            out.append(re.compile(one))
+        except re.error as exc:
+            raise RepeatBroken("数据", "的 %r 里第 %d 条正则编译不过：%s。"
+                               % (key, index + 1, exc)) from None
+    return tuple(out)
 
 
 def _above_zero(data: Mapping[str, Any], key: str) -> int:

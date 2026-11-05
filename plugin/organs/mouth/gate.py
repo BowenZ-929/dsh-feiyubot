@@ -22,15 +22,22 @@
   里面带一句人话原因（含命中的那段原文）；没命中返回 None。**不返回布尔**——布尔说不出「为什么拦」，
   日志与面板也就没法复盘，只能再翻译一次。
 - enforce(text, clauses, rewrite, sink=None, inject=None, policy=None, action=None, recent=None,
-  repeat_table=None, quota=None) -> Verdict：命中一次 → 交给注入的 rewrite 改一次 → 再 check；还命中就
-  decision="dropped"、text 留空串，两次命中的原因都按发生顺序留在 hits 里。Verdict.audit 是这一轮
-  复述审计的读数（status / hit / lcs_len / threshold），Verdict.action_status 是动作括注那一关判没判过
-  （"ok" / "not-checked"），Verdict.repeat_status 是内容重复那一关判没判过（同样是 "ok" /
-  "not-checked"），Verdict.quota_status 是动作配额那一关判没判过（同样两个取值）。
+  repeat_table=None, quota=None, asked="", keep_unrewritten=False) -> Verdict：命中一次 → 交给注入的
+  rewrite 改一次 → 再 check；还命中就 decision="dropped"、text 留空串，两次命中的原因都按发生顺序
+  留在 hits 里。Verdict.audit 是这一轮复述审计的读数（status / hit / lcs_len / threshold），
+  Verdict.action_status 是动作括注那一关判没判过（"ok" / "not-checked"），Verdict.repeat_status 是
+  内容重复那一关的状态（"ok" / "not-checked" / "skipped-by-request"），Verdict.quota_status 是
+  动作配额那一关判没判过（同样两个取值）。
 
 rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端：闸只管判，不改写。
-传 None 视为「改不了」，直接弃掉——**出口不许 fail-open**，改不了就别说这句。rewrite 自己抛错、
-或者改回来是空的，也只算「改不了」，错误照实写进 reason，出口本身不抛错。
+传 None 视为「改不了」——**出口不许 fail-open**，改不了就不许把命中句原样当成「判过了」发出去。
+rewrite 自己抛错、或者改回来是空的，也只算「改不了」，错误照实写进 reason，出口本身不抛错。
+
+**keep_unrewritten=True 时「改不了」不弃句，留原话发。** 这是调用方开的第二条出口：她那句话是
+她说的，改不动也要发出去——**宁可发一句略有瑕疵的，也不许静默变哑**。这时 decide 是 "pass"、
+text 一个字不改、hits 里留着那条命中，reason 用 organs/mouth/rewrite.py 里那句带 rewrite-failed
+的说法，并且往 sink 记一笔账（好让人看见闸本想过改它）。默认 False，旧行为一个字节都不变；
+配额命中仍然优先走剥行兜底（把动作行拿掉比留着原话强）。
 
 sink 也是调用方注入的 callable（clause_id, reason -> None），**只在「弃掉」那一次**被叫一遍
 （例外只有配额兜底救回来的那一句：它也记一笔，好让人看见闸动过手），好让弃言留下痕迹：谁被弃、为什么。sink 为 None 就不记，闸仍是纯函数——本文件不取时钟、不写盘，
@@ -72,6 +79,14 @@ Verdict.action_status 上（"ok" 真的判过，"not-checked" 这一轮没给表
 挂在 Verdict.repeat_status 上（"ok" 真的比过，"not-checked" 这一轮没拿到），照 action_status 那个
 写法。闸不记账、不取时钟：谁记着她说过什么，是调用方的事。
 
+**对方明说要她重复时，这一关只记账、不判废（这一轮加的）。** asked 是对方这一轮说的那句话，
+由调用方原样传下来、交给 repeat 判「是不是在要她再说一遍」；撞上重复而对方确实要她重复时，
+repeat 给的不是命中而是一条 RepeatSkip：**decision 保持 pass、text 一个字不改**，但闸要替这一关
+记一行账（clause_id 取自数据 hit.skip_clause_id，reason 里带 skipped-by-request），并把
+Verdict.repeat_status 记成跳过那个状态。为什么记账：跳过是对的，但它必须留痕——不然「她今天
+复读了三次没被拦」与「这一关没跑」在账本上长得一模一样。这条豁免只在**真的撞上重复**且
+**asked 命中请求标记**时成立，asked 为空一律不豁免（不许默认豁免，那是把这一关白设）。
+
 **动作配额排在第二道（这一轮加的），因为它比「动作写得对不对」更早。** 装配标了「本轮不许写
 动作」时，她根本没资格写动作，那就不必先问「动作里有没有编场景」。判据与说法全在
 organs/mouth/quota.py 与 data/quota.json；quota 是调用方给的配额写法（forbid / allow），**None 就是
@@ -97,6 +112,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import action_note, repeat
 from . import quota as quota_rules          # 参数名就叫 quota（调用方按这个名字传），模块用别名进来免得被挡住
+from . import rewrite as rewrite_rules      # 参数名就叫 rewrite（调用方按这个名字传），模块用别名进来免得被挡住
 from .audit import AuditResult, audit as _audit
 
 __all__ = ["ClauseBroken", "Hit", "Verdict", "check", "enforce"]
@@ -158,7 +174,8 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
           action: Optional[Mapping[str, Any]] = None,
           recent: Optional[Sequence[str]] = None,
           repeat_table: Optional[Mapping[str, Any]] = None,
-          quota: Any = None) -> Optional[Hit]:
+          quota: Any = None,
+          asked: str = "") -> Optional[Hit]:
     """看这段字有没有踩条款、有没有超动作配额、有没有在动作里带场景、有没有在反复念、有没有在复述注入的原文：命中给一条 Hit，否则 None。
 
     **返回的不是布尔。** Hit 里带一句人话原因，原因里含这次命中的那段原文，所以日志、面板、
@@ -179,6 +196,8 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
     **quota 为 None 同样整段不跑动作配额**：装配没标就是这一关没跑，判没判看 Verdict.quota_status；
     标了 allow 才是一律不命中（真判过、判过没问题）——这两种情况在返回类型里都只能是 None，
     所以分不分开看状态，不看返回值。
+    **asked 是对方这一轮说的那句话**，原样转给 repeat：他明说要她重复时，撞上重复也只是一次跳过
+    （返回 None——跳过不是命中，这个返回类型装不下它，账与状态由 enforce 记）。
     """
     prepared, _disabled = _prepared(clauses)
     body = text or ""
@@ -191,7 +210,7 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
     noted = _noted(body, action)
     if noted is not None:
         return noted
-    repeated = _repeated(body, recent, repeat_table)
+    repeated, _skipped = _dedup(body, recent, repeat_table, asked)
     if repeated is not None:
         return repeated
     return _recited(body, inject, policy)
@@ -204,7 +223,9 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             action: Optional[Mapping[str, Any]] = None,
             recent: Optional[Sequence[str]] = None,
             repeat_table: Optional[Mapping[str, Any]] = None,
-            quota: Any = None) -> Verdict:
+            quota: Any = None,
+            asked: str = "",
+            keep_unrewritten: bool = False) -> Verdict:
     """过闸：命中一次 → 用注入的 rewrite 改一次 → 再 check；还命中就弃掉这句（配额那一条另有兜底）。
 
     rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端。五种结局：
@@ -233,6 +254,16 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     一轮拿到了历史、真的比过，"not-checked" 表示 recent 是 None、这一关没跑；**没比不是没重复**，
     两者同样必须分得开。
 
+    asked 是对方这一轮说的那句话：他明说要她重复时，内容重复这一关撞上了也只记一笔账（clause_id
+    取自数据的 skip_clause_id、reason 里带 skipped-by-request），decision 保持 pass、text 一个字
+    不改，repeat_status 记成跳过那个状态；**豁免只在真撞上重复、且 asked 命中请求标记时成立**，
+    asked 为空一律不豁免。
+
+    keep_unrewritten 是「改不了也不许哑」的那个开关（调用方开）：rewrite 是 None、抛错、或改回来
+    是空的，都不弃句——text 原样发、decision 记 "pass"、hits 留着那条命中、reason 用
+    organs/mouth/rewrite.py 里那句带 rewrite-failed 的说法，并往 sink 记一笔账。**配额命中是例外**：
+    它优先走剥行兜底（把动作行拿掉比留着原话强）。默认 False 时旧行为一个字节都不变。
+
     动作配额（这一轮加的）排在条款后面、动作括注**前面**：装配没给这一轮写动作的资格，她根本没
     资格写动作，不必先问「动作写得对不对」。给没给配额看 quota_status——"ok" 表示装配标了这一轮
     的配额（forbid 与 allow 都算判过），"not-checked" 表示没标；**没标不是 allow**。
@@ -250,9 +281,9 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     seen = _audit(body, inject, policy)
     quoted = _quota(body, quota)
     noted = _noted(body, action)
-    repeated = _repeated(body, recent, repeat_table)
+    repeated, skipped = _dedup(body, recent, repeat_table, asked)
     judged = action_note.STATUS_OK if _has_action(action) else action_note.STATUS_NOT_CHECKED
-    deduped = repeat.STATUS_OK if _has_recent(recent) else repeat.STATUS_NOT_CHECKED
+    deduped = _dedup_status(recent, skipped)
     quotaed = quota_rules.STATUS_OK if _has_quota(quota) else quota_rules.STATUS_NOT_CHECKED
     base = dict(disabled=disabled, audit=seen, action_status=judged,
                 repeat_status=deduped, quota_status=quotaed)
@@ -272,7 +303,7 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                     reason=quota_rules.blank_reason(removed), **base), sink)
         kept = quota_rules.strip_reason(removed)
         after = _first(_scan(prepared, bodies), _noted(bodies, action),
-                       _repeated(bodies, recent, repeat_table),
+                       _dedup(bodies, recent, repeat_table, asked)[0],
                        _from_audit(_audit(bodies, inject, policy)))
         if after is not None:
             return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
@@ -292,29 +323,41 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             reason += repeat.clear_reason(repeat_table)    # 这一关查过了，也要说出来
         if _has_quota(quota):
             reason += quota_rules.clear_reason()           # 配额这一关查过了，同样要说出来
+        if skipped is not None:
+            return _skipped(body, skipped, reason, sink, base)   # 这一关本来要判废，按他说的放
         return Verdict(text=body, decision="pass", hits=[], reason=reason, **base)
     if rewrite is None:
         if first is quoted:
             return _salvage(body, [first])                 # 配额自带兜底：没有重写器也剥
+        if keep_unrewritten:
+            return _kept(body, first, rewrite_rules.no_rewriter_why(), sink, base)
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s也没给重写器，这句改不了，弃掉不发。" % _lead(first),
                                 **base), sink)
     try:
         again = rewrite(body)
     except Exception as exc:          # 重写失败只算「改不了」，出口不许抛错
+        if keep_unrewritten:
+            if first is quoted:
+                return _salvage(body, [first])             # 配额命中：剥掉动作行比留原话强
+            return _kept(body, first, _unrewritable_why(exc), sink, base)
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s重写时出了错（%s：%s），这句改不了，弃掉不发。"
                                        % (_lead(first), type(exc).__name__, exc),
                                 **base), sink)
     rewritten = again if isinstance(again, str) else ("" if again is None else str(again))
     if not rewritten.strip():
+        if keep_unrewritten:
+            if first is quoted:
+                return _salvage(body, [first])
+            return _kept(body, first, rewrite_rules.not_text_why(), sink, base)
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
                                 reason="%s重写回来是空的，等于改不了，弃掉不发。" % _lead(first),
                                 **base), sink)
     retried = _scan(prepared, rewritten)
     requoted = _quota(rewritten, quota)
     again_noted = _noted(rewritten, action)
-    again_repeated = _repeated(rewritten, recent, repeat_table)
+    again_repeated = _dedup(rewritten, recent, repeat_table, asked)[0]
     second = _first(retried, requoted, again_noted, again_repeated,
                     _from_audit(_audit(rewritten, inject, policy)))
     if second is None:
@@ -411,21 +454,78 @@ def _has_quota(quota: Any) -> bool:
     return quota is not None
 
 
-def _repeated(text: str, recent: Any, table: Any) -> Optional[Hit]:
-    """内容重复这一关：判「这句是在反复念」就返回一条 Hit；recent 为 None 就整段不跑。
+def _dedup(text: str, recent: Any, table: Any,
+           asked: str = "") -> Tuple[Optional[Hit], Any]:
+    """内容重复这一关：返回（命中, 跳过）——两者互斥，都没有就是（None, None）。
+
+    命中与跳过是两件事，所以是两样返回值、不是一种：命中要把这句拦下来（走改一次还不行就弃的
+    老路），跳过要把这句放出去（只记账）。**没给 recent 就两个都返回 None 不是放行**：这一关判
+    没判挂在 Verdict.repeat_status 上（拿不到历史与「比过没重复」挤不进同一条通道，所以不塞假 Hit）。
 
     clause_id 与 kind 都取自判据表（repeat 带出来的那两个名字），闸不自己造名字——账本里看到的
-    因此是一个数据里能指认的名字。**没给 recent 就返回 None 不是放行**：这一关判没判挂在
-    Verdict.repeat_status 上（拿不到历史与「比过没重复」挤不进同一条通道，所以不塞假 Hit）。
+    因此是一个数据里能指认的名字；跳过那一笔的 clause_id 也是数据里的另一个名字（skip_clause_id），
+    因为它记的不是判废那一笔，是「按对方要求再说一遍」那一笔。
+    asked 原样转给 repeat：他明说要她再说一遍时，撞上重复也只记一笔账。
     recent 或判据表本身形状坏掉由 repeat 当场抛 RepeatBroken，照实往上抛。
     """
     if not _has_recent(recent):
-        return None
-    found = repeat.check(text, recent, table)
+        return None, None
+    found = repeat.check(text, recent, table, asked)
+    if isinstance(found, repeat.RepeatSkip):
+        return None, found
     if found is None:
-        return None
+        return None, None
     clause_id, kind = repeat.names(table)
-    return Hit(clause_id=clause_id, kind=kind, matched=found.matched, reason=found.reason)
+    return Hit(clause_id=clause_id, kind=kind, matched=found.matched, reason=found.reason), None
+
+
+def _dedup_status(recent: Any, skipped: Any) -> str:
+    """内容重复这一关的状态：跳过 > 真的比过 > 没拿到历史。
+
+    为什么跳过排在最前：这一轮确实比过了、也确实撞上了，只是按对方的要求放过去——把它记成 "ok"
+    会让人以为这一關判过没问题，记成 "not-checked" 又会让人以为这一关没跑。三种读数各是各的。
+    """
+    if skipped is not None:
+        return skipped.status
+    return repeat.STATUS_OK if _has_recent(recent) else repeat.STATUS_NOT_CHECKED
+
+
+def _skipped(body: str, skipped: Any, reason: str,
+             sink: Optional[Callable[[str, str], None]], base: Dict[str, Any]) -> Verdict:
+    """「对方要她再说一遍」的放行：text 一个字不改、decision 仍 pass，但替这一关记一行账。
+
+    记账用数据里的 skip_clause_id 与 reason（带 skipped-by-request）：跳过是对的，但它必须留痕——
+    不然「她今天被放过三次」与「这一关没跑」在账本上长得一模一样。sink 为 None 就只放行不记，
+    闸仍是纯函数（记账是调用方的事，写盘在 drops.py）。
+    """
+    if sink is not None:
+        sink(skipped.clause_id, skipped.reason)
+    return Verdict(text=body, decision="pass", hits=[], reason=reason + skipped.reason, **base)
+
+
+def _unrewritable_why(exc: BaseException) -> str:
+    """重写抛错时那句「为什么改不动」：rewrite 自己带出来的原因原样用，别的异常照实写进去。
+
+    为什么分两支：器官那一侧的失败（超时 / 空 / 不合规）本来就带着数据里那句人话，照抄最准；
+    别的异常是没料到的，带上类型与原文，好让人一眼看出是哪一处坏的。
+    """
+    if isinstance(exc, rewrite_rules.Unrewritable):
+        return str(exc)
+    return rewrite_rules.error_why(exc)
+
+
+def _kept(body: str, hit: Hit, why: str,
+          sink: Optional[Callable[[str, str], None]], base: Dict[str, Any]) -> Verdict:
+    """改不动就留着原话发：text 一个字不改、decision 记 pass、hits 留着那条命中，账本记一笔。
+
+    这是「宁可发一句略有瑕疵的，也不许静默变哑」那一条：出口不许 fail-open（没说过的不能说），
+    但也不许把她说的话当成没发生——所以 decision 是 pass（话发出去了），hits 里留着那条命中
+    （闸本想过改它），reason 用 data/rewrite.json 里那句带 rewrite-failed 的说法，并且记账。
+    """
+    reason = rewrite_rules.failed_reason(why)
+    if sink is not None:
+        sink(hit.clause_id, reason)
+    return Verdict(text=body, decision="pass", hits=[hit], reason=reason, **base)
 
 
 def _has_recent(recent: Any) -> bool:

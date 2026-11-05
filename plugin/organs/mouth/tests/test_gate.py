@@ -18,6 +18,8 @@ from pathlib import Path
 
 from organs.mouth import audit as recitation
 from organs.mouth import gate
+from organs.mouth import repeat as repeats
+from organs.mouth import rewrite as rewriting
 from organs.mouth.action_note import ActionBroken
 from organs.mouth.audit import AuditBroken
 from organs.mouth.gate import ClauseBroken, Hit, Verdict, check, enforce
@@ -545,6 +547,18 @@ class GateStaysClean(unittest.TestCase):
         for line in note["reason"].values():
             self.assertNotIn(line, self.source)
 
+    def test_gate_source_has_no_rewrite_word(self):
+        """重写的说法、三条铁律与那两条正则也不许进闸：闸只接判据，不持判据。"""
+        book = load("rewrite")
+        for word in (book["keep"]["digits"], book["keep"]["latin"], book["prompt"]["head"]):
+            self.assertNotIn(word, self.source)
+        for line in book["prompt"]["rules"]:
+            self.assertNotIn(line, self.source)
+        for line in book["reason"].values():
+            self.assertNotIn(line.replace("{why}", "x"), self.source)
+        for line in book["why"].values():
+            self.assertNotIn(line.replace("{budget_ms}", "1").replace("{error}", "x"), self.source)
+
     def test_gate_imports_no_host(self):
         for word in ("astrbot", "deepseek-ai", "cordis", "OneBot", "NapCat", "aiocqhttp"):
             self.assertNotIn(word, self.source)
@@ -661,6 +675,126 @@ class RepeatRidesTheGate(unittest.TestCase):
             self.assertNotIn(word, source)
         for line in book["reason"].values():
             self.assertNotIn(line.format(rounds=1, matched="", prev_no=1, tag="x"), source)
+
+
+class ARequestToRepeatSkipsTheGate(unittest.TestCase):
+    """asked 一路传进内容去重那一关：对方要她再说一遍时，这一关只记账、不判废。
+
+    判据与名字一个都不在这份文件里：跳过用的 clause_id 与 reason 记号从 data/repeat.json 读
+    （hit.skip_clause_id 与 skip_reason），这里只验「接上了没有、账记了没有」。
+    """
+
+    BOOK = load("repeat")
+    CLAUSE_ID = BOOK["hit"]["clause_id"]
+    SKIP_CLAUSE_ID = BOOK["hit"]["skip_clause_id"]
+    FIRST = "主人回来啦，我把碗放桌上了。\n（尾巴尖蜷了一下）"
+    THIRD = "主人回来啦，灯我给你留着呢。"
+    CLEAN = "明天风大，我把窗关好了。"
+    ASKED = "你刚才说的那句再说一遍"
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_check_returns_no_hit_when_the_user_asked_for_it(self):
+        self.assertIsNone(check(self.THIRD, CLAUSES, recent=[self.FIRST], asked=self.ASKED))
+        self.assertIsInstance(check(self.THIRD, CLAUSES, recent=[self.FIRST]), Hit)
+
+    def test_enforce_sends_it_verbatim_and_records_one_row(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.THIRD, CLAUSES, None, sink,
+                          recent=[self.FIRST], asked=self.ASKED)
+        self.assertEqual("pass", verdict.decision)                  # 话照发
+        self.assertEqual(self.THIRD, verdict.text)                  # 一个字都不改
+        self.assertEqual([], verdict.hits)                          # 跳过不是命中
+        self.assertEqual(repeats.STATUS_SKIPPED, verdict.repeat_status)
+        self.assertEqual(1, len(seen), "跳过也要留一行账")
+        self.assertEqual(self.SKIP_CLAUSE_ID, seen[0][0])           # 账本里是数据里那个名字
+        self.assertIn("skipped-by-request", seen[0][1])
+        self.assertIn("skipped-by-request", verdict.reason)         # 面板上也看得见
+
+    def test_without_the_request_it_is_still_dropped(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.THIRD, CLAUSES, None, sink,
+                          recent=[self.FIRST], asked="今天吃啥")
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual("ok", verdict.repeat_status)               # 真的比过、判废了
+        self.assertEqual(self.CLAUSE_ID, seen[0][0])
+
+    def test_an_empty_asked_never_exempts(self):
+        for asked in ("", None, "   "):
+            with self.subTest(asked=asked):
+                verdict = enforce(self.THIRD, CLAUSES, None, None,
+                                  recent=[self.FIRST], asked=asked)
+                self.assertEqual("dropped", verdict.decision)
+                self.assertEqual("ok", verdict.repeat_status)
+
+    def test_a_request_without_a_repeat_records_nothing(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.CLEAN, CLAUSES, None, sink,
+                          recent=[self.FIRST], asked=self.ASKED)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual([], seen)                                  # 没撞上就没有账可记
+        self.assertEqual("ok", verdict.repeat_status)               # 比过了、没重复
+
+    def test_without_history_the_skip_cannot_happen_at_all(self):
+        verdict = enforce(self.THIRD, CLAUSES, None, None, asked=self.ASKED)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual("not-checked", verdict.repeat_status)
+
+
+class KeepUnrewrittenKeepsHerLine(unittest.TestCase):
+    """改不动就不弃句：原话留着发、账本记一笔带 rewrite-failed，**输出绝不为空**。
+
+    这是「宁可发一句略有瑕疵的，也不许静默变哑」那条规矩的闸侧出口：开了这个开关之后，
+    rewrite 是 None、抛错、改回来是空的，都不再把整句吞掉。默认关着，旧行为一个字节都不变。
+    """
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_a_failing_rewriter_keeps_the_text(self):
+        seen, sink = self._spy()
+
+        def boom(text):
+            raise rewriting.Unrewritable(rewriting.timeout_why())
+
+        verdict = enforce(SPEECH, CLAUSES, boom, sink, keep_unrewritten=True)
+        self.assertEqual("pass", verdict.decision)                  # 发出去，不弃
+        self.assertEqual(SPEECH, verdict.text)                      # 原话一个字不改
+        self.assertTrue(verdict.text.strip())                       # 绝不为空
+        self.assertEqual(1, len(verdict.hits))                      # 命中留着：闸本想过改它
+        self.assertIn("rewrite-failed", verdict.reason)
+        self.assertEqual(1, len(seen))
+        self.assertIn("rewrite-failed", seen[0][1])                 # 账本里看得见这一笔
+        self.assertEqual(verdict.hits[0].clause_id, seen[0][0])
+
+    def test_an_empty_rewrite_keeps_the_text(self):
+        verdict = enforce(SPEECH, CLAUSES, lambda text: "", keep_unrewritten=True)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(SPEECH, verdict.text)
+
+    def test_no_rewriter_at_all_keeps_the_text(self):
+        verdict = enforce(SPEECH, CLAUSES, None, keep_unrewritten=True)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(SPEECH, verdict.text)
+        self.assertIn("rewrite-failed", verdict.reason)
+
+    def test_off_by_default_the_old_behaviour_stays(self):
+        self.assertEqual("dropped", enforce(SPEECH, CLAUSES, None).decision)
+        self.assertEqual("dropped", enforce(SPEECH, CLAUSES, lambda text: "").decision)
+
+    def test_a_quota_hit_still_prefers_stripping(self):
+        """配额命中是例外：剥掉动作行比留着原话强，所以改不动时先剥行，不整句留着。"""
+        book = load("quota")
+        line = "（尾巴在水里晃了一下）可爱归可爱，那也不是胖。"
+        verdict = enforce(line, CLAUSES, None, None, quota=book["quota_values"]["forbid"][0],
+                          keep_unrewritten=True)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertEqual("可爱归可爱，那也不是胖。", verdict.text)
 
 
 class QuotaOverruns(unittest.TestCase):

@@ -16,13 +16,15 @@ import unittest
 from pathlib import Path
 
 from organs.mouth import repeat as repeats
-from organs.mouth.repeat import RepeatBroken, RepeatHit
+from organs.mouth.repeat import RepeatBroken, RepeatHit, RepeatSkip
 from organs.mouth.warehouse import load
 
 REPEAT = load("repeat")
 KIND_OPENING = REPEAT["kinds"]["opening"]      # 数据里的「哪一路」名字，测试不自己造
 KIND_ACTION = REPEAT["kinds"]["action_line"]
 TAG = REPEAT["tag"]
+SKIP_CLAUSE_ID = REPEAT["hit"]["skip_clause_id"]
+SKIP_MARK = "skipped-by-request"               # reason.skip 里那个记号，账本靠它认门
 
 # 三条回放用的素材：第 1 条是原句；第 2 条换了开场、动作行只差标点；第 3 条换了动作行、开场同第 1 条。
 FIRST = "主人回来啦，我把碗放桌上了。\n（尾巴尖蜷了一下）"
@@ -94,16 +96,74 @@ class SameLineAndSameOpening(unittest.TestCase):
         self.assertIn(str(REPEAT["rounds"]), repeats.clear_reason())
 
 
+class ARequestToRepeatIsSkipped(unittest.TestCase):
+    """对方明说要她再说一遍：撞上重复也只记账、不判废（判据全在数据里）。
+
+    两层缺一不可：**先真的撞上了重复**（同一动作行或同一开场），**再**看对方这句是不是在要她重复。
+    只认「他说了再说一遍」就跳过，等于这一关每次都白设；没撞上的时候也没有「判废」可放。
+    """
+
+    ASKED = "你刚才说的那句再说一遍"
+
+    def test_the_same_line_is_skipped_not_hit(self):
+        skip = repeats.check(THIRD, [FIRST, SECOND], asked=self.ASKED)
+        self.assertIsInstance(skip, RepeatSkip)
+        self.assertNotIsInstance(skip, RepeatHit)          # 跳过不是命中：闸要分得开
+        self.assertEqual(SKIP_MARK, skip.status)
+        self.assertEqual(repeats.STATUS_SKIPPED, skip.status)
+        self.assertEqual(SKIP_CLAUSE_ID, skip.clause_id)    # 记账用的名字取自数据
+        self.assertIn(SKIP_MARK, skip.reason)
+        self.assertIsInstance(skip.hit, RepeatHit)          # 本来会判废的那一条还在里面
+        self.assertIn(skip.hit.matched, skip.reason)
+
+    def test_without_the_request_it_is_still_a_hit(self):
+        self.assertIsInstance(repeats.check(THIRD, [FIRST], asked="今天吃啥"), RepeatHit)
+        self.assertIsInstance(repeats.check(THIRD, [FIRST]), RepeatHit)
+
+    def test_an_empty_ask_never_exempts(self):
+        """验收：asked 为空一律不豁免——不许默认豁免。"""
+        for empty in ("", None, "   ", "\n"):
+            with self.subTest(empty=empty):
+                self.assertIsInstance(repeats.check(THIRD, [FIRST], asked=empty), RepeatHit)
+
+    def test_every_variant_the_data_lists_counts(self):
+        for asked in ("再说一遍", "再说一次", "再来一遍", "再念一遍", "再讲一遍", "再重复一次",
+                      "重说一遍", "重复一遍", "重复一次", "你再说一遍", "你刚才说那句",
+                      "刚才那句再说一遍", "刚刚说的那句", "上一句再说一下"):
+            with self.subTest(asked=asked):
+                self.assertIsInstance(repeats.check(THIRD, [FIRST], asked=asked), RepeatSkip)
+
+    def test_the_markers_come_from_the_data(self):
+        """把标记表换成一句别的话：原来的请求不再豁免，新标记才开始生效。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            other = _write_and_load(tmp, {"request_markers": ["闭嘴"]})
+            self.assertIsInstance(repeats.check(THIRD, [FIRST], other, self.ASKED), RepeatHit)
+            self.assertIsInstance(repeats.check(THIRD, [FIRST], other, "闭嘴"), RepeatSkip)
+
+    def test_a_request_without_a_repeat_is_not_a_skip(self):
+        """没撞上重复就没有「判废」可放：不给跳过，也就不记那一笔账。"""
+        self.assertIsNone(repeats.check(CLEAN, [FIRST], asked=self.ASKED))
+        self.assertIsNone(repeats.check(FIRST, [], asked=self.ASKED))     # 还没有历史
+
+    def test_an_action_line_is_skipped_too(self):
+        """动作行那一路同样豁免：同一行原样回来，对方要她重复时也只记账。"""
+        skip = repeats.check(SECOND, [FIRST], asked=self.ASKED)
+        self.assertIsInstance(skip, RepeatSkip)
+        self.assertEqual(KIND_ACTION, skip.hit.kind)
+
+
 class NotCheckedIsNotClean(unittest.TestCase):
     """recent 为 None 是「没判」，空清单是「判过、没重复」：两件事同一个返回值，状态必须分得开。"""
 
     def test_none_returns_no_evidence(self):
         self.assertIsNone(repeats.check(FIRST, None))         # 没有证据 ≠ 判过没重复
 
-    def test_status_vocabulary_is_two_words(self):
+    def test_status_vocabulary_is_three_words(self):
         self.assertEqual("ok", repeats.STATUS_OK)
         self.assertEqual("not-checked", repeats.STATUS_NOT_CHECKED)
-        self.assertNotEqual(repeats.STATUS_OK, repeats.STATUS_NOT_CHECKED)
+        self.assertEqual(SKIP_MARK, repeats.STATUS_SKIPPED)
+        self.assertEqual(3, len({repeats.STATUS_OK, repeats.STATUS_NOT_CHECKED,
+                                 repeats.STATUS_SKIPPED}))
 
 
 class WindowComesFromData(unittest.TestCase):
@@ -159,6 +219,17 @@ class BrokenTableIsLoud(unittest.TestCase):
             repeats.check(FIRST, [SECOND], same)
         self.assertIn("kinds", str(caught.exception))
 
+    def test_broken_request_markers_are_loud(self):
+        """标记表空着、写成整串字、或某一条正则编译不过，都当场响并点名——不许静默少一种豁免。"""
+        for changes, spot in (({"request_markers": []}, "request_markers"),
+                              ({"request_markers": "再说一遍"}, "request_markers"),
+                              ({"request_markers": ["(("]}, "第 1 条"),
+                              ({"hit": {"clause_id": "反复读", "kind": "内容去重"}}, "skip_clause_id")):
+            with self.subTest(changes=changes):
+                with self.assertRaises(RepeatBroken) as caught:
+                    repeats.check(THIRD, [FIRST], dict(REPEAT, **changes), "再说一遍")
+                self.assertIn(spot, str(caught.exception))
+
     def test_bad_recent_is_named(self):
         """recent 只能是「一串原文」，不是一整段话：按字切会把历史读成一个字一条。"""
         with self.assertRaises(RepeatBroken) as caught:
@@ -178,11 +249,17 @@ class RepeatStaysClean(unittest.TestCase):
     def test_source_has_no_reason_template(self):
         for line in REPEAT["reason"].values():
             self.assertNotIn(line, self.source)
+        self.assertNotIn(REPEAT["skip_reason"], self.source)     # 跳过那条说法也不许进代码
 
     def test_source_has_no_data_name(self):
         for word in (REPEAT["hit"]["clause_id"], REPEAT["hit"]["kind"],
-                     KIND_OPENING, KIND_ACTION):
+                     SKIP_CLAUSE_ID, KIND_OPENING, KIND_ACTION):
             self.assertNotIn(word, self.source)
+
+    def test_source_has_no_request_marker(self):
+        """请求标记的正则也一条都不许进代码：要改「什么算要求重复」，改数据。"""
+        for marker in REPEAT["request_markers"]:
+            self.assertNotIn(marker, self.source)
 
     def test_source_has_no_clock_or_random(self):
         self.assertNotRegex(self.source,

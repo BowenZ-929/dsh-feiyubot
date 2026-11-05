@@ -24,6 +24,19 @@ gate 节除了既有的 decision / hit / drops，还逐泡交代 parts / in_part
 **动作配额也从装配传进闸**：answer() 回包的 action.quota.blocked 为真就传 forbid、为假传 allow；
 装配里没有这一项就是 None（闸记 quota_status=not-checked）——没标不是 allow，不许猜。
 
+**重写真的接到模型上（这一轮加的老账）**：以前命中即弃，一句口癖让她整泡消失。现在命中先改一次——
+「她的原话 + 命中的那一条 + 一句人话原因」交给模型（走 answer() 用的**同一条出口** llm.complete，
+不另开 HTTP 客户端），带 data/rewrite.json 的 budget_ms 硬时限；拿回来先过 rewrite.accept
+（空 / 逐字相同 / 长度出区间 / 丢了数字、英文串、引号里的原话都算不合规），过了再用新稿跑一遍闸，
+**二次仍命中才弃**。改不动（超时 / 空 / 不合规 / 出口抛错）就**保留原话发出**、账本记一行
+rewrite-failed，绝不输出空——宁可发一句略有瑕疵的，也不许静默变哑。每一泡的重写读数挂在
+parts[*].rewrite（{status, why, from, to}，from / to 只放一小截）。
+
+**对方要她再说一遍时内容去重不判废（这一轮加的）**：asked（入站那句）原样传给闸，撞上重复而
+对方明说要她重复时，那一泡只记一行账（reason 带 skipped-by-request）、照原样发出，
+repeat_status 记成跳过那个状态——**她重复是对的，别吞**。这条豁免只在真撞上重复、且 asked 命中
+请求标记时成立，asked 为空一律不豁免。
+
 成功体里多一节 refusal（**不破坏既有键**）：{kind, shape, verdict_reason, delivered{delivered,
 topic, until, remaining_min, reason}}。没判出拒绝时**这一节不出现**——不加一个空壳，免得人把
 「判过了、不是拒绝」与「没判」读成一件事；正面答了的那句本来也不该挂个 refusal。
@@ -34,16 +47,19 @@ topic, until, remaining_min, reason}}。没判出拒绝时**这一节不出现**
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from organs.heart import refuse as heart_refuse
 from organs.mind import conversation
+from organs.mind import llm
 from organs.mind import recent as mind_recent
 from organs.mind.llm import LLMError
 from organs.mouth import action_note, audit, drops, gate, refusal, repeat, warehouse
 from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
+from organs.mouth import rewrite as rewrite_rules      # 参数名就叫 rewrite，模块用别名进来免得被挡住
 from organs.mouth.gate import ClauseBroken
 
 from .core import Result
@@ -70,13 +86,25 @@ DEFAULT_STATUS = 502
 
 LOG = logging.getLogger(LOGGER_NAME)
 
+# 重写那一次模型调用的注入点：与装配（answer() → llm.complete）走的是同一条出口，本文件不另开
+# HTTP 客户端。生产三样都是 None（配置从 data/llm.json 读、key 从环境读、transport 走 urllib）；
+# 测试把假 transport / 假配置塞进这一格，一个字节都不发真网络。
+TRANSPORT: Optional[Any] = None
+CONFIG: Optional[Mapping[str, Any]] = None
+ENV: Optional[Mapping[str, str]] = None
+
 GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（条款 → 动作括注 → 内容重复 → 复述审计），"
-             "命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里删掉，send_at 按剩下的重算。"
+             "命中就交给模型改一次（同一个 transport、带 budget_ms 硬时限）；改完不命中就用新稿，"
+             "二次仍命中才弃那一泡，改不动（超时 / 空 / 不合规 / 出口抛错）则保留原话发出并记账；"
+             "弃掉的泡从 chunks 里删掉，send_at 按剩下的重算。"
              "in_parts 是进闸的泡数、out_parts 是出闸的泡数，blocked 是这次拦下过她的 clause_id"
              "（去重、按出现顺序），parts 逐泡交代判词与这一泡过闸前后的原文，"
-             "另带这一泡的三样「判没判」读数：audit 是复述审计（status 不是 ok 就是没比过）、"
-             "action_status 是动作括注、repeat_status 是内容重复、quota_status 是动作配额"
-             "（not-checked 都是这一关没跑，不是通过）；顶层的 quota 是这一轮交给闸的配额写法"
+             "另带这一泡的几样「判没判」读数：audit 是复述审计（status 不是 ok 就是没比过）、"
+             "action_status 是动作括注、repeat_status 是内容重复（skipped-by-request 是「对方要她"
+             "再说一遍、这一关只记账没判废」）、quota_status 是动作配额（not-checked 都是这一关"
+             "没跑，不是通过），以及 rewrite 是这一泡的重写读数"
+             "（{status: ok|failed|not-tried, why, from, to}，from / to 只是一小截）；"
+             "顶层的 quota 是这一轮交给闸的配额写法"
              "（forbid / allow / null），取自装配 action.quota.blocked，装配没标就是 null。"
              "每一泡弃言都记一行账（organs/mouth/drops.py）。")
 
@@ -125,10 +153,17 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
                 history: Optional[List[str]]) -> None:
     """answer() 之后、交出去之前：把 chunks 里的每一泡单独过一遍闸，结论就地写回 payload。
 
-    五件事：
+    六件事：
 
     - **逐泡过闸**：每一泡各调一次 gate.enforce（条款 → 动作括注 → 内容重复 → 复述审计）。注入的
       原文、最近几轮、判据表都是同一份——同一轮里的几泡是同一句话切出来的，凭什么两样看待。
+    - **命中先改一次，不再命中即弃**（这一轮接上的）：命中之后把「她的原话 + 命中的那一条 + 一句
+      人话原因」交给模型改一次（走 answer() 同一个 transport，带 data/rewrite.json 的 budget_ms
+      硬时限），拿回来先过 rewrite.accept，过了再用新稿跑第二遍闸；二次仍命中才弃那一泡。
+      **改不动（超时 / 空 / 不合规 / 出口抛错）就保留原话发出**并记一笔账，绝不输出空——
+      一句略有瑕疵的话也比她突然变哑强。每一泡的重写读数挂在 parts[*].rewrite 上。
+    - **对方要她重复时不判废**：asked（入站那句）原样转给闸，撞上重复而对方明说要她再说一遍时，
+      这一泡照发、账本记一行 skipped-by-request，repeat_status 记成跳过那个状态。
     - **真的落到返回体**：pass 原样留着；rewritten 换 Verdict.text（gap 沿用那一泡的）；dropped 从
       chunks 里删掉。**一处都没被改时不碰 chunks**——不接闸时逐字相同，这条是被测过的。
     - **重算 send_at**：删掉几泡之后，剩下的按原来的 gap_before 累加重排，不留洞（小数位与
@@ -179,10 +214,15 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     blocked: List[str] = []
     changed = False
     for index, chunk in enumerate(chunks):
-        verdict = gate.enforce(chunk["text"], books["clauses"], None, sink,
-                               inject=inject, policy=books["audit"],
-                               action=books["action"], recent=history,
-                               repeat_table=books["repeat"], quota=quota)
+        rewritten = _outcome()
+        verdict = gate.enforce(
+            chunk["text"], books["clauses"],
+            _rewriter(chunk["text"], asked=asked, books=books, inject=inject,
+                      recent=history, quota=quota, outcome=rewritten),
+            sink, inject=inject, policy=books["audit"],
+            action=books["action"], recent=history,
+            repeat_table=books["repeat"], quota=quota,
+            asked=asked, keep_unrewritten=True)
         parts.append({"i": index, "decision": verdict.decision,
                       "hits": [_hit_row(one) for one in verdict.hits],
                       "reason": verdict.reason,
@@ -190,7 +230,8 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
                       "audit": _audit_row(verdict.audit),
                       "action_status": verdict.action_status,
                       "repeat_status": verdict.repeat_status,
-                      "quota_status": verdict.quota_status})
+                      "quota_status": verdict.quota_status,
+                      "rewrite": rewritten})
         if verdict.decision == "pass":
             kept.append({"text": chunk["text"], "gap_before": chunk["gap_before"]})
             continue
@@ -223,8 +264,106 @@ def _not_gated(payload: Dict[str, Any], exc: Exception) -> None:
     payload["gate"] = section
 
 
+# —— 重写：命中之后改一次，不改就留原话 ————————————————————
+
+def _outcome() -> Dict[str, Any]:
+    """这一泡的重写读数：{status, why, from, to}，进 gate.parts[*].rewrite。
+
+    默认 not-tried：这一泡没命中，一次请求都没发。why 用数据里那句「没命中，不用改」——
+    空白字段会让人以为「没看见」，而这里其实是「不需要」。
+    """
+    return {"status": rewrite_rules.STATUS_NOT_TRIED, "why": rewrite_rules.clear_reason(),
+            "from": "", "to": ""}
+
+
+def _rewriter(original: str, *, asked: str, books: Mapping[str, Any], inject: Any,
+              recent: Optional[List[str]], quota: Optional[str],
+              outcome: Dict[str, Any]) -> Callable[[str], str]:
+    """造这一泡的 rewrite（text -> text）：把命中的那一条交给模型改一次，改不动就抛 Unrewritable。
+
+    闸只在命中之后才调它，所以没命中的那泡一次模型请求都不发。要改的是哪一条由 gate.check 现问：
+    入参与紧接着的 enforce 一模一样（同一份 clauses / inject / recent / 判据表 / asked），
+    而两道判据都是纯函数、顺序也钉死了，所以两处指的必然是同一条——问一次不会分岔。
+
+    三件事按顺序做，缺一件都不算改成：**发**（_ask_model，带硬时限）→ **验**（rewrite.accept，
+    六条判据全在数据里）→ **交**（把新稿还给闸，由闸拿它再判一遍）。任何一步不过就抛
+    Unrewritable，把「为什么改不动」原样带出去——闸据此保留原话、记一行账，绝不输出空。
+    from / to 只放必要的一小截（截多少取自数据）：面板要看的是「改的是哪一句」，不是整段再抄一遍。
+    """
+    table = books["rewrite"]
+
+    def rewrite(body: str) -> str:
+        hit = gate.check(body, books["clauses"], inject=inject, policy=books["audit"],
+                         action=books["action"], recent=recent,
+                         repeat_table=books["repeat"], quota=quota, asked=asked)
+        before = rewrite_rules.excerpt(body, table)
+        try:
+            said = _ask_model(rewrite_rules.prompt(body, hit, table), table)
+            ok, why = rewrite_rules.accept(body, said, table)
+        except rewrite_rules.Unrewritable as exc:
+            outcome.update({"status": rewrite_rules.STATUS_FAILED, "why": str(exc),
+                            "from": before, "to": ""})
+            raise
+        if not ok:
+            outcome.update({"status": rewrite_rules.STATUS_FAILED, "why": why,
+                            "from": before, "to": rewrite_rules.excerpt(said, table)})
+            raise rewrite_rules.Unrewritable(why)
+        outcome.update({"status": rewrite_rules.STATUS_OK, "why": why, "from": before,
+                        "to": rewrite_rules.excerpt(said, table)})
+        return said
+
+    return rewrite
+
+
+def _ask_model(prompt_text: str, table: Mapping[str, Any]) -> str:
+    """把重写那一段指令发出去、把新稿拿回来：走 answer() 用的同一条出口，带 budget_ms 硬时限。
+
+    **同一个 transport、同一份配置。** 出口就是 organs/mind/llm.complete（模型名 / 地址 / key /
+    重试都在 data/llm.json 与那份配置里，与装配那一问完全一样），本文件不另开 HTTP 客户端、
+    不自己拼地址；测试把假 transport 塞进模块顶上那三个注入点，一个字节都不发真网络。
+
+    **两个时限一起收：** transport 那一侧把 config 的 timeout_ms 换成 budget_ms（一次读写别拖过
+    整件事的预算），attempts 按数据算（1 就是不重试，免得「一次重写」变成两三次）；外面再用
+    线程等一个硬时限，超了就抛——**等不到就当改不动**，原话留着发。
+
+    失败一律翻成 Unrewritable（为什么取自数据）：超时、出口抛错、配置读不动都算「改不动」，
+    绝不往上抛裸异常——闸那边只认这一种「改不了」的说法。
+    """
+    budget = rewrite_rules.budget_ms(table)
+    try:
+        conf = dict(llm.resolve_config(CONFIG), timeout_ms=budget,
+                    retries=max(0, rewrite_rules.attempts(table) - 1))
+        messages = [{"role": "user", "content": prompt_text}]
+        return _bounded(lambda: llm.complete(messages, config=conf, env=ENV,
+                                             transport=TRANSPORT),
+                        budget / 1000.0)
+    except concurrent.futures.TimeoutError:
+        raise rewrite_rules.Unrewritable(rewrite_rules.timeout_why(table)) from None
+    except LLMError as exc:
+        raise rewrite_rules.Unrewritable(rewrite_rules.error_why(exc, table)) from None
+    except Exception as exc:          # 配置读不动、出口抛别的：一样算「改不动」，不往上抛裸异常
+        raise rewrite_rules.Unrewritable(rewrite_rules.error_why(exc, table)) from None
+
+
+def _bounded(call: Callable[[], str], seconds: float) -> str:
+    """在 seconds 秒内等这一次调用的结果；到点就抛 concurrent.futures.TimeoutError。
+
+    为什么用线程、而不是只靠 transport 自己的超时：那一层管的是「一次 HTTP 读写等多久」，重试、
+    连接、读响应各算各的，凑起来能把一次重写拖到三四倍。这里要的是一个「整件事最多等多久」的
+    硬时限，所以拿线程等：submitted 之后 result(timeout) 到点就抛。
+
+    **不 join**：超时之后那次请求可能还在路上，等它就把这一轮 HTTP 请求挂死了。线程自己不清理
+    也没关系——它不持有本文件的任何状态，回来也只会被丢掉。
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(call).result(timeout=seconds)
+    finally:
+        pool.shutdown(wait=False)
+
+
 def _books() -> Dict[str, Any]:
-    """这一轮过闸用的五份判据，全部经 warehouse 读——api 里不写死一条条款、一个数。
+    """这一轮过闸用的六份判据，全部经 warehouse 读——api 里不写死一条条款、一个数。
 
     条数（rounds）与小数位（round_digits）也在数据里：前者是她最近几条回话的窗口，后者与
     pace.fill 算 send_at 用的是同一个数，重排时才不会跟切分那一处对不上。缺件坏件照实抛，
@@ -237,6 +376,7 @@ def _books() -> Dict[str, Any]:
         "audit": warehouse.load("audit"),
         "action": warehouse.load("action_note"),
         "repeat": repeat_book,
+        "rewrite": warehouse.load("rewrite"),
         "digits": int(policy["pace"]["round_digits"]),
     }
 

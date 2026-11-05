@@ -272,7 +272,7 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 
 | 字段 | 是什么 |
 | --- | --- |
-| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,hit,lcs_len,threshold}, action_status, repeat_status, quota_status}` |
+| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,hit,lcs_len,threshold}, action_status, repeat_status, quota_status, rewrite{status,why,from,to}}` |
 | `in_parts` / `out_parts` | 进闸的泡数 / 出闸（真发出去）的泡数 |
 | `blocked[]` | 这次拦下过她的 `clause_id`（去重、按出现顺序），一条都没拦就是空表 |
 | `quota` | 这一轮交给闸的动作配额写法：`forbid`（装配标了本轮不许写动作）/ `allow`（标了放行）/ `null`（装配没标——闸记 `quota_status=not-checked`，**没标不是 allow**） |
@@ -283,6 +283,28 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 为假传 `allow`，装配里没有这一项才传 `None`——**不许猜成 allow**：没标是这一关没跑，放行是真的判过。
 配额命中是闸里唯一一条不丢整句的路：它把动作行剥掉、正文接着过其余判据（`quota.strip`），
 所以那一泡是 `rewritten` 而不是 `dropped`，账本里那一行的 `reason` 带 `action-over-quota`。
+
+**命中先改一次，二次命中才丢（本轮接上的老账）**：以前命中即弃，一句口癖就让她整泡消失。
+现在 `gate.enforce` 拿到一个真的重写器——`api/chat.py` 把「她的原话 + 命中的那一条 + 一句人话
+原因」（`organs/mouth/rewrite.py` 的 `prompt()`）交给模型改一次，走的是 `answer()` 用的**同一条
+出口** `organs/mind/llm.complete`（同一份 `config` / key / transport，不另开 HTTP 客户端），
+时限取 `organs/mouth/data/rewrite.json` 的 `budget_ms`（线程等出来的硬时限，transport 那一侧的
+超时也一起收窄，`attempts` 定成一次不重试）。拿回来先过 `rewrite.accept()`：空 / 逐字相同 /
+长度出区间 / 原文里的数字、英文串、引号里的原话少了，都算「没改成」；过了才用新稿再跑一遍闸，
+**二次仍命中才 `dropped`**。
+
+**改不动就留原话，绝不静默变哑**：超时、回空、不合规、出口抛错，一律**保留原文发出**
+（`decision: pass`、`before == after`、`hits` 里留着那条命中），弃言账本记一行 `reason` 带
+`rewrite-failed` 的账，`parts[*].rewrite` 记 `{status:"failed", why, from, to}`——`from` / `to`
+各只放一小截（截多长也取自数据）。没命中的那泡是 `status:"not-tried"`（`why` 照样有话说），
+改成了是 `"ok"`。**配额命中是例外**：它仍优先走剥行兜底（把动作行拿掉比留着原话强）。
+
+**对方要她再说一遍时，内容去重只记账、不判废**：入站那句（`asked`）原样传给闸，`data/repeat.json`
+的 `request_markers` 认「再说一遍／再说一次／再来一遍／重说一遍／你刚才说／刚才那句／上一句」这类
+请求。**先真的撞上重复、再看 requested**：两步都成立才放过——`decision` 保持 `pass`、`text` 一个字
+不改、`chunks` 里还是她那句原话，账本记一行 `clause_id` 取自数据 `hit.skip_clause_id`、`reason` 带
+`skipped-by-request` 的账，`parts[*].repeat_status` 记 `skipped-by-request`（既不是 `ok` 也不是
+`not-checked`）。`asked` 为空一律不豁免；只说了请求、本来就没重复的，什么都不记。
 
 四样「判没判」的读数**不许折叠**：`audit.status` 不是 `ok` 就是没真的比过，
 `action_status` / `repeat_status` / `quota_status` 的 `not-checked` 是**这一关没跑**，不是「查过没问题」。
