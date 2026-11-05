@@ -61,7 +61,7 @@ class BadCardsTest(unittest.TestCase):
         load(root)                                          # 不抛就是过
 
     def test_field_outside_the_four_is_rejected(self):
-        """六件之外的字段一律拒收：她写的自述归脑，来历归家·抽屉。"""
+        """七件之外的字段一律拒收：她写的自述归脑，来历归家·抽屉。"""
         for extra in ({"self_written": ["我最近像变了个人"]}, {"her_notes": "昨晚做的梦"}):
             temp = tempfile.TemporaryDirectory()
             self.addCleanup(temp.cleanup)
@@ -73,7 +73,7 @@ class BadCardsTest(unittest.TestCase):
             with self.assertRaises(model.SoulLoadError) as caught:
                 load(root)
             messages = [issue.message for issue in caught.exception.issues]
-            self.assertTrue(any("六件之外" in message for message in messages), messages)
+            self.assertTrue(any("七件之外" in message for message in messages), messages)
 
     def test_manner_and_bounds_also_have_a_closed_key_set(self):
         for block, key in (("manner", "her_voice"), ("bounds", "soften")):

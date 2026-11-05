@@ -1,4 +1,4 @@
-"""魂的注入渲染：只有六件正文；数值不进文本（性格档位词归心，不在魂里）。"""
+"""魂的注入渲染：只有七件正文；数值不进文本（性格档位词归心，不在魂里）。"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List, Tuple
@@ -9,8 +9,12 @@ if TYPE_CHECKING:
     from .store import Snapshot
 
 def self_name(identity: model.Identity) -> str:
-    if identity.synonyms:
-        return "%s（%s）" % (identity.display, "、".join(identity.synonyms))
+    """名字与别名；占位那一格逐字出去，不重复包一层括号，也不加修饰。"""
+    if identity.display == model.PLACEHOLDER:
+        return model.PLACEHOLDER
+    names = [item for item in identity.synonyms if item != model.PLACEHOLDER]
+    if names:
+        return "%s（%s）" % (identity.display, "、".join(names))
     return identity.display
 
 
@@ -18,6 +22,7 @@ def appearance_line(identity: model.Identity) -> str:
     """她看起来是什么：发色、瞳色、体型、尾巴、看着多大。
 
     画风、生成参数、模型、服装细节不在这里——那些归家·仓库的素材卡。
+    这一格缺了时出来的是 model.PLACEHOLDER（降级载入的占位，逐字注入），不是空行。
     """
     return identity.appearance
 
@@ -45,29 +50,36 @@ def fears_line(identity: model.Identity) -> str:
     return identity.fears
 
 
+def likes_line(identity: model.Identity) -> str:
+    """她喜欢什么：一句，逐字进注入。只有人写的那一句，不自动增长、不加料。"""
+    return identity.likes
+
+
 def redlines(bounds: model.Bounds) -> str:
     """只出 rule 正文：条目 id 是给 match_bounds 回报用的，不该进她的自我描述。"""
     return "；".join(item.rule for item in bounds.items if item.active)
 
 
 def sections(snapshot: "Snapshot", audience: str = "") -> List[Tuple[str, str]]:
-    """六件的（标题, 正文）：魂的注入就是这六行，没有第七段。
+    """七件的（标题, 正文）：魂的注入就是这七行，没有第八段。
 
-    第二行是她的样子，第三行是她的性格底色，第四行是她怕什么，都不是「她是谁」的档案：
-    名字在上面一行，世界怎么看她（爱称、外号、熟稔档）都在脑·人名录，不在这里。
+    第二行是她的样子，第三行是她的性格底色，第四行是她怕什么，第五行是她喜欢什么，
+    都不是「她是谁」的档案：名字在上面一行，世界怎么看她（爱称、外号、熟稔档）都在脑·人名录，
+    不在这里。
     """
     return [
         ("【自称】", self_name(snapshot.identity)),
         ("【形象】", appearance_line(snapshot.identity)),
         ("【性格底色】", self_statements(snapshot.identity)),
         ("【怕什么】", fears_line(snapshot.identity)),
+        ("【喜欢什么】", likes_line(snapshot.identity)),
         ("【待人姿态】", stance_line(snapshot.manner, audience)),
         ("【红线】", redlines(snapshot.bounds)),
     ]
 
 
 def budget_used(snapshot: "Snapshot") -> int:
-    """正文预算 = 六件的字，按源文本算（不数标题）。"""
+    """正文预算 = 七件的字，按源文本算（不数标题）。"""
     return model.body_chars(snapshot.identity, snapshot.manner, snapshot.bounds)
 
 

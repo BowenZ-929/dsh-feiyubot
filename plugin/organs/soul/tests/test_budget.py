@@ -1,4 +1,4 @@
-"""六件预算：单件超建议值只 warn（形象、怕什么以外），合计超 1000 硬线才拦（改 fixture 副本，不动真数据）。"""
+"""七件预算：单件超建议值只 warn（形象、怕什么、喜欢什么以外），合计超 1000 硬线才拦（改 fixture 副本，不动真数据）。"""
 from __future__ import annotations
 
 import dataclasses
@@ -30,11 +30,11 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual([], [issue for issue in issues if issue.level == model.ERROR])
         load(self.root)
 
-    def test_clean_fixture_loads_and_six_items_fit(self):
+    def test_clean_fixture_loads_and_seven_items_fit(self):
         store = load(self.root)
         snapshot = store.snapshot()
         parts = model.body_parts(snapshot.identity, snapshot.manner, snapshot.bounds)
-        self.assertEqual(6, len(parts))
+        self.assertEqual(7, len(parts))
         for _, chars, limit, _ in parts:
             self.assertLessEqual(chars, limit)
         self.assertLessEqual(model.body_chars(snapshot.identity, snapshot.manner, snapshot.bounds),

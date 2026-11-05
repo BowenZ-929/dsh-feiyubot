@@ -81,8 +81,13 @@ class Snapshot:
     issues: Tuple[model.Issue, ...]
 
 
-def errors_only(issues: Sequence[model.Issue]) -> List[model.Issue]:
-    return [item for item in issues if item.level == model.ERROR]
+def blocking_errors(issues: Sequence[model.Issue]) -> List[model.Issue]:
+    """会拦下这次载入/这次写入的 error：只有 blocking 的才算。
+
+    降级载入的 Issue（缺这一格）是 error 级但 blocking=False：它只报、不拦，
+    否则「必填格缺失 → 载入抛 → edit 也进不去 → 补不进去」那个死锁又会回来。
+    """
+    return [item for item in issues if item.level == model.ERROR and item.blocking]
 
 
 def now_iso() -> str:
@@ -198,13 +203,13 @@ def read_blocks(root: Path) -> Tuple[Dict[str, Any], List[model.Issue]]:
             continue
         raw[block] = data
         issues.extend(model.validate(block, data))
-    if errors_only(issues):
+    if blocking_errors(issues):
         return raw, issues
     blocks = dict((block, model.parse(block, raw[block])) for block in model.BLOCK_NAMES)
     total = model.body_chars(blocks["identity"], blocks["manner"], blocks["bounds"])
     if total > model.limits.body_total:
         issues.append(model.Issue("BUDGET_OVER", model.ERROR,
-                                  "六件正文合计 %d 字 > %d 字（合计是硬线，超了拒载）"
+                                  "七件正文合计 %d 字 > %d 字（合计是硬线，超了拒载）"
                                   % (total, model.limits.body_total)))
     return raw, issues
 
@@ -434,10 +439,10 @@ def rollback(root: Path, actor: str, reason: str, revision: int) -> Dict[str, An
                                       % (revision, name, exc)))
             continue
         issues.extend(model.validate(block, raw[block]))
-    if errors_only(issues):
+    if blocking_errors(issues):
         return _reject("这一版载不进去（回滚目标必须是能载入的整档），未写入", issues)
     text_issues = redline.check_bounds(model.parse("bounds", raw["bounds"]))
-    if errors_only(text_issues):
+    if blocking_errors(text_issues):
         return _reject("这一版的红线段过不了断言，未写入", text_issues)
     before: Dict[str, bytes] = {}
     for name in BLOCK_FILES.values():
@@ -473,7 +478,7 @@ def rollback(root: Path, actor: str, reason: str, revision: int) -> Dict[str, An
             _atomic_write(root / name, data)
         return _reject("history 追加失败，已回滚，本次回滚作废：%s" % exc)
     _, post = read_blocks(root)
-    if errors_only(post):
+    if blocking_errors(post):
         for name, data in before.items():
             _atomic_write(root / name, data)
         return _reject("回滚后整张魂载不进去，已还原", post)
@@ -657,10 +662,10 @@ class SoulStore:
 
     def _reload(self) -> Snapshot:
         raw, issues = read_blocks(self._root)
-        if not errors_only(issues):
+        if not blocking_errors(issues):
             # M1：热更新之后同样跑一次红线断言；不过就照旧拒载（磁盘已经变了，拒的是这次重载）
             issues = list(issues) + redline.check_bounds(model.parse("bounds", raw["bounds"]))
-        bad = errors_only(issues)
+        bad = blocking_errors(issues)
         if bad:
             raise model.SoulLoadError(issues)
         self._raw = raw
@@ -761,7 +766,7 @@ class SoulStore:
             return _reject("bounds.items 不是数组，先修卡")
         new_block["items"] = items + [copy.deepcopy(item)]
         block_issues = model.validate("bounds", new_block)
-        if errors_only(block_issues):
+        if blocking_errors(block_issues):
             return _reject("加完这一条线过不了校验，未写入", block_issues)
         index = len(items)
         line = {
@@ -784,7 +789,7 @@ class SoulStore:
     def retire_redline(self, actor: str, reason: str, item_id: str) -> Dict[str, Any]:
         """逐条撤一条红线——⑤ 的专用动作名（旧名 retire_bounds_item 已删，不留别名）。
 
-        只把 active 改成 false，不物理删除：撤下的线仍占六件预算、仍留在卡里、账上留有摘要；
+        只把 active 改成 false，不物理删除：撤下的线仍占七件预算、仍留在卡里、账上留有摘要；
         这也是「账本只增不改」的同一个道理。账上记 redline_id / redline_op=retire，
         加线的 7 天复燃冷却就查它。撤线同样不占那 2 次月限额，但必须写 reason。
         """
@@ -815,7 +820,7 @@ class SoulStore:
         previous_rule = items[index].get("rule")
         items[index]["active"] = False
         block_issues = model.validate("bounds", new_block)
-        if errors_only(block_issues):
+        if blocking_errors(block_issues):
             return _reject("撤完这一条线过不了校验，未写入", block_issues)
         line = {
             "kind": KIND_EDIT,
@@ -894,7 +899,7 @@ class SoulStore:
         if _stat_signature(target) != self._signatures.get(target_name):
             return _reject("文件在你编辑期间被改过，请重读后再改：%s" % target_name)
         raw, issues = read_blocks(self._root)
-        if errors_only(issues):
+        if blocking_errors(issues):
             return _reject("当前魂是坏卡，先修好再改", issues)
         if block not in raw:
             return _reject("%s 没读到" % block)
@@ -923,7 +928,7 @@ class SoulStore:
         if _stat_signature(target) != signature:
             return _reject("文件在你编辑期间被改过，请重读后再改：%s" % BLOCK_FILES[block])
         text_issues = redline_issues(raw, block, new_block)
-        if errors_only(text_issues):
+        if blocking_errors(text_issues):
             # 拒因原样带回调用方：面板把 message 与 issues 一起显示，人才知道改哪一行
             return _reject("改完的红线段过不了断言（%s）：%s，未写入"
                            % ("、".join(sorted({item.code for item in text_issues})),
@@ -952,6 +957,10 @@ class SoulStore:
         """人的手：改 identity / manner / bounds 的一个字段，同事务追一行账。
 
         只有这三块：六轴卡与基线归心（organs/heart/），不在这张白名单里。
+
+        缺这一格的卡（model.DEGRADABLE_PATHS 那五格）是降级载入，所以这里进得来：给这五格
+        写值就是补上它，不需要 structural——形状早由占位顶住了；补齐之后自检那条非阻塞
+        error 自然消失，硬门禁恢复。
 
         structural=True 是「这次是经裁决的结构变更」的显式声明：许新建缺的字段、许把被
         搬走的字段/条目拿掉，path 为空还许整块替换。删掉的东西记进账行的 removed，
@@ -986,15 +995,19 @@ class SoulStore:
             old_value = copy.deepcopy(raw[block])
             new_block = copy.deepcopy(value)
         else:
+            # 降级载入的格（缺这一格）许就地新建：那张卡已经是「载入成功 + 非阻塞 error」，
+            # 补它的正是这个入口。其余缺字段仍要显式 structural=true（形状变化走 migrate）。
+            create = structural or (block == "identity"
+                                    and path.strip() in model.DEGRADABLE_PATHS)
             try:
                 tokens = _parse_path(path)
                 try:
                     old_value = _get_path(raw[block], tokens)
                 except KeyError:
-                    if not structural:
+                    if not create:
                         raise
                     old_value = ""          # 这次新建的字段：账上 old_summary 记空
-                _set_path(new_block, tokens, value, create=structural)
+                _set_path(new_block, tokens, value, create=create)
             except (KeyError, IndexError, TypeError, ValueError) as exc:
                 return _reject("path 无法定位：%s（%s）" % (path, exc))
         if block == "bounds":
@@ -1024,7 +1037,7 @@ class SoulStore:
         if removed and not structural:
             return _reject_issue("SOUL_DELETE_ATTEMPT", removed)
         block_issues = model.validate(block, new_block)
-        if errors_only(block_issues):
+        if blocking_errors(block_issues):
             return _reject("改完这一块过不了校验，未写入", block_issues)
         new_bytes = (json.dumps(new_block, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         if probe:
@@ -1124,7 +1137,7 @@ class SoulStore:
         if removed:
             return _reject_issue("SOUL_DELETE_ATTEMPT", removed)
         block_issues = model.validate(block, new_block)
-        if errors_only(block_issues):
+        if blocking_errors(block_issues):
             return _reject("提案改完这一块过不了校验，未写入", block_issues)
         new_bytes = (json.dumps(new_block, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         line = {
@@ -1159,7 +1172,7 @@ def migrate(root: Path, actor: str, reason: str, block: str, new_value: Any,
 
     这里刻意不走 load()/_loaded_for_write()：旧形状在新 model 下就是坏卡，过去三次手工
     改盘全是这么来的。所以旧卡只按磁盘原文读（不要求它通过新校验），新值必须过新 model，
-    且换完之后的整张魂要能载入（另外两张卡不许是坏的、六件合计不许超硬线）。
+    且换完之后的整张魂要能载入（另外两张卡不许是坏的、七件合计不许超硬线）。
     这里只能是模块级函数：坏卡状态下根本没有能构造出来的 SoulStore。
     """
     root = Path(root)
@@ -1187,7 +1200,7 @@ def migrate(root: Path, actor: str, reason: str, block: str, new_value: Any,
                              "expect_old_digest 对不上 %s 的当前 sha256：要改成别人的东西之前"
                              "先重读（当前 %s）" % (BLOCK_FILES[block], current))
     block_issues = model.validate(block, new_value)
-    if errors_only(block_issues):
+    if blocking_errors(block_issues):
         return _reject("迁移后的卡过不了新 model，未写入", block_issues)
     others: Dict[str, Any] = {}
     issues: List[model.Issue] = []
@@ -1207,7 +1220,7 @@ def migrate(root: Path, actor: str, reason: str, block: str, new_value: Any,
             continue
         issues.extend(model.validate(name, data))
         others[name] = data
-    if errors_only(issues):
+    if blocking_errors(issues):
         return _reject("另外两张卡过不了校验，先修它们再迁移 %s" % block, issues)
     final = dict((name, new_value if name == block else others[name])
                  for name in model.BLOCK_NAMES)
@@ -1215,10 +1228,10 @@ def migrate(root: Path, actor: str, reason: str, block: str, new_value: Any,
     total = model.body_chars(parsed["identity"], parsed["manner"], parsed["bounds"])
     if total > model.limits.body_total:
         return _reject_issue("BUDGET_OVER",
-                             "迁移后六件正文合计 %d 字 > %d 字（合计是硬线，超了拒载）"
+                             "迁移后七件正文合计 %d 字 > %d 字（合计是硬线，超了拒载）"
                              % (total, model.limits.body_total))
     text_issues = redline.check_bounds(parsed["bounds"])
-    if errors_only(text_issues):
+    if blocking_errors(text_issues):
         return _reject("迁移后的红线段过不了断言（%s）：%s，未写入"
                        % ("、".join(sorted({item.code for item in text_issues})),
                           text_issues[0].message),
@@ -1258,7 +1271,7 @@ def migrate(root: Path, actor: str, reason: str, block: str, new_value: Any,
         _atomic_write(target, old_bytes)
         return _reject("history 追加失败，已回滚，本次迁移作废：%s" % exc)
     _, post = read_blocks(root)
-    if errors_only(post):
+    if blocking_errors(post):
         _atomic_write(target, old_bytes)
         _atomic_write(history_path, ledger_before)   # 账退回追加前：只删掉刚写的那一行
         return _reject("迁移后整张魂载不进去，已回滚（含账行）", post)
@@ -1272,9 +1285,9 @@ def load(root: Path) -> SoulStore:
     """
     root = Path(root)
     raw, issues = read_blocks(root)
-    if not errors_only(issues):
+    if not blocking_errors(issues):
         issues = list(issues) + redline.check_bounds(model.parse("bounds", raw["bounds"]))
-    if errors_only(issues):
+    if blocking_errors(issues):
         raise model.SoulLoadError(issues)
     return SoulStore(root, raw, issues)
 

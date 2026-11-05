@@ -35,10 +35,11 @@ class CliTest(unittest.TestCase):
     def test_check_exits_zero_on_warn_only(self):
         code, out = self._run(["check"])
         self.assertEqual(0, code)
-        self.assertIn("六件·名字与自称", out)
-        self.assertIn("六件·形象 %d/60 字（硬线）" % len("【待定稿】"), out)
-        self.assertIn("六件·怕什么 %d/60 字（硬线）" % len("【待定稿】"), out)
-        self.assertIn("六件合计", out)
+        self.assertIn("七件·名字与自称", out)
+        self.assertIn("七件·形象 %d/60 字（硬线）" % len("【待定稿】"), out)
+        self.assertIn("七件·怕什么 %d/60 字（硬线）" % len("【待定稿】"), out)
+        self.assertIn("七件·喜欢什么 %d/80 字（硬线；建议 40）" % len("【待定稿】"), out)
+        self.assertIn("七件合计", out)
 
     def test_check_exits_one_on_error(self):
         edit_card(self.root, "bounds", lambda data: data["items"][0].update({"rule": "禁" * 1000}))
@@ -64,7 +65,7 @@ class CliTest(unittest.TestCase):
         code, out = self._run(["render", "--audience", "熟人"])
         self.assertEqual(0, code)
         self.assertIn("【待人姿态】", out)
-        self.assertIn("预算（六件）", out)
+        self.assertIn("预算（七件）", out)
 
     def test_render_ignores_retired_audience(self):
         """矩阵归脑后对象档不再是魂的概念：长辈也不再是错，只是不再有任何区别。"""

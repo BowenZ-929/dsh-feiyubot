@@ -1,10 +1,11 @@
 """魂的命令行入口：从 organs/soul/data 目录读卡，不碰任何插件层。
 
-改魂只有人手的这几条路：edit（改六件里的字段，--structural 换形状）、
+改魂只有人手的这几条路：edit（改七件里的字段，--structural 换形状）、
 migrate（形状变化的唯一入口，坏卡状态下也能跑）、accept-proposal（改待人姿态）、
 acceptance（验收探针：写值再写回原值，两行都记 probe；红线一律不探）。
 edit 不再有 --probe：探针只有 acceptance 一个入口，两件事不能再挤在一条命令里。
 删字段、删条目、越界 target 一律拒绝。六轴卡归心，不在这个目录里。
+喜欢什么（identity.likes）也走 edit：它是七件之一，但没有任何程序侧的写路径。
 """
 from __future__ import annotations
 
@@ -26,9 +27,9 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="打印全部 Issue 与人读摘要，有 error 级则退出码 1")
     sub.add_parser("show", help="打印四块现状与 digest")
-    renderer = sub.add_parser("render", help="打印注入文本与六件预算")
+    renderer = sub.add_parser("render", help="打印注入文本与七件预算")
     renderer.add_argument("--audience", default="")
-    editor = sub.add_parser("edit", help="人手改六件里的一个字段，写后同一事务追一行账")
+    editor = sub.add_parser("edit", help="人手改七件里的一个字段，写后同一事务追一行账")
     editor.add_argument("--block", required=True)
     editor.add_argument("--path", required=True)
     editor.add_argument("--value", required=True)
@@ -129,7 +130,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         print(text)
         print()
-        print("预算（六件）%d/%d 字（合计是硬线）"
+        print("预算（七件）%d/%d 字（合计是硬线）"
               % (render.budget_used(store.snapshot()), model.limits.body_total))
         return 0
     if args.cmd == "revisions":

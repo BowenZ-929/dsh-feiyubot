@@ -118,6 +118,7 @@ def _placeholder_issues(snapshot: store.Snapshot, issues: List[model.Issue]) -> 
         ("identity.appearance", snapshot.identity.appearance),
         ("identity.self_statements", "\n".join(snapshot.identity.self_statements)),
         ("identity.fears", snapshot.identity.fears),
+        ("identity.likes", snapshot.identity.likes),
         ("manner.stance", snapshot.manner.stance),
     ]
     for item in snapshot.bounds.items:
@@ -133,13 +134,22 @@ def _placeholder_issues(snapshot: store.Snapshot, issues: List[model.Issue]) -> 
                 break
 
 
+# 七件里哪几件会「缺了这一格」→ 摘要那一行要把 Issue 一并带上（字数照报：占位的字也算字）。
+_DEGRADED_PARTS = {
+    "名字与自称": ("display", "synonyms"),
+    "形象": ("appearance",),
+    "怕什么": ("fears",),
+    "喜欢什么": ("likes",),
+}
+
+
 def collect(root: Path) -> List[model.Issue]:
     root = Path(root)
     raw, issues = store.read_blocks(root)
     rows = _history_issues(root, issues)
     _kind_issues(rows, issues)
     _proposal_issues(rows, issues)
-    if store.errors_only(issues):
+    if store.blocking_errors(issues):
         return issues
     snapshot = store.build_snapshot(root, raw, ())
     _placeholder_issues(snapshot, issues)
@@ -151,20 +161,31 @@ def collect(root: Path) -> List[model.Issue]:
 
 
 def summary(root: Path) -> List[str]:
-    """人读摘要：六件各多少字、合计多少字、账多长、本月提案用了多少。"""
+    """人读摘要：七件各多少字、合计多少字、账多长、本月提案用了多少。"""
     root = Path(root)
     raw, issues = store.read_blocks(root)
-    if store.errors_only(issues):
+    if store.blocking_errors(issues):
         return ["有 error 级问题，摘要不可用，见下面的 Issue 列表"]
     snapshot = store.build_snapshot(root, raw, issues)
     identity = snapshot.identity
     manner = snapshot.manner
     bounds = snapshot.bounds
+    # 降级载入的那几格：字数照实际算（占位就是现在的值），Issue 码挂在同一行上，
+    # 人一眼看得出「这一件是占位，不是 0 字，也不是没问题」。
+    degraded = set(issue.code for issue in issues if not issue.blocking)
     lines = []
     for name, chars, limit, hard in model.body_parts(identity, manner, bounds):
-        lines.append("六件·%s %d/%d 字（%s）"
-                     % (name, chars, limit, "硬线" if hard else "建议值"))
-    lines.append("六件合计 %d/%d 字（硬线）"
+        note = "硬线" if hard else "建议值"
+        if name == "喜欢什么":
+            # 这一件两条线都报：80 字是硬线（超了拒载），40 字只是建议（超了只 warn）
+            note = "硬线；建议 %d" % model.limits.likes_suggested
+        line = "七件·%s %d/%d 字（%s）" % (name, chars, limit, note)
+        missing = [model.MISSING_CODES[key] for key in _DEGRADED_PARTS.get(name, ())
+                   if model.MISSING_CODES[key] in degraded]
+        if missing:
+            line += "；%s 按占位降级载入（补齐后恢复硬门禁）" % "/".join(missing)
+        lines.append(line)
+    lines.append("七件合计 %d/%d 字（硬线）"
                  % (model.body_chars(identity, manner, bounds), model.limits.body_total))
     lines.append("manner 姿态 1 句；bounds %d 条（生效 %d 条）"
                  % (len(bounds.items), len([item for item in bounds.items if item.active])))

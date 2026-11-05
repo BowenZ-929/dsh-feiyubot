@@ -1,13 +1,25 @@
-"""魂的六件：数据结构、校验规则与字数预算。
+"""魂的七件：数据结构、校验规则与字数预算。
 
-正文只有六件：名字（含自称）、形象、三句自述、怕什么、待人姿态、红线条目，合计 ≤1000 字
-（红线可占大头）。六件里形象与怕什么都是硬线：用户各指定 ≤60 字，超了拒载；其余四件的数值
-（40／60／100／250）只是建议值：超了报 WARN、不拦——plan §2「数值一律是默认值，
-不是验收线」。六轴卡不在这里——它是心的性格参数（docs/plan.md §2「魂是底色，心是
-性格与情绪」，卡片已移交 organs/heart/）。
+正文只有七件：名字（含自称）、形象、三句自述、怕什么、喜欢什么、待人姿态、红线条目，
+合计 ≤1000 字（红线可占大头）。七件里形象、怕什么、喜欢什么都是硬线：用户各指定
+≤60／≤60／≤80 字，超了拒载；其余几件的数值（40／60／100／250，喜欢什么另有一条建议 40）
+只是建议值：超了报 WARN、不拦——plan §2「数值一律是默认值，不是验收线」。六轴卡不在这里
+——它是心的性格参数（docs/plan.md §2「魂是底色，心是性格与情绪」，卡片已移交 organs/heart/）。
 
-坏卡一律拒载：校验只报 Issue，绝不给缺失字段补默认值——补默认值等于
-给同一块多加一个写者。六件之外的字段（来历、她写的自述、话术、语料）
+喜欢什么只有人写的那一句：没有自动增长的路径（她要长新喜欢，写进 selfnarration 与
+家·抽屉），也不做讨好词表检测——「不写喜欢主人这类讨好」是判据，不是代码。
+
+缺这一格 ≠ 写错了，两条路不混：
+
+- **缺了这一格**（字段不存在、空串、全空白）：名字与自称、形象、怕什么、喜欢什么这五格
+  按占位（PLACEHOLDER）降级载入，报 error 级但**非阻塞**的 Issue（码名不变），面板显红；
+  人补齐之后硬门禁自动恢复。这样「必填格缺失 → 载入抛 → 改不动」那个死锁才不会出现：
+  SoulLoadError 只由 blocking 的 error 触发，补的入口进得去。
+- **写错了**（类型错、超硬线、自述不是三句、自称名单不是数组）：照旧硬拒载，一个字节都不补。
+  三句自述尤其不许给占位：三句同样的占位会被逐字注入，把模型带偏。
+
+自述之外，程序侧仍然没有任何「补默认值」的路径：占位是值本身，不是默认值，
+只有人走 edit / migrate 才写得进真值。七件之外的字段（来历、她写的自述、话术、语料）
 一律按坏卡拒收：它们归家·抽屉、脑、嘴，不归魂。
 """
 from __future__ import annotations
@@ -19,14 +31,31 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 ERROR = "error"
 WARN = "warn"
 
+# 缺这一格（字段不存在、空串、全空白）→ 降级载入：值换成这一串占位，报一条非阻塞 error。
+# 占位只在这里定义一次，render 逐字注入、不加括号修饰——它就是值本身，不是提示语。
+PLACEHOLDER = "（这一栏还没写）"
+
+# 缺字段类的 Issue 码：码名是契约（面板按它显红、测试与账都按它对），补齐之后自然不再报。
+MISSING_CODES = {
+    "display": "IDENTITY_DISPLAY_MISSING",
+    "synonyms": "IDENTITY_SYNONYMS_MISSING",
+    "appearance": "IDENTITY_APPEARANCE_MISSING",
+    "fears": "IDENTITY_FEARS_MISSING",
+    "likes": "IDENTITY_LIKES_MISSING",
+}
+# 只有这几格「缺了」才许 edit 新建（path 用磁盘形状的写法）：降级载入的卡要能从面板补齐。
+# 其余缺字段一律按「写错」硬拒——补默认值等于给同一块多加一个写者。
+DEGRADABLE_PATHS = ("self_names.display", "self_names.synonyms",
+                    "appearance", "fears", "likes")
+
 BLOCK_NAMES = ("identity", "manner", "bounds")
 # 红线的执行方：这条线由谁拦住。缺了就是没人接线，报 warn 让人看得见。
 # soul·字面 = 魂内字面/正则能判；mouth·语义复核 = 要嘴按语义复核；home·仓库词表 = 词表在家。
 ENFORCERS = ("soul·字面", "mouth·语义复核", "home·仓库词表")
 
-# 每块只许这些顶层键：多一个就是六件之外的东西混进来了
+# 每块只许这些顶层键：多一个就是七件之外的东西混进来了
 ALLOWED_KEYS = {
-    "identity": ("self_names", "appearance", "self_statements", "fears"),
+    "identity": ("self_names", "appearance", "self_statements", "fears", "likes"),
     "manner": ("stance",),
     "bounds": ("items",),
 }
@@ -48,12 +77,15 @@ _PROPOSAL_MANNER = "manner.stance"
 
 @dataclass(frozen=True)
 class Limits:
-    # 单件里 appearance 与 fears 是硬线（用户各指定 ≤60 字，超了拒载）；其余四个是建议值，
-    # 超了只 WARN。body_total 是合计硬线。
+    # 单件里 appearance / fears / likes 是硬线（用户各指定 ≤60／≤60／≤80 字，超了拒载）；
+    # 其余几件是建议值，超了只 WARN（likes 自己另有一条建议 40，与别的建议值同口径）。
+    # body_total 是合计硬线。
     self_names: int = 40
     appearance: int = 60
     self_statements: int = 60
     fears: int = 60
+    likes: int = 80
+    likes_suggested: int = 40
     statement_count: int = 3
     manner: int = 100
     bounds: int = 250
@@ -71,14 +103,18 @@ class Issue:
     code: str
     level: str
     message: str
+    # blocking=False 的 error 只报不拦：载入降级、面板显红，补齐即恢复硬门禁。
+    # 它仍然是 error 级（不是 warn），只是不触发 SoulLoadError。
+    blocking: bool = True
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         """给要跨进程/跨语言边界（HTTP 层、CLI）一个 JSON 安全的形状。"""
-        return {"code": self.code, "level": self.level, "message": self.message}
+        return {"code": self.code, "level": self.level, "message": self.message,
+                "blocking": self.blocking}
 
 
 class SoulLoadError(Exception):
-    """载入失败；issues 里至少有 error 级条目。"""
+    """载入失败；issues 里至少有 blocking 的 error 级条目（非阻塞的 error 降级载入）。"""
 
     def __init__(self, issues: Sequence[Issue]) -> None:
         self.issues = list(issues)
@@ -96,6 +132,9 @@ class Identity:
     # 她怕什么：一句，60 字硬线。心里很怕、几乎不露（六轴 inner 78／shown 15），
     # 所以这里写的是她怎么绕着怕走，不是把"我怕"说出口。
     fears: str
+    # 她喜欢什么：一句，80 字硬线（建议 40）。只有人写的那一句——她不会自己往这里长，
+    # 程序侧也没有任何追加路径。
+    likes: str
 
 
 @dataclass(frozen=True)
@@ -141,6 +180,10 @@ def fears_chars(identity: Identity) -> int:
     return char_count(identity.fears)
 
 
+def likes_chars(identity: Identity) -> int:
+    return char_count(identity.likes)
+
+
 def manner_chars(manner: Manner) -> int:
     """待人姿态 = 那一句的字。矩阵已归脑，魂里不再有分档的字。"""
     return char_count(manner.stance)
@@ -153,16 +196,18 @@ def bounds_chars(bounds: Bounds) -> int:
 
 def body_parts(identity: Identity, manner: Manner, bounds: Bounds
                ) -> List[Tuple[str, int, int, bool]]:
-    """六件的（名字, 字数, 上限, 是不是硬线）：check 摘要、CLI、面板都读这一份。
+    """七件的（名字, 字数, 上限, 是不是硬线）：check 摘要、CLI、面板都读这一份。
 
-    形象与怕什么都是硬线（用户各指定 ≤60 字，超了报 error 拒载）；其余四个的第三个数字是
-    建议值，不是验收线。硬线还有 body_total，那是合计。顺序即渲染顺序。
+    形象、怕什么、喜欢什么都是硬线（用户各指定 ≤60／≤60／≤80 字，超了报 error 拒载）；
+    其余几件的第三个数字是建议值，不是验收线。硬线还有 body_total，那是合计。
+    顺序即渲染顺序。
     """
     return [
         ("名字与自称", identity_name_chars(identity), limits.self_names, False),
         ("形象", appearance_chars(identity), limits.appearance, True),
         ("三句自述", identity_statement_chars(identity), limits.self_statements, False),
         ("怕什么", fears_chars(identity), limits.fears, True),
+        ("喜欢什么", likes_chars(identity), limits.likes, True),
         ("待人姿态", manner_chars(manner), limits.manner, False),
         ("红线条目", bounds_chars(bounds), limits.bounds, False),
     ]
@@ -195,34 +240,81 @@ def _bad(message: str) -> Issue:
     return Issue("SOUL_JSON_UNREADABLE", ERROR, message)
 
 
+def _missing(key: str, detail: str) -> Issue:
+    """缺这一格：报一条非阻塞 error，值按占位降级载入；补齐之后这条自然不再报。
+
+    只有「字段不存在 / 空串 / 全空白」走这里。「写错」（类型错、超硬线、
+    自述不是三句、自称名单不是数组）一律仍走 _bad / TOO_LONG，照旧硬拒载。
+    """
+    return Issue(MISSING_CODES[key], ERROR,
+                 "%s（已按占位「%s」降级载入，补齐后恢复硬门禁）" % (detail, PLACEHOLDER),
+                 blocking=False)
+
+
 def _unknown_keys(block: str, data: Dict[str, Any], issues: List[Issue]) -> None:
     extra = [str(key) for key in data if key not in ALLOWED_KEYS[block]]
     if extra:
-        issues.append(_bad("%s 只许有 %s；多出 %s（六件之外的不进魂：来历归家·抽屉，"
+        issues.append(_bad("%s 只许有 %s；多出 %s（七件之外的不进魂：来历归家·抽屉，"
                            "她写的自述归脑，具体话术归嘴）"
                            % (block, "/".join(ALLOWED_KEYS[block]), "/".join(extra))))
 
 
 def _shape_identity(data: Dict[str, Any], issues: List[Issue]) -> Optional[Identity]:
+    """identity 的三类格子：降级（缺这一格）、硬拒（写错）、放行。
+
+    缺 display / synonyms / appearance / fears / likes 这五格 → 降级载入：值换成
+    PLACEHOLDER，报 error 级但非阻塞的 Issue（码名不变），人补齐之后硬门禁自动恢复。
+    self_statements 例外，缺了仍按「写错」硬拒：三句同样的占位会把模型带偏，
+    宁可不起来也不要一个会被逐字注入的假自述。
+    """
     ok = True
     names = data.get("self_names")
     if not isinstance(names, dict):
         issues.append(_bad("identity.self_names 必须是对象"))
         return None
     display = names.get("display")
+    if "display" not in names:
+        issues.append(_missing("display", "identity.self_names.display 缺了：名字是必填件"))
+        display = PLACEHOLDER
+    elif not isinstance(display, str):
+        issues.append(_bad("identity.self_names.display 必须是字符串"))
+        ok = False
+        display = PLACEHOLDER
+    elif not display.strip():
+        issues.append(_missing("display", "identity.self_names.display 是空白的：名字是必填件"))
+        display = PLACEHOLDER
     synonyms = names.get("synonyms")
-    if not _is_text(display):
-        issues.append(_bad("identity.self_names.display 必须是非空字符串"))
+    if "synonyms" not in names:
+        issues.append(_missing("synonyms",
+                               "identity.self_names.synonyms 缺了：没有别名就写成空数组"))
+        synonyms = [PLACEHOLDER]
+    elif not isinstance(synonyms, list) or not all(isinstance(item, str) for item in synonyms):
+        issues.append(_bad("identity.self_names.synonyms 必须是字符串数组"))
         ok = False
-    if not (isinstance(synonyms, list) and all(_is_text(item) for item in synonyms)):
-        issues.append(_bad("identity.self_names.synonyms 必须是非空字符串数组"))
-        ok = False
+        synonyms = [PLACEHOLDER]
+    else:
+        kept = [item for item in synonyms if item.strip()]
+        if synonyms and not kept:
+            # 有元素但全是空白 = 值全空白，与空串同一档；空数组是「没有别名」，本来就不算错
+            issues.append(_missing("synonyms",
+                                   "identity.self_names.synonyms 全是空白：没有别名就写成空数组"))
+            kept = [PLACEHOLDER]
+        synonyms = kept
     appearance = data.get("appearance")
-    if not _is_text(appearance):
-        issues.append(Issue("IDENTITY_APPEARANCE_MISSING", ERROR,
-                            "identity.appearance 必须是非空字符串：只写她看起来是什么"
-                            "（发色、瞳色、体型、有没有尾巴、看着多大）"))
+    if "appearance" not in data:
+        issues.append(_missing("appearance",
+                               "identity.appearance 缺了：只写她看起来是什么"
+                               "（发色、瞳色、体型、有没有尾巴、看着多大）"))
+        appearance = PLACEHOLDER
+    elif not isinstance(appearance, str):
+        issues.append(_bad("identity.appearance 必须是字符串"))
         ok = False
+        appearance = PLACEHOLDER
+    elif not appearance.strip():
+        issues.append(_missing("appearance",
+                               "identity.appearance 是空白的：只写她看起来是什么"
+                               "（发色、瞳色、体型、有没有尾巴、看着多大）"))
+        appearance = PLACEHOLDER
     elif char_count(appearance) > limits.appearance:
         issues.append(Issue("IDENTITY_APPEARANCE_TOO_LONG", ERROR,
                             "identity.appearance %d 字 > %d 字硬线（超了拒载，不截断）："
@@ -230,15 +322,44 @@ def _shape_identity(data: Dict[str, Any], issues: List[Issue]) -> Optional[Ident
                             % (char_count(appearance), limits.appearance)))
         ok = False
     fears = data.get("fears")
-    if not _is_text(fears):
-        issues.append(Issue("IDENTITY_FEARS_MISSING", ERROR,
-                            "identity.fears 必须是非空字符串：一句她怕什么"
-                            "（心里很怕、几乎不露，所以写她怎么绕着怕走）"))
+    if "fears" not in data:
+        issues.append(_missing("fears",
+                               "identity.fears 缺了：一句她怕什么"
+                               "（心里很怕、几乎不露，所以写她怎么绕着怕走）"))
+        fears = PLACEHOLDER
+    elif not isinstance(fears, str):
+        issues.append(_bad("identity.fears 必须是字符串"))
         ok = False
+        fears = PLACEHOLDER
+    elif not fears.strip():
+        issues.append(_missing("fears",
+                               "identity.fears 缺了：一句她怕什么"
+                               "（心里很怕、几乎不露，所以写她怎么绕着怕走）"))
+        fears = PLACEHOLDER
     elif char_count(fears) > limits.fears:
         issues.append(Issue("IDENTITY_FEARS_TOO_LONG", ERROR,
                             "identity.fears %d 字 > %d 字硬线（超了拒载，不截断）：只写一句"
                             % (char_count(fears), limits.fears)))
+        ok = False
+    likes = data.get("likes")
+    if "likes" not in data:
+        issues.append(_missing("likes",
+                               "identity.likes 缺了：一句她喜欢什么"
+                               "（只有人写的那一句，缺了不编）"))
+        likes = PLACEHOLDER
+    elif not isinstance(likes, str):
+        issues.append(_bad("identity.likes 必须是字符串"))
+        ok = False
+        likes = PLACEHOLDER
+    elif not likes.strip():
+        issues.append(_missing("likes",
+                               "identity.likes 缺了：一句她喜欢什么"
+                               "（只有人写的那一句，缺了不编）"))
+        likes = PLACEHOLDER
+    elif char_count(likes) > limits.likes:
+        issues.append(Issue("IDENTITY_LIKES_TOO_LONG", ERROR,
+                            "identity.likes %d 字 > %d 字硬线（超了拒载，不截断）：只写一句"
+                            % (char_count(likes), limits.likes)))
         ok = False
     statements = data.get("self_statements")
     if not (isinstance(statements, list) and all(_is_text(item) for item in statements)):
@@ -251,7 +372,7 @@ def _shape_identity(data: Dict[str, Any], issues: List[Issue]) -> Optional[Ident
     if not ok:
         return None
     return Identity(display=display, synonyms=tuple(synonyms), appearance=appearance,
-                    self_statements=tuple(statements), fears=fears)
+                    self_statements=tuple(statements), fears=fears, likes=likes)
 
 
 def _shape_manner(data: Dict[str, Any], issues: List[Issue]) -> Optional[Manner]:
@@ -389,7 +510,9 @@ def _budget_issues(block: str, parsed: Any, issues: List[Issue]) -> None:
     """
     if block == "identity":
         parts = [("identity.self_names", identity_name_chars(parsed), limits.self_names),
-                 ("identity.self_statements", identity_statement_chars(parsed), limits.self_statements)]
+                 ("identity.self_statements", identity_statement_chars(parsed),
+                  limits.self_statements),
+                 ("identity.likes", likes_chars(parsed), limits.likes_suggested)]
     elif block == "manner":
         parts = [("manner.stance（一句姿态）", manner_chars(parsed), limits.manner)]
     elif block == "bounds":

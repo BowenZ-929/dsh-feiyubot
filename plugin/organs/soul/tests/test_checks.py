@@ -1,4 +1,4 @@
-"""check 的判据：坏卡拒载、话术拒收、占位符示警、账对不上报错、摘要按六件报字数。"""
+"""check 的判据：坏卡拒载、话术拒收、占位符示警、账对不上报错、摘要按七件报字数。"""
 from __future__ import annotations
 
 import tempfile
@@ -93,7 +93,7 @@ class CheckTest(unittest.TestCase):
             load(self.root)
 
     def test_manner_matrix_cannot_come_back(self):
-        """对象矩阵归脑：manner 再多出 matrix 就是六件之外的东西，按坏卡拒。"""
+        """对象矩阵归脑：manner 再多出 matrix 就是七件之外的东西，按坏卡拒。"""
         edit_card(self.root, "manner", lambda data: data.update({"matrix": []}))
         with self.assertRaises(model.SoulLoadError) as caught:
             load(self.root)
@@ -118,20 +118,22 @@ class CheckTest(unittest.TestCase):
         (self.root / "history.jsonl").write_text("不是账\n", encoding="utf-8")
         self.assertIn("HISTORY_UNREADABLE", codes(checks.collect(self.root)))
 
-    def test_summary_reports_six_items_and_total(self):
+    def test_summary_reports_seven_items_and_total(self):
         lines = checks.summary(self.root)
         text = "\n".join(lines)
-        for word in ("六件·名字与自称", "六件·形象", "六件·三句自述", "六件·怕什么",
-                     "六件·待人姿态", "六件·红线条目", "六件合计"):
+        for word in ("七件·名字与自称", "七件·形象", "七件·三句自述", "七件·怕什么",
+                     "七件·喜欢什么", "七件·待人姿态", "七件·红线条目", "七件合计"):
             self.assertIn(word, text)
-        self.assertIn("六件·形象 %d/60 字（硬线）" % model.char_count(
+        self.assertIn("七件·形象 %d/60 字（硬线）" % model.char_count(
             load(self.root).snapshot().identity.appearance), text)
-        self.assertIn("六件·怕什么 %d/60 字（硬线）" % model.char_count(
+        self.assertIn("七件·怕什么 %d/60 字（硬线）" % model.char_count(
             load(self.root).snapshot().identity.fears), text)
+        self.assertIn("七件·喜欢什么 %d/80 字（硬线；建议 40）" % model.char_count(
+            load(self.root).snapshot().identity.likes), text)
         self.assertNotIn("来历", text)
         snapshot = load(self.root).snapshot()
         expected = model.body_chars(snapshot.identity, snapshot.manner, snapshot.bounds)
-        self.assertIn("六件合计 %d/%d 字" % (expected, model.limits.body_total), text)
+        self.assertIn("七件合计 %d/%d 字" % (expected, model.limits.body_total), text)
 
     def test_summary_carries_no_baseline_or_axis_line(self):
         text = "\n".join(checks.summary(self.root))
@@ -187,7 +189,8 @@ class CheckTest(unittest.TestCase):
         self.assertIn("等它接线", messages[-1])
 
     def test_summary_refuses_when_card_is_broken(self):
-        edit_card(self.root, "identity", lambda data: data["self_names"].update({"display": ""}))
+        """摘要不可用只留给真正写错的卡：缺这一格是降级载入，摘要照出（那一行带 Issue）。"""
+        edit_card(self.root, "manner", lambda data: data.update({"stance": "  "}))
         self.assertEqual(["有 error 级问题，摘要不可用，见下面的 Issue 列表"], checks.summary(self.root))
 
 

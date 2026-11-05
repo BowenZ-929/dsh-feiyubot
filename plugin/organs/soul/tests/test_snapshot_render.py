@@ -1,4 +1,4 @@
-"""注入渲染：只有六件正文，没有第七段（性格归心，不在魂里）。"""
+"""注入渲染：只有七件正文，没有第八段（性格归心，不在魂里）。"""
 from __future__ import annotations
 
 import dataclasses
@@ -21,24 +21,31 @@ class RenderTest(unittest.TestCase):
     def test_two_loads_render_identically(self):
         self.assertEqual(self.store.render("熟人"), load(self.root).render("熟人"))
 
-    def test_render_has_exactly_six_sections(self):
+    def test_render_has_exactly_seven_sections(self):
         text = self.store.render("熟人")
-        for head in ("【自称】", "【形象】", "【性格底色】", "【怕什么】", "【待人姿态】", "【红线】"):
+        for head in ("【自称】", "【形象】", "【性格底色】", "【怕什么】", "【喜欢什么】",
+                     "【待人姿态】", "【红线】"):
             self.assertIn(head, text)
         self.assertNotIn("【我是谁】", text)      # 那一行是世界怎么看她，归脑·人名录
-        self.assertEqual(6, len(text.splitlines()))
+        self.assertEqual(7, len(text.splitlines()))
 
     def test_appearance_sits_between_self_name_and_character(self):
         """形象在【自称】之后、【性格底色】之前：先她是谁，再她样子，再她的底色。"""
         heads = [line.split("】")[0] + "】" for line in self.store.render("熟人").splitlines()]
-        self.assertEqual(["【自称】", "【形象】", "【性格底色】", "【怕什么】", "【待人姿态】",
-                          "【红线】"], heads)
+        self.assertEqual(["【自称】", "【形象】", "【性格底色】", "【怕什么】", "【喜欢什么】",
+                          "【待人姿态】", "【红线】"], heads)
 
-    def test_fears_sits_between_character_and_stance(self):
-        """怕什么在【性格底色】之后、【待人姿态】之前：先她是谁、她的底色，再她怕什么。"""
+    def test_fears_sits_between_character_and_likes(self):
+        """怕什么在【性格底色】之后、【喜欢什么】之前：先她是谁、她的底色，再她怕什么。"""
         lines = self.store.render("熟人").splitlines()
         self.assertEqual("【怕什么】", lines[3].split("】")[0] + "】")
-        self.assertEqual("【待人姿态】", lines[4].split("】")[0] + "】")
+        self.assertEqual("【喜欢什么】", lines[4].split("】")[0] + "】")
+
+    def test_likes_sits_between_fears_and_stance(self):
+        """喜欢什么在【怕什么】之后、【待人姿态】之前：怕与喜欢是同一层，都在她底色里。"""
+        lines = self.store.render("熟人").splitlines()
+        self.assertEqual("【喜欢什么】", lines[4].split("】")[0] + "】")
+        self.assertEqual("【待人姿态】", lines[5].split("】")[0] + "】")
 
     def test_budget_counts_the_five_items_only(self):
         snapshot = self.store.snapshot()
