@@ -7,10 +7,13 @@
 这里只剩一件事：PAGE_FILES，devserver 直接发字节的静态名单。
 architecture §9.2：心与脑只能看。页是活的只读视图，不含任何写入口。
 
-一页一个席位（2026-11-05）：DSH 里只有一个席位「她的面板」，页内一条导航条
-（魂 / 心 / 脑 / 家 / 日子 / 聊天 / 设置）换 iframe 的地址；/panel 发聚合页 panel.html，
-"/" 仍是魂页（直开核时 / 就是魂）。日子与设置这一轮没有真实页面，各发一张占位页——
-导航里点得到、打开不是 404，比删掉那一项更接近下一步。
+一页一个席位（2026-11-05）：DSH 里只有一个席位「她的面板」，页内一条导航条换
+iframe 的地址；/panel 发聚合页 panel.html，"/" 仍是魂页（直开核时 / 就是魂）。
+
+导航重切（2026-11-06，人拍板）：六项 = 魂 · 关于他 · 记忆 · 聊天 · 今天 · 设置。
+心（/heart）与家（/home）仍是可用页，但不占导航位——它们是同一批只读面，
+入口收在「设置」页里那两条链接上。脑（/brain）同理：内容已分到「关于他」与「记忆」，
+页还在，只是导航不再指向它。
 """
 from __future__ import annotations
 
@@ -30,6 +33,12 @@ PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "panel.html",
                               "/home": "home.html",
                               "/day": "day.html",
                               "/settings": "settings.html",
+                              # 2026-11-06 信息架构重切（人拍板）：导航六项
+                              #（魂 · 关于他 · 记忆 · 聊天 · 今天 · 设置），
+                              # 两页新文件从脑页里分出来——「关于他」只放人名录与名片，
+                              #「记忆」只放四个抽屉与冷库。脑页 /brain 仍可用，只是不占导航位。
+                              "/about": "about.html",
+                              "/memory": "memory.html",
                               # 说话页：GET /chat 发这一页的字节，POST /chat 走 api.handle
                               #（devserver._dispatch 只在 GET 时查 PAGE_FILES，两条不打架）。
                               "/chat": "chat.html",

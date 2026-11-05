@@ -3,175 +3,169 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>魂 · 面板</title>
+<title>魂 · 她的面板</title>
 <style>
-  :root { color-scheme: light; }
-  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 0 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
-  header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
-                  padding: .55rem 1.2rem; background: #fff6d8;
-                  border-bottom: 1px solid #e8d9a8; color: #5c4200; font-weight: 600; }
-  main { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
-         gap: 1.2rem; align-items: start; max-width: 1180px; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  section { background: #fff; border: 1px solid #dcdcdc; border-radius: 8px;
-            padding: .6rem 1rem 1rem; margin-bottom: 1.2rem; }
-  h2 { font-size: 1rem; margin: .4rem 0 .8rem; letter-spacing: .02em; }
-  h2 small { font-weight: 400; color: #666; margin-left: .5rem; }
-  dl { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .35rem .8rem; margin: 0; }
-  dt { color: #666; }
-  dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .note { margin: .9rem 0 0; color: #7a5c00; background: #fffbea;
-          border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
-  label { display: block; font-size: .85rem; color: #555; margin: .7rem 0 .25rem; }
-  input, textarea, select, button { font: inherit; }
-  input[type=text], textarea, select { width: 100%; box-sizing: border-box;
-          border: 1px solid #cfcfcf; border-radius: 6px; padding: .4rem .5rem; background: #fff; }
-  textarea { resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: .86rem; }
-  button { margin-top: .7rem; padding: .42rem 1rem; border-radius: 6px;
-           border: 1px solid #2f6f4f; background: #2f6f4f; color: #fff; cursor: pointer; }
-  button.slim { margin: 0 .3rem .2rem 0; padding: .1rem .5rem; font-size: .8rem;
-                background: #fff; color: #a11; border-color: #d8b4b4; }
-  button:disabled { opacity: .5; cursor: default; }
-  #log { margin: .9rem 0 0; font: .82rem/1.5 ui-monospace, Menlo, monospace;
-         white-space: pre-wrap; overflow-wrap: anywhere; color: #333;
-         background: #f6f6f6; border-radius: 6px; padding: .5rem .6rem; min-height: 2.4rem; }
-  #render-text, #issues, #revisions-text, #pin-text {
-         margin: .5rem 0 0; padding: .7rem .8rem; background: #f4f7fb;
-         border: 1px solid #ccd8e6; border-radius: 6px; white-space: pre-wrap;
-         overflow-wrap: anywhere; font-size: .86rem;
-         font-family: ui-monospace, Menlo, monospace; }
-  #redlines-list { margin: .3rem 0 0; padding: 0; list-style: none; }
-  #redlines-list li { border-top: 1px dashed #e2e2e2; padding: .45rem 0;
-                      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem; }
-  #redlines-list li.retired { color: #888; }
-  #redlines-list .rule { white-space: pre-wrap; overflow-wrap: anywhere; }
-  #redlines-list .tag { font-size: .78rem; color: #666; }
-  .err { color: #a11; }
-  .ok { color: #1b6b3a; }
-  nav.links { max-width: 1180px; margin: 0 0 1rem; font-size: .9rem; color: #555; }
-  nav.links a { color: #2f6f4f; }
+  /* 颜色只取宿主变量，兜底用系统色（Canvas / CanvasText / GrayText）：
+     宿主给变量就跟宿主；宿主没给，color-scheme 会让系统色自己跟着明暗走。
+     深色跟随宿主的 [data-theme="dark"]，不自造色板。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --radius: 8px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--panel); color: var(--dim); }
+  main { display: grid; gap: var(--gap-2); grid-template-columns: minmax(0, 1fr);
+         max-width: 62rem; margin: 0 auto; }
+  @media (min-width: 60rem) { main { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); } }
+  .col { display: grid; gap: var(--gap-2); align-content: start; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--gap-2); }
+  .head { display: flex; flex-wrap: wrap; gap: var(--gap-1);
+          align-items: baseline; justify-content: space-between; margin: 0 0 var(--gap-1); }
+  h1, h2 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  .who { font-size: .95rem; color: var(--dim); }
+  .hint { margin: 0 0 var(--gap-1); color: var(--dim); }
+  .msg { margin: var(--gap-1) 0 0; color: var(--dim); }
+  .msg.bad { color: var(--warn); }
+  .msg.good { color: var(--fg); }
+  dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr);
+          gap: var(--gap-1); margin: 0; }
+  dl.kv dt { color: var(--dim); }
+  dl.kv dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows > li { border-top: 1px solid var(--line); padding: var(--gap-1) 0;
+                 display: grid; grid-template-columns: minmax(0, 1fr) auto;
+                 gap: var(--gap-1); align-items: start; }
+  ul.rows > li:first-child { border-top: 0; }
+  ul.rows .body { overflow-wrap: anywhere; white-space: pre-wrap; }
+  ul.rows .meta { display: block; color: var(--dim); }
+  ul.rows li.retired .body { color: var(--dim); }
+  label { display: block; margin: var(--gap-1) 0; color: var(--dim); }
+  input[type=text], textarea { width: 100%; margin: 0; padding: var(--gap-1);
+          border: 1px solid var(--line); border-radius: var(--radius);
+          background: var(--bg); color: var(--fg); font: .95rem/1.6 inherit; }
+  textarea { resize: vertical; }
+  button { margin: var(--gap-1) 0 0; padding: var(--gap-1) var(--gap-2);
+           border: 1px solid var(--brand); border-radius: var(--radius);
+           background: var(--brand); color: var(--on-brand); font: .95rem/1.4 inherit;
+           cursor: pointer; }
+  button:disabled { opacity: .5; cursor: progress; }
+  button.slim { margin: 0; padding: var(--gap-1); background: var(--panel);
+                color: var(--fg); border-color: var(--line); }
+  pre { margin: 0; padding: var(--gap-1); border: 1px solid var(--line);
+        border-radius: var(--radius); background: var(--bg); color: var(--fg);
+        font: .95rem/1.6 ui-monospace, Menlo, monospace;
+        white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
-<!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
-     直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
+     壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
 <script src="panel-base.js" data-page="soul"></script>
 </head>
 <body>
-<header class="banner">本面板无鉴权，只许绑 127.0.0.1；改魂只有本页下面这几处入口。</header>
-<nav class="links" aria-label="只读页">另有只读两页：<a href="heart">心 · 只读</a>、<a href="brain">脑 · 只读</a>（是入口，不是写口）</nav>
-<!-- 两条入口是相对地址：直开核时 /heart、/brain，壳里 /qqagent/panel/heart、
-     /qqagent/panel/brain（壳剥前缀后仍是 /heart、/brain）。壳前缀不在页里写第二份。 -->
+<p class="banner">她的魂。每块标题右边那行小字写着「这块谁写的」：人写的能改，程序写的只能看。改一句、加一条红线都要写原因——原因会进改动记录。</p>
 <main>
-  <div>
-    <section aria-labelledby="ro-h">
-      <h2 id="ro-h">可编辑正文<small id="budget">字数载入中…</small></h2>
-      <dl>
-        <dt>名字</dt><dd id="ro-name">…</dd>
-        <dt>形象</dt><dd id="ro-appearance">…</dd>
-        <dt>三句自述</dt><dd id="ro-statements">…</dd>
-        <dt>怕什么</dt><dd id="ro-fears">…</dd>
-        <dt>待人姿态</dt><dd id="ro-manner">…</dd>
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>她是谁</h2><span class="who">人写的；这一页只显示，改不了</span></div>
+      <dl class="kv">
+        <dt>名字</dt><dd id="ro-name">读取中…</dd>
+        <dt>形象</dt><dd id="ro-appearance">读取中…</dd>
+        <dt>三句自述</dt><dd id="ro-statements">读取中…</dd>
+        <dt>怕什么</dt><dd id="ro-fears">读取中…</dd>
       </dl>
-      <p class="note">这一栏是六件里的五件（名字／形象／三句自述／怕什么／待人姿态），改一次追一行账。
-        红线不在这一栏：它单独成块，只许逐条加、逐条撤（见右侧「红线块」）。</p>
-      <p class="note">心与脑只能看、不能改：本页没有改心、改脑的入口。</p>
+      <p class="msg" id="identity-msg"></p>
     </section>
 
-    <section aria-labelledby="w-h">
-      <h2 id="w-h">写入口</h2>
+    <section class="card">
+      <div class="head"><h2>待人姿态</h2><span class="who">人写</span></div>
+      <p class="hint">她跟人打交道时的那股劲儿，一句话。改完下一回合就生效，不用重启。</p>
+      <label for="say-value">这一句话</label>
+      <textarea id="say-value" rows="3" spellcheck="false" placeholder="读取中…"></textarea>
+      <label for="say-reason">为什么改（必填，进改动记录）</label>
+      <input id="say-reason" type="text" autocomplete="off" placeholder="比如：最近说话太硬了">
+      <button id="say-submit" type="button">改这一句</button>
+      <p class="msg" id="say-msg">读取中…</p>
+    </section>
 
-      <label for="stance-value">① 待人姿态（manner.stance，一句）</label>
-      <textarea id="stance-value" rows="3" spellcheck="false"></textarea>
-      <label for="stance-reason">原因（进变更史）</label>
-      <input id="stance-reason" type="text" autocomplete="off">
-      <button id="stance-submit" type="button">提交待人姿态</button>
-
-      <label for="proposal-json">② 提案 JSON（粘贴 proposal 对象）</label>
-      <textarea id="proposal-json" rows="8" spellcheck="false" placeholder='{"id":"p-1","target":"manner.stance","value":"…","evidence":["m1","m2","m3"],"reason":"…"}'></textarea>
-      <label for="proposal-reason">原因（提案里没写 reason 时用它补）</label>
-      <input id="proposal-reason" type="text" autocomplete="off">
-      <button id="proposal-submit" type="button">接受提案</button>
-      <p class="note">接受提案要过演化五闸（依据 ≥3 条且不重复／单次改动 ≤ 该字段可编辑范围的 1/10／
-        同一格冷却 168 小时／护栏不动红线／落盘前存整档），不过就整次拒，拒因下面会写出来。</p>
-
-      <pre id="log">就绪。</pre>
+    <section class="card">
+      <div class="head"><h2>红线</h2><span class="who">人写，程序只读其余</span></div>
+      <p class="hint">撞上这些她就不说。只能一条一条加、一条一条撤——整块替换没有入口，撤下来的那条也还留着痕迹。</p>
+      <ul class="rows" id="redlines-list"><li><span class="body">读取中…</span></li></ul>
+      <label for="redline-rule">加一条：要拦的话（一句能判定的话，别写「尽量」这类软话）</label>
+      <textarea id="redline-rule" rows="2" spellcheck="false"></textarea>
+      <label for="redline-reason">为什么加（必填，进改动记录）</label>
+      <input id="redline-reason" type="text" autocomplete="off" placeholder="比如：她上次顺着说了不该说的">
+      <button id="redline-submit" type="button">加这条红线</button>
+      <p class="msg" id="redline-msg"></p>
     </section>
   </div>
 
-  <div>
-    <section aria-labelledby="b-h">
-      <h2 id="b-h">红线块<small>只可逐条加、逐条撤</small></h2>
-      <ul id="redlines-list"><li>载入中…</li></ul>
-      <p class="note">红线块不许整块替换（包括压缩产物与迁移结果），所以这里没有「编辑整段红线」的框：
-        加一条、撤一条各是一次写入（add_redline / retire_redline），撤线是 active=false，
-        条目仍留在卡里、仍占预算。两次都要写原因；加/撤不占本月那 2 次提案限额，
-        但同一条线撤了 7 天内不许加回。</p>
-      <label for="redline-id">新增一条 · id（形如 h08）</label>
-      <input id="redline-id" type="text" autocomplete="off">
-      <label for="redline-rule">新增一条 · 禁令正文（一句可判定的话，不写「尽量」这类软话）</label>
-      <textarea id="redline-rule" rows="3" spellcheck="false"></textarea>
-      <label for="redline-reason">原因（进变更史）</label>
-      <input id="redline-reason" type="text" autocomplete="off">
-      <button id="redline-submit" type="button">加一条红线</button>
-      <p class="note">字面匹配按禁令原文填；要正则、要外挂词表，走命令行或 API 把 match 写全。</p>
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>她此刻会被注入的样子</h2><span class="who">由程序拼：把上面这些原样交给模型，人改不了</span></div>
+      <p class="hint" id="budget">合计 … 字</p>
+      <pre id="render-text">读取中…</pre>
+      <p class="msg" id="render-msg"></p>
     </section>
 
-    <section aria-labelledby="v-h">
-      <h2 id="v-h">版本 · 回滚<small id="revision-now">revision …</small></h2>
-      <pre id="revisions-text">载入中…</pre>
-      <p class="note">变更史解释「谁为什么改」，快照负责「回到哪一版」：回滚读的是整档归档
-        （previous.json + 环形最近二十版），回滚本身也记账、也先存一份。</p>
-      <label for="rollback-revision">回到哪一版（revision 号）</label>
-      <input id="rollback-revision" type="text" autocomplete="off">
-      <label for="rollback-reason">原因（进变更史）</label>
-      <input id="rollback-reason" type="text" autocomplete="off">
-      <button id="rollback-submit" type="button">回滚到这一版</button>
+    <section class="card">
+      <div class="head"><h2>改动记录</h2><span class="who">由程序写：每次改一句、加撤红线，程序自己记一行</span></div>
+      <ul class="rows" id="history-list"><li><span class="body">读取中…</span></li></ul>
+      <p class="msg" id="history-msg"></p>
     </section>
 
-    <section aria-labelledby="a-h">
-      <h2 id="a-h">断言 · 自检<small id="pin-size">pin …</small></h2>
-      <pre id="issues">载入中…</pre>
-      <pre id="pin-text">载入中…</pre>
-      <p class="note">红线断言三条：生效条目 ≤40 条、每条禁令恰好出现 1 次、出现软话词即拒。
-        自检与每次写盘之前各跑一次——不过就不许落盘。</p>
-    </section>
-
-    <section aria-labelledby="r-h">
-      <h2 id="r-h">她此刻会被注入的样子</h2>
-      <p class="note">矩阵已归脑（熟人/生人=人名录，群档=场合判断），这一栏不再分档。</p>
-      <pre id="render-text">载入中…</pre>
-    </section>
-
-    <section aria-labelledby="bp-h">
-      <h2 id="bp-h">脑的改基线提案<small>只读 · 每晚 0–2 条 · 各附三条依据记忆</small></h2>
-      <pre id="brain-proposals">载入中…</pre>
-      <p class="note">提案由脑在夜结算时产出；要接受就把对应 JSON 粘进左侧「② 提案 JSON」提交，由人点头才落魂。</p>
+    <section class="card">
+      <div class="head"><h2>自检</h2><span class="who">由程序写：载入时与每次写盘前各跑一次</span></div>
+      <ul class="rows" id="issues"><li><span class="body">读取中…</span></li></ul>
+      <p class="msg" id="issues-msg"></p>
     </section>
   </div>
 </main>
-
 <script>
 (function () {
   "use strict";
-  var ACTOR = "panel";   // 写入口只有一个：本面板；账本上记作 panel
+
+  // 写入口只有一个：本面板。账本上记作 panel，页面上说成「人（面板）」。
+  var ACTOR = "panel";
+  var ACTOR_TEXT = { panel: "人（面板）", "总览": "总览" };
+  // 块名翻成人话：账本上的块名不进界面。
+  var BLOCK_TEXT = { identity: "名字与形象", manner: "待人姿态", bounds: "红线" };
 
   function el(id) { return document.getElementById(id); }
-
-  function say(text, cls) {
-    var line = document.createElement("div");
-    if (cls) { line.className = cls; }
-    line.textContent = text;
-    el("log").appendChild(line);
+  function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
   }
-
+  function say(id, text, tone) {
+    var box = el(id);
+    box.className = "msg" + (tone ? " " + tone : "");
+    box.textContent = text;
+  }
+  // 取数只从这里出去：路径写核上那一条，挂载前缀由 panel-base.js 的 panelFetch 补。
   function call(method, path, body) {
     var init = { method: method, headers: {} };
     if (body !== undefined) {
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    // 路径只写核上那一条（"/soul/render"）；挂载前缀由 panel-base.js 的 panelFetch 补，
-    // 壳里补成 /qqagent/panel/soul/render，剥前缀后还是 /soul/render。
     return panelFetch(path, init).then(function (res) {
       return res.json().then(function (data) {
         return { status: res.status, data: data };
@@ -180,223 +174,215 @@
       });
     });
   }
-
-  function showSoul(soul) {
-    var id = soul.identity, manner = soul.manner, bounds = soul.bounds;
-    el("ro-name").textContent = id.synonyms && id.synonyms.length
-      ? id.display + "（" + id.synonyms.join("、") + "）" : id.display;
-    el("ro-appearance").textContent = id.appearance;
-    el("ro-statements").textContent = id.self_statements.join("\n");
-    el("ro-fears").textContent = id.fears;
-    el("ro-manner").textContent = manner.stance;
-    el("revision-now").textContent = "revision " + soul.revision;
-    if (!el("stance-value").value) { el("stance-value").value = manner.stance; }
-    showRedlines(bounds);
+  function reasonOf(res) {
+    var data = res.data || {};
+    var issues = data.issues || [];
+    var tail = issues.length ? "（" + issues.map(function (i) { return i.message; }).join("；") + "）" : "";
+    return "HTTP " + res.status + "：" + (data.message || "没给原因") + tail;
+  }
+  function shortTime(stamp) {
+    var text = String(stamp || "");
+    return text ? text.slice(0, 16).replace("T", " ") : "时间没记";
   }
 
-  // 红线块单独成栏：每条一行，只有「撤线」这一个写动作（active=false，不物理删除）。
-  // 整块替换没有入口——加一条走下面那个单条表单，撤一条走这里的按钮。
+  // —— 她是谁（只读） ——————————————————————————————
+  function showSoul(soul) {
+    var id = soul.identity || {};
+    var synonyms = id.synonyms && id.synonyms.length ? "（也叫 " + id.synonyms.join("、") + "）" : "";
+    el("ro-name").textContent = String(id.display || "没写名字") + synonyms;
+    el("ro-appearance").textContent = String(id.appearance || "还没写形象");
+    el("ro-statements").textContent = (id.self_statements || []).length
+      ? id.self_statements.join("\n") : "还没写自述";
+    el("ro-fears").textContent = String(id.fears || "还没写怕什么");
+    say("identity-msg", "这四样不在这一页改：这一页只动待人姿态与红线。");
+    var stance = (soul.manner || {}).stance;
+    if (stance && !el("say-value").value) { el("say-value").value = stance; }
+    if (el("say-msg").textContent === "读取中…") {
+      say("say-msg", "上面框里是她现在这一句；改了要写原因，改完下一回合生效。");
+    }
+    showRedlines(soul.bounds || {});
+  }
+
+  // —— 红线（逐条加、逐条撤） ————————————————————————
   function showRedlines(bounds) {
     var list = el("redlines-list");
-    while (list.firstChild) { list.removeChild(list.firstChild); }
-    if (!bounds.items.length) {
-      var empty = document.createElement("li");
-      empty.textContent = "（没有条目）";
-      list.appendChild(empty);
+    clear(list);
+    var items = bounds.items || [];
+    if (!items.length) {
+      list.appendChild(node("li", "msg", "还没有红线。在下面加第一条，写上要拦的那句话。"));
       return;
     }
-    bounds.items.forEach(function (item, index) {
-      var row = document.createElement("li");
-      if (!item.active) { row.className = "retired"; }
-      var cell = document.createElement("div");
-      var rule = document.createElement("div");
-      rule.className = "rule";
-      rule.textContent = (item.active ? "" : "（已撤下）") + item.rule;
-      var tag = document.createElement("div");
-      tag.className = "tag";
-      tag.textContent = item.id + " · " + item.match_type
-        + " · 执行方 " + (item.enforced_by || "未登记");
-      cell.appendChild(rule);
-      cell.appendChild(tag);
+    items.forEach(function (item) {
+      var row = node("li", item.active ? "" : "retired");
+      var cell = node("div");
+      cell.appendChild(node("div", "body", item.active ? item.rule : "（已撤下）" + item.rule));
+      cell.appendChild(node("div", "meta", item.active ? "生效中" : "已撤下，仍留着痕迹"));
       row.appendChild(cell);
       if (item.active) {
-        var retire = document.createElement("button");
+        var retire = node("button", "slim", "撤这条");
         retire.type = "button";
-        retire.className = "slim";
-        retire.textContent = "撤这条";
-        retire.addEventListener("click", function () { retireRedline(item.id, index); });
+        retire.addEventListener("click", function () { retireRedline(item); });
         row.appendChild(retire);
       }
       list.appendChild(row);
     });
   }
 
+  function retireRedline(item) {
+    var reason = window.prompt("为什么要撤掉「" + item.rule + "」？（必填，进改动记录）", "");
+    if (reason === null) { return; }
+    reason = String(reason).trim();
+    if (!reason) { say("redline-msg", "撤线被取消：原因不能空着。", "bad"); return; }
+    say("redline-msg", "正在撤…");
+    call("POST", "/soul/redline", { actor: ACTOR, reason: reason, op: "retire", id: item.id })
+      .then(function (res) {
+        if (res.status === 200 && (res.data || {}).ok !== false) {
+          say("redline-msg", "撤掉了：「" + item.rule + "」。", "good");
+          return refresh();
+        }
+        say("redline-msg", "撤不动：" + reasonOf(res), "bad");
+      })
+      .catch(function (err) { say("redline-msg", "连不上核：" + err, "bad"); });
+  }
+
+  // —— 她此刻会被注入的样子（只读） ————————————————————
   function showRender(view) {
-    el("render-text").textContent = view.text;
-    var chars = view.chars;
-    el("budget").textContent = "合计 " + chars.used + " / " + chars.limit + " 字（硬线）";
-    el("budget").title = chars.parts.map(function (p) {
-      return p.name + " " + p.chars
-        + (p.hard ? "（硬线 " + p.limit + "）" : "（建议 " + p.limit + "）");
-    }).join("　");
+    el("render-text").textContent = String(view.text || "（空的：魂里没东西可注入）");
+    if (!el("render-msg").textContent) {
+      say("render-msg", "这一段就是她下一回合真会看到的原话。");
+    }
+    var chars = view.chars || {};
+    var parts = chars.parts || [];
+    el("budget").textContent = "合计 " + (chars.used === undefined ? "?" : chars.used)
+      + " / " + (chars.limit === undefined ? "?" : chars.limit) + " 字（硬线）"
+      + (parts.length ? "；各件：" + parts.map(function (p) {
+          return p.name + " " + p.chars + (p.hard ? "（硬线 " + p.limit + "）" : "（建议 " + p.limit + "）");
+        }).join("、") : "");
   }
 
-  function showIssues(data) {
-    if (!data || !data.issues || !data.issues.length) {
-      el("issues").textContent = "自检：无 Issue";
+  // —— 改动记录（只读） ——————————————————————————————
+  function historyLine(row) {
+    var what = row.block ? (BLOCK_TEXT[row.block] || "别的块")
+      : (row.kind === "rollback" ? "回到旧的一版" : "整档动作");
+    var change = "";
+    if (row.old_summary !== undefined || row.new_summary !== undefined) {
+      change = "「" + (row.old_summary || "空") + "」→「" + (row.new_summary || "空") + "」";
+    }
+    var who = row.actor ? "记作 " + (ACTOR_TEXT[row.actor] || row.actor) : "没记谁改的";
+    var why = row.reason ? "为什么：" + row.reason : "没写原因";
+    return shortTime(row.ts) + " · " + what + (change ? " · " + change : "") + " · " + why + " · " + who;
+  }
+
+  function showHistory(rows) {
+    var list = el("history-list");
+    clear(list);
+    if (!rows.length) {
+      list.appendChild(node("li", "msg", "还没有改动。改一句或加一条红线之后，这里会多一行。"));
       return;
     }
-    el("issues").textContent = data.issues.map(function (issue) {
-      return "[" + issue.level + "] " + issue.code + " " + issue.message;
-    }).join("\n");
+    rows.slice().reverse().forEach(function (row) {
+      list.appendChild(node("li", "", historyLine(row)));
+    });
+    say("history-msg", "共 " + rows.length + " 次改动，最新的一行在上面。");
   }
 
-  function showPin(data) {
-    el("pin-size").textContent = "pin " + data.bytes + " / " + data.limit + " 字节";
-    el("pin-text").textContent = data.pin || "（没有生效红线）";
-  }
-
-  function showRevisions(data) {
-    if (!data || !data.revisions || !data.revisions.length) {
-      el("revisions-text").textContent = "（还没有整档快照：第一次写入前会生成）";
+  // —— 自检（只读） ————————————————————————————————
+  function showIssues(issues) {
+    var list = el("issues");
+    clear(list);
+    if (!issues.length) {
+      list.appendChild(node("li", "msg", "自检过了：没有要人复核的地方。"));
       return;
     }
-    el("revisions-text").textContent = data.revisions.map(function (row) {
-      return "revision " + row.revision + " · " + (row.ts || "时间未知")
-        + " · " + row.bytes + " 字节 · " + row.file;
-    }).join("\n");
+    issues.forEach(function (issue) {
+      list.appendChild(node("li", "", "[" + (issue.level === "error" ? "要修" : "留意") + "] "
+        + issue.message));
+    });
+    say("issues-msg", "共 " + issues.length + " 条。这些不改也能跑，但值得看一眼。");
   }
 
-  function showProposals(data) {
-    if (!data || !data.proposals || !data.proposals.length) {
-      el("brain-proposals").textContent = "（空）";
-      return;
-    }
-    el("brain-proposals").textContent = data.proposals.map(function (p) {
-      return JSON.stringify(p);
-    }).join("\n");
-  }
-
+  // —— 取数与三态 ————————————————————————————————
   function refresh() {
     return Promise.all([
       call("GET", "/soul"),
       call("GET", "/soul/render"),
-      call("GET", "/soul/check"),
-      call("GET", "/soul/revisions"),
-      call("GET", "/soul/pin"),
-      call("GET", "/brain/proposals")
+      call("GET", "/soul/history"),
+      call("GET", "/soul/check")
     ]).then(function (out) {
-      if (out[0].status === 200) { showSoul(out[0].data); }
-      else { say("读 /soul 失败（" + out[0].status + "）：" + out[0].data.message, "err"); }
-      if (out[1].status === 200) { showRender(out[1].data); }
-      else { say("读 /soul/render 失败（" + out[1].status + "）：" + out[1].data.message, "err"); }
-      if (out[2].status === 200) { showIssues(out[2].data); }
-      else { el("issues").textContent = "（读不到自检：" + out[2].status + "）"; }
-      if (out[3].status === 200) { showRevisions(out[3].data); }
-      else { el("revisions-text").textContent = "（读不到版本：回滚不可用）"; }
-      if (out[4].status === 200) { showPin(out[4].data); }
-      else { el("pin-text").textContent = "（读不到 pin）"; }
-      if (out[5].status === 200) { showProposals(out[5].data); }
-      else { el("brain-proposals").textContent = "（读不到提案：HTTP " + out[5].status + "）"; }
+      if (out[0].status === 200) { showSoul(out[0].data || {}); }
+      else {
+        say("identity-msg", "她是谁读不出来，先确认核在跑：" + reasonOf(out[0]), "bad");
+        say("redline-msg", "红线也读不出来：" + reasonOf(out[0]), "bad");
+      }
+      if (out[1].status === 200) { showRender(out[1].data || {}); }
+      else {
+        el("render-text").textContent = "读不出来。";
+        say("render-msg", "注入面读不到，先确认核在跑：" + reasonOf(out[1]), "bad");
+      }
+      if (out[2].status === 200) { showHistory((out[2].data || {}).history || []); }
+      else { say("history-msg", "改动记录读不到：" + reasonOf(out[2]), "bad"); }
+      if (out[3].status === 200) { showIssues((out[3].data || {}).issues || []); }
+      else { say("issues-msg", "自检跑不起来：" + reasonOf(out[3]), "bad"); }
     }).catch(function (err) {
-      say("连不上后端：" + err, "err");
+      say("identity-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
     });
   }
 
-  function reasons(res) {
-    var issues = res.data.issues || [];
-    if (!issues.length) { return ""; }
-    return "　拒因：" + issues.map(function (issue) {
-      return issue.code + " " + issue.message;
-    }).join("；");
-  }
-
-  function finish(label, res) {
-    if (res.status === 200 && res.data.ok !== false) {
-      say(label + "成功：" + (res.data.history_line
-        ? JSON.stringify(res.data.history_line) : "已写入"), "ok");
-      return refresh();
-    }
-    say(label + "被拒（" + res.status + "）：" + (res.data.message || "未知原因")
-      + reasons(res), "err");
-  }
-
-  function retireRedline(itemId, index) {
-    var reason = window.prompt("撤下 " + itemId + " 的原因（进变更史）", "");
-    if (!reason) { say("撤线被取消：原因不能为空", "err"); return; }
-    call("POST", "/soul/redline", {
-      actor: ACTOR, reason: reason, op: "retire", id: itemId
-    }).then(function (res) { finish("撤线 " + itemId, res); })
-      .catch(function (err) { say("撤线失败：" + err, "err"); });
-  }
-
-  el("stance-submit").addEventListener("click", function () {
-    var value = el("stance-value").value.trim();
-    var reason = el("stance-reason").value.trim();
-    if (!value) { say("待人姿态不能为空", "err"); return; }
-    if (!reason) { say("原因不能为空：变更史要记清为什么改", "err"); return; }
+  el("say-submit").addEventListener("click", function () {
+    var value = el("say-value").value.trim();
+    var reason = el("say-reason").value.trim();
+    if (!value) { say("say-msg", "这一句不能空着。", "bad"); return; }
+    if (!reason) { say("say-msg", "原因不能空着：改动记录要写清为什么改。", "bad"); return; }
+    var button = el("say-submit");
+    button.disabled = true;
+    say("say-msg", "正在写…");
     call("POST", "/soul/edit", {
       actor: ACTOR, reason: reason, block: "manner", path: "stance", value: value
-    }).then(function (res) { finish("提交待人姿态", res); })
-      .catch(function (err) { say("提交失败：" + err, "err"); });
+    }).then(function (res) {
+      button.disabled = false;
+      if (res.status === 200 && (res.data || {}).ok !== false) {
+        el("say-reason").value = "";
+        say("say-msg", "改好了。下一回合她就按这一句说话。", "good");
+        return refresh();
+      }
+      say("say-msg", "没改成：" + reasonOf(res), "bad");
+    }).catch(function (err) {
+      button.disabled = false;
+      say("say-msg", "连不上核：" + err, "bad");
+    });
   });
 
   el("redline-submit").addEventListener("click", function () {
-    var itemId = el("redline-id").value.trim();
     var rule = el("redline-rule").value.trim();
     var reason = el("redline-reason").value.trim();
-    if (!itemId || !rule) { say("新增一条要 id 与禁令正文都给", "err"); return; }
-    if (!reason) { say("原因不能为空：变更史要记清为什么加", "err"); return; }
+    if (!rule) { say("redline-msg", "要拦的那句话不能空着。", "bad"); return; }
+    if (!reason) { say("redline-msg", "原因不能空着：改动记录要写清为什么加。", "bad"); return; }
+    var button = el("redline-submit");
+    button.disabled = true;
+    say("redline-msg", "正在加…");
+    // 记号由页面自己出：人不用给每条线起名字，只要写清要拦什么。
+    var mark = "h" + String(Date.now()).slice(-6);
     call("POST", "/soul/redline", {
       actor: ACTOR, reason: reason, op: "add",
-      item: {
-        id: itemId, rule: rule,
-        match: { type: "literal", pattern: rule },
-        action: "block", active: true, enforced_by: "soul·字面"
-      }
+      item: { id: mark, rule: rule, match: { type: "literal", pattern: rule },
+              action: "block", active: true, enforced_by: "soul·字面" }
     }).then(function (res) {
-      if (res.status === 200 && res.data.ok !== false) {
-        el("redline-id").value = "";
+      button.disabled = false;
+      if (res.status === 200 && (res.data || {}).ok !== false) {
         el("redline-rule").value = "";
         el("redline-reason").value = "";
+        say("redline-msg", "加好了。", "good");
+        return refresh();
       }
-      finish("加一条红线", res);
-    }).catch(function (err) { say("加线失败：" + err, "err"); });
-  });
-
-  el("rollback-submit").addEventListener("click", function () {
-    var revision = el("rollback-revision").value.trim();
-    var reason = el("rollback-reason").value.trim();
-    if (!/^-?[0-9]+$/.test(revision)) { say("revision 要是整数版本号", "err"); return; }
-    if (!reason) { say("原因不能为空：变更史要记清为什么回滚", "err"); return; }
-    call("POST", "/soul/rollback", {
-      actor: ACTOR, reason: reason, revision: parseInt(revision, 10)
-    }).then(function (res) { finish("回滚", res); })
-      .catch(function (err) { say("回滚失败：" + err, "err"); });
-  });
-
-  el("proposal-submit").addEventListener("click", function () {
-    var raw = el("proposal-json").value.trim();
-    var reason = el("proposal-reason").value.trim();
-    var proposal;
-    try {
-      proposal = JSON.parse(raw);
-    } catch (err) {
-      say("提案不是合法 JSON：" + err.message, "err");
-      return;
-    }
-    if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) {
-      say("提案必须是 JSON 对象", "err");
-      return;
-    }
-    if (!proposal.reason) { proposal.reason = reason; }
-    call("POST", "/soul/proposal", { actor: ACTOR, proposal: proposal })
-      .then(function (res) { finish("接受提案", res); })
-      .catch(function (err) { say("提交失败：" + err, "err"); });
+      say("redline-msg", "没加上：" + reasonOf(res), "bad");
+    }).catch(function (err) {
+      button.disabled = false;
+      say("redline-msg", "连不上核：" + err, "bad");
+    });
   });
 
   refresh();
-})();
+}());
 </script>
 </body>
 </html>

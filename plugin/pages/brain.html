@@ -184,7 +184,7 @@
 <main id="page" data-state="loading">
   <h1>脑</h1>
   <p class="note">三块读：人名录（含熟稔读数）、记忆四档、判断结论。脑的写入是程序内的消息路径；
-    面板上只有名片那四栏是人写的（PATCH /brain/people/&lt;id&gt;/card，body 带 actor），
+    面板上只有名片那四栏是人写的，
     熟稔、记忆、判断都不在人手上。</p>
 
   <section class="card" aria-labelledby="ov-h">
@@ -212,7 +212,7 @@
       <span class="owner auto">由程序写：她的记性由记忆写入路径落条；本页只读，人不在这里改</span>
     </div>
     <div class="recall">
-      <label for="recall-q">回想（GET /brain/recall?q=）</label>
+      <label for="recall-q">回想一句</label>
       <input id="recall-q" type="search" autocomplete="off"
              placeholder="问一句：她上次说过什么">
       <button class="btn" id="recall-btn" type="button">回想</button>
@@ -228,7 +228,7 @@
       <textarea id="note-text" rows="2" placeholder="留空 = 只存原话"></textarea>
     </div>
     <div class="card-actions">
-      <button class="btn" id="note-save" type="button">改理解（PATCH /brain/memory/&lt;id&gt;/note）</button>
+      <button class="btn" id="note-save" type="button">改理解</button>
       <span class="muted" id="note-state">quote 不会被覆盖，历史留痕。</span>
     </div>
     <div class="tiers">
@@ -249,20 +249,19 @@
       </div>
       <div class="tier">
         <h3>冷仓 <small id="tier-cold-count"></small></h3>
-        <p class="tier-note">冷仓：status=archived 的条目，分页读（/brain/cold）</p>
+        <p class="tier-note">冷仓：淡到最后一层的条目，分页看，能捞回来、不能改</p>
         <ul class="rows" id="tier-cold"><li class="empty">载入中…</li></ul>
         <div id="tier-cold-more"></div>
       </div>
     </div>
-    <p class="note">四档条目来自 GET /brain/tiers（每档 count + 最近几条），冷仓来自 GET /brain/cold
-      （有 next_cursor 才有「下一页」）。遗忘进度：每条自带的 retention（0–1）按百分比显示，clarity 一并给出；
-      某条没带这两个值就整栏不显示——不编数，也不拿 β 冒充。</p>
+    <p class="note">四档各自有总数与最近几条，冷仓另开一页看（还有下一页就显示「下一页」）。
+      每条后面那句「还记着多少」是程序现算的；某条没给就整栏不显示——不编数，也不拿估摸的数冒充。</p>
   </section>
 
   <section class="card" aria-labelledby="pr-h">
     <div class="card-head">
       <h2 id="pr-h">改基线提案</h2>
-      <span class="owner">人点头才落魂：接受 = POST /soul/proposal；拒绝只在这一页记一条，不发请求</span>
+      <span class="owner">人点头才落魂：人点头才落魂；拒绝只在这一页记一条，不发请求</span>
     </div>
     <p class="muted" id="proposal-night" style="margin:0 0 .6rem">载入中…</p>
     <div id="proposal-list"><p class="muted">载入中…</p></div>

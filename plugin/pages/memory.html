@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆 · 她的面板</title>
+<style>
+  /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --radius: 8px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--panel); color: var(--dim); }
+  main { display: grid; gap: var(--gap-2); grid-template-columns: minmax(0, 1fr);
+         max-width: 62rem; margin: 0 auto; }
+  @media (min-width: 60rem) { main { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); } }
+  .col { display: grid; gap: var(--gap-2); align-content: start; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--gap-2); }
+  .head { display: flex; flex-wrap: wrap; gap: var(--gap-1);
+          align-items: baseline; justify-content: space-between; margin: 0 0 var(--gap-1); }
+  h1, h2 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  .who { font-size: .95rem; color: var(--dim); }
+  .hint { margin: 0 0 var(--gap-1); color: var(--dim); }
+  .msg { margin: var(--gap-1) 0 0; color: var(--dim); }
+  .msg.bad { color: var(--warn); }
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows > li { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+  ul.rows > li:first-child { border-top: 0; }
+  ul.rows .body { overflow-wrap: anywhere; white-space: pre-wrap; }
+  ul.rows .meta { display: block; color: var(--dim); }
+  dl.temps { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+             gap: var(--gap-1); margin: 0; }
+  dl.temps dt { color: var(--dim); }
+  dl.temps dd { margin: 0; }
+  .search { display: flex; gap: var(--gap-1); }
+  input[type=text] { flex: 1 1 auto; min-width: 8rem; padding: var(--gap-1);
+          border: 1px solid var(--line); border-radius: var(--radius);
+          background: var(--bg); color: var(--fg); font: .95rem/1.6 inherit; }
+  button { margin: var(--gap-1) 0 0; padding: var(--gap-1) var(--gap-2);
+           border: 1px solid var(--line); border-radius: var(--radius);
+           background: var(--panel); color: var(--fg); font: .95rem/1.4 inherit;
+           cursor: pointer; }
+  .search button { margin: 0; border-color: var(--brand); background: var(--brand);
+                   color: var(--on-brand); }
+  button:disabled { opacity: .5; cursor: progress; }
+</style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
+     壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
+<script src="panel-base.js" data-page="memory"></script>
+</head>
+<body>
+<p class="banner">她的记性。这一页只有看：没有一处能改、能删、能重置。四个抽屉越往下越淡，淡到只剩轮廓的进冷库。</p>
+<main>
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>今天记下的</h2><span class="who">由程序写：说过的话自动记下，人只能看</span></div>
+      <p class="hint" id="today-count">读取中…</p>
+      <ul class="rows" id="today-list"><li class="msg">读取中…</li></ul>
+      <p class="msg" id="today-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>冷库</h2><span class="who">由程序写：淡到最后一层都收在这里，能捞回来，不能改</span></div>
+      <p class="hint">「还记着多少」是她此刻还记得的分量：越淡越低，低到只剩轮廓也会留着。</p>
+      <ul class="rows" id="cold-list"><li class="msg">读取中…</li></ul>
+      <button id="cold-more" type="button">再捞一些</button>
+      <p class="msg" id="cold-msg"></p>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>四个抽屉</h2><span class="who">由程序写：每过一夜，记性自己往下沉一格</span></div>
+      <dl class="temps">
+        <dt>今天</dt><dd id="temp-today">读取中…</dd>
+        <dt>这几天</dt><dd id="temp-hot">读取中…</dd>
+        <dt>长期</dt><dd id="temp-longterm">读取中…</dd>
+        <dt>冷库</dt><dd id="temp-cold">读取中…</dd>
+      </dl>
+      <p class="msg" id="drawers-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>回想一句</h2><span class="who">由程序写：回想是程序按证据挑的，人只能看它挑中了什么</span></div>
+      <p class="hint">写一个词，看看她此刻想得起什么。只是查，一条都不改。</p>
+      <div class="search">
+        <input id="recall-q" type="text" autocomplete="off" placeholder="比如：生日" aria-label="要回想的词">
+        <button id="recall-btn" type="button">查一下</button>
+      </div>
+      <ul class="rows" id="recall-list"></ul>
+      <p class="msg" id="recall-msg">还没查：写一个词再点「查一下」。</p>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 清楚度是程序给的词，翻成人话；认不出就照实说「说不清」。
+  var CLARITY_TEXT = { vivid: "清清楚楚", clear: "清楚", fuzzy: "有点模糊", trace: "只剩轮廓" };
+  var SOURCE_TEXT = { "亲历": "亲历", lived: "亲历", "日程模拟": "日程模拟", sim: "日程模拟" };
+  var COLD_LIMIT = 20;
+
+  function el(id) { return document.getElementById(id); }
+  function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+  function say(id, text, tone) {
+    var box = el(id);
+    box.className = "msg" + (tone ? " " + tone : "");
+    box.textContent = text;
+  }
+  // 只读页：出口只有一个，而且只收 GET——写成 call("GET", …) 是为了让「这一页到底取了什么」
+  // 能被静态扫出来（测试要逐条打到活进程上验），不是给自己留第二条写路。
+  function call(method, path) {
+    if (method !== "GET") { throw new Error("这一页只读：只许 GET"); }
+    return panelFetch(path, { method: method }).then(function (res) {
+      return res.json().then(function (data) {
+        return { status: res.status, data: data };
+      }, function () {
+        return { status: res.status, data: { ok: false, message: "响应不是 JSON" } };
+      });
+    });
+  }
+  function reasonOf(res) {
+    return "HTTP " + res.status + "：" + ((res.data || {}).message || "没给原因");
+  }
+  function shortTime(stamp) {
+    var text = String(stamp || "");
+    return text ? text.slice(0, 16).replace("T", " ") : "时间没记";
+  }
+  function sourceText(item) {
+    return SOURCE_TEXT[item.source_type] || String(item.source_type || "来源没记");
+  }
+  function memoryLine(row) {
+    var li = node("li");
+    li.appendChild(node("div", "body", row.text || row.quote || "（这条没有正文）"));
+    var meta = [shortTime(row.ts), row.who ? "跟 " + row.who : "", sourceText(row)];
+    if (row.note) { meta.push("她说：" + row.note); }
+    li.appendChild(node("div", "meta", meta.filter(function (part) { return part; }).join(" · ")));
+    return li;
+  }
+
+  // —— 今天记下的（只读） ————————————————————————
+  function showToday(view) {
+    var list = el("today-list");
+    clear(list);
+    var rows = view.entries || [];
+    el("today-count").textContent = (view.day ? view.day + " · " : "") + "一共 " + rows.length + " 条";
+    if (!rows.length) {
+      list.appendChild(node("li", "msg", "今天她还没记下什么。"));
+      say("today-msg", "去「聊天」页说一句，这里就会出现第一条。");
+      return;
+    }
+    rows.forEach(function (row) { list.appendChild(memoryLine(row)); });
+    say("today-msg", "这些是她今天听到的原话，一条都没改过。");
+  }
+
+  // —— 四个抽屉（只读） ————————————————————————
+  function showTiers(tiers) {
+    var cells = [["today", "temp-today"], ["hot", "temp-hot"],
+                 ["longterm", "temp-longterm"], ["cold", "temp-cold"]];
+    var total = 0;
+    cells.forEach(function (pair) {
+      var block = tiers[pair[0]] || {};
+      var count = Number(block.count || 0);
+      total += count;
+      el(pair[1]).textContent = count + " 条";
+    });
+    if (!total) {
+      say("drawers-msg", "四个抽屉都是空的：她还没存下任何东西。");
+    } else {
+      say("drawers-msg", "合计 " + total + " 条。这个数不归人改，它随记忆自己变。");
+    }
+  }
+
+  // —— 冷库（只读，可翻页） ————————————————————
+  var coldSeen = [];
+  function showCold(data, append) {
+    var list = el("cold-list");
+    var rows = data.items || [];
+    if (!append) { coldSeen = []; clear(list); }
+    if (!append && !rows.length) {
+      list.appendChild(node("li", "msg", "冷库还是空的。等记性淡下来的东西多了，这里才会出现。"));
+      say("cold-msg", "冷库这时一条都没有（这不是读不到）。");
+      el("cold-more").disabled = true;
+      return;
+    }
+    rows.forEach(function (row) {
+      coldSeen.push(row);
+      var li = node("li");
+      li.appendChild(node("div", "body", row.text || "（这条只剩轮廓，正文已淡掉）"));
+      var share = typeof row.retention === "number" ? Math.round(row.retention * 100) : null;
+      li.appendChild(node("div", "meta",
+        "还记着多少 " + (share === null ? "?%" : share + "%")
+        + " · " + (CLARITY_TEXT[row.clarity] || "说不清")
+        + " · " + sourceText(row) + " · " + shortTime(row.ts)));
+      list.appendChild(li);
+    });
+    var more = Boolean(data.next_cursor);
+    el("cold-more").disabled = !more;
+    say("cold-msg", more
+      ? "已捞出 " + coldSeen.length + " 条，还有更冷的。"
+      : "已捞出 " + coldSeen.length + " 条，到底了。");
+    if (more) { el("cold-more").setAttribute("data-cursor", String(data.next_cursor)); }
+    else { el("cold-more").removeAttribute("data-cursor"); }
+  }
+
+  // —— 回想（只读） ————————————————————————————
+  function showRecall(data) {
+    var list = el("recall-list");
+    clear(list);
+    var rows = data.items || [];
+    if (!rows.length) {
+      say("recall-msg", "「" + String(data.query || "") + "」她想不起来了：是没记过，不是读不到。", "");
+      return;
+    }
+    rows.forEach(function (row) {
+      var li = node("li");
+      li.appendChild(node("div", "body", row.text || row.full_text || "（这条没有正文）"));
+      var meta = [sourceText(row), row.note ? "她说：" + row.note : ""];
+      li.appendChild(node("div", "meta", meta.filter(function (part) { return part; }).join(" · ")));
+      list.appendChild(li);
+    });
+    say("recall-msg", "想起了 " + rows.length + " 条。", "");
+  }
+
+  function loadTiers() {
+    return call("GET", "/brain/tiers").then(function (res) {
+      if (res.status === 200) { showTiers(res.data || {}); return; }
+      clear(el("today-list"));
+      el("today-list").appendChild(node("li", "msg", "记忆读不出来。"));
+      say("drawers-msg", "先确认核在跑：" + reasonOf(res), "bad");
+    }).catch(function (err) {
+      say("drawers-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
+      clear(el("today-list"));
+      el("today-list").appendChild(node("li", "msg", "连不上核。"));
+    });
+  }
+
+  function loadToday() {
+    return call("GET", "/brain/today").then(function (res) {
+      if (res.status === 200) { showToday(res.data || {}); return; }
+      clear(el("today-list"));
+      el("today-list").appendChild(node("li", "msg", "今天记下的读不出来。"));
+      say("today-msg", "先确认核在跑：" + reasonOf(res), "bad");
+    });
+  }
+
+  function loadCold(append) {
+    var cursor = append ? el("cold-more").getAttribute("data-cursor") : null;
+    return call("GET", "/brain/cold?limit=" + COLD_LIMIT
+      + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "")).then(function (res) {
+      if (res.status === 200) { showCold(res.data || {}, Boolean(cursor)); return; }
+      if (!append) {
+        clear(el("cold-list"));
+        el("cold-list").appendChild(node("li", "msg", "冷库读不出来。"));
+      }
+      say("cold-msg", "先确认核在跑：" + reasonOf(res), "bad");
+    });
+  }
+
+  function look() {
+    var query = el("recall-q").value.trim();
+    if (!query) { say("recall-msg", "先写一个词。", "bad"); return; }
+    say("recall-msg", "正在想…");
+    call("GET", "/brain/recall?q=" + encodeURIComponent(query)).then(function (res) {
+      if (res.status === 200) { showRecall(res.data || {}); return; }
+      clear(el("recall-list"));
+      say("recall-msg", "没查成：" + reasonOf(res), "bad");
+    }).catch(function (err) { say("recall-msg", "连不上核：" + err, "bad"); });
+  }
+
+  el("recall-btn").addEventListener("click", look);
+  el("recall-q").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") { event.preventDefault(); look(); }
+  });
+  el("cold-more").addEventListener("click", function () { loadCold(true); });
+
+  loadTiers();
+  loadToday();
+  loadCold(false);
+}());
+</script>
+</body>
+</html>

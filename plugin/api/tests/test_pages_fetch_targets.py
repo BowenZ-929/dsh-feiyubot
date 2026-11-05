@@ -29,6 +29,7 @@ from api import devserver
 from api.api import ROUTES
 from api.pages import PAGE_FILES
 from api.tests.helpers import copy_fixture
+from organs.brain import BrainStore
 from organs.soul import load
 
 PAGES = Path(__file__).resolve().parents[2] / "pages"
@@ -39,10 +40,14 @@ TARGET_RE = re.compile(
     r'|call\(\s*"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*["\']([^"\']+)["\']'
     r'|fetch\(\s*["\']([^"\']+)["\']'
 )
-#: 每页至少扫出这么多条，否则说明正则没匹配上（会变成「假绿」）
-MIN_TARGETS = {"soul.html": 5, "heart.html": 8, "brain.html": 6,
+#: 每页至少扫出这么多条，否则说明正则没匹配上（会变成「假绿」）。
+#: 2026-11-06 前端重做：多三张有取数的页——魂（4 读 + 2 写）、今天（3 条只读）、
+#: 记忆（4 条只读）；「关于他」只有一条能扫到的固定地址（/brain/people），
+#: 名片那条路径带人名、扫不出来，由下面 PagesWithDynamicPaths 单独看住（不许因此放宽判据）。
+MIN_TARGETS = {"soul.html": 6, "heart.html": 8, "brain.html": 6,
                "home.html": 9, "chat.html": 1, "panel.html": 0,
-               "day.html": 0, "settings.html": 0}
+               "day.html": 3, "settings.html": 0,
+               "about.html": 1, "memory.html": 4}
 #: 拿它们去探非 GET 端点，只为「证明是 JSON 端点」，不会真写
 PROBE_METHOD = {"POST": "DELETE", "PUT": "DELETE", "PATCH": "DELETE", "DELETE": "PATCH"}
 
@@ -66,8 +71,12 @@ class PagesFetchOnlyJson(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         store = load(copy_fixture("valid", cls._tmp.name))
+        # 脑也要给：名片那条动态路径在脑没载入时回 503，探不到「是不是页面」这件事。
+        # 建在临时目录下的空脑：人名录是空的，所以下面那条探针拿到的必须是 404。
+        brain = BrainStore(Path(cls._tmp.name) / "brain")
         handler = type("_PageFetchHandler", (devserver._Handler,),
-                       {"store": store, "log_message": lambda *args: None})
+                       {"store": store, "brain": brain,
+                        "log_message": lambda *args: None})
         try:
             cls.server = HTTPServer(("127.0.0.1", 0), handler)
         except OSError as exc:                 # 本机不让绑端口：跳过，不假绿
@@ -129,6 +138,25 @@ class PagesFetchOnlyJson(unittest.TestCase):
                 self.assertIn("application/json", ctype,
                               "%s 的 %s %s 用 %s 打回来的不是 JSON（是页面？）"
                               % (page, method, path, probe))
+
+    # —— 带人名的动态路径：扫不出来，单独打活进程验 ——
+    def test_about_page_builds_the_card_path_in_one_place(self):
+        """名片的地址由页面那一处拼：人名必须 encodeURIComponent（中文人名要能进路径）。"""
+        text = (PAGES / "about.html").read_text(encoding="utf-8")
+        self.assertIn('"/brain/people/" + encodeURIComponent(', text,
+                      "名片路径要在唯一的 cardPath() 里拼，人名要编码")
+        self.assertIn('+ "/card"', text, "名片路径的末段丢了 /card")
+        self.assertEqual("GET", ROUTES.get("/brain/people"), "人名录本身是只读 GET")
+
+    def test_dynamic_card_path_is_a_json_endpoint_not_a_page(self):
+        """拿一个不存在的人名探这条路：是端点才会回 404/405 + JSON，打到页面上就是 HTML。"""
+        probe = "/brain/people/__probe__/card"
+        status, ctype = self._request("GET", probe)
+        self.assertEqual(404, status, "人名录里没有这个人：端点该回 404，页面则会回 200 HTML")
+        self.assertIn("application/json", ctype, "GET 名片回的不是 JSON：%s" % ctype)
+        status, ctype = self._request("DELETE", probe)
+        self.assertEqual(405, status, "名片只收 GET/PATCH：别的写方法必须 405")
+        self.assertIn("application/json", ctype, "405 也要是 JSON（不是页面）：%s" % ctype)
 
     def test_get_targets_are_never_page_addresses(self):
         addresses = set(PAGE_FILES)

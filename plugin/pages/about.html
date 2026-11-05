@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关于他 · 她的面板</title>
+<style>
+  /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --radius: 8px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--panel); color: var(--dim); }
+  main { display: grid; gap: var(--gap-2); grid-template-columns: minmax(0, 1fr);
+         max-width: 62rem; margin: 0 auto; }
+  @media (min-width: 60rem) { main { grid-template-columns: minmax(14rem, .8fr) minmax(0, 1.4fr); } }
+  .col { display: grid; gap: var(--gap-2); align-content: start; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--gap-2); }
+  .head { display: flex; flex-wrap: wrap; gap: var(--gap-1);
+          align-items: baseline; justify-content: space-between; margin: 0 0 var(--gap-1); }
+  h1, h2 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  .who { font-size: .95rem; color: var(--dim); }
+  .hint { margin: 0 0 var(--gap-1); color: var(--dim); }
+  .msg { margin: var(--gap-1) 0 0; color: var(--dim); }
+  .msg.bad { color: var(--warn); }
+  .msg.good { color: var(--fg); }
+  a { color: var(--brand); }
+  dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr);
+          gap: var(--gap-1); margin: 0; }
+  dl.kv dt { color: var(--dim); }
+  dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows > li { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+  ul.rows > li:first-child { border-top: 0; }
+  ul.rows .body { overflow-wrap: anywhere; white-space: pre-wrap; }
+  ul.rows .meta { display: block; color: var(--dim); }
+  ul.people { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--gap-1); }
+  ul.people button { width: 100%; text-align: left; margin: 0; }
+  ul.people button.picked { border-color: var(--brand); color: var(--brand); }
+  label { display: block; margin: var(--gap-1) 0; color: var(--dim); }
+  input[type=text], textarea { width: 100%; margin: 0; padding: var(--gap-1);
+          border: 1px solid var(--line); border-radius: var(--radius);
+          background: var(--bg); color: var(--fg); font: .95rem/1.6 inherit; }
+  textarea { resize: vertical; }
+  button { padding: var(--gap-1) var(--gap-2); border: 1px solid var(--line);
+           border-radius: var(--radius); background: var(--panel); color: var(--fg);
+           font: .95rem/1.4 inherit; cursor: pointer; }
+  ul.people button { padding: var(--gap-1); }
+  #card-save { margin: var(--gap-1) 0 0; border-color: var(--brand);
+               background: var(--brand); color: var(--on-brand); }
+  button:disabled { opacity: .5; cursor: progress; }
+</style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
+     壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
+<script src="panel-base.js" data-page="about"></script>
+</head>
+<body>
+<p class="banner">关于他。左边是跟你说过话的人，右边是这个人的名片：名片人写，熟稔和她记得的事都由程序写。</p>
+<main>
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>都有谁</h2><span class="who">由程序写：谁开口说过话，程序自己记</span></div>
+      <p class="hint">点一个人，右边换成他的名片。</p>
+      <ul class="people" id="people-list"><li class="msg">读取中…</li></ul>
+      <p class="msg" id="people-msg"></p>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>这个人</h2><span class="who">由程序写：认识多久、说过几句、熟稔多少，都随记忆自己变</span></div>
+      <dl class="kv">
+        <dt>称呼</dt><dd id="person-name">读取中…</dd>
+        <dt>怎么认识</dt><dd id="person-since">读取中…</dd>
+        <dt>最近说话</dt><dd id="person-last">读取中…</dd>
+        <dt>一起说过</dt><dd id="person-talk">读取中…</dd>
+        <dt>熟稔</dt><dd id="person-familiar">读取中…</dd>
+        <dt>生日</dt><dd id="person-birthday">读取中…</dd>
+      </dl>
+      <p class="msg" id="person-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>名片</h2><span class="who">人写</span></div>
+      <label for="card-display">称呼（她怎么叫他）</label>
+      <input id="card-display" type="text" autocomplete="off">
+      <label for="card-prefs">雷点（一行一条：别提什么）</label>
+      <textarea id="card-prefs" rows="2" spellcheck="false"></textarea>
+      <label for="card-notes">备注（一行一条：他是谁、怎么相处）</label>
+      <textarea id="card-notes" rows="3" spellcheck="false"></textarea>
+      <label for="card-photo_note">照片说明</label>
+      <input id="card-photo_note" type="text" autocomplete="off">
+      <button id="card-save" type="button">保存名片</button>
+      <p class="msg" id="card-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>她记得关于他的事</h2><span class="who">由程序写：聊过的话自动记下，人只能看</span></div>
+      <ul class="rows" id="memory-list"><li class="msg">读取中…</li></ul>
+      <p class="msg" id="memory-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>名片改动记录</h2><span class="who">由程序写：每次改名片，程序自己记一行</span></div>
+      <ul class="rows" id="card-history"><li class="msg">读取中…</li></ul>
+      <p class="msg" id="card-history-msg"></p>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var ACTOR = "panel";
+  var ACTOR_TEXT = { panel: "人（面板）" };
+  // 名片四栏：label 是提交时用的名字，key 是她在账上存的名字。
+  var FIELDS = [
+    ["称呼", "display", "input"],
+    ["雷点", "prefs", "lines"],
+    ["备注", "notes", "lines"],
+    ["照片说明", "photo_note", "input"]
+  ];
+  var STATE = { people: [], selected: "", card: null, history: null, historyFor: "" };
+
+  function el(id) { return document.getElementById(id); }
+  function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+  function say(id, text, tone) {
+    var box = el(id);
+    box.className = "msg" + (tone ? " " + tone : "");
+    box.textContent = text;
+  }
+  function call(method, path, body) {
+    var init = { method: method, headers: {} };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    return panelFetch(path, init).then(function (res) {
+      return res.json().then(function (data) {
+        return { status: res.status, data: data };
+      }, function () {
+        return { status: res.status, data: { ok: false, message: "响应不是 JSON" } };
+      });
+    });
+  }
+  function reasonOf(res) {
+    return "HTTP " + res.status + "：" + ((res.data || {}).message || "没给原因");
+  }
+  function shortTime(stamp) {
+    var text = String(stamp || "");
+    return text ? text.slice(0, 16).replace("T", " ") : "时间没记";
+  }
+  function secondsLabel(stamp) {
+    var text = String(stamp || "");
+    return text ? text.slice(0, 16).replace("T", " ") : "还没说过话";
+  }
+  // 人名可以是中文：这一条路径只由这里拼，人名的编码也只在这一处做。
+  function cardPath(personId) {
+    return "/brain/people/" + encodeURIComponent(personId) + "/card";
+  }
+  function talkCount(person) {
+    var days = person.interactions || {};
+    var total = 0;
+    Object.keys(days).forEach(function (day) { total += Number(days[day]) || 0; });
+    return total;
+  }
+
+  function personById(id) {
+    for (var i = 0; i < STATE.people.length; i += 1) {
+      if (STATE.people[i].id === id) { return STATE.people[i]; }
+    }
+    return null;
+  }
+
+  // —— 名单（只读） ————————————————————————————————
+  function showPeople(people) {
+    var list = el("people-list");
+    clear(list);
+    if (!people.length) {
+      list.appendChild(node("li", "msg", "还没有人跟你说过话。"));
+      say("people-msg", "等有人来找你，这里会出现第一个人；也可以先去「聊天」页说一句。", "");
+      return;
+    }
+    people.forEach(function (person) {
+      var li = node("li");
+      var button = node("button", person.id === STATE.selected ? "picked" : "",
+                        String(person.display || person.id) + " · 熟稔 " + Math.round(person.familiarity || 0));
+      button.type = "button";
+      button.addEventListener("click", function () { select(person.id); });
+      li.appendChild(button);
+      list.appendChild(li);
+    });
+    say("people-msg", "共 " + people.length + " 个人，熟的排在上面。");
+  }
+
+  // —— 这个人（只读） ————————————————————————————
+  function showPerson(person) {
+    el("person-name").textContent = String(person.display || person.id);
+    el("person-since").textContent = secondsLabel(person.first_seen);
+    el("person-last").textContent = secondsLabel(person.last_interaction);
+    el("person-talk").textContent = talkCount(person) + " 句";
+    el("person-familiar").textContent = String(Math.round(person.familiarity || 0))
+      + "（由程序写：熟稔随记忆更新，人改不了）";
+    el("person-birthday").textContent = String(person.birthday || "还没记");
+    say("person-msg", "熟稔这一格没有输入框：它只跟着记忆走。");
+  }
+
+  // —— 名片（人写） ————————————————————————————————
+  function valueOf(person, key) {
+    if (key === "prefs" || key === "notes") { return (person[key] || []).map(String); }
+    return String(person[key] === undefined || person[key] === null ? "" : person[key]);
+  }
+  function fillCard(person) {
+    FIELDS.forEach(function (spec) {
+      var value = valueOf(person, spec[1]);
+      el("card-" + spec[1]).value = value instanceof Array ? value.join("\n") : value;
+    });
+  }
+  function inputValue(spec) {
+    var raw = String(el("card-" + spec[1]).value);
+    if (spec[2] === "lines") {
+      return raw.split("\n").map(function (line) { return line.trim(); })
+        .filter(function (line) { return line !== ""; });
+    }
+    return raw.trim();
+  }
+
+  // —— 她记得关于他的事（只读） ————————————————————
+  function showMemories(person) {
+    var list = el("memory-list");
+    clear(list);
+    var rows = person.memories || [];
+    if (!rows.length) {
+      list.appendChild(node("li", "msg", "这个人她还没记下什么。等再聊几句，这里就会有。"));
+      return;
+    }
+    rows.forEach(function (row) {
+      var li = node("li");
+      li.appendChild(node("div", "body", row.text || "（这条没有正文）"));
+      li.appendChild(node("div", "meta", shortTime(row.ts) + " · "
+        + (row.source_type || "来源没记") + (row.note ? " · 她说：" + row.note : "")));
+      list.appendChild(li);
+    });
+    say("memory-msg", "最近 " + rows.length + " 条。");
+  }
+
+  // —— 名片改动记录（只读） ————————————————————————
+  function showHistory(rows) {
+    var list = el("card-history");
+    clear(list);
+    if (!rows.length) {
+      list.appendChild(node("li", "msg", "这张名片还没改过。"));
+      return;
+    }
+    rows.slice().reverse().forEach(function (row) {
+      var li = node("li");
+      li.appendChild(node("div", "body", (row.field || "某一栏") + "：「"
+        + (row.old_summary || "空") + "」→「" + (row.new_summary || "空") + "」"));
+      li.appendChild(node("div", "meta", shortTime(row.ts) + " · 记作 "
+        + (ACTOR_TEXT[row.actor] || row.actor || "没说")));
+      list.appendChild(li);
+    });
+    say("card-history-msg", "共 " + rows.length + " 次改动。");
+  }
+
+  function loadCardHistory(person) {
+    if (STATE.historyFor === person.id) { showHistory(STATE.history || []); return; }
+    var list = el("card-history");
+    clear(list);
+    list.appendChild(node("li", "msg", "读取中…"));
+    call("GET", cardPath(person.id)).then(function (res) {
+      if (res.status !== 200) {
+        clear(list);
+        list.appendChild(node("li", "msg", "改动记录读不出来：" + reasonOf(res)));
+        return;
+      }
+      STATE.history = (res.data || {}).history || [];
+      STATE.historyFor = person.id;
+      showHistory(STATE.history);
+    }).catch(function (err) {
+      clear(list);
+      list.appendChild(node("li", "msg", "连不上核：" + err));
+    });
+  }
+
+  function select(personId) {
+    var person = personById(personId);
+    if (!person) { return; }
+    STATE.selected = personId;
+    STATE.history = null;
+    STATE.historyFor = "";
+    showPeople(STATE.people);
+    showPerson(person);
+    fillCard(person);
+    showMemories(person);
+    loadCardHistory(person);
+    say("card-msg", "改完点「保存名片」。四栏和现在一样就不发请求。");
+  }
+
+  function saveCard() {
+    var person = personById(STATE.selected);
+    if (!person) { say("card-msg", "先在左边选一个人。", "bad"); return; }
+    var fields = {};
+    FIELDS.forEach(function (spec) {
+      var now = inputValue(spec);
+      if (JSON.stringify(now) !== JSON.stringify(valueOf(person, spec[1]))) {
+        fields[spec[0]] = now;
+      }
+    });
+    if (!Object.keys(fields).length) {
+      say("card-msg", "名片没改：四栏和现在一样，没发请求。", "");
+      return;
+    }
+    var button = el("card-save");
+    button.disabled = true;
+    say("card-msg", "正在保存…");
+    call("PATCH", cardPath(person.id), { actor: ACTOR, fields: fields }).then(function (res) {
+      button.disabled = false;
+      if (res.status === 200 && (res.data || {}).ok !== false) {
+        var lines = (res.data || {}).history_lines || [];
+        STATE.history = (STATE.history || []).concat(lines);
+        STATE.historyFor = person.id;
+        say("card-msg", "保存好了，改了 " + lines.length + " 栏。", "good");
+        return refresh();
+      }
+      say("card-msg", "没保存成：" + reasonOf(res), "bad");
+    }).catch(function (err) {
+      button.disabled = false;
+      say("card-msg", "连不上核：" + err, "bad");
+    });
+  }
+
+  function refresh() {
+    return call("GET", "/brain/people").then(function (res) {
+      if (res.status !== 200) {
+        clear(el("people-list"));
+        el("people-list").appendChild(node("li", "msg", "名单读不出来。"));
+        say("people-msg", "先确认核在跑：" + reasonOf(res), "bad");
+        return;
+      }
+      STATE.people = (res.data || {}).people || [];
+      var keep = STATE.selected && personById(STATE.selected) ? STATE.selected : "";
+      if (!keep && STATE.people.length) { keep = STATE.people[0].id; }
+      STATE.selected = keep;
+      showPeople(STATE.people);
+      if (keep) { select(keep); }
+      else { say("card-msg", "左边还没有人，名片暂时没处落。"); }
+    }).catch(function (err) {
+      say("people-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
+    });
+  }
+
+  el("card-save").addEventListener("click", saveCard);
+  refresh();
+}());
+</script>
+</body>
+</html>

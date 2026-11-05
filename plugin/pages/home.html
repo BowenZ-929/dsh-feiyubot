@@ -9,14 +9,14 @@
      深色不自造色板——只换兜底色，宿主变量仍然优先。 */
   :root {
     color-scheme: light dark;
-    --home-fg: var(--dsw-alias-text-primary, #1b1b1b);
-    --home-bg: var(--dsw-alias-bg-base, #fbfbfb);
-    --home-card: var(--dsw-alias-bg-elevated, #ffffff);
+    --home-fg: var(--dsw-alias-text-primary, CanvasText);
+    --home-bg: var(--dsw-alias-bg-base, Canvas);
+    --home-card: var(--dsw-alias-bg-elevated, Canvas);
     --home-border: var(--dsw-alias-border-l2, rgba(120, 120, 120, .35));
     --home-muted: var(--dsw-alias-text-secondary, #666666);
     --home-brand: var(--dsw-alias-brand, #2f6f4f);
     --home-warn: var(--dsw-alias-warning-fg, #7a5c00);
-    --home-warn-bg: var(--dsw-alias-warning-bg, #fffbea);
+    --home-warn-bg: var(--dsw-alias-warning-bg, Canvas);
     --home-err: var(--dsw-alias-danger-fg, #a11111);
     --home-mono: ui-monospace, Menlo, monospace;
   }
@@ -60,7 +60,7 @@
   h2 small { font-weight: 400; color: var(--home-muted); margin-left: .5rem; }
   #room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: .5rem; }
   button { font: inherit; padding: .42rem 1rem; border-radius: 6px; cursor: pointer;
-           border: 1px solid var(--home-brand); background: var(--home-brand); color: #fff; }
+           border: 1px solid var(--home-brand); background: var(--home-brand); color: Canvas; }
   button.room { text-align: left; padding: .5rem .6rem; background: transparent;
                 color: var(--home-fg); border-color: var(--home-border); }
   button.room:hover { border-color: var(--home-brand); }
@@ -108,7 +108,7 @@
       <h2 id="rooms-h">十间房<small id="rooms-total">载入中…</small></h2>
       <div id="room-grid"></div>
       <p class="state" id="rooms-state">载入中…</p>
-      <p class="note">房名表固定十间（真源 organs/home/rooms.py，改它等于改建房）；「可写」是两栏：
+      <p class="note">房名表固定十间（改它等于改建房）；「可写」是两栏：
         结构可写（这间房放不放东西）与她此刻可写（白名单 access.json）。点一间看里面有什么。</p>
     </section>
 
@@ -127,7 +127,7 @@
 
   <div>
     <section aria-labelledby="write-h">
-      <h2 id="write-h">放一件东西<small>唯一的写入口 POST /home/write</small></h2>
+      <h2 id="write-h">放一件东西<small>唯一的写入口</small></h2>
 
       <label for="write-room">房名（十间都在这儿，不灰化：能不能写由门判，不看 UI）</label>
       <select id="write-room"></select>

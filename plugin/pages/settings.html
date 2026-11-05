@@ -3,27 +3,65 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>设置 · 还没接</title>
+<title>设置 · 她的面板</title>
 <style>
-  :root { color-scheme: light; }
-  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 2.2rem 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
-  main { max-width: 44rem; margin: 0 auto; }
-  h1 { font-size: 1.25rem; margin: 0 0 1rem; letter-spacing: .02em; }
-  .note { margin: 0 0 1.2rem; color: #7a5c00; background: #fffbea;
-          border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
-  .back { font-size: .9rem; margin-top: 2.4rem; }
+  /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --radius: 8px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--panel); color: var(--dim); }
+  main { display: grid; gap: var(--gap-2); max-width: 46rem; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--gap-2); }
+  .head { display: flex; flex-wrap: wrap; gap: var(--gap-1);
+          align-items: baseline; justify-content: space-between; margin: 0 0 var(--gap-1); }
+  h1, h2 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  .who { font-size: .95rem; color: var(--dim); }
+  .hint { margin: 0; color: var(--dim); }
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows > li { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+  ul.rows > li:first-child { border-top: 0; }
+  ul.rows a { color: var(--brand); font-weight: 600; }
+  ul.rows .meta { display: block; color: var(--dim); }
 </style>
 </head>
 <body>
+<p class="banner">设置。这一页还没有能改的参数：先放两条只读入口，读数和规矩都在里面写着。</p>
 <main>
-  <h1>设置 · 还没接</h1>
-  <p class="note">还没接：这一页只有地址，没有内容。</p>
-  <p>为什么：设置要改的是三处的真参数（魂的待人姿态与红线、心的轴档、脑的改基线），
-     而写入口现在只有一个——魂页那张表单（账本上记作 panel）。把设置页先做成一张表，
-     就得为「谁能改哪一处」重新裁一遍判据；这件事没裁之前，控件一个都不放。</p>
-  <p>所以这一轮只把 <code>/settings</code> 这个地址占住，导航里点得到、打开是这一页，不是 404。</p>
-  <p class="back"><a href="../">← 回魂面板</a></p>
+  <section class="card">
+    <div class="head"><h2>只读入口</h2><span class="who">由程序写：这两页都是读数，人只能看</span></div>
+    <ul class="rows">
+      <li>
+        <a href="heart">心 · 只读读数</a>
+        <span class="meta">心的读数与脑、家是同一批只读面，不占导航位，所以入口放在这里。她此刻什么心情、念头还剩多久，都在这一页。</span>
+      </li>
+      <li>
+        <a href="home">家 · 十间房</a>
+        <span class="meta">她住的那十间房里放着什么（锚句、词表、卡片、成长记录），也只有看。它和心一样是只读面，所以不占导航位。</span>
+      </li>
+    </ul>
+    <p class="hint">点进去看，回来还是这一页；导航不整页刷新。</p>
+  </section>
+
+  <section class="card">
+    <div class="head"><h2>参数</h2><span class="who">还没开口子：现在没有一处能从这一页改</span></div>
+    <p class="hint">参数开口子以后再放这里。开口子之前先要裁清「谁能改哪一处」：写入口现在只有魂页那两处（改一句、加红线），多开一处就得先改判据，再改这一页。</p>
+  </section>
 </main>
 </body>
 </html>

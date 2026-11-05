@@ -5,28 +5,42 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>心 · 只读</title>
 <style>
-  :root { color-scheme: light; }
-  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 2.2rem 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
-  main { max-width: 44rem; margin: 0 auto; }
-  h1 { font-size: 1.25rem; margin: 0 0 1rem; letter-spacing: .02em; }
-  h2 { font-size: 1rem; margin: 2rem 0 .6rem; color: #333; }
-  section { border-top: 1px solid #ececec; }
-  .note { margin: 0 0 1.2rem; color: #7a5c00; background: #fffbea;
-          border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
-  .status { margin: 0 0 .4rem; font-weight: 600; }
-  .issues { margin: 0 0 .4rem; font-family: ui-monospace, Menlo, monospace;
-            font-size: .85rem; color: #a03030; white-space: pre-line; }
+  /* 颜色只取宿主变量，兜底用系统色（Canvas / CanvasText / GrayText）：宿主给了变量就跟宿主，
+     没给就让 color-scheme 带着系统色走。深色跟随宿主 [data-theme="dark"]，不自造色板。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.1rem; margin: 0 0 var(--gap-1); }
+  h2 { font-size: 1.1rem; margin: var(--gap-2) 0 var(--gap-1); }
+  section { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+  .note { margin: 0 0 var(--gap-1); color: var(--warn);
+          border-left: 3px solid var(--warn); padding: var(--gap-1); }
+  .status { margin: 0 0 var(--gap-1); font-weight: 600; }
+  .issues { margin: 0 0 var(--gap-1); font: .95rem/1.6 ui-monospace, Menlo, monospace;
+            color: var(--warn); white-space: pre-line; }
   .axes { list-style: none; margin: 0; padding: 0; }
-  .axes li { padding: .25rem 0; border-bottom: 1px dashed #f0f0f0; }
-  li.greyed { color: #9a9a9a; }
-  #engage, #sleep { white-space: pre-line; margin: 0 0 .6rem; }
-  #window { white-space: pre-line; margin: 0 0 .6rem; }
-  #hits { margin: 0; padding-left: 1.2rem; font-size: .9rem; color: #444; }
-  canvas { width: 100%; height: auto; background: #fff; border: 1px solid #e6e6e6;
-           border-radius: 8px; margin: .4rem 0 .2rem; }
-  .legend { margin: 0 0 .6rem; color: #8a8a8a; font-size: .82rem; }
-  .back { font-size: .9rem; margin-top: 2.4rem; }
+  .axes li { padding: var(--gap-1) 0; border-bottom: 1px dashed var(--line); }
+  li.greyed { color: var(--dim); }
+  #engage, #sleep, #window { white-space: pre-line; margin: 0 0 var(--gap-1); }
+  #hits { margin: 0; padding-left: var(--gap-2); color: var(--dim); }
+  canvas { width: 100%; height: auto; background: Canvas; border: 1px solid var(--line);
+           border-radius: 8px; margin: var(--gap-1) 0; }
+  .legend { margin: 0 0 var(--gap-1); color: var(--dim); }
+  .back { margin-top: var(--gap-2); }
+  a { color: var(--brand); }
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
      直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
@@ -62,8 +76,7 @@
   <section>
     <h2>④ 睡眠账</h2>
     <p id="sleep">……</p>
-    <p class="legend">来自 /heart/sleep：上次入睡 / 睡了多久 / 连续熬夜 / 连续没睡够 /
-      drift / 生效窗口 / wake_cap。三个派生量都是读时现算，账本里不存：连续熬夜把
+    <p class="legend">这一块看她的睡眠：上次入睡、睡了多久、连着熬了几夜、连着几天没睡够，以及此刻生效的折扣。_cap。三个派生量都是读时现算，账本里不存：连续熬夜把
       作息窗口整体后移（drift），连续两晚没睡够就把睡眠回血的封顶降到 95。
       窗口与封顶都接在③精力的结算上——③那一行显示的「生效窗口」就是这一块给的那两个数。</p>
   </section>
@@ -88,7 +101,7 @@
     <h2>⑦ 念头（她此刻想要什么：只是说话方式，不是发生过的事）</h2>
     <ul id="thoughts" class="axes"></ul>
     <p id="pending-info" class="legend"></p>
-    <p class="legend">来自 /heart/pending：kind / 轴 / 剩余 TTL / 已试次数 / 状态。
+    <p class="legend">等着用的念头：类型、牵动哪一面、还剩多久、试过几次、现在什么状态。
       念头只影响怎么说、要不要开口，永不被当成发生过的事，也不进证据链。</p>
   </section>
 
@@ -103,15 +116,14 @@
   <section>
     <h2>⑨ 语气档（嘴读它定冷热）</h2>
     <p id="voice">……</p>
-    <p class="legend">档位词、方向与禁令都来自 /heart/effective 的 voice：一个合成点，
+    <p class="legend">这些话的档位、方向与禁令是同一处算出来的：
       面板说的档与嘴上念的档不会分叉。</p>
   </section>
 
   <section>
     <h2>⑩ 拒绝记录（额度是刹车，不是一直拒的许可；冷却只由时间解除）</h2>
     <p id="refusals">……</p>
-    <p class="legend">额度来自 GET /heart/refusals：今天用了几次 / 上限几次 / 还剩几次；
-      冷却中的话题与剩余分钟来自 GET /heart 的 refusals 块。冷却只比 until 与 now 的先后，
+    <p class="legend">今天拒绝了几次、上限几次、还剩几次；正在冷却的话题与剩余分钟数。冷却只比 until 与 now 的先后，
       心情升两档、精力回满都不改它一个字节——时间到了才算完，谁也不许提前解除。
       这一块没有输入框：面板只把账摊开给人看，不替人查话题。</p>
   </section>

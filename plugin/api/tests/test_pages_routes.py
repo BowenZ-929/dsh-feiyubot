@@ -62,10 +62,19 @@ def _code_only(text: str) -> str:
 
 class EveryClickableHasARoute(unittest.TestCase):
     def test_soul_page_calls_only_registered_routes(self):
-        """页面上每个 call(METHOD, path) 都在路由表里，方法对得上。"""
+        """页面上每个 call(METHOD, path) 都在路由表里，方法对得上。
+
+        口径变更（2026-11-06 前端重做）：魂页按「一页一个主操作」重切，取数四条
+        （她是谁 / 注入面 / 改动记录 / 自检）、写两条（改一句、红线加与撤走同一条端点）。
+        原来那条「>=8 次」的数数断言换成集合相等——多一条少一条都得在这里说清楚。
+        """
         text = _text("soul.html")
         calls = CALL_RE.findall(text)
-        self.assertGreaterEqual(len(calls), 8, "魂页该有若干次读写调用，少了说明解析没抓到")
+        self.assertEqual(
+            {("GET", "/soul"), ("GET", "/soul/render"), ("GET", "/soul/history"),
+             ("GET", "/soul/check"), ("POST", "/soul/edit"), ("POST", "/soul/redline")},
+            {(method, path.partition("?")[0]) for method, path in calls},
+            "魂页的取数与写就这六条：四条只读 + 两条写（改一句、红线加/撤）")
         for method, path in calls:
             route = path.partition("?")[0]
             self.assertIn(route, api.ROUTES, "页面在打一条不存在的路由：%s" % route)
@@ -83,7 +92,9 @@ class EveryClickableHasARoute(unittest.TestCase):
         """没绑事件的按钮 = 点了没反应的死按钮。"""
         text = _text("soul.html")
         ids = BUTTON_ID_RE.findall(text)
-        self.assertEqual(len(ids), 4, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
+        # 口径变更（2026-11-06 前端重做）：静态按钮从四个收到两个——「改这一句」与
+        # 「加这条红线」；撤线按钮仍由 JS 按条生成（下一条用例单独看它）。
+        self.assertEqual(len(ids), 2, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
         for button_id in ids:
             self.assertIn('el("%s").addEventListener' % button_id, text,
                           "按钮 %s 没有绑定任何事件" % button_id)

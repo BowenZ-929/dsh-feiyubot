@@ -5,33 +5,47 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>她的面板</title>
 <style>
-  :root { color-scheme: light; }
+  /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
   html, body { height: 100%; }
-  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; color: #1b1b1b; background: #fbfbfb;
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
          display: flex; flex-direction: column; }
-  .tabs { display: flex; flex-wrap: wrap; gap: .2rem; align-items: baseline;
-          padding: .5rem .8rem; background: #fff; border-bottom: 1px solid #ececec; }
-  .tabs a { padding: .2rem .6rem; border-radius: 999px; text-decoration: none;
-            color: #555; font-size: .95rem; }
-  .tabs a:hover { background: #f2f2f2; }
-  .tabs a.on { background: #1b1b1b; color: #fff; }
-  iframe { flex: 1; border: 0; width: 100%; display: block; background: #fbfbfb; }
+  nav { display: flex; flex-wrap: wrap; gap: var(--gap-1); align-items: center;
+        padding: var(--gap-1) var(--gap-2); background: var(--panel);
+        border-bottom: 1px solid var(--line); }
+  nav a { padding: var(--gap-1); border-radius: 999px; text-decoration: none;
+          color: var(--dim); }
+  nav a:hover { color: var(--fg); }
+  nav a.on { background: var(--brand); color: var(--on-brand); }
+  iframe { flex: 1; border: 0; width: 100%; display: block; background: var(--bg); }
 </style>
 </head>
 <body>
 <!-- 导航只是搬运：每一项都是**相对地址**，解析出来就是核上那一页。
-     直开核时文档在 /panel，相对 heart 解析成 /heart；
-     壳里文档在 /qqagent/panel/panel，相对 heart 解析成 /qqagent/panel/heart，剥前缀后还是 /heart。
-     七项一一对应核上真实路由（魂 / 心 /heart 脑 /brain 家 /home 日子 /day 聊天 /chat 设置 /settings）：
-     点不出 404 是这一页的硬要求，删一个按钮比留一个死按钮强。 -->
-<nav class="tabs" id="tabs" aria-label="她的面板导航">
+     直开核时文档在 /panel，相对 about 解析成 /about；
+     壳里文档在 /qqagent/panel/panel，相对 about 解析成 /qqagent/panel/about，剥前缀后还是 /about。
+     六项一一对应核上真实路由（魂 / 、关于他 /about、记忆 /memory、聊天 /chat、今天 /day、设置 /settings）：
+     点不出 404 是这一页的硬要求，删一个按钮比留一个死按钮强。
+     心与家两条只读面不占导航位，入口在「设置」里。 -->
+<nav id="tabs" aria-label="她的面板导航">
   <a href="./" target="organ" class="on">魂</a>
-  <a href="heart" target="organ">心</a>
-  <a href="brain" target="organ">脑</a>
-  <a href="home" target="organ">家</a>
-  <a href="day" target="organ">日子</a>
+  <a href="about" target="organ">关于他</a>
+  <a href="memory" target="organ">记忆</a>
   <a href="chat" target="organ">聊天</a>
+  <a href="day" target="organ">今天</a>
   <a href="settings" target="organ">设置</a>
 </nav>
 <iframe name="organ" title="面板页" src="./"></iframe>
@@ -39,8 +53,8 @@
 (function () {
   "use strict";
 
-  // 导航条只做一件事：换 iframe 的地址（target="organ" 干的）并把当前这一项点亮。
-  // 页里没有任何她的判断，也没有第二条取数路径。
+  // 导航条只做两件事：换 iframe 的地址（target="organ" 干的）并把当前这一项点亮。
+  // 不整页刷新，页里没有任何她的判断，也没有第二条取数路径。
   var tabs = document.getElementById("tabs");
   var links = tabs.querySelectorAll("a");
   tabs.addEventListener("click", function (event) {

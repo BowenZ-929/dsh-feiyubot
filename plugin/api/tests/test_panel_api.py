@@ -79,7 +79,7 @@ REQUIRED_ROUTES = (
     ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
     ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
     ("GET", "/home/anchors"), ("POST", "/home/anchors/append"),
-    ("POST", "/home/write"),
+    ("POST", "/home/consume"), ("POST", "/home/write"),
     # 核自报身份（2026-11-05）：跑的是哪一版、什么时候起的、源码有没有在它脚下被改过。
     ("GET", "/healthz"),
     # 脑线新落的两条只读端点（2026-11-05，四档列表与冷仓分页）：先在这儿认下来，
@@ -360,9 +360,9 @@ class PanelSourceTest(unittest.TestCase):
         rest = set(api.ROUTES) - soul - brain - family - heart - day - chat
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
-        self.assertEqual({"/home/write", "/home/anchors/append"},
+        self.assertEqual({"/home/write", "/home/anchors/append", "/home/consume"},
                          {path for path in family if api.ROUTES[path] == "POST"},
-                         "家只有两条写路由：POST /home/write 与 POST /home/anchors/append")
+                         "家三条写路由：POST /home/write、/home/anchors/append、/home/consume")
         self.assertEqual({"GET"},
                          {api.ROUTES[path] for path in family} - {"POST"},
                          "家其余十条只读")
@@ -414,40 +414,39 @@ class PanelSourceTest(unittest.TestCase):
                          "路由表就是那张关键端点表：多了少了都得在这儿说清楚")
 
     def test_panel_page_write_controls_are_the_named_ones(self):
-        """面板的写控件逐个点名，不许多出来：本轮从两处扩到四处，各对应一条机制。
+        """面板的写控件逐个点名，不许多出来：本轮从四处收到两处。
 
-        原口径「只有两个写控件」是吸收前的世界：红线段与整档回滚都还没有入口。
-        本轮加上 ① 红线逐条加（M3：整块替换没有入口，只有单条表单）与 ② 回滚（M5）。
-        撤线按钮由 JS 按条生成（不在源码里数），所以 <button> 仍是四个固定提交钮。
+        口径变更（2026-11-06 前端重做，人拍板的信息架构）：魂页只留「改一句」与
+        「加一条红线」两个主操作。提案 JSON 与整档回滚不再挂在这一页——它们没有进
+        六项导航（魂 · 关于他 · 记忆 · 聊天 · 今天 · 设置），也没有在这页留死按钮；
+        端点还在路由表里，命令行照旧能用。撤线按钮仍由 JS 按条生成，不在源码里数。
         """
         text = PAGE.read_text(encoding="utf-8")
-        self.assertEqual(1, text.count("改心"))
-        self.assertEqual(1, text.count("改脑"))
-        note = [line for line in text.splitlines() if "改心" in line or "改脑" in line]
-        self.assertEqual(1, len(note), "改心/改脑 只许出现在那一行只读说明里")
-        self.assertIn("只能看", note[0])
-        self.assertIn("127.0.0.1", text)
-        # 三个文本框：待人姿态、提案 JSON、新红线条目的禁令正文
-        self.assertEqual(3, text.count("<textarea"), "可编辑的只有这三处")
-        # 四个固定提交钮：姿态 / 提案 / 加一条红线 / 回滚；撤线按钮按条生成
-        self.assertEqual(4, text.count("<button"), "只有四个固定提交按钮")
+        self.assertNotIn("127.0.0.1", text, "界面上不写核的地址：那是工程细节")
+        # 两个文本框：待人姿态、新红线条目的禁令正文
+        self.assertEqual(2, text.count("<textarea"), "可编辑的只有这两处")
+        # 两个固定提交钮：改这一句 / 加这条红线；撤线按钮按条生成
+        self.assertEqual(2, text.count("<button"), "只有两个固定提交按钮")
         self.assertNotIn("<form", text)
-        # 五个写请求、四个端点：/soul/edit、/soul/proposal、/soul/rollback、
-        # /soul/redline 两次（逐条加、逐条撤各一次——红线没有「整块写」的那一次）
-        self.assertEqual(5, text.count('call("POST"'), "全页只有五个写请求")
+        # 三个写请求、两个端点：/soul/edit 一次、/soul/redline 两次（逐条加、逐条撤）
+        self.assertEqual(3, text.count('call("POST"'), "全页只有三个写请求")
         self.assertNotIn("/soul/migrate", text, "换形状是坏卡状态的路，不给面板入口")
+        self.assertNotIn("/soul/proposal", text, "提案不在这一页：没有进六项导航")
+        self.assertNotIn("/soul/rollback", text, "整档回滚不在这一页：没有进六项导航")
         self.assertIn("/soul/render", text, "面板要显示她会被注入的样子")
-        self.assertIn("/soul/revisions", text, "回滚要能列出可回到的版本")
+        self.assertIn("/soul/history", text, "改动记录要有入口：谁为什么改")
+        self.assertIn("/soul/check", text, "自检要在这页跑")
 
-    def test_panel_links_to_the_two_readonly_pages(self):
-        """心与脑只许以只读方式出现：两条链接 + 只读说明 + 只读提案框，没有任何写口。"""
-        text = PAGE.read_text(encoding="utf-8")
-        self.assertEqual(2, text.count("<a "), "顶部的只读页链接：心、脑各一条")
-        # 链接是相对的：壳把本页挂在 /qqagent/panel 下，"/heart" 会折成壳的 JSON 端点；
-        # 页面自己按当前前缀补回面板路径（见页内那段 script）。
-        self.assertIn('href="heart"', text)
-        self.assertIn('href="brain"', text)
-        for word in ("heart", "brain"):
+    def test_settings_page_links_to_the_two_readonly_pages(self):
+        """心与家只许以只读方式出现：两条链接 + 各自一句「为什么在这」，没有任何写口。
+
+        口径变更（2026-11-06 前端重做）：心与家不占导航位——它们与脑是同一批只读面，
+        入口收在「设置」页。魂页因此不再有 心/脑 两条链接，断言跟着挪到设置页。
+        """
+        text = (PAGES / "settings.html").read_text(encoding="utf-8")
+        self.assertIn('href="heart"', text, "心 · 只读读数 的入口在设置页")
+        self.assertIn('href="home"', text, "家 · 十间房 的入口在设置页")
+        for word in ("heart", "home"):
             hits = [line for line in text.splitlines() if word in line.lower()]
             self.assertGreater(len(hits), 0, "%s 至少出现在链接行上" % word)
             for line in hits:
@@ -456,6 +455,9 @@ class PanelSourceTest(unittest.TestCase):
                                'call("post"', 'call("put"', 'call("delete"'):
                     self.assertNotIn(needle, lowered,
                                      "%s 出现的那行不能有写口：%s" % (word, line))
+        # 原来那句「还没接」改成「参数开口子以后再放这里」：页面不再是占位说明。
+        self.assertNotIn("还没接：这一页只有地址", text)
+        self.assertIn("参数开口子以后再放这里", text)
 
     def test_readonly_pages_have_no_write_controls(self):
         """两页一条规则：页面在、只读说明在、没有任何写控件（不钉占位文案，心/脑上线都不用改）。
@@ -759,10 +761,13 @@ class DevserverPageTest(unittest.TestCase):
         # "/panel" 改成聚合页 panel.html（页里一条导航 + 一个 iframe，DSH 侧只有一个席位）。
         # 新增 /day、/settings 两张占位页（导航里点得到、打开不是 404）与 /panel-base.js
         # （MOUNT/BASE 的唯一一份推导，按 .js 发 text/javascript）。
+        # 2026-11-06 信息架构重切：多 /about 与 /memory 两页（脑页里的名片与记忆各自
+        # 独立成一页）；/brain 仍在，只是导航不再指向它——页还在、路由还在，断言照旧收着。
         self.assertEqual({"/": "soul.html", "/panel": "panel.html",
                           "/heart": "heart.html", "/brain": "brain.html",
                           "/home": "home.html", "/day": "day.html",
                           "/settings": "settings.html", "/chat": "chat.html",
+                          "/about": "about.html", "/memory": "memory.html",
                           "/panel-base.js": "panel-base.js"},
                          devserver.PAGE_ROUTES)
         data = devserver.read_page("soul.html")

@@ -3,28 +3,262 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>日子 · 还没接</title>
+<title>今天 · 她的面板</title>
 <style>
-  :root { color-scheme: light; }
-  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 2.2rem 1.2rem 3rem; color: #1b1b1b; background: #fbfbfb; }
-  main { max-width: 44rem; margin: 0 auto; }
-  h1 { font-size: 1.25rem; margin: 0 0 1rem; letter-spacing: .02em; }
-  .note { margin: 0 0 1.2rem; color: #7a5c00; background: #fffbea;
-          border-left: 3px solid #e0c265; padding: .45rem .6rem; font-size: .9rem; }
-  .back { font-size: .9rem; margin-top: 2.4rem; }
+  /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
+  :root {
+    color-scheme: light;
+    --gap-1: 12px;
+    --gap-2: 20px;
+    --radius: 8px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+  }
+  html[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  .banner { margin: 0 0 var(--gap-2); padding: var(--gap-1);
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--panel); color: var(--dim); }
+  main { display: grid; gap: var(--gap-2); grid-template-columns: minmax(0, 1fr);
+         max-width: 62rem; margin: 0 auto; }
+  @media (min-width: 60rem) { main { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); } }
+  .col { display: grid; gap: var(--gap-2); align-content: start; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--gap-2); }
+  .head { display: flex; flex-wrap: wrap; gap: var(--gap-1);
+          align-items: baseline; justify-content: space-between; margin: 0 0 var(--gap-1); }
+  h1, h2 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  .who { font-size: .95rem; color: var(--dim); }
+  .hint { margin: 0 0 var(--gap-1); color: var(--dim); }
+  .msg { margin: var(--gap-1) 0 0; color: var(--dim); }
+  .msg.bad { color: var(--warn); }
+  dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr);
+          gap: var(--gap-1); margin: 0; }
+  dl.kv dt { color: var(--dim); }
+  dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows > li { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+  ul.rows > li:first-child { border-top: 0; }
+  ul.rows .body { overflow-wrap: anywhere; white-space: pre-wrap; }
+  ul.rows .meta { display: block; color: var(--dim); }
+  h3 { font-size: .95rem; font-weight: 600; margin: var(--gap-1) 0 0; color: var(--dim); }
 </style>
+<!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
+     壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
+<script src="panel-base.js" data-page="day"></script>
 </head>
 <body>
+<p class="banner">今天。这一页全是读数：现在落在哪一段、今天抽到过什么、排着要说什么、计划跑没跑，都是程序记的，人在这里什么都改不了。</p>
 <main>
-  <h1>日子 · 还没接</h1>
-  <p class="note">还没接：这一页只有地址，没有内容。</p>
-  <p>为什么：日子线的端点已经在核上（tick / plan / night / schedule / pending / deliver / ack /
-     reconcile 十条），但画法还没定——按小时排还是按事排、失败怎么摊开，都还没想清楚。
-     先出现一块「猜着画」的界面，比空着更坏：人会把猜的读成真的。</p>
-  <p>所以这一轮只把 <code>/day</code> 这个地址占住，导航里点得到、打开是这一页，不是 404。
-     要接的时候，画法与判据一起进 docs，再改这一页。</p>
-  <p class="back"><a href="../">← 回魂面板</a></p>
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>现在这一段</h2><span class="who">由程序写：按钟点换段，人改不了</span></div>
+      <dl class="kv">
+        <dt>日子</dt><dd id="now-day">读取中…</dd>
+        <dt>这一段</dt><dd id="now-slot">读取中…</dd>
+        <dt>几点到几点</dt><dd id="now-window">读取中…</dd>
+        <dt>有没有人</dt><dd id="now-company">读取中…</dd>
+      </dl>
+      <p class="msg" id="now-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>排着要说的</h2><span class="who">由程序写：她排着要说的话，进出都由程序管，人改不了</span></div>
+      <p class="hint" id="pending-count">读取中…</p>
+      <ul class="rows" id="pending-list"><li class="msg">读取中…</li></ul>
+      <p class="msg" id="pending-msg"></p>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="card">
+      <div class="head"><h2>今天抽到过什么</h2><span class="who">由程序写：每抽一次落一行，人只能看</span></div>
+      <p class="hint" id="draw-count">读取中…</p>
+      <ul class="rows" id="draw-list"><li class="msg">读取中…</li></ul>
+      <p class="msg" id="draw-msg"></p>
+    </section>
+
+    <section class="card">
+      <div class="head"><h2>计划的下场</h2><span class="who">由程序写：跑过的、被拦的、错过的分开记，不合并成一个桶</span></div>
+      <div id="plan-columns">
+        <h3>还没到点</h3><ul class="rows" id="plan-pending"><li class="msg">读取中…</li></ul>
+        <h3>跑过了</h3><ul class="rows" id="plan-consumed"><li class="msg">读取中…</li></ul>
+        <h3>被拦下</h3><ul class="rows" id="plan-blocked"><li class="msg">读取中…</li></ul>
+        <h3>错过了</h3><ul class="rows" id="plan-expired"><li class="msg">读取中…</li></ul>
+        <h3>该跑却没跑成</h3><ul class="rows" id="plan-never"><li class="msg">读取中…</li></ul>
+      </div>
+      <p class="msg" id="plan-msg"></p>
+    </section>
+  </div>
 </main>
+<script>
+(function () {
+  "use strict";
+
+  // 谁陪：这两个词只用来解释那一个真假值。
+  var COMPANY_TEXT = { yes: "这段一般有人陪", no: "这段一般一个人" };
+  // 计划那一行的类型：认不出就照实写「别的安排」，不编。
+  var KIND_TEXT = { night: "夜里那一轮" };
+  var SOURCE_TEXT = { plan: "按计划抽的", fallback: "没计划时兜底抽的" };
+  var ENERGY_TEXT = { low: "偏累", mid: "一般", high: "充沛" };
+  var STATE_TEXT = { expect: "排着", delivered: "说过了" };
+
+  function el(id) { return document.getElementById(id); }
+  function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+  function say(id, text, tone) {
+    var box = el(id);
+    box.className = "msg" + (tone ? " " + tone : "");
+    box.textContent = text;
+  }
+  // 只读页：出口只有一个，而且只收 GET。
+  function call(method, path) {
+    if (method !== "GET") { throw new Error("这一页只读：只许 GET"); }
+    return panelFetch(path, { method: method }).then(function (res) {
+      return res.json().then(function (data) {
+        return { status: res.status, data: data };
+      }, function () {
+        return { status: res.status, data: { ok: false, message: "响应不是 JSON" } };
+      });
+    });
+  }
+  function reasonOf(res) {
+    return "HTTP " + res.status + "：" + ((res.data || {}).message || "没给原因");
+  }
+  function shortTime(stamp) {
+    var text = String(stamp || "");
+    return text ? text.slice(0, 16).replace("T", " ") : "时间没记";
+  }
+
+  // —— 现在这一段（只读） ————————————————————————
+  function showNow(data) {
+    el("now-day").textContent = String(data.day || "日期没给");
+    el("now-slot").textContent = String(data.slot || "时段没给");
+    var span = data.slot_window || {};
+    el("now-window").textContent = (span.from === undefined || span.to === undefined)
+      ? "时段范围没给" : span.from + " 点到 " + span.to + " 点";
+    var company = COMPANY_TEXT[data.company_key] || "按钟点算的";
+    el("now-company").textContent = (data.company === true ? "有人陪" : "一个人") + "（" + company + "）";
+    say("now-msg", "这一段现在就是这么定的；要不要有人陪，也是程序按钟点算的。");
+  }
+
+  // —— 今天抽到过什么（只读） ————————————————————
+  function showDraw(data) {
+    var list = el("draw-list");
+    clear(list);
+    var counts = data.counts || {};
+    el("draw-count").textContent = "今天抽了 " + Number(counts.drawn_today || 0) + " 次"
+      + (counts.items ? "；可抽的活动共 " + counts.items + " 样" : "");
+    if (!data.last) {
+      list.appendChild(node("li", "msg", "今天还没抽过。"));
+      say("draw-msg", "夜循环跑过之后才会有一行；这一页不提供抽签按钮。");
+      return;
+    }
+    var last = data.last;
+    var li = node("li");
+    li.appendChild(node("div", "body", String(last.item || "抽到的活动没记")));
+    li.appendChild(node("div", "meta", shortTime(last.ts)
+      + (last.slot ? " · " + last.slot : "")
+      + " · " + (SOURCE_TEXT[last.source] || "抽法没记")
+      + (last.energy_tier ? " · 那天" + (ENERGY_TEXT[last.energy_tier] || "力气没记") : "")));
+    list.appendChild(li);
+    say("draw-msg", "这是最近抽到的那一次。");
+  }
+
+  // —— 排着要说的（只读） ————————————————————————
+  function showPending(data) {
+    var list = el("pending-list");
+    clear(list);
+    var counts = data.counts || {};
+    el("pending-count").textContent = "排着 " + Number(counts.expect || 0)
+      + " 条 · 说过了 " + Number(counts.delivered || 0) + " 条";
+    var rows = data.items || [];
+    if (!rows.length) {
+      list.appendChild(node("li", "msg", "队列空着：没有排着要说的话。"));
+      say("pending-msg", "她要说什么，由她那边的程序排；这一页只是给你看它排了什么。");
+      return;
+    }
+    rows.forEach(function (row) {
+      var li = node("li");
+      li.appendChild(node("div", "body", row.text || "（这条没有正文）"));
+      li.appendChild(node("div", "meta", (STATE_TEXT[row.state] || "状态没记")
+        + (row.created_at ? " · " + shortTime(row.created_at) + " 排上的" : "")));
+      list.appendChild(li);
+    });
+    say("pending-msg", "这条队列不由人改：它跟着她那边的发送走。");
+  }
+
+  // —— 计划的下场（只读） ————————————————————————
+  function planRow(row) {
+    var li = node("li");
+    var name = KIND_TEXT[row.kind] || String(row.kind || "别的安排");
+    li.appendChild(node("div", "body", name + (row.note ? "：" + row.note : "")));
+    var meta = [];
+    if (row.at) { meta.push(shortTime(row.at)); }
+    if (row.reason) { meta.push("为什么：" + row.reason); }
+    if (row.message) { meta.push(row.message); }
+    if (row.required === true) { meta.push("这条非跑不可"); }
+    li.appendChild(node("div", "meta", meta.length ? meta.join(" · ") : "没有更多可说的"));
+    return li;
+  }
+
+  function showPlan(data) {
+    var columns = [["pending", "plan-pending"], ["consumed", "plan-consumed"],
+                   ["blocked", "plan-blocked"], ["expired", "plan-expired"],
+                   ["never_ran", "plan-never"]];
+    var total = 0;
+    columns.forEach(function (pair) {
+      var box = el(pair[1]);
+      clear(box);
+      var rows = data[pair[0]] || [];
+      total += rows.length;
+      if (!rows.length) {
+        box.appendChild(node("li", "msg", "这一栏空着。"));
+        return;
+      }
+      rows.forEach(function (row) { box.appendChild(planRow(row)); });
+    });
+    say("plan-msg", total
+      ? "共 " + total + " 条计划，五种下场分开列，不合并。"
+      : "还没有任何计划：夜循环按点排的计划会出现在这里。");
+  }
+
+  function load() {
+    return Promise.all([
+      call("GET", "/day/schedule"),
+      call("GET", "/day/pending"),
+      call("GET", "/day/plan")
+    ]).then(function (out) {
+      if (out[0].status === 200) {
+        showNow(out[0].data || {});
+        showDraw(out[0].data || {});     // 今天抽过什么与现在落在哪一段是同一条读数
+      } else {
+        say("now-msg", "今天这几段读不出来，先确认核在跑：" + reasonOf(out[0]), "bad");
+        say("draw-msg", "抽签记录也读不出来。", "bad");
+      }
+      if (out[1].status === 200) { showPending(out[1].data || {}); }
+      else { say("pending-msg", "待说队列读不出来：" + reasonOf(out[1]), "bad"); }
+      if (out[2].status === 200) { showPlan(out[2].data || {}); }
+      else { say("plan-msg", "计划读不出来：" + reasonOf(out[2]), "bad"); }
+    }).catch(function (err) {
+      say("now-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
+    });
+  }
+
+  load();
+}());
+</script>
 </body>
 </html>
