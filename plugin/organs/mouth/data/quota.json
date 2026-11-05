@@ -36,11 +36,11 @@
   "line_marks": "。！？!?…~～；;",
   "line_marks_note": "行首尾要忽略的句末标点：「（尾巴晃了一下）。」删掉括注之后只剩一个句号，那不算正文，也不愿意把句号当成她要说的话发出去。",
   "reason": {
-    "hit": "本轮装配没给写动作的资格，这句里却有动作行「{matched}」（一共 {count} 处）：动作超配额（action-over-quota），这句判废。",
-    "strip": "动作超配额（action-over-quota）：剥掉动作行「{removed}」，只留正文发出。",
-    "blank": "动作超配额（action-over-quota）：剥掉动作行「{removed}」之后只剩空白，没有正文可发，这句弃掉不发。",
-    "leftover": "动作超配额（action-over-quota）：剥掉动作行之后，正文仍被拦下（{clause_id}，命中「{matched}」），这句弃掉不发。",
-    "clear": "动作配额这一关查过了：这一轮没有超配额的动作行。"
+    "hit": "这一轮没给她写动作的份儿，这句里偏有动作行「{matched}」（一共 {count} 处）：动作超配额（action-over-quota），这句不发了。",
+    "strip": "动作超配额（action-over-quota）：把动作行「{removed}」摘掉，只留说的话发出去。",
+    "blank": "动作超配额（action-over-quota）：摘掉动作行「{removed}」以后就空了，没话可说，这句不发了。",
+    "leftover": "动作超配额（action-over-quota）：动作行摘掉之后，剩下那句还是被拦下（{clause_id}，命中「{matched}」），这句不发了。",
+    "clear": "动作这一关数过了：这一轮没有多写出来的动作行。"
   },
   "reason_note": "五种说法：hit 是判废那句（必须带 action-over-quota，账本靠它认门）；strip 是剥行后救回来那句；blank 是剥完只剩空白、整句丢掉那句；leftover 是剥完的正文仍被别的判据拦下那句；clear 是放行那句（放行要有据，面板上得看得见这一关查过了）。"
 }

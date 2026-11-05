@@ -168,12 +168,14 @@
   // 两种都靠 panelFetch(path) 把前缀补回来，路径本身只写核上的那一条。
 
   // 后端 kind → 人话归类。message 一律原样显示，不在这里改写、也不显示原始 JSON。
+  // kind 名对照（诊断用，页面上不显示）：no-key（缺 key）/ timeout（超时）/
+  // rate_limit（限流）/ auth（鉴权）/ empty / http。
   var KIND_TEXT = {
-    "no-key": "缺 key：核里没有配置模型密钥",
-    "timeout": "超时：她想了太久，这次没说完",
-    "rate_limit": "限流：上游说请求太密，等一会儿再试",
-    "auth": "鉴权：密钥被上游拒了",
-    "empty": "空：这句话里没有能说给她听的字",
+    "no-key": "核里还没配模型密钥",
+    "timeout": "她想太久了，这句没说完",
+    "rate_limit": "上游说太密了，等会儿再说",
+    "auth": "密钥被上游拒了",
+    "empty": "这句里没有能说给她听的字",
     "http": "服务端出错"
   };
   var SOURCE_TEXT = { today: "今日", hot: "热", longterm: "长期" };
