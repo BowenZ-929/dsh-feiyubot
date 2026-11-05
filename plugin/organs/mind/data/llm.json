@@ -1,0 +1,10 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "base_url": "https://api.deepseek.com/v1",
+  "timeout_ms": 30000,
+  "retries": 2,
+  "key_env": "QQAGENT_LLM_KEY",
+  "temperature": 0.8,
+  "max_tokens": 400
+}

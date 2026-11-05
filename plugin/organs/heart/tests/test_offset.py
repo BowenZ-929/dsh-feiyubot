@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from organs.day import model as day_model
 from organs.heart import card, model, offset, store
 from organs.heart.tests import helpers
 
@@ -162,7 +163,7 @@ class OffsetTest(unittest.TestCase):
         store.write_json(self.root / offset.OFFSET_FILE, {
             "version": offset.STATE_VERSION, "week": "",
             "axes": {"想黏人": {"value": 1.0, "updated_at": T0,
-                              "day": model.day_key(T0), "day_delta": 1.0}},
+                              "day": day_model.day_key(T0, cutover_hour=0), "day_delta": 1.0}},
         })
         snap = offset.read(root=self.root, now=T_2_9D)
         self.assertAlmostEqual(snap["axes"]["想黏人"]["value"], 1.0)
@@ -194,7 +195,7 @@ class OffsetTest(unittest.TestCase):
         self.assertEqual(set(row), {"value", "updated_at", "day", "day_delta", "idle_anchor_at"})
         self.assertEqual(row["updated_at"], T0)
         self.assertEqual(row["idle_anchor_at"], T0)
-        self.assertEqual(row["day"], model.day_key(T0))
+        self.assertEqual(row["day"], day_model.day_key(T0, cutover_hour=0))
         self.assertAlmostEqual(row["day_delta"], 1.0)
 
     def test_card_file_hash_is_untouched_by_every_write_path(self):

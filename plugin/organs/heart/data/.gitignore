@@ -2,3 +2,5 @@
 *
 !.gitignore
 !baseline-card.json
+# 出厂权重表要入库：人得能看见默认长什么样、怎么改（intent.load_weights 每次现读）
+!engage_weights.json

@@ -1,7 +1,7 @@
-"""心的九个只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
+"""心的十条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
 
 判据（architecture §9.2：心与脑只能看）：
-- 九条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
+- 十条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
 - 合成只有一处：/heart/effective 的三块（mood / axes / voice）由
   organs/heart/effective.py 出；/heart/overview 的 effective 块、/heart/mood 的
   两个数与档位词、/heart/engage 的 mood_now 都从那里取，本模块不自己换算档位。
@@ -30,11 +30,13 @@ from organs.heart import card as card_module
 from organs.heart import effective as effective_module
 from organs.heart import energy as energy_module
 from organs.heart import engage as engage_module
+from organs.heart import intent as intent_module
 from organs.heart import model as heart_model
 from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
 from organs.heart import ports as ports_module
+from organs.heart import sleep as sleep_module
 
 from .core import Result
 
@@ -48,6 +50,7 @@ HEART_ROUTES = {
     "/heart/engage": "GET",
     "/heart/effective": "GET",
     "/heart/pending": "GET",
+    "/heart/sleep": "GET",
 }
 
 # /heart/offset 每轴对外只承诺这四个键；offset 模块以后多出来的键原样透传。
@@ -213,6 +216,43 @@ def _pending() -> List[str]:
     return list(heart_model.PENDING_AXES)
 
 
+def _sleep_terms(root: Optional[Path], now: Optional[str]) -> Dict[str, Any]:
+    """睡眠账给 energy 的两个派生量：生效窗口与睡眠回血封顶。
+
+    两个数都是 sleep 读时现算的（drift 只在窗口上体现），本层只搬运、不重算：
+    窗口后移是连续熬夜的结果，回血封顶下调是连续没睡够的结果——心这边一个常数都不持有。
+    """
+    return {
+        "sleep_window": sleep_module.effective_window(root, now),
+        "wake_cap": sleep_module.wake_cap(root, now),
+    }
+
+
+def _intent_context(readout: Any, who: str, now: Optional[str],
+                   energy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """意图排序的上下文：今日互动条数与熟稔（只从脑的公开读数来）+ 精力那两口数。
+
+    精力也注入：调用方已经按睡眠账的窗口结算过一次，排序层拿同一个数算清醒度，
+    否则它会自己再读一次 energy——两次结算一条先后，档位与系数就可能与面板分叉。
+    """
+    context: Dict[str, Any] = {
+        "who": who,
+        "today_count": readout.today_count(who, now),
+        "familiarity": readout.familiarity(who, now),
+    }
+    if isinstance(energy, dict):
+        context["energy_value"] = energy.get("value")
+        context["energy_tier"] = energy.get("tier")
+    return context
+
+
+def _intents(root: Optional[Path], now: Optional[str], readout: Any, who: str,
+             energy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """意图排序（order / top / score / threshold / clarity / pass），原样给出去。"""
+    return intent_module.rank(
+        root, now, context=_intent_context(readout, who, now, energy))
+
+
 def _baseline_payload(root: Optional[Path], now: Optional[str]) -> Dict[str, Any]:
     """总览与 /heart/baseline 共用的那份。"""
     base = _baseline(root, _offsets(root, now))
@@ -230,27 +270,37 @@ def _baseline_payload(root: Optional[Path], now: Optional[str]) -> Dict[str, Any
     }
 
 
-# ---- 九个端点 ------------------------------------------------------------
+# ---- 十个端点 ------------------------------------------------------------
 
 
-def _overview(params: Mapping[str, str]) -> Result:
+def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
     """/heart 与 /heart/overview：一次拿齐四块读数（页面只发一次请求就够）。
 
     第五块 effective 是合成读数：/heart/effective 那份原样嵌进来，两个端点的数
     因此不可能分叉（都从同一个 effective_state 出）。
+
+    精力按睡眠账的生效窗口与回血封顶结算：与 /heart/energy 同一个口径（都从
+    sleep.effective_window / sleep.wake_cap 取那两个数），两个端点不可能一个用后移
+    窗口、一个用出厂窗口。intents 块与 /heart/engage 吃的是同一份 rank。
     """
     root, now = _root(params), _now(params)
+    who = _who(params)
     payload = _baseline_payload(root, now)
     payload["status"] = STATUS_CONNECTED if payload["ok"] else STATUS_UNLOADABLE
     mood_read = mood_module.read(root, now)
     payload["mood"] = mood_read
-    payload["energy"] = energy_module.read(root, now)
+    energy_read = energy_module.read(root, now, **_sleep_terms(root, now))
+    payload["energy"] = energy_read
     payload["offset"] = offset_module.overview(root, now)
     payload["effective"] = _effective_readout(root, now, mood_read)
     # 念头块与事件窗口：两块都是纯读（pending.overview 不落笔、window_signal 现算）。
     # 块名 thoughts（不叫 pending：pending 是待定轴名单，老键不换义）。
     payload["thoughts"] = pending_module.overview(root, now)
     payload["window"] = engage_module.window_signal(root, now)
+    # 意图排序块：与 /heart/engage 送进第 5 道软门的是同一份 rank（同一个上下文），
+    # 精力也复用上面那一份读数——同一个数，不各读各的。
+    payload["intents"] = _intents(root, now, ports_module.from_brain(brain), who,
+                                  energy_read)
     return 200, payload
 
 
@@ -275,9 +325,18 @@ def _mood(params: Mapping[str, str]) -> Result:
 
 
 def _energy(params: Mapping[str, str]) -> Result:
-    """/heart/energy：数值 + 档位词 + 这次结算从哪算到哪。"""
+    """/heart/energy：数值 + 档位词 + 这次结算从哪算到哪 + 这次用的睡眠口径。
+
+    睡眠账在这里接进 energy：生效窗口（连续熬夜后整体后移）与回血封顶（连续没睡够
+    就下调）都原样传下去，并回显成 sleep_window / wake_cap——面板要能说清
+    「这一格是拿哪个窗口算的」，否则后移看不出效果。
+    """
     root, now = _root(params), _now(params)
-    return 200, energy_module.overview(root, now)
+    terms = _sleep_terms(root, now)
+    payload = energy_module.overview(root, now, **terms)
+    payload["sleep_window"] = list(terms["sleep_window"])
+    payload["wake_cap"] = terms["wake_cap"]
+    return 200, payload
 
 
 def _offset(params: Mapping[str, str]) -> Result:
@@ -320,6 +379,20 @@ def _pending_route(params: Mapping[str, str]) -> Result:
     return 200, payload
 
 
+def _sleep_route(params: Mapping[str, str]) -> Result:
+    """/heart/sleep：睡眠账的读数（上次入睡 / 睡了多久 / 两个连续计数 / 三个派生量）。
+
+    纯读：sleep.overview 读时现算，不落盘、不投递、不挂定时器；effective_window
+    转成列表只是 JSON 的形状（模块内部认的是两枚整数小时）。
+    """
+    root, now = _root(params), _now(params)
+    payload = sleep_module.overview(root, now)
+    payload["effective_window"] = list(payload["effective_window"])
+    payload.update({"ok": True, "readonly": True, "agent": "heart",
+                    "status": STATUS_CONNECTED})
+    return 200, payload
+
+
 def _engage(params: Mapping[str, str], brain: Any) -> Result:
     """/heart/engage：干跑一次判决——只调 engage.decide，不写日志、不说话。
 
@@ -345,10 +418,15 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
         eff = {"mood": effective_module.mood_block(values["baseline"], values["now"])}
     # 第 4 道软门读的是窗口：不传 = 这道门只在单测里存在（端点永远判不出 ignored-recently）。
     window = engage_module.window_signal(root, now)
+    # 精力先按睡眠账的窗口结算一次，门的读数与意图层的清醒度用同一个数。
+    energy_read = energy_module.read(root, now, **_sleep_terms(root, now))
+    # 第 5 道软门读的是意图排序：整份 rank 原样送进门，返回体也原样带回。
+    intents = _intents(root, now, readout, who, energy_read)
     judgement = engage_module.EngageInput.from_effective(
         eff,
         window=window,
-        energy=energy_module.read(root, now)["value"],
+        intents=intents,
+        energy=energy_read["value"],
         familiarity=readout.familiarity(who, now),
         today_count=readout.today_count(who, now),
         intent=intent,
@@ -365,7 +443,7 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
 
 def dispatch(route: str, params: Mapping[str, str],
              store: Any = None, brain: Any = None) -> Result:
-    """心的九条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage。
+    """心的十条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
 
     只收 ValueError 这一种：查询串里的时间戳坏了一个（now / interrupted）就走 400，
     把坏值原样带出来——失败必须响，但响成一条能读的 400，不是一条 traceback。
@@ -383,7 +461,7 @@ def dispatch(route: str, params: Mapping[str, str],
 def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Result:
     """各端点的实际分派；干跑与只读都在这里，一个字节都不写。"""
     if route in ("/heart", "/heart/overview"):
-        return _overview(params)
+        return _overview(params, brain)
     if route == "/heart/baseline":
         return _baseline_route(params)
     if route == "/heart/mood":
@@ -398,4 +476,6 @@ def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Resul
         return _effective_route(params)
     if route == "/heart/pending":
         return _pending_route(params)
+    if route == "/heart/sleep":
+        return _sleep_route(params)
     return 404, {"ok": False, "message": "没有这个端点：%s" % route}

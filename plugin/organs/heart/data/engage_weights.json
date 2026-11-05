@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "note": "这些数是我们按自己场景标定的默认值，不是验收线：没聊完 > 没放下的事 > 没出口的话 > 无聊 > 孤单，数字只是把这个次序写成能算的东西。改这个文件即生效（每次现读，不用重启），改完不用动代码。",
+  "threshold": 0.55,
+  "weights": {
+    "unfinished-chat": 0.9,
+    "unresolved": 0.75,
+    "unsaid": 0.6,
+    "bored": 0.35,
+    "lonely": 0.3
+  },
+  "clarity": {
+    "tired": 0.7,
+    "normal": 0.85,
+    "fresh": 1.0,
+    "night": 0.8
+  }
+}

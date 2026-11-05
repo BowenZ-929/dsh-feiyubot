@@ -37,8 +37,8 @@ class TodayTest(unittest.TestCase):
     def test_rollover_archives_to_longterm_and_clears_today(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        ingest(store, "主人", "我妈住院了", "2026-11-03T23:00:00+00:00")
-        ingest(store, "朋友", "别太冷淡", "2026-11-03T23:05:00+00:00")
+        ingest(store, "主人", "我妈住院了", "2026-11-03T18:00:00+00:00")
+        ingest(store, "朋友", "别太冷淡", "2026-11-03T18:05:00+00:00")
         # 04:00 换日点：05:00 第一次读触发换日
         self.assertEqual(0, len(store.longterm_entries()))
         today = store.today_entries("2026-11-04T05:00:00+00:00")

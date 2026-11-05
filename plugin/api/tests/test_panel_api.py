@@ -30,11 +30,14 @@ PAGE = PLUGIN / "pages" / "soul.html"
 BLOCK_FILES = ("identity.json", "manner.json", "bounds.json", "history.jsonl")
 AUDIENCE = "熟人"
 PAGES = PLUGIN / "pages"
-# 心的数据目录：跑完一轮测试，这里只许剩这三个文件。mood.read / energy.read 是
-# "读时算、顺手落一笔"的设计，谁拿默认根跑一次就会往这儿丢运行时文件——守卫见
-# PanelContractTest.test_zz_heart_data_dir_stays_clean。
+# 心的数据目录：跑完一轮测试，这里只许剩这四个条目——两个出厂文件（卡 + 意图权重表）
+# 加两个说明文件。mood.read / energy.read 是"读时算、顺手落一笔"的设计，谁拿默认根跑
+# 一次就会往这儿丢运行时文件——守卫见 PanelContractTest.test_zz_heart_data_dir_stays_clean。
+# engage_weights.json 是第四轮的出厂权重表（intent 的参数表，人可改、改完即生效）：
+# 它是**出厂文件**，不是运行时落盘——intent 只读它，一个字节都不写。
 HEART_DATA = PLUGIN / "organs" / "heart" / "data"
-ALLOWED_HEART_DATA = {".gitignore", ".gitkeep", "baseline-card.json"}
+ALLOWED_HEART_DATA = {".gitignore", ".gitkeep", "baseline-card.json",
+                      "engage_weights.json"}
 BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
                 "/brain/recall", "/brain/selfnarration", "/brain/proposals")
 # 关键端点：方法 + 路径。条数由 api.ROUTES 自己算（见 RouteRegistryTest），这里只钉"必须在"。
@@ -52,11 +55,16 @@ REQUIRED_ROUTES = (
     ("GET", "/heart/effective"),
     # 第三轮念头层：/heart/pending 与心跳同一条只读口径（谁加路由谁登记）
     ("GET", "/heart/pending"),
+    # 第四轮接线段：/heart/sleep 把睡眠账搬上端点（谁加路由谁登记）
+    ("GET", "/heart/sleep"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
+    ("GET", "/brain/tiers"), ("GET", "/brain/cold"), ("POST", "/brain/judge"),
     ("GET", "/mouth/split"), ("GET", "/mouth/address"),
     ("GET", "/mouth/tone"), ("GET", "/mouth/gate"),
+    # 说话线（2026-11-05）：POST /chat 是核上唯一一条真会说话的写（谁加路由谁登记）
+    ("POST", "/chat"),
     ("GET", "/home/rooms"), ("GET", "/home/access"), ("GET", "/home/list"),
     ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
     ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
@@ -309,7 +317,8 @@ class PanelSourceTest(unittest.TestCase):
         write_routes = [item for item in mounted
                         if (item[1] == "/heart" or item[1].startswith("/brain"))
                         and item[0] != "GET"]
-        self.assertEqual([], write_routes, "心与脑只读：不许挂任何写方法")
+        self.assertEqual([("POST", "/brain/judge")], write_routes,
+                         "心只读；脑只有 POST /brain/judge 一个写方法（名片走动态路由，不在这张表）")
 
     def test_route_table_partitions_into_soul_brain_and_readonly_pages(self):
         """按前缀分组断言，不写死条数：别处加端点这里不该红，写错归属才该红。
@@ -321,13 +330,17 @@ class PanelSourceTest(unittest.TestCase):
 
         口径变更（2026-11-05 日子线第一波）：多第六组「日子」（/day*，DAY_ROUTES 那一张表），
         「其余」仍只有嘴的干跑端点 + 核自报身份——日子不许混进 rest，混进去就等于没归属。
+
+        口径变更（2026-11-05 说话线）：多第七组「说话」（/chat，CHAT_ROUTES 那一张表：
+        核上唯一一条真会说话的写）。它不复用嘴的干跑端点那张表——干跑只算不发，说话是真发。
         """
         soul = {path for path in api.ROUTES if path.startswith("/soul")}
         brain = {path for path in api.ROUTES if path.startswith("/brain")}
         family = {path for path in api.ROUTES if path.startswith("/home")}
         heart = {path for path in api.ROUTES if path.startswith("/heart")}
         day = {path for path in api.ROUTES if path.startswith("/day")}
-        rest = set(api.ROUTES) - soul - brain - family - heart - day
+        chat = {path for path in api.ROUTES if path.startswith("/chat")}
+        rest = set(api.ROUTES) - soul - brain - family - heart - day - chat
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
         self.assertEqual({"/home/write"},
@@ -345,10 +358,18 @@ class PanelSourceTest(unittest.TestCase):
                          "日子的路由就是 DAY_ROUTES 那一张表")
         self.assertEqual({"GET", "POST"}, {api.ROUTES[path] for path in day},
                          "日子只有四条只读 + 六条手工触发（写方法错了一律 405）")
+        self.assertEqual(set(core.chat_api.CHAT_ROUTES), chat,
+                         "说话的路由就是 CHAT_ROUTES 那一张表")
+        self.assertEqual({"POST"}, {api.ROUTES[path] for path in chat},
+                         "说话只有一条写：POST /chat")
         self.assertEqual(mouth | version_set, rest,
-                         "魂、脑、家、心之外 = 嘴的干跑端点 + 核自报身份 %s"
+                         "魂、脑、家、心、日子、说话之外 = 嘴的干跑端点 + 核自报身份 %s"
                          % (sorted(mouth | version_set),))
-        self.assertEqual({"GET"}, {api.ROUTES[path] for path in brain}, "脑只有只读端点")
+        self.assertEqual({"GET", "POST"}, {api.ROUTES[path] for path in brain},
+                         "脑的端点：只读 + 唯一写端点 POST /brain/judge")
+        self.assertEqual({"/brain/judge"},
+                         {path for path in brain if api.ROUTES[path] == "POST"},
+                         "脑只有一条写路由：POST /brain/judge")
         # 写入口六条：改值 / 换形状 / 提案 / 红线逐条加撤 / 回滚 / 验收探针。
         # 前五条是「改她的魂」；探针是「写两次再写回」的验收路径，edit 上的 probe 键已关掉。
         # 整块替换仍然没有入口（edit 动 items 整表、migrate 碰 bounds 都一律拒）。
@@ -367,8 +388,10 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(), brain & heart, "脑与心有重叠")
         self.assertEqual(set(), family & (soul | brain | heart | rest), "家与别的组有重叠")
         self.assertEqual(set(), day & (soul | brain | family | heart | rest), "日子与别的组有重叠")
-        self.assertEqual(set(api.ROUTES), soul | brain | family | heart | day | rest,
-                         "路由表分不成六组：有端点没归属")
+        self.assertEqual(set(), chat & (soul | brain | family | heart | day | rest),
+                         "说话与别的组有重叠")
+        self.assertEqual(set(api.ROUTES), soul | brain | family | heart | day | chat | rest,
+                         "路由表分不成七组：有端点没归属")
         self.assertEqual(set(REQUIRED_ROUTES),
                          {(api.ROUTES[path], path) for path in api.ROUTES},
                          "路由表就是那张关键端点表：多了少了都得在这儿说清楚")
@@ -567,10 +590,12 @@ class PanelContractTest(unittest.TestCase):
         present = {path.name for path in HEART_DATA.iterdir()}
         extra = sorted(present - ALLOWED_HEART_DATA)
         self.assertEqual(set(), set(extra),
-                         "心的 data 目录多了运行时文件 %r：有测试拿了默认根（真实数据根）"
-                         "跑心，root= 必须指到临时目录" % (extra,))
+                         "心的 data 目录只许出厂文件（baseline-card.json / "
+                         "engage_weights.json）；运行时落盘一律去临时根。多出来的是 %r："
+                         "有测试拿了默认根（真实数据根）跑心，root= 必须指到临时目录"
+                         % (extra,))
         self.assertEqual(ALLOWED_HEART_DATA, present,
-                         "心的 data 目录少了卡或说明文件：%r" % (sorted(present),))
+                         "心的 data 目录少了出厂文件或说明文件：%r" % (sorted(present),))
 
     def test_contract_module_documents_mount_point_and_imports_no_host(self):
         source = (PLUGIN / "api" / "panel.py").read_text(encoding="utf-8")
@@ -647,7 +672,7 @@ class DevserverPageTest(unittest.TestCase):
     def test_root_and_panel_serve_the_same_page(self):
         self.assertEqual({"/": "soul.html", "/panel": "soul.html",
                           "/heart": "heart.html", "/brain": "brain.html",
-                          "/home": "home.html"},
+                          "/home": "home.html", "/chat": "chat.html"},
                          devserver.PAGE_ROUTES)
         data = devserver.read_page("soul.html")
         self.assertIsNotNone(data)
@@ -755,10 +780,10 @@ class DevserverHttpTest(unittest.TestCase):
 
 
 class RouteRegistryTest(unittest.TestCase):
-    """路由表的汇总口径：八张器官表拼一张，同名键当场炸——静默覆盖正是拆包要止住的事。"""
+    """路由表的汇总口径：九张器官表拼一张，同名键当场炸——静默覆盖正是拆包要止住的事。"""
 
     def test_route_table_is_the_merge_of_five_organ_tables(self):
-        """汇总表 = 八张器官表逐键拼起来，一条不少、一条不多。
+        """汇总表 = 九张器官表逐键拼起来，一条不少、一条不多。
 
         口径变更（2026-11-05 心线落地）：心的七条只读端点成了独立一张表
         （heart_api.HEART_ROUTES），占位页表 PAGE_ROUTES 留空——所以这里是六张，不是五张。
@@ -767,12 +792,15 @@ class RouteRegistryTest(unittest.TestCase):
         十条：tick/plan/night/log/schedule/schedule-draw/pending/deliver/ack/reconcile）
         ——所以这里是八张，不是六张（核自报身份那张一直在，从没算进"器官"里）。
 
-        八张表各自守着一条器官线：soul_api.SOUL_ROUTES（魂）/ brain_api.BRAIN_ROUTES（脑）/
+        口径变更（2026-11-05 说话线）：说话成了独立一张表（chat_api.CHAT_ROUTES，
+        一条 POST /chat）——所以这里是九张，不是八张。
+
+        九张表各自守着一条器官线：soul_api.SOUL_ROUTES（魂）/ brain_api.BRAIN_ROUTES（脑）/
         page_api.PAGE_ROUTES（占位页，已空）/ mouth_api.MOUTH_ROUTES（嘴的干跑端点）/
         home_api.HOME_ROUTES（家：九条只读 + 一条 POST /home/write）/
         heart_api.HEART_ROUTES（心：七条只读）/
         day_api.DAY_ROUTES（日子：四条只读 + 六条 POST，内容归 schedule、送达归 delivery）/
-        version_api.VERSION_ROUTES（核自报身份）。
+        version_api.VERSION_ROUTES（核自报身份）/ chat_api.CHAT_ROUTES（说话：POST /chat）。
         """
         tables = (("soul_api.SOUL_ROUTES", core.soul_api.SOUL_ROUTES),
                   ("brain_api.BRAIN_ROUTES", core.brain_api.BRAIN_ROUTES),
@@ -781,7 +809,8 @@ class RouteRegistryTest(unittest.TestCase):
                   ("home_api.HOME_ROUTES", core.home_api.HOME_ROUTES),
                   ("heart_api.HEART_ROUTES", core.heart_api.HEART_ROUTES),
                   ("day_api.DAY_ROUTES", core.day_api.DAY_ROUTES),
-                  ("version_api.VERSION_ROUTES", core.version_api.VERSION_ROUTES))
+                  ("version_api.VERSION_ROUTES", core.version_api.VERSION_ROUTES),
+                  ("chat_api.CHAT_ROUTES", core.chat_api.CHAT_ROUTES))
         sources = " / ".join(name for name, _ in tables)
         merged = core._merge(*[table for _, table in tables])
         self.assertEqual(merged, core.ROUTES, "汇总表不是这六张表的拼接：%s" % sources)

@@ -14,7 +14,7 @@ from organs.soul import load
 
 BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
                 "/brain/recall", "/brain/selfnarration", "/brain/proposals",
-                "/brain/tiers", "/brain/cold")
+                "/brain/tiers", "/brain/cold", "/brain/judge")
 
 
 class BrainApiTest(unittest.TestCase):
@@ -62,6 +62,8 @@ class BrainApiTest(unittest.TestCase):
     def test_brain_routes_reject_write_methods(self):
         for path in BRAIN_ROUTES:
             for method in ("POST", "PUT", "DELETE"):
+                if path == "/brain/judge" and method == "POST":
+                    continue   # /brain/judge 是唯一写端点，POST 是它的正方法
                 status, payload = self._call(method, path, {})
                 self.assertEqual(405, status, "%s %s" % (method, path))
                 self.assertIn("只读", payload["message"])
@@ -115,11 +117,12 @@ class BrainApiTest(unittest.TestCase):
         self.assertTrue(person["memories"])
         self.assertTrue(all("ts" in m for m in person["memories"]))
 
-    def test_panel_routes_mount_all_brain_get_endpoints(self):
+    def test_panel_routes_mount_all_brain_endpoints(self):
         routes = panel.routes(self.store, self.brain)
         brain_routes = {(method, path) for method, path, _ in routes
                         if path.startswith("/brain")}
-        self.assertEqual({("GET", path) for path in BRAIN_ROUTES}, brain_routes)
+        expected = {(api.ROUTES[path], path) for path in BRAIN_ROUTES}
+        self.assertEqual(expected, brain_routes)
 
 
 if __name__ == "__main__":

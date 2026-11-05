@@ -69,6 +69,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     neighbors_p.add_argument("--node", required=True)
     cold_p = sub.add_parser("cold", help="冷仓读回：按 id 取原文（不看过期状态）")
     cold_p.add_argument("--id", required=True)
+    sub.add_parser("preflight", help="接库前只读检查：只报不修")
     return parser.parse_args(argv)
 
 
@@ -132,6 +133,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _print(store.neighbors(args.node))
     elif args.cmd == "cold":
         _print(store.cold_lookup(args.id))
+    elif args.cmd == "preflight":
+        from .preflight import preflight
+
+        _print(preflight(ROOT))
     return 0
 
 

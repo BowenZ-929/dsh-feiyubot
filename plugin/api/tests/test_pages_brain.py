@@ -401,6 +401,9 @@ class PageIsMountedAtBrain(unittest.TestCase):
     def test_brain_routes_are_all_readonly(self):
         """页面用到的 /brain* 字面路由都必须是只读方法（写只走名片那条动态路由）。"""
         for route, method in BRAIN_ROUTES.items():
+            if route == "/brain/judge":
+                self.assertEqual("POST", method, "judge 是脑唯一写端点")
+                continue
             self.assertEqual(method, "GET", "脑出现了写路由：%s %s" % (method, route))
         used = {route for _, route in _calls() if route.startswith("/brain")}
         self.assertTrue(used, "页面没读任何脑端点")

@@ -8,7 +8,8 @@
 - 本模块不持有任何时间衰减常数：窗口是调用方传进来的分钟数，
   "现在"一律读时现算（公开函数都收 now，缺省取 model.now_iso()）。
 - 两个落账口子：
-  deliver() 给嘴/脑投递，只认四个 DELIVER_KINDS，别的 kind 一律 ValueError；
+  deliver() 给嘴/脑投递，只认六个 DELIVER_KINDS
+  （ignored / harsh / replied / normal / asleep / awake），别的 kind 一律 ValueError；
   append() 是内部口子，mood 的四类事件（praise / cold / conflict / insult）也落同一本账。
 - 行形状 {"at": iso, "kind": str, "who": str, ...extra}；下一轮的 engage 窗口与念头层读它。
 """
@@ -26,7 +27,16 @@ KIND_IGNORED = "ignored"  # 她说了、没人回（嘴/脑投递）
 KIND_HARSH = "harsh"  # 最近被凶
 KIND_REPLIED = "replied"  # 一次正常互动
 KIND_NORMAL = "normal"  # 背景互动（中性）
-DELIVER_KINDS = (KIND_IGNORED, KIND_HARSH, KIND_REPLIED, KIND_NORMAL)
+KIND_ASLEEP = "asleep"  # 睡了（sleep 账本投递）
+KIND_AWAKE = "awake"  # 醒了（sleep 账本投递）
+DELIVER_KINDS = (
+    KIND_IGNORED,
+    KIND_HARSH,
+    KIND_REPLIED,
+    KIND_NORMAL,
+    KIND_ASLEEP,
+    KIND_AWAKE,
+)
 
 
 # ---- 内部小工具 ----------------------------------------------------------
@@ -94,7 +104,8 @@ def deliver(
     kind: str, who: str = "主人", root: Any = None, now: Optional[str] = None, note: str = ""
 ) -> Dict[str, Any]:
     """嘴/脑投递一条：她说了没人回（ignored）、被凶（harsh）、正常回了一句（replied）、
-    背景互动（normal）。kind 不在 DELIVER_KINDS → ValueError，坏值原样带出，不悄悄改写。
+    背景互动（normal）、睡了（asleep）、醒了（awake，这两类由 sleep 账本投递）。
+    DELIVER_KINDS 就这六个，kind 不在其中 → ValueError，坏值原样带出，不悄悄改写。
     返回写进账本的那一行。
     """
     if kind not in DELIVER_KINDS:

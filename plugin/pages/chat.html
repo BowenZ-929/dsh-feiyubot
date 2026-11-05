@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>说话 · 她第一次开口</title>
+<style>
+  /* 颜色全部取宿主变量并带兜底值（docs/reference/ui.md §1.5）。 */
+  :root {
+    color-scheme: light;
+    --bg: var(--dsw-alias-bg-l1, #fbfbfb);
+    --panel: var(--dsw-alias-bg-l2, #ffffff);
+    --line: var(--dsw-alias-border-l2, #dcdcdc);
+    --fg: var(--dsw-alias-text-l1, #1b1b1b);
+    --dim: var(--dsw-alias-text-l2, #666666);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --warn: var(--dsw-alias-warn, #d98a3d);
+    --radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { color-scheme: dark;
+      --bg: var(--dsw-alias-bg-l1, #0f1115);
+      --panel: var(--dsw-alias-bg-l2, #171a21);
+      --line: var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+      --fg: var(--dsw-alias-text-l1, #e8eaf0);
+      --dim: var(--dsw-alias-text-l2, #9aa2b1); }
+  }
+  html[data-theme="dark"] { color-scheme: dark;
+    --bg: var(--dsw-alias-bg-l1, #0f1115);
+    --panel: var(--dsw-alias-bg-l2, #171a21);
+    --line: var(--dsw-alias-border-l2, rgba(128,128,128,.28));
+    --fg: var(--dsw-alias-text-l1, #e8eaf0);
+    --dim: var(--dsw-alias-text-l2, #9aa2b1); }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
+         margin: 0; padding: 0 1.2rem 3rem; color: var(--fg); background: var(--bg); }
+  header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
+                  padding: .55rem 1.2rem; background: var(--panel);
+                  border-bottom: 1px solid var(--line); font-weight: 600; }
+  nav.links { max-width: 72rem; margin: 0 auto 1rem; font-size: .9rem; color: var(--dim); }
+  nav.links a { color: var(--brand); }
+  main { max-width: 72rem; margin: 0 auto; display: grid; gap: 1rem;
+         grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr); align-items: start; }
+  @media (max-width: 52rem) { main { grid-template-columns: minmax(0, 1fr); } }
+  section.card { background: var(--panel); border: 1px solid var(--line);
+                 border-radius: var(--radius); padding: .6rem 1rem 1rem; margin-bottom: 1rem; }
+  h1 { font-size: 1.25rem; margin: 1rem 0 .6rem; letter-spacing: .02em; }
+  h2 { font-size: 1rem; margin: 0 0 .4rem; letter-spacing: .02em; }
+  h3 { font-size: .92rem; margin: .7rem 0 .3rem; }
+  .owner { font-size: .78rem; color: var(--dim); margin: 0 0 .5rem; }
+  .muted { color: var(--dim); font-size: .85rem; }
+  .hidden { display: none; }
+  /* 消息流 */
+  .thread { display: flex; flex-direction: column; gap: .5rem; min-height: 4rem; }
+  .bubble { max-width: 42rem; padding: .45rem .75rem; border-radius: var(--radius);
+            border: 1px solid var(--line); background: var(--bg); overflow-wrap: anywhere; }
+  .bubble.me { align-self: flex-end; border-color: var(--brand); }
+  .bubble.her .chunk-meta { display: block; margin-top: .2rem; font-size: .74rem;
+                            color: var(--dim); font-family: ui-monospace, Menlo, monospace; }
+  /* 输入行 */
+  .composer { display: flex; gap: .5rem; margin-top: .9rem; }
+  .composer input { flex: 1 1 auto; min-width: 8rem; font: inherit; font-size: .9rem;
+                    padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 6px;
+                    background: var(--bg); color: var(--fg); }
+  .composer input:focus { outline: 1px solid var(--brand); }
+  button { font: inherit; font-size: .88rem; padding: .38rem .9rem; cursor: pointer;
+           border: 1px solid var(--brand); border-radius: 6px;
+           background: var(--brand); color: #ffffff; }
+  button:disabled { opacity: .5; cursor: progress; }
+  button.plain { background: var(--panel); color: var(--brand); }
+  /* 三态 */
+  #loading-card { border-style: dashed; color: var(--dim); }
+  #error-card { border-color: var(--warn); }
+  #error-card .card-title { color: var(--warn); font-weight: 600; margin-bottom: .3rem; }
+  #error-card .err-msg { margin: 0; overflow-wrap: anywhere; }
+  /* 右栏：想起什么 / 心 */
+  ul.rows { list-style: none; margin: 0; padding: 0; font-size: .84rem; }
+  ul.rows li { padding: .35rem 0; border-bottom: 1px dashed var(--line); }
+  ul.rows li:last-child { border-bottom: 0; }
+  .recall-text { overflow-wrap: anywhere; }
+  .recall-meta { display: block; margin-top: .15rem; }
+  .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+           padding: 0 .4rem; font-size: .72rem; color: var(--dim); margin-right: .3rem; }
+  .badge.ev { border-style: dashed; font-family: ui-monospace, Menlo, monospace; }
+  .assembly-name { overflow-wrap: anywhere; }
+  .row-meta { display: block; font-size: .74rem; color: var(--dim);
+              font-family: ui-monospace, Menlo, monospace; }
+  dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .2rem .6rem;
+          margin: 0; font-size: .86rem; }
+  dl.kv dt { color: var(--dim); }
+  dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header class="banner">说话 · 她第一次真说话：这一页只有一条写（POST /chat）。她的话按 chunks 分条出，心的档位与命中门只回显，人改不了。记忆的写入在核里，页面上没有开关。</header>
+<nav class="links" aria-label="页面导航"><a href="/">← 回魂面板</a></nav>
+<main>
+  <div>
+    <h1>跟她说一句话</h1>
+    <section class="card" id="chat-empty">
+      <p class="muted">还没开始。在下面写一句，按回车或点「发送」——她先想起点什么，再开口。</p>
+    </section>
+    <section class="card hidden" id="loading-card">
+      <p class="muted">她在想…</p>
+    </section>
+    <section class="card hidden" id="error-card">
+      <div class="card-title">这次没说出来</div>
+      <p class="err-msg"></p>
+    </section>
+    <section class="card" id="thread-card">
+      <h2>这一场</h2>
+      <div class="thread" id="thread" aria-live="polite"></div>
+      <div class="composer">
+        <input id="chat-text" type="text" autocomplete="off" placeholder="跟她说一句话…" aria-label="要说的话">
+        <button id="send-btn" type="button">发送</button>
+        <button id="retry-btn" type="button" class="plain hidden">重试</button>
+      </div>
+    </section>
+  </div>
+  <aside class="side">
+    <section class="card" id="recall-card">
+      <h2>这次她想起了什么</h2>
+      <p class="owner">回忆是程序写的：回想过程挑出来的条目，人改不了。</p>
+      <ul class="rows" id="recall-list"></ul>
+      <p class="muted" id="recall-empty">这次没想起什么</p>
+    </section>
+    <section class="card" id="heart-card">
+      <h2>心 · 只给档位词</h2>
+      <p class="owner">心只给档位词，不给数字：本页不显示任何读数，只显示档位与判决。</p>
+      <dl class="kv">
+        <dt>心境档</dt><dd id="heart-mood">还没说话</dd>
+        <dt>语气档</dt><dd id="heart-tone">还没说话</dd>
+        <dt>参与态</dt><dd id="heart-engage">还没说话</dd>
+      </dl>
+      <h3>命中门</h3>
+      <dl class="kv">
+        <dt>判决</dt><dd id="gate-decision">还没说话</dd>
+        <dt>命中条款</dt><dd id="gate-hit">无</dd>
+        <dt>咽回的话</dt><dd id="gate-drops">无</dd>
+      </dl>
+    </section>
+    <section class="card" id="assembly-card">
+      <h2>这次怎么装的</h2>
+      <p class="owner">装配是程序算的：谁进了上下文、各占多少字、回复允许多长。页面上改不了。</p>
+      <ul class="rows" id="assembly-list"></ul>
+      <p class="muted" id="assembly-empty">这次没有装配记录</p>
+      <dl class="kv">
+        <dt>回复上限</dt><dd id="assembly-budget-text">还没说话</dd>
+      </dl>
+    </section>
+  </aside>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // 挂载前缀：直开核时 MOUNT 是 /chat，BASE 为空串；
+  // 挂在壳里（/qqagent/panel/chat）时 BASE 是 /qqagent/panel，请求原样打回核的 /chat。
+  var MOUNT = location.pathname.replace(/\/+$/, "");
+  var BASE = MOUNT.slice(-5) === "/chat" ? MOUNT.slice(0, -5) : "";
+
+  // 后端 kind → 人话归类。message 一律原样显示，不在这里改写、也不显示原始 JSON。
+  var KIND_TEXT = {
+    "no-key": "缺 key：核里没有配置模型密钥",
+    "timeout": "超时：她想了太久，这次没说完",
+    "rate_limit": "限流：上游说请求太密，等一会儿再试",
+    "auth": "鉴权：密钥被上游拒了",
+    "empty": "空：这句话里没有能说给她听的字",
+    "http": "服务端出错"
+  };
+  var SOURCE_TEXT = { today: "今日", hot: "热", longterm: "长期" };
+  // source_type 后端可能给亲历/日程模拟，也可能给 lived/sim：两种都认，认不出就原样显示。
+  var TYPE_TEXT = { lived: "亲历", real: "亲历", sim: "日程模拟",
+                    "亲历": "亲历", "日程模拟": "日程模拟" };
+
+  var busy = false;
+  var lastText = "";
+
+  function el(id) { return document.getElementById(id); }
+
+  function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
+
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+
+  function call(method, path, body) {
+    var init = { method: method, headers: {} };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    // 取数与写都只从这一条出去：BASE 是挂载前缀（直开核时是空串）。
+    return fetch(BASE + path, init).then(function (res) {
+      return res.json().then(function (data) {
+        return { status: res.status, data: data };
+      }, function () {
+        return { status: res.status, data: { ok: false, kind: "http", message: "响应不是 JSON" } };
+      });
+    });
+  }
+
+  function hide(id) { el(id).classList.add("hidden"); }
+  function show(id) { el(id).classList.remove("hidden"); }
+
+  // 加载：按钮禁用 + 「她在想…」。请求在飞时 setBusy(true)，回来再放。
+  function setBusy(on) {
+    busy = on;
+    el("send-btn").disabled = on;
+    if (on) { show("loading-card"); } else { hide("loading-card"); }
+  }
+
+  function errorText(kind) {
+    return KIND_TEXT[kind] || "没成：这次没接上（" + String(kind || "未知") + "）";
+  }
+
+  function showError(kind, message) {
+    var box = el("error-card");
+    clear(box);
+    box.appendChild(node("div", "card-title", "这次没说出来 · " + errorText(kind)));
+    box.appendChild(node("p", "err-msg", message === undefined || message === null || message === ""
+                                ? "后端没给 message" : String(message)));
+    show("error-card");
+  }
+
+  function bubble(cls, text) { return node("div", "bubble " + cls, text); }
+
+  // 她的话按 chunks 分条：一泡一个气泡，间隔写在气泡角上（gap_before 秒 / send_at 时刻）。
+  function renderChunks(chunks) {
+    var thread = el("thread");
+    for (var i = 0; i < chunks.length; i += 1) {
+      var chunk = chunks[i];
+      var wrap = bubble("her", chunk.text);
+      var gap = chunk.gap_before;
+      var gapText = (typeof gap === "number") ? "+" + gap.toFixed(1) + "s" : "同一泡";
+      var stamp = chunk.send_at ? String(chunk.send_at) : "时间没带上";
+      wrap.appendChild(node("div", "chunk-meta", i === 0 ? stamp : gapText + " · " + stamp));
+      thread.appendChild(wrap);
+    }
+    if (!chunks.length) { thread.appendChild(bubble("her", "（这次没有分泡的回复）")); }
+  }
+
+  // 「这次她想起了什么」：每条带正文、来源、来源类型、证据指针。
+  function renderRecall(items) {
+    var list = el("recall-list");
+    clear(list);
+    if (!items.length) {
+      el("recall-empty").textContent = "这次没想起什么";
+      show("recall-empty");
+      return;
+    }
+    hide("recall-empty");
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      var li = node("li", "recall-item");
+      li.appendChild(node("div", "recall-text", item.text));
+      var meta = node("div", "recall-meta");
+      meta.appendChild(node("span", "badge", SOURCE_TEXT[item.source] || String(item.source || "来源不明")));
+      meta.appendChild(node("span", "badge", TYPE_TEXT[item.source_type] || String(item.source_type || "类型不明")));
+      meta.appendChild(node("span", "badge ev", "证据：" + (item.evidence_key ? String(item.evidence_key) : "无")));
+      li.appendChild(meta);
+      list.appendChild(li);
+    }
+  }
+
+  // 心只回显档位词（tier / tone / state），一个数都不画。
+  function renderHeart(heart) {
+    var mood = heart.mood || {};
+    var voice = heart.voice || {};
+    var engage = heart.engage || {};
+    el("heart-mood").textContent = mood.tier || "没说心境档";
+    el("heart-tone").textContent = voice.tone || "没说语气档";
+    el("heart-engage").textContent = engage.state || "没说参与态";
+  }
+
+  function dropsText(drops) {
+    if (!drops || !drops.today) { return "今天没咽回话"; }
+    return "今日咽回 " + drops.today + " 条";
+  }
+
+  // 命中门：过就说出口，不过就咽回去；命中条款照抄 clause_id + reason。
+  function renderGate(gate) {
+    var decision = gate.decision;
+    if (decision === "pass") {
+      el("gate-decision").textContent = "pass · 说出口";
+    } else if (decision === "dropped") {
+      el("gate-decision").textContent = "dropped · 咽回去了";
+    } else {
+      el("gate-decision").textContent = decision ? String(decision) : "没说判决";
+    }
+    var hit = gate.hit;
+    el("gate-hit").textContent = hit
+      ? String(hit.clause_id || "没给条款号") + " · " + String(hit.reason || "没给理由")
+      : "无（没命中条款）";
+    el("gate-drops").textContent = dropsText(gate.drops);
+  }
+
+  // 装配结果：逐段显示中文名与 chars/cap（超了标「超限」）；不认识的 key 照实显示，不静默丢。
+  var SECTION_TEXT = { soul: "魂六件", memory: "脑装包", heart: "心读数", mouth: "嘴语气" };
+
+  function sectionText(key) {
+    var name = SECTION_TEXT[key];
+    return name ? name + "（" + String(key) + "）" : String(key === undefined || key === null || key === "" ? "没给 key" : key);
+  }
+
+  function charText(section) {
+    var chars = section.chars;
+    var cap = section.cap;
+    if (chars === undefined || chars === null) {
+      return (cap === undefined || cap === null) ? "字数没给" : "上限 " + String(cap) + " 字";
+    }
+    var text = String(chars) + ((cap === undefined || cap === null) ? " 字" : " / " + String(cap) + " 字");
+    if (typeof chars === "number" && typeof cap === "number" && cap > 0 && chars > cap) {
+      text += " · 超限";
+    }
+    return text;
+  }
+
+  function renderAssembly(assembly) {
+    var list = el("assembly-list");
+    clear(list);
+    var sections = (assembly && assembly.sections) || [];
+    if (!sections.length) {
+      el("assembly-empty").textContent = "这次没有装配记录";
+      show("assembly-empty");
+    } else {
+      hide("assembly-empty");
+      for (var i = 0; i < sections.length; i += 1) {
+        var section = sections[i];
+        var li = node("li", "assembly-row");
+        li.appendChild(node("div", "assembly-name", sectionText(section.key)));
+        li.appendChild(node("div", "row-meta", charText(section)));
+        list.appendChild(li);
+      }
+    }
+    var budget = (assembly && assembly.reply_budget) || {};
+    var tier = budget.tier;
+    var chars = budget.chars;
+    el("assembly-budget-text").textContent = (tier === undefined || tier === null || tier === "")
+      ? "没给档位"
+      : String(tier) + " · 最多 " + ((chars === undefined || chars === null) ? "没给字数" : String(chars) + " 字");
+  }
+
+  function send(text) {
+    if (busy) { return; }
+    var said = String(text === undefined || text === null ? "" : text).trim();
+    lastText = said;
+    hide("error-card");
+    el("retry-btn").classList.add("hidden");
+    if (!said) { showError("empty", "先说点什么再发。"); return; }
+    hide("chat-empty");
+    // 用户那句只显示一次：发出去的当下就落进这一场，回包不再重复。
+    el("thread").appendChild(bubble("me", said));
+    el("chat-text").value = "";
+    setBusy(true);
+    call("POST", "/chat", { text: said }).then(function (res) {
+      setBusy(false);
+      var data = res.data || {};
+      if (res.status !== 200 || data.ok !== true) {
+        showError(data.kind, data.message === undefined ? "HTTP " + res.status : data.message);
+        show("retry-btn");
+        return;
+      }
+      renderChunks(data.chunks || []);
+      renderRecall(data.recalled || []);
+      renderHeart(data.heart || {});
+      renderGate(data.gate || {});
+      renderAssembly(data.assembly || {});
+    }, function () {
+      setBusy(false);
+      showError("http", "连不上核：devserver 起了吗？");
+      show("retry-btn");
+    });
+  }
+
+  el("send-btn").addEventListener("click", function () { send(el("chat-text").value); });
+  el("retry-btn").addEventListener("click", function () { send(lastText); });
+  el("chat-text").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") { event.preventDefault(); send(el("chat-text").value); }
+  });
+}());
+</script>
+</body>
+</html>

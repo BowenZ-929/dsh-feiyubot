@@ -4,14 +4,19 @@
 - 硬门先于软门，次序固定：① 夜间窗口 → ② 被骂当天 → ③ mood 与 energy 双低。
 - 硬门命中一条就不再算软门（soft_skipped=True、soft=[]）：夜里、被骂、双低，
   这三件事发生的时候再去数今天说了几条没有意义。
-- 没有硬门才把软门四条全算一遍（不短路）：今日量硬线判不说 / 软线判少说、
-  熟稔偏低判少说、刚被打断判少说、近期连着被无视/被凶判少说或不说。命中集
-  全列，最强的那门定三态。
+- 没有硬门才把软门五条全算一遍（不短路）：今日量硬线判不说 / 软线判少说、
+  熟稔偏低判少说、刚被打断判少说、近期连着被无视/被凶判少说或不说、意图排序
+  层没过阈值判少说。命中集全列，最强的那门定三态。
 - 第 4 道软门读「近期事件窗口」（window_signal）：连续被无视、最近 2 小时内
   被凶 → 判少说/不说，理由码 model.REASON_IGNORED。**窗口是现算的**：每次判决
   现读 events.recent、现算每条事件的 age；"越来越冷"是窗口内加权叠出来的，
   不落任何"冷度"状态，所以窗口滑走（事件出了窗口、时间推过去）自然恢复，
   没有需要回滚的东西。
+- 第 5 道软门读「意图排序层」（intent.rank）：调用方把 rank() 的返回整份传进来
+  （EngageInput.intents），只有 pass == False 才加一道"少说"，理由码
+  model.REASON_INTENT_BELOW。**pass == True 时一个字都不加**——它只决定
+  "值不值得开口"，不决定"必须开口"；没传 intents 时这道门不参与，判决与本轮
+  之前逐行一致。
 - 每次出结论都要能说出"哪几个门命中"：hits 为空而态不是"说"，那就是
   "判了但不知道为什么"，属失败——塞 model.REASON_UNATTRIBUTED 并 WARN 出来。
 
@@ -78,6 +83,9 @@ class EngageInput:
     # 近期事件窗口的 signal（调用方用 window_signal 现算好传进来）。
     # decide 仍然不读盘：窗口是入参，不是它自己的副作用。
     window: Optional[Dict[str, Any]] = None
+    # 意图排序层的读数（intent.rank() 的返回，调用方传进来）。
+    # 同样只是入参：decide 不读权重表、不读 pending，只看这一份。
+    intents: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_effective(cls, eff: Dict[str, Any], energy: float, familiarity: float,
@@ -228,10 +236,12 @@ def _window_hit(sig: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
-    """四道软门全算一遍（不短路），返回 (理由码, 它主张的态)。
+    """五道软门全算一遍（不短路），返回 (理由码, 它主张的态)。
 
     今日量一档只出一条码：过硬线判不说，只过软线判少说。第 4 道是近期事件
-    窗口，读调用方传进来的 signal（本函数自己不读盘）。
+    窗口，第 5 道是意图排序层，两者都只读调用方传进来的入参（本函数自己不读盘）。
+    第 5 道只在 pass 明确为 False 时命中：pass=True 表示"值得开口"，绝不因此
+    多给一口气；没传 intents / 形状不对 → 这道门不参与。
     """
     hits: List[Tuple[str, str]] = []
     if inp.today_count >= model.ENGAGE_TODAY_HARD:
@@ -246,6 +256,8 @@ def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
     window_state = _window_hit(inp.window)
     if window_state is not None:
         hits.append((model.REASON_IGNORED, window_state))
+    if isinstance(inp.intents, dict) and inp.intents.get("pass") is False:
+        hits.append((model.REASON_INTENT_BELOW, model.STATE_LESS))
     return hits
 
 
@@ -302,11 +314,12 @@ def decide(inp: EngageInput) -> Dict[str, Any]:
     """纯函数：给一次判决，说清态与理由码，不读盘、不写盘、不说话。
 
     返回 {"state", "reason", "hits", "hard", "soft", "soft_skipped",
-          "readouts", "score", "window"}；reason 是主因（最强那门的码，无门则
-    None），hits 是所有命中门（硬门时等于 hard），score 只做读数，
-    window 是调用方传进来的窗口 signal 原样带回（没传就是 None）。
+          "readouts", "score", "window", "intents"}；reason 是主因（最强那门的码，
+    无门则 None），hits 是所有命中门（硬门时等于 hard），score 只做读数，
+    window / intents 是调用方传进来的入参原样带回（没传就是 None）。
     """
     signal = dict(inp.window) if isinstance(inp.window, dict) else None
+    intents = dict(inp.intents) if isinstance(inp.intents, dict) else None
     now = inp.now or model.now_iso()
     hard = _hard_hits(inp, now)
     if hard:
@@ -332,6 +345,7 @@ def decide(inp: EngageInput) -> Dict[str, Any]:
         "readouts": _readouts(inp),
         "score": _score(inp),
         "window": signal,
+        "intents": intents,
     }
 
 

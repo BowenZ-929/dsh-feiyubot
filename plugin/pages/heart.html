@@ -20,7 +20,7 @@
   .axes { list-style: none; margin: 0; padding: 0; }
   .axes li { padding: .25rem 0; border-bottom: 1px dashed #f0f0f0; }
   li.greyed { color: #9a9a9a; }
-  #engage { white-space: pre-line; margin: 0 0 .6rem; }
+  #engage, #sleep { white-space: pre-line; margin: 0 0 .6rem; }
   #window { white-space: pre-line; margin: 0 0 .6rem; }
   #hits { margin: 0; padding-left: 1.2rem; font-size: .9rem; color: #444; }
   canvas { width: 100%; height: auto; background: #fff; border: 1px solid #e6e6e6;
@@ -57,13 +57,32 @@
   </section>
 
   <section>
-    <h2>④ 开口与否（干跑：只算不说）</h2>
+    <h2>④ 睡眠账</h2>
+    <p id="sleep">……</p>
+    <p class="legend">来自 /heart/sleep：上次入睡 / 睡了多久 / 连续熬夜 / 连续没睡够 /
+      drift / 生效窗口 / wake_cap。三个派生量都是读时现算，账本里不存：连续熬夜把
+      作息窗口整体后移（drift），连续两晚没睡够就把睡眠回血的封顶降到 95。
+      窗口与封顶都接在③精力的结算上——③那一行显示的「生效窗口」就是这一块给的那两个数。</p>
+  </section>
+
+  <section>
+    <h2>⑤ 开口与否（干跑：只算不说）</h2>
     <p id="engage">……</p>
     <ul id="hits"></ul>
   </section>
 
   <section>
-    <h2>⑤ 念头（她此刻想要什么：只是说话方式，不是发生过的事）</h2>
+    <h2>⑥ 意图排序（此刻最值得开口的是哪一件、值不值得开口）</h2>
+    <ul id="intents" class="axes"></ul>
+    <p id="intent-info" class="legend"></p>
+    <p class="legend">来自 /heart 的 intents 一节，与⑤吃的是同一份排序：每条意图的
+      权重 = 表里那一档 × 清醒度系数（精力档 × 夜间窗口）。hit=False 的照样列出，
+      并写清是哪一条判据没成立。top 是最重的命中项，pass = top.weight ≥ threshold；
+      pass 只说明「值得开口」，闭不闭嘴仍由⑤的门定——pass=False 时判决会多一道少说。</p>
+  </section>
+
+  <section>
+    <h2>⑦ 念头（她此刻想要什么：只是说话方式，不是发生过的事）</h2>
     <ul id="thoughts" class="axes"></ul>
     <p id="pending-info" class="legend"></p>
     <p class="legend">来自 /heart/pending：kind / 轴 / 剩余 TTL / 已试次数 / 状态。
@@ -71,7 +90,7 @@
   </section>
 
   <section>
-    <h2>⑥ 近期窗口（她最近遇到的：冷落、被凶、正常回话）</h2>
+    <h2>⑧ 近期窗口（她最近遇到的：冷落、被凶、正常回话）</h2>
     <p id="window">……</p>
     <p class="legend">窗内逐条加权（ignored +1.0、harsh +1.5、replied −1.0、normal −0.5，
       越新越接近满权重）。命中时理由码是 ignored-recently：weight ≥ 3 判「少说」、
@@ -79,7 +98,7 @@
   </section>
 
   <section>
-    <h2>⑦ 语气档（嘴读它定冷热）</h2>
+    <h2>⑨ 语气档（嘴读它定冷热）</h2>
     <p id="voice">……</p>
     <p class="legend">档位词、方向与禁令都来自 /heart/effective 的 voice：一个合成点，
       面板说的档与嘴上念的档不会分叉。</p>
@@ -187,7 +206,7 @@
     }
     say("window", "窗口 " + signal.window_min + " 分钟 · 加权 " + weight +
       " · 连续被无视 " + signal.consecutive_ignored + " 条 · 窗内事件 " +
-      signal.rows + " 条\n命中时判决怎么变：" + verdict + "（理由码 ignored-recently，逐条列在④的命中门里）");
+      signal.rows + " 条\n命中时判决怎么变：" + verdict + "（理由码 ignored-recently，逐条列在⑤的命中门里）");
   }
 
   function renderMood(data) {
@@ -247,8 +266,48 @@
 
   function renderEnergy(data) {
     var tail = data.capped ? "（超过一次补算的上限，更早的部分不追）" : "";
+    var window = (data.sleep_window || []).join(" → ");
+    var terms = window ? " · 生效窗口 " + window + " 点 · 回血封顶 " + data.wake_cap : "";
     say("energy", "精力 " + data.value + "（" + data.tier + "）· 这次结算 " +
-        data.settled_from + " → " + data.settled_to + "，共 " + data.hours + " 小时" + tail);
+        data.settled_from + " → " + data.settled_to + "，共 " + data.hours + " 小时" +
+        tail + terms);
+  }
+
+  function renderSleep(data) {
+    if (data.ok !== true) {
+      say("sleep", "拒载：睡眠账读不出来，生效窗口与回血封顶一个都不给");
+      return;
+    }
+    var asleep = data.last_asleep_at ? data.last_asleep_at : "没有记录";
+    var slept = typeof data.last_duration_min === "number"
+      ? Math.round(data.last_duration_min) + " 分钟" : "没有记录";
+    var window = (data.effective_window || []).join(" → ");
+    say("sleep", "上次入睡 " + asleep + " · 睡了 " + slept +
+        "\n连续熬夜 " + data.consecutive_late_nights + " 夜 · 连续没睡够 " +
+        data.consecutive_short_nights + " 夜 · drift " + data.drift_hours + " 小时" +
+        "\n生效窗口 " + window + " 点 · wake_cap " + data.wake_cap);
+  }
+
+  function renderIntents(block) {
+    var list = el("intents");
+    list.textContent = "";
+    if (!block || !(block.order || []).length) {
+      say("intent-info", "这一块没有读数（/heart 没有给出 intents）。");
+      return;
+    }
+    block.order.forEach(function (row) {
+      var item = document.createElement("li");
+      if (!row.hit) { item.className = "greyed"; }
+      item.textContent = row.intent + " · 权重 " + row.weight + " · " +
+        (row.hit ? "命中" : "未命中") + " · " + row.why;
+      list.appendChild(item);
+    });
+    var top = block.top
+      ? block.top.intent + "（权重 " + block.top.weight + "）"
+      : "没有命中的意图";
+    say("intent-info", "top " + top + " · 阈值 " + block.threshold + " · pass " +
+      (block.pass ? "true：值得开口" : "false：不值得开口，判决会加一道少说") +
+      " · 清醒度系数 " + (block.clarity || {}).factor);
   }
 
   function renderGates() {
@@ -285,7 +344,12 @@
     if (data.window) { renderWindow(data.window); }
   }
 
-  fetch("/heart").then(function (res) { return res.json(); }).then(renderStatus).catch(fail);
+  fetch("/heart").then(function (res) { return res.json(); }).then(function (data) {
+    renderStatus(data);
+    renderIntents(data.intents);
+  }).catch(fail);
+
+  fetch("/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
 
   fetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
 

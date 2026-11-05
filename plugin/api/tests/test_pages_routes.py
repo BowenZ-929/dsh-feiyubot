@@ -34,10 +34,10 @@ FETCH_RE = re.compile(r'fetch\(\s*"([^"]+)"')
 BUTTON_ID_RE = re.compile(r'<button[^>]*\bid="([^"]+)"')
 ANCHOR_RE = re.compile(r'<a\b[^>]*\bhref="([^"]+)"')
 WRITE_VERBS = ('"post"', '"put"', '"delete"', '"patch"')
-# 心页只许拉自己那八条：页面自检用（顺序无所谓，集合相等就够）
+# 心页只许拉自己这十条：页面自检用（顺序无所谓，集合相等就够）
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending")
+                "/heart/pending", "/heart/sleep")
 
 
 def _text(name: str) -> str:
@@ -125,8 +125,8 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
     1. 页面上每一次 fetch 的路径都在 api.ROUTES 里，且那条路由就是 GET；
     2. 画的是 mood 的轨迹：<canvas> + trajectory + fetch("/heart/mood") 三样都在；
     3. 没有任何非 GET 的写法（连 "method" 这种第二参数都不许出现），也不挂定时器；
-    4. 念头块与窗口块真的在页上，且各自读的是自己那一块的键——只断言"没有写控件"
-      的话，把这两块的取数删掉也照样是绿的。
+    4. 念头块、窗口块、睡眠账、意图排序真的在页上，且各自读的是自己那一块的键——
+      只断言"没有写控件"的话，把这几块的取数删掉也照样是绿的。
     """
 
     def setUp(self) -> None:
@@ -165,6 +165,34 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
                              ("signal.weight", "窗口块显示 weight"),
                              ("signal.consecutive_ignored", "窗口块显示 consecutive_ignored"),
                              ("signal.rows", "窗口块显示窗内事件条数")):
+            self.assertTrue(needle in self.text, "%s：页面上找不到 %r" % (note, needle))
+
+    def test_sleep_and_intent_blocks_read_their_own_keys(self):
+        """睡眠账（/heart/sleep）与意图排序（/heart 的 intents）各读各的键。
+
+        只断言"没有写控件"的话，把这两块的取数删掉也照样是绿的——所以逐键点名：
+        睡眠账七样（上次入睡 / 睡了多久 / 两个连续计数 / drift / 生效窗口 / wake_cap）、
+        意图排序六样（order 的每条的 intent·weight·hit·why，加 top / pass / threshold）。
+        """
+        for needle, note in (('fetch("/heart/sleep"', "睡眠账来自 GET /heart/sleep"),
+                             ("data.effective_window", "睡眠块显示生效窗口"),
+                             ("data.wake_cap", "睡眠块显示 wake_cap"),
+                             ("data.drift_hours", "睡眠块显示 drift"),
+                             ("data.consecutive_late_nights", "睡眠块显示连续熬夜夜数"),
+                             ("data.consecutive_short_nights", "睡眠块显示连续没睡够夜数"),
+                             ("data.last_asleep_at", "睡眠块显示上次入睡"),
+                             ("data.last_duration_min", "睡眠块显示睡了多久"),
+                             ("data.sleep_window", "/heart/energy 那一行显示这次用的窗口"),
+                             ("renderIntents", "意图排序有自己的渲染"),
+                             ("block.order", "排序块读 order"),
+                             ("row.intent", "order 的每一行显示 intent"),
+                             ("row.weight", "order 的每一行显示 weight"),
+                             ("row.hit", "order 的每一行显示 hit"),
+                             ("row.why", "order 的每一行显示 why"),
+                             ("block.top", "排序块显示 top"),
+                             ("block.pass", "排序块显示 pass"),
+                             ("block.threshold", "排序块显示阈值"),
+                             ("清醒度系数", "排序块显示清醒度系数")):
             self.assertTrue(needle in self.text, "%s：页面上找不到 %r" % (note, needle))
 
     def test_axes_and_voice_come_from_the_effective_route(self):

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+
+from organs.day.model import day_key  # noqa: F401  # 全仓唯一 day_key 真源
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,3 @@ def parse_ts(text: str) -> datetime:
     return stamp
 
 
-def day_key(ts: str, cutover_hour: int = limits.day_cutover_hour) -> str:
-    """换日点前归昨天：凌晨 4:00 前发的消息记在前一天。"""
-    return (parse_ts(ts) - timedelta(hours=cutover_hour)).date().isoformat()

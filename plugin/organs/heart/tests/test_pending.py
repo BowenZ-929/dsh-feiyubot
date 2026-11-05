@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest import mock
 
+from organs.day import model as day_model
 from organs.heart import energy, events, model, mood, offset, pending, store
 from organs.heart.tests import helpers
 
@@ -45,7 +46,7 @@ def seed_offsets(root: Any, values: Dict[str, float], when: str = T0) -> None:
         axis: {
             "value": float(value),
             "day_delta": 0.0,
-            "day": model.day_key(when),
+            "day": day_model.day_key(when, cutover_hour=0),
             "updated_at": when,
             "idle_anchor_at": when,
         }
@@ -68,7 +69,7 @@ def seed_energy(root: Any, value: float, when: str = T0) -> None:
             "version": model.VERSION,
             "value": float(value),
             "updated_at": when,
-            "day": model.day_key(when),
+            "day": day_model.day_key(when, cutover_hour=0),
             "deducted": 0.0,
             "last_burst_at": None,
         },

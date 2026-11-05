@@ -1,4 +1,5 @@
 """精力的验收：一条时间轴、切片积分、读时结算、连发与长回复有界、重启不重复扣。
+档位带迟滞（值越线不等于换档）、睡眠回血可封顶（wake_cap），第四轮补在文件末尾。
 
 判据：下文的数都是默认值派生的期望，不是验收线——改 model 里的数，期望跟着改。
 所有用例都在 helpers.make_root 的临时目录里跑，绝不写真 data。
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from organs.day import model as day_model
 from organs.heart import energy, model
 from organs.heart.tests import helpers
 
@@ -29,7 +31,7 @@ def _at(hours: float = 0.0, base: Optional[datetime] = None) -> str:
 
 
 def _slice_walk(
-    value: float, start_iso: str, end_iso: str, window: Any = None
+    value: float, start_iso: str, end_iso: str, window: Any = None, cap: Any = None
 ) -> float:
     """参照实现：关掉夹断、一片一片地走完整个 Δt。
 
@@ -43,7 +45,7 @@ def _slice_walk(
     band = energy.DEFAULT_SLEEP_WINDOW if window is None else window
     while remaining > 1e-9:
         take = min(slice_min, remaining)
-        value = energy._step(value, cursor, take, band)
+        value = energy._step(value, cursor, take, band, cap)
         cursor = cursor + timedelta(minutes=take)
         remaining -= take
     return value
@@ -70,7 +72,7 @@ class EnergyTest(unittest.TestCase):
             "version": model.VERSION,
             "value": value,
             "updated_at": updated_at,
-            "day": day or model.day_key(updated_at),
+            "day": day or day_model.day_key(updated_at, cutover_hour=0),
             "deducted": deducted,
             "last_burst_at": last_burst_at,
         }
@@ -322,7 +324,7 @@ class EnergyTest(unittest.TestCase):
             80.0,
             start,
             deducted=float(model.ENERGY_DAILY_CAP),
-            day=model.day_key(_at(-24)),
+            day=day_model.day_key(_at(-24), cutover_hour=0),
         )
         got = energy.apply_burst(self.root, now=start, event_id="rollover")
         self.assertTrue(got["ok"], "跨日了还按昨天的扣除额封顶")
@@ -390,7 +392,7 @@ def _seed_state(
                 "version": model.VERSION,
                 "value": value,
                 "updated_at": updated_at,
-                "day": model.day_key(updated_at),
+                "day": day_model.day_key(updated_at, cutover_hour=0),
                 "deducted": deducted,
                 "last_burst_at": None,
             }
@@ -628,14 +630,16 @@ class EnergyGoldenTest(unittest.TestCase):
                         self.assertEqual(want, got[key], "%s 的 %s 变了" % (where, key))
 
 
-# 模块级大写名字的白名单：除 DEFAULT_SLEEP_WINDOW 与派生量 ENERGY_STEP_CAP 外与
-# 改动前完全相同；去重不设过期时间，所以这里也不许再出现 _SEEN_BURSTS_TTL_S 那种
-# 第二个时钟。ENERGY_STEP_CAP 不是新常数，是 ENERGY_MAX_SETTLE_H / ENERGY_SLICE_MIN
-# 的派生量（下面有用例钉住它确实由既有常数算出）。
+# 模块级大写名字的白名单：除 DEFAULT_SLEEP_WINDOW、派生量 ENERGY_STEP_CAP 与迟滞带宽
+# ENERGY_TIER_GAP 外与改动前完全相同；去重不设过期时间，所以这里也不许再出现
+# _SEEN_BURSTS_TTL_S 那种第二个时钟。ENERGY_STEP_CAP 不是新常数，是 ENERGY_MAX_SETTLE_H
+# / ENERGY_SLICE_MIN 的派生量（下面有用例钉住它确实由既有常数算出）；ENERGY_TIER_GAP
+# 的单位是「点」（不是时间），只决定换不换档，不参与结算。
 _ALLOWED_UPPER_NAMES = (
     "DEFAULT_SLEEP_WINDOW",
     "ENERGY_FILE",
     "ENERGY_STEP_CAP",
+    "ENERGY_TIER_GAP",
     "_ENERGY_TIERS",
     "_SEEN_BURSTS",
     "_SEEN_BURSTS_MAX",
@@ -748,7 +752,7 @@ class SleepWindowTest(unittest.TestCase):
                 self.assertIn("0–23", message)
 
     def test_no_new_module_level_constants(self) -> None:
-        """大写名字只许增 DEFAULT_SLEEP_WINDOW：不许冒出第二个半衰 / delay / 间隔常数。"""
+        """大写名字只许增 DEFAULT_SLEEP_WINDOW 与 ENERGY_TIER_GAP：不许冒出第二个钟。"""
         upper = sorted(n for n in dir(energy) if n.isupper())
         self.assertEqual(sorted(_ALLOWED_UPPER_NAMES), upper)
         for name in upper:
@@ -791,6 +795,308 @@ class SleepWindowTest(unittest.TestCase):
         self.assertAlmostEqual(
             float(model.ENERGY_BURST_COST), fresh["cost"], places=1
         )
+
+# ---- 第四轮：档位迟滞 + 回血封顶 -----------------------------------------
+
+
+def _seed_tiered(root: Any, value: float, tier: Optional[str], updated_at: str) -> None:
+    """造一份带 tier 栏的状态（第四轮的新 schema）：这一栏就是这次读取的起点档。"""
+    helpers.write_raw(
+        Path(root) / energy.ENERGY_FILE,
+        json.dumps(
+            {
+                "version": model.VERSION,
+                "value": value,
+                "updated_at": updated_at,
+                "day": day_model.day_key(updated_at, cutover_hour=0),
+                "deducted": 0.0,
+                "last_burst_at": None,
+                "tier": tier,
+            }
+        ),
+    )
+
+
+def _patch_energy(root: Any, **fields: Any) -> None:
+    """只改文件里的这几栏，其余（尤其是 tier）原样留着——模拟"旧档已经在盘上"。"""
+    path = Path(root) / energy.ENERGY_FILE
+    data = helpers.read_json_file(path)
+    data.update(fields)
+    helpers.write_raw(path, json.dumps(data))
+
+
+def _on_disk(root: Any) -> Dict[str, Any]:
+    return helpers.read_json_file(Path(root) / energy.ENERGY_FILE)
+
+
+class TierHysteresisTest(unittest.TestCase):
+    """档位是带迟滞的读数：3 点内不换档；退档要跌过下界再让出 ENERGY_TIER_GAP。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = helpers.make_root(self.tmp.name)
+        energy._SEEN_BURSTS.clear()
+
+    def _tier_at(self, value: float, tier: Optional[str], at: Any = None) -> str:
+        """把状态设成 (value, tier)，读一次，返回这次落的档。"""
+        moment = at if isinstance(at, str) else _ts(15, 14)
+        _seed_tiered(self.root, value, tier, moment)
+        return energy.read(self.root, now=moment)["tier"]
+
+    # ---- 验收 1：值抖 10 次，档位只变一次 ---------------------------------
+
+    def test_jitter_at_one_instant_flips_once(self) -> None:
+        """验收 1：同一时刻连读、只改文件里的 value，29/31 抖 10 次 → 档位只变 1 次。
+
+        起点 29 =「累」。31 越过 b[0] = 30 → 升到「偏累」；这一读的 Δ 是 0 分钟
+        （不足 ENERGY_MIN_GAP_MIN），所以值不动、只有 tier 那一栏落盘。之后回落到 29，
+        离退档线 b[0] − ENERGY_TIER_GAP = 27 还差 2 点，退不回去——后面 8 次都不换档。
+        换档不落盘的话，每次读又从「累」起判，这里就会变 9 次。
+        """
+        at = _ts(15, 14)
+        _seed_tiered(self.root, 29.0, "累", at)
+        values = [29.0, 31.0] * 5
+        tiers = []
+        disk_tiers = []
+        for value in values:
+            _patch_energy(self.root, value=value)  # 只改值，档位留在这份文件里
+            got = energy.read(self.root, now=at)
+            tiers.append(got["tier"])
+            disk_tiers.append(_on_disk(self.root).get("tier"))
+            print(
+                "    值 %5s → 档 %s ｜ 文件里的 tier = %s"
+                % (value, got["tier"], disk_tiers[-1])
+            )
+
+        changes = sum(1 for prev, cur in zip(["累"] + tiers[:-1], tiers) if prev != cur)
+        self.assertEqual(1, changes, "同一时刻抖了 10 次，档位变了 %d 次" % changes)
+        self.assertEqual("偏累", tiers[-1], "跨过 30 之后应该停在「偏累」")
+        self.assertEqual(tiers, disk_tiers, "档位算出来了却没落盘：%r vs %r" % (tiers, disk_tiers))
+
+        state = _on_disk(self.root)
+        self.assertAlmostEqual(31.0, state["value"], places=6, msg="短间隔不该改写 value")
+        self.assertEqual(at, state["updated_at"], "短间隔不该推走 updated_at")
+        self.assertAlmostEqual(0.0, state["deducted"], places=6, msg="短间隔不该动扣减")
+
+        # 对照：去掉迟滞（就是改动前那套裸读）同样 10 个值会变 9 次——每次越线都变。
+        bare = [energy._tier(29.0)] + [energy._tier(value) for value in values]
+        bare_changes = sum(1 for prev, cur in zip(bare[:-1], bare[1:]) if prev != cur)
+        print("    去掉迟滞（裸读）：同样 10 个值变 %d 次" % bare_changes)
+        self.assertEqual(9, bare_changes, "对照没成立：裸读本来就该每次越线都变")
+        self.assertGreater(bare_changes, changes)
+
+    def test_jitter_across_settlements_flips_once(self) -> None:
+        """验收 3：每读之间推进 11 分钟（走 settle、整份写回）同样只变 1 次。
+
+        每轮起点值 29 / 31，11 分钟醒着掉 4 × 11/60 ≈ 0.73：29 → 28.27、31 → 30.27。
+        档位仍只在第二读越过 30 时变一次；「偏累」之后 28.27 离 27 还差 1.27，退不回去。
+        修"换档落盘"不许把这条结算路弄坏。
+        """
+        base = _local(14)
+        moments = [model.iso(base + timedelta(minutes=11 * index)) for index in range(11)]
+        values = [29.0, 31.0] * 5
+        _seed_tiered(self.root, 29.0, "累", moments[0])
+        tiers = []
+        for index, value in enumerate(values):
+            _patch_energy(self.root, value=value, updated_at=moments[index])
+            got = energy.read(self.root, now=moments[index + 1])
+            tiers.append(got["tier"])
+            print(
+                "    值 %5s + %s 小时 → value=%s 档 %s"
+                % (value, got["hours"], got["value"], got["tier"])
+            )
+        changes = sum(1 for prev, cur in zip(["累"] + tiers[:-1], tiers) if prev != cur)
+        self.assertEqual(1, changes, "推进着读也会变档 %d 次" % changes)
+        self.assertEqual("偏累", tiers[-1])
+        self.assertEqual(moments[-1], _on_disk(self.root)["updated_at"], "结算没把起点推到 now")
+
+    def test_holding_writes_nothing_and_flipping_writes_only_tier(self) -> None:
+        """没换档一个字节都不写；换档只落 tier 一栏，value / updated_at / deducted 不动。"""
+        at = _ts(15, 14)
+        _seed_tiered(self.root, 60.0, "一般", at)
+        path = Path(self.root) / energy.ENERGY_FILE
+        before_text = path.read_text(encoding="utf-8")
+        for _ in range(3):
+            self.assertEqual("一般", energy.read(self.root, now=at)["tier"])
+        self.assertEqual(
+            before_text, path.read_text(encoding="utf-8"), "档位没变却动了文件"
+        )
+
+        expected = dict(_on_disk(self.root))
+        expected["value"] = 77.0  # 越过 b[2] = 75 → 升到「充沛」
+        _patch_energy(self.root, value=77.0)
+        self.assertEqual("充沛", energy.read(self.root, now=at)["tier"])
+
+        after = _on_disk(self.root)
+        self.assertEqual("充沛", after["tier"])
+        stripped = dict(after)
+        stripped.pop("tier", None)
+        wanted = dict(expected)
+        wanted.pop("tier", None)
+        self.assertEqual(
+            json.dumps(wanted, sort_keys=True),
+            json.dumps(stripped, sort_keys=True),
+            "除了 tier 还有别的栏被这次短间隔读取改了",
+        )
+
+    def test_overview_also_lands_a_new_tier(self) -> None:
+        """总览走同一条路：换了档只落 tier，值一个字节不动。"""
+        at = _ts(15, 14)
+        _seed_tiered(self.root, 60.0, "一般", at)
+        _patch_energy(self.root, value=77.0)
+        got = energy.overview(self.root, now=at)
+        self.assertEqual("充沛", got["tier"])
+        after = _on_disk(self.root)
+        self.assertEqual("充沛", after["tier"])
+        self.assertAlmostEqual(77.0, after["value"], places=6)
+        self.assertEqual(at, after["updated_at"])
+
+    # ---- 验收 2：回差 ----------------------------------------------------
+
+    def test_dropping_a_tier_needs_the_gap(self) -> None:
+        """验收 2：从「一般」退到「偏累」要跌到 50 − ENERGY_TIER_GAP = 47（含）以下。
+
+        49 / 48 都还在 3 点缓冲里 → 仍是「一般」；47 正好踩线 → 「偏累」。
+        裸读在 48 就已经变档了（48 < 50），回差就是这 3 点。
+        """
+        self.assertAlmostEqual(3.0, energy.ENERGY_TIER_GAP, msg="迟滞带宽是 3 点")
+        at = _ts(15, 14)
+        got = {}
+        for value in (49.0, 48.0, 47.0):
+            got[value] = self._tier_at(value, "一般", at)
+            print(
+                "    值 %5s → 档 %s（裸读会判 %s）"
+                % (value, got[value], energy._tier(value))
+            )
+        self.assertEqual("一般", got[49.0])
+        self.assertEqual("一般", got[48.0])
+        self.assertEqual("偏累", got[47.0])
+        self.assertAlmostEqual(47.0, 50.0 - energy.ENERGY_TIER_GAP)
+        self.assertEqual("偏累", energy._tier(48.0), "裸读在 48 就该变了")
+
+    def test_one_read_moves_at_most_one_tier(self) -> None:
+        """一次读取只走一格：从「累」直接读到 90 也只升到「偏累」，再读一次才继续。"""
+        at = _ts(15, 14)
+        self.assertEqual("偏累", self._tier_at(90.0, "累", at))
+        self.assertEqual("一般", self._tier_at(90.0, "偏累", at))
+        self.assertEqual("充沛", self._tier_at(90.0, "一般", at))
+        self.assertEqual("充沛", self._tier_at(90.0, "充沛", at))
+
+    def test_unknown_tier_word_falls_back_to_the_bare_read(self) -> None:
+        """档位词不认识（手改坏了）或没有这一栏，都按值现算：不炸，也不卡在别的档上。"""
+        self.assertEqual("一般", self._tier_at(70.0, "胡说", _ts(15, 14)))
+        self.assertEqual("一般", self._tier_at(70.0, None, _ts(15, 14)))
+
+    def test_settled_tier_is_written_back(self) -> None:
+        """档位跟着状态落盘：睡半小时把值从 20 顶到 50，文件里记的是「偏累」。"""
+        at = _ts(15, 23, 30)
+        _seed_tiered(self.root, 20.0, "累", _ts(15, 23))
+        got = energy.read(self.root, now=at)
+        self.assertAlmostEqual(50.0, got["value"], places=1)
+        self.assertEqual("偏累", got["tier"])
+        after = helpers.read_json_file(Path(self.root) / energy.ENERGY_FILE)
+        self.assertEqual("偏累", after["tier"])
+
+    # ---- 验收 4：旧数据兼容 ----------------------------------------------
+
+    def test_old_file_without_tier_is_backfilled_and_unchanged(self) -> None:
+        """验收 4：没有 tier 栏的旧 energy.json：不炸、值与改动前逐字一致，并把 tier 补写回。
+
+        这份旧数据就是 GOLDEN 01：80 分、前推 24 小时 → 76.0 /「充沛」/ 24.0 小时。
+        """
+        at = _ts(15, 14)
+        _seed_state(self.root, 80.0, _ts(14, 14))  # 旧 schema：没有 tier 栏
+        before = helpers.read_json_file(Path(self.root) / energy.ENERGY_FILE)
+        self.assertNotIn("tier", before, "这份旧数据本来就不该有 tier 栏")
+
+        got = energy.read(self.root, now=at)
+        self.assertAlmostEqual(76.0, got["value"], places=4)
+        self.assertEqual("充沛", got["tier"])
+        self.assertAlmostEqual(24.0, got["hours"], places=2)
+        self.assertEqual(_ts(14, 14), got["settled_from"])
+
+        after = helpers.read_json_file(Path(self.root) / energy.ENERGY_FILE)
+        self.assertEqual("充沛", after["tier"], "tier 没补写回文件")
+        self.assertAlmostEqual(76.0, after["value"], places=1)
+        self.assertEqual(at, after["updated_at"])
+        self.assertAlmostEqual(before["deducted"], after["deducted"], places=2)
+
+    def test_old_file_tier_is_the_bare_read_of_that_value(self) -> None:
+        """补写那一次不带迟滞：旧文件没有上一档可继承，答案就是裸读。"""
+        at = _ts(15, 14)
+        _seed_state(self.root, 70.0, _ts(15, 13, 30))  # 半小时醒着 → 68
+        got = energy.read(self.root, now=at)
+        self.assertAlmostEqual(68.0, got["value"], places=1)
+        self.assertEqual(energy._tier(got["value"]), got["tier"])
+
+    # ---- 验收 3：回血封顶 ------------------------------------------------
+
+    def test_wake_cap_caps_the_sleep_recovery(self) -> None:
+        """验收 3：同一起点、同一段长睡（23:00→08:00）：不传封顶 100，wake_cap=95 就停 95。"""
+        for cap, want in ((None, 100.0), (95.0, 95.0)):
+            _seed_state(self.root, 20.0, _ts(15, 23))
+            got = energy.read(self.root, now=_ts(16, 8), wake_cap=cap)
+            print("    wake_cap=%r → value=%s（%s）" % (cap, got["value"], got["tier"]))
+            self.assertAlmostEqual(want, got["value"], places=1, msg=str(cap))
+
+    def test_wake_cap_none_is_100(self) -> None:
+        """None 与显式 100 是同一条路：默认行为一个字都不变。"""
+        seen = []
+        for cap in (None, 100.0, int(model.ENERGY_MAX)):
+            _seed_state(self.root, 20.0, _ts(15, 23))
+            seen.append(energy.read(self.root, now=_ts(16, 8), wake_cap=cap)["value"])
+        self.assertEqual(1, len(set(seen)), "None 和 100 走了两条路：%r" % (seen,))
+
+    def test_wake_cap_only_caps_the_sleeping_hours(self) -> None:
+        """封顶只管睡着那一段：醒着照旧 −4/小时，扣减一分不动。"""
+        _seed_state(self.root, 90.0, _ts(15, 10))
+        awake = energy.read(self.root, now=_ts(15, 12), wake_cap=95.0)
+        self.assertAlmostEqual(82.0, awake["value"], places=1)
+
+        _seed_state(self.root, 40.0, _ts(15, 23))
+        slept = energy.read(self.root, now=_ts(16, 8), wake_cap=95.0)
+        self.assertAlmostEqual(95.0, slept["value"], places=1)
+
+        _seed_state(self.root, 95.0, _ts(16, 8))
+        walked = energy.read(self.root, now=_ts(16, 10), wake_cap=95.0)
+        self.assertAlmostEqual(87.0, walked["value"], places=1)
+
+    def test_wake_cap_survives_the_day_fold(self) -> None:
+        """封顶穿过"整天折算"也不变形：同一段 Δt，折算走的与逐片走的差 < 0.05。"""
+        cases = ((80.0, _ts(15, 20), 24), (60.0, _ts(14, 20), 48), (30.0, _ts(14, 8), 60))
+        for seed, begin, hours in cases:
+            _seed_state(self.root, seed, begin)
+            got = energy.read(self.root, now=_ts(16, 20), wake_cap=95.0)
+            want = _slice_walk(seed, begin, _ts(16, 20), None, 95.0)
+            print(
+                "    %s 小时、起点 %s：折算 %s / 逐片 %.1f（folded_days=%s）"
+                % (hours, seed, got["value"], want, got["folded_days"])
+            )
+            self.assertLess(abs(got["value"] - want), 0.05, "%s 小时折算偏了" % hours)
+            self.assertLessEqual(got["value"], 95.0 + 1e-6, "折算把值顶过了封顶")
+
+    def test_overview_takes_wake_cap_too(self) -> None:
+        """总览与 read 同一个口径：封顶原样传透。"""
+        _seed_state(self.root, 20.0, _ts(15, 23))
+        got = energy.overview(self.root, now=_ts(16, 8), wake_cap=95.0)
+        self.assertAlmostEqual(95.0, got["value"], places=1)
+        self.assertIn("deducted", got)
+
+    def test_bad_wake_cap_raises_value_error(self) -> None:
+        """坏封顶不许糊过去：0–100 之外、非数、bool、nan 都报，并把坏值原样带出来。"""
+        _seed_state(self.root, 50.0, _ts(16, 4))
+        for bad in (-1, 101, "95", True, [95], float("nan")):
+            calls = (
+                lambda: energy.read(self.root, now=_ts(16, 4), wake_cap=bad),
+                lambda: energy.overview(self.root, now=_ts(16, 4), wake_cap=bad),
+            )
+            for call in calls:
+                with self.assertRaises(ValueError) as ctx:
+                    call()
+                message = str(ctx.exception)
+                self.assertIn("wake_cap", message)
+                self.assertIn(repr(bad), message, "消息没原样带出坏值：%s" % message)
 
 
 if __name__ == "__main__":

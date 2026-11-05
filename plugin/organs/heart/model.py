@@ -131,13 +131,15 @@ REASON_FAMILIARITY = "low-familiarity"
 REASON_INTERRUPTED = "recently-interrupted"
 # 近期事件窗口（engage.window_signal 现算）：连续被无视 / 最近 2 小时内被凶。
 REASON_IGNORED = "ignored-recently"
+# 意图排序层（intent.rank 现算）：这一刻最值得开口的念头也没过阈值 → 少说。
+REASON_INTENT_BELOW = "intent-below-threshold"
 REASON_UNATTRIBUTED = "unattributed"
 
 # 硬理由：一条就足够闭嘴，不看别的。
 HARD_REASONS = (REASON_NIGHT, REASON_INSULTED, REASON_DOUBLE_LOW)
 # 软理由：单独不足以沉默，累积才降态。
 SOFT_REASONS = (REASON_TODAY_VOLUME, REASON_FAMILIARITY, REASON_INTERRUPTED,
-                REASON_IGNORED)
+                REASON_IGNORED, REASON_INTENT_BELOW)
 REASONS = HARD_REASONS + SOFT_REASONS + (REASON_UNATTRIBUTED,)
 
 INTENT_PASSIVE = "passive"
@@ -191,11 +193,6 @@ def iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=_local_tz())
     return dt.astimezone().replace(microsecond=0).isoformat()
-
-
-def day_key(value: str) -> str:
-    """时间戳 → 本地日期 "YYYY-MM-DD"。"""
-    return parse_ts(value).astimezone(_local_tz()).date().isoformat()
 
 
 def hours_between(older: "str | datetime", newer: "str | datetime") -> float:

@@ -1,0 +1,42 @@
+{
+  "_note": "装配说明书：先后、每段字数上限、提示词模板、回复预算全在这里——改这一份就改装配，代码里一个数都不写死。读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先，没有才读这份出厂默认（organ/mind/data/assembly.json）。",
+  "order": [
+    "soul",
+    "memory",
+    "heart",
+    "mouth"
+  ],
+  "sections": {
+    "soul": {
+      "label": "魂六件",
+      "cap": 1200
+    },
+    "memory": {
+      "label": "脑装包",
+      "cap": 900
+    },
+    "heart": {
+      "label": "心读数",
+      "cap": 600
+    },
+    "mouth": {
+      "label": "嘴语气",
+      "cap": 400
+    }
+  },
+  "prompt": {
+    "system": "你正在装配这一轮对话的上下文：下面四段按顺序拼好，一个字都不许改。\n\n{sections}\n\n这一次回复不超过 {reply_budget} 个字。{reply_instruction}",
+    "user": "{text}"
+  },
+  "reply": {
+    "budget_by_tier": {
+      "冰点": 40,
+      "偏冷": 70,
+      "平常": 100,
+      "偏热": 140,
+      "滚烫": 180
+    },
+    "default": 100,
+    "instruction": "按你此刻的档位说话：冷的时候字少而克制，热的时候可以多说一点；不摆营业腔，不解释自己是怎么被装配出来的。"
+  }
+}

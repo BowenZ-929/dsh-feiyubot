@@ -639,5 +639,72 @@ class DecideAndLogTest(unittest.TestCase):
             self.assertTrue(caught, "日志写失败要留一行 WARN")
 
 
+class IntentGateTest(unittest.TestCase):
+    """验收 4：意图排序层作为第 5 道软门——只否决，不授予。
+
+    intents 是 intent.rank() 的返回，调用方传进来；decide 不读权重表、不读 pending。
+    pass=False → 主张少说；pass=True → 一个字都不加；没传 → 与没有这道门时逐行一致。
+    """
+
+    def test_below_threshold_adds_less(self) -> None:
+        low = {"pass": False, "score": 0.42, "threshold": 0.55}
+        res = engage.decide(make_input(intents=low))
+        self.assertEqual(res["state"], model.STATE_LESS)
+        self.assertEqual(res["reason"], model.REASON_INTENT_BELOW)
+        self.assertIn(model.REASON_INTENT_BELOW, res["hits"])
+        self.assertEqual(res["soft"], [model.REASON_INTENT_BELOW])
+        self.assertFalse(res["soft_skipped"])
+        self.assertEqual(res["intents"], low)
+
+    def test_below_threshold_is_in_soft_reasons(self) -> None:
+        self.assertIn(model.REASON_INTENT_BELOW, model.SOFT_REASONS)
+        self.assertIn(model.REASON_INTENT_BELOW, model.REASONS)
+
+    def test_pass_true_adds_no_gate(self) -> None:
+        ok = {"pass": True, "score": 0.77, "threshold": 0.55}
+        res = engage.decide(make_input(intents=ok))
+        self.assertEqual(res["state"], model.STATE_SPEAK)
+        self.assertEqual(res["hits"], [])
+        self.assertIsNone(res["reason"])
+        self.assertEqual(res["intents"], ok, "原样带回")
+
+    def test_no_intents_means_no_fifth_gate(self) -> None:
+        res = engage.decide(make_input())
+        self.assertEqual(res["hits"], [])
+        self.assertIsNone(res["intents"])
+
+    def test_intents_without_pass_key_do_not_gate(self) -> None:
+        res = engage.decide(make_input(intents={"score": 0.1, "order": []}))
+        self.assertEqual(res["hits"], [])
+
+    def test_intent_gate_stacks_with_other_soft_gates(self) -> None:
+        res = engage.decide(make_input(today_count=20,
+                                       intents={"pass": False}))
+        self.assertEqual(res["state"], model.STATE_LESS)
+        self.assertEqual(res["hits"],
+                         [model.REASON_TODAY_VOLUME, model.REASON_INTENT_BELOW])
+        self.assertEqual(res["reason"], model.REASON_TODAY_VOLUME)
+
+    def test_hard_gate_still_skips_the_intent_gate(self) -> None:
+        res = engage.decide(make_input(now=NIGHT, intent=model.INTENT_PROACTIVE,
+                                       intents={"pass": False}))
+        self.assertEqual(res["state"], model.STATE_SILENT)
+        self.assertEqual(res["hits"], [model.REASON_NIGHT])
+        self.assertTrue(res["soft_skipped"])
+        self.assertEqual(res["soft"], [])
+
+    def test_broken_intents_value_is_ignored(self) -> None:
+        res = engage.decide(make_input())
+        self.assertIsNone(res["intents"])
+        res = engage.decide(make_input(intents={}))  # type: ignore[arg-type]
+        self.assertEqual(res["hits"], [])
+        self.assertEqual(res["state"], model.STATE_SPEAK)
+
+    def test_decide_does_not_read_the_weights_table(self) -> None:
+        text = Path(engage.__file__).read_text(encoding="utf-8")
+        for banned in ("engage_weights", "import intent", "from organs.heart import intent"):
+            self.assertNotIn(banned, text, "decide 该保持纯函数：%s" % banned)
+
+
 if __name__ == "__main__":
     unittest.main()

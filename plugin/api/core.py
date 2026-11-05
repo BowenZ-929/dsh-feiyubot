@@ -12,7 +12,7 @@ path 可以带查询串（"?"后段由 handle 自己解），也可以把解好�
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 from organs.soul import model
 
@@ -46,14 +46,14 @@ def _merge(*tables: Mapping[str, str]) -> Dict[str, str]:
 
 
 # 器官文件要 import 上面的公共件，所以汇总放最后：否则 core 还没定义完就被回头拿走。
-from . import brain as brain_api, day as day_api, heart as heart_api  # noqa: E402
+from . import brain as brain_api, chat as chat_api, day as day_api, heart as heart_api  # noqa: E402
 from . import home as home_api  # noqa: E402
 from . import mouth as mouth_api, pages as page_api, soul as soul_api  # noqa: E402
 from . import version as version_api  # noqa: E402
 
 ROUTES = _merge(soul_api.SOUL_ROUTES, brain_api.BRAIN_ROUTES, page_api.PAGE_ROUTES,
                 mouth_api.MOUTH_ROUTES, home_api.HOME_ROUTES, heart_api.HEART_ROUTES,
-                version_api.VERSION_ROUTES, day_api.DAY_ROUTES)
+                version_api.VERSION_ROUTES, day_api.DAY_ROUTES, chat_api.CHAT_ROUTES)
 
 
 def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
@@ -61,6 +61,7 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
     """唯一的入口：把一次 HTTP 请求变成 (状态码, JSON 安全的字典)。"""
     method = method.upper()
     route, _, raw_query = path.partition("?")
+    route = unquote(route)   # 中文人名等百分号编码的路径段要先还原，否则匹配不到
     params = dict(query) if query else _parse_query(raw_query)
     if route.startswith("/brain/people/") and route.endswith("/card"):
         return brain_api.dispatch_card(method, route, body, brain)
@@ -90,11 +91,18 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
                          "message": "%s 只收 %s：日子线十条路由各认一个方法，派发前先看这张表"
                                     "（换日与闸门都拦在调度层，换方法绕不过去）"
                                     % (route, ROUTES[route])}
+        if route in chat_api.CHAT_ROUTES:
+            return 405, {"ok": False,
+                         "message": "%s 只收 %s：说话是一条写（说一句话），GET/PUT/DELETE "
+                                    "一律 405（页在 GET 时由 devserver 直接发字节，不走这张表）"
+                                    % (route, ROUTES[route])}
         return 405, {"ok": False, "message": "%s 只收 %s" % (route, ROUTES[route])}
+    if route in chat_api.CHAT_ROUTES:
+        return chat_api.dispatch(route, body, store, brain)
     if route in heart_api.HEART_ROUTES:
         return heart_api.dispatch(route, params, store, brain)
     if route in brain_api.BRAIN_ROUTES:
-        return brain_api.dispatch(route, params, brain)
+        return brain_api.dispatch(route, params, body, brain)
     if route in mouth_api.MOUTH_ROUTES:
         return mouth_api.dispatch(route, params, store, brain)
     if route in home_api.HOME_ROUTES:

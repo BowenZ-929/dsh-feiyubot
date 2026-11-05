@@ -41,6 +41,7 @@ EDGES_FILE = "edges.json"
 EVICTIONS_FILE = "evictions.jsonl"
 TOPIC_CANDIDATES_FILE = "topic_candidates.json"
 PEOPLE_CARD_HISTORY = "people_card_history.jsonl"
+USAGE_FILE = "usage.jsonl"
 CARD_FIELDS = {"称呼": "display", "雷点": "prefs", "备注": "notes", "照片说明": "photo_note"}
 
 TIERS_DEFAULT = {"today_max": 60, "today_demote_count": 20, "hot_max": 20, "hot_lines_max": 3}
@@ -141,6 +142,10 @@ def _read_jsonl_strict(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _usage_rows(path: Path) -> List[Dict[str, Any]]:
+    return _read_jsonl(path)
+
+
 def _short(value: Any) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     text = " ".join(text.split())
@@ -181,8 +186,6 @@ def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
     if "evidence_key" not in row:
         # 亲历的原话出处就是这一行自己；日程模拟没有真实出处，留空 → 无记录背书
         row["evidence_key"] = row["id"] if row.get("source_type") == SOURCE_LIVED else ""
-    row.setdefault("recall_count", 0)
-    row.setdefault("last_recalled_at", "")
     return row
 
 
@@ -219,7 +222,7 @@ class BrainStore:
                 "_note": "未接 NLP：回想到的未登录词（按整句暂存）进候选池，人在面板上收进 topics.json",
             })
         for name in (LONGTERM_FILE, SELF_FILE, PROPOSAL_LOG_FILE, EVICTIONS_FILE,
-                     PEOPLE_CARD_HISTORY):
+                     PEOPLE_CARD_HISTORY, USAGE_FILE):
             path = self._root / name
             if not path.is_file():
                 path.write_text("", encoding="utf-8")
@@ -387,8 +390,7 @@ class BrainStore:
                 "alpha": entry.get("alpha", ALPHA_DEFAULT),
                 "beta": entry.get("beta", BETA_DEFAULT),
                 "evidence_key": entry.get("evidence_key", ""),
-                "recall_count": 0,
-                "last_recalled_at": "",
+                "demoted_to": "hot",
             }, entry_id=entry.get("id", ""))
             longterm_rows.append(row)
         self._append_longterm(longterm_rows)
@@ -413,7 +415,14 @@ class BrainStore:
         rows = hot.get("rows", [])
         if len(rows) <= tiers.get("hot_max", 20):
             return {"ok": True, "evicted": 0}
-        victim = min(rows, key=lambda row: row.get("last_hit_at") or row.get("created_at") or "")
+        def row_last_hit(row: Dict[str, Any]) -> str:
+            times = [self._latest_usage(sid).get("last_recalled_at", "")
+                     if self._latest_usage(sid) else ""
+                     for sid in row.get("source_ids", [])]
+            hits = [t for t in times if t]
+            return min(hits) if hits else (row.get("created_at") or "")
+
+        victim = min(rows, key=row_last_hit)
         hot["rows"] = [row for row in rows if row.get("id") != victim.get("id")]
         self._write_hot(hot)
         self._record_eviction("hot_full", now_ts,
@@ -428,14 +437,12 @@ class BrainStore:
         hot = self._hot()
         for row in hot.get("rows", []):
             if row.get("id") == hot_id:
-                row["hit_count"] = int(row.get("hit_count", 0)) + 1
-                row["last_hit_at"] = now_ts
-                self._write_hot(hot)
                 full_texts = []
                 for source_id in row.get("source_ids", []):
                     found = self._latest_longterm(source_id)
                     if found:
                         full_texts.append(found)
+                    self._record_hit(source_id, now_ts)
                 return {"ok": True, "line": row.get("line"),
                         "source_ids": row.get("source_ids", []),
                         "full_texts": full_texts}
@@ -464,6 +471,9 @@ class BrainStore:
             idle = retention_mod.days_between(now_ts, last)
             if value < threshold and (idle is None or idle >= idle_days):
                 archived_row = dict(entry)
+                archived_row.pop("recall_count", None)
+                archived_row.pop("last_recalled_at", None)
+                archived_row.pop("hit_count", None)
                 archived_row["status"] = STATUS_ARCHIVED
                 archived_row["retention"] = value
                 archived_row["clarity"] = retention_mod.clarity(value, params)
@@ -516,6 +526,21 @@ class BrainStore:
             "longterm": {"count": len(active), "recent": recent_of(active)},
             "cold": {"count": len(cold), "recent": recent_of(cold)},
         }
+
+    def rebuild_index(self, now_ts: Optional[str] = None) -> Dict[str, Any]:
+        """重建热索引（hot.json）：从长期档 demoted_to=hot 的原文重新分组；usage 账不动。"""
+        now_ts = now_ts or now_iso()
+        rows = _read_jsonl(self._root / LONGTERM_FILE)
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if row.get("id"):
+                latest[row["id"]] = row
+        demoted = [row for row in latest.values()
+                   if row.get("demoted_to") == "hot"
+                   and row.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
+        rebuilt = self._build_hot_rows(demoted, now_ts)
+        self._write_hot({"rows": rebuilt})
+        return {"ok": True, "hot_rows": len(rebuilt), "source_rows": len(demoted)}
 
     def cold_page(self, cursor: Optional[str] = None,
                   limit: int = 20, now_ts: Optional[str] = None) -> Dict[str, Any]:
@@ -695,15 +720,38 @@ class BrainStore:
         """长期档全部行（含 tombstone，审计用）。"""
         return _read_jsonl(self._root / LONGTERM_FILE)
 
+    def usage_entries(self) -> List[Dict[str, Any]]:
+        """命中账：hit_count / last_hit_at / recall_count 单列一本账，索引重建不丢。"""
+        return _usage_rows(self._root / USAGE_FILE)
+
+    def _append_usage(self, record: Dict[str, Any]) -> None:
+        _append_jsonl(self._root / USAGE_FILE, record)
+
+    def _latest_usage(self, entry_id: str) -> Optional[Dict[str, Any]]:
+        latest = None
+        for row in _usage_rows(self._root / USAGE_FILE):
+            if row.get("id") == entry_id:
+                latest = row
+        return latest
+
+    def _merge_usage(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(entry)
+        usage = self._latest_usage(entry.get("id", ""))
+        if usage:
+            merged["recall_count"] = usage.get("recall_count", 0)
+            merged["last_recalled_at"] = usage.get("last_recalled_at", "")
+            merged["hit_count"] = usage.get("hit_count", 0)
+        return merged
+
     def longterm_active_entries(self) -> List[Dict[str, Any]]:
-        """长期档在役条目：同 id 只认最后一行（tombstone 覆盖旧行），status 进查询条件。"""
+        """长期档在役条目：同 id 只认最后一行，status 进查询；命中账从 usage 现合并。"""
         rows = _read_jsonl(self._root / LONGTERM_FILE)
         latest: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             row_id = row.get("id")
             if row_id:
                 latest[row_id] = row
-        return [row for row in latest.values()
+        return [self._merge_usage(row) for row in latest.values()
                 if row.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
 
     def import_rows(self, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1004,25 +1052,23 @@ class BrainStore:
         self._add_topic_candidates(result.get("items", []), now_ts)
         return result
 
+    def _record_hit(self, entry_id: str, now_ts: str) -> None:
+        usage = self._latest_usage(entry_id) or {}
+        record = {
+            "id": entry_id,
+            "ts": now_ts,
+            "recall_count": int(usage.get("recall_count", 0)) + 1,
+            "last_recalled_at": now_ts,
+            "hit_count": int(usage.get("hit_count", 0)) + 1,
+        }
+        self._append_usage(record)
+
     def _write_back_hits(self, items: Sequence[Dict[str, Any]], now_ts: str) -> None:
-        """命中回写：长期/热条目想起次数 +1、最后想起时间更新（遗忘曲线靠它）。"""
+        """命中回写：只进 usage 账（hit_count/想起次数/最后命中时间），行本身不动。"""
         for item in items:
-            entry_id = item.get("id", "")
             source = item.get("source", "")
-            if source == "hot":
-                hot = self._hot()
-                for row in hot.get("rows", []):
-                    if entry_id in row.get("source_ids", []):
-                        row["hit_count"] = int(row.get("hit_count", 0)) + 1
-                        row["last_hit_at"] = now_ts
-                self._write_hot(hot)
             if source in ("longterm", "hot"):
-                found = self._latest_longterm(entry_id)
-                if found:
-                    updated = dict(found)
-                    updated["recall_count"] = int(updated.get("recall_count", 0)) + 1
-                    updated["last_recalled_at"] = now_ts
-                    _append_jsonl(self._root / LONGTERM_FILE, updated)
+                self._record_hit(item.get("id", ""), now_ts)
 
     def vector_rerank(self, query: str,
                       candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:

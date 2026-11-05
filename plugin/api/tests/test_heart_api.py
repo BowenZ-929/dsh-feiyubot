@@ -1,4 +1,5 @@
-"""心的九个只读端点：形状、405 措辞、坏卡不假装、轨迹、干跑、偏移键集、唯一合成点、窗口。
+"""心的十个只读端点：形状、405 措辞、坏卡不假装、轨迹、干跑、偏移键集、唯一合成点、窗口、
+睡眠账与意图排序。
 
 判据（architecture §9.2：心与脑只能看）：
 - 九条路由全是 GET，写方法一律 405，且心的措辞点名「只收 GET」；
@@ -22,6 +23,7 @@ import re
 import tempfile
 import unittest
 import warnings
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -33,15 +35,17 @@ from organs.heart import engage as engage_module
 from organs.heart import model as heart_model
 from organs.heart import mood as mood_module
 from organs.heart import events as events_module
+from organs.heart import intent as intent_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
+from organs.heart import sleep as sleep_module
 
 PLUGIN = Path(__file__).resolve().parents[2]
 REAL_CARD = PLUGIN / "organs" / "heart" / "data" / "baseline-card.json"
 
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending")
+                "/heart/pending", "/heart/sleep")
 
 # 固定时刻：断言不看"现在几点"。09:00 / 23:00 分别避开与落进夜间窗口（23-8）。
 T0 = "2026-11-05T09:00:00+09:00"
@@ -50,6 +54,27 @@ T0 = "2026-11-05T09:00:00+09:00"
 def _stamp(day: int, hour: int, minute: int = 0) -> str:
     """造一个带 +09:00 的 ISO 时刻；跨天、跨时段都靠它，不依赖本机时区。"""
     return "2026-11-%02dT%02d:%02d:00+09:00" % (day, hour, minute)
+
+
+_START = datetime(2026, 11, 1)
+
+
+def _local(day: int, hour: int = 0, minute: int = 0) -> str:
+    """起点之后第 day 天的 hour:minute（本机时区，与 sleep 的锚点同一把挂钟）。
+
+    睡眠账判熬夜用的是「醒来的那一刻往前找最近一次基准起点」的本地挂钟小时，
+    所以睡眠账相关的时刻一律用本地时间造，别掺 +09:00 的固定偏移。
+    """
+    return heart_model.iso(_START + timedelta(days=day, hours=hour, minutes=minute))
+
+
+def _night(root: Any, day: int, late_min: float = 0.0, minutes: float = 480.0) -> Any:
+    """day 那天 23:00 之后第 late_min 分钟睡，睡 minutes 分钟后醒；返回醒来的那笔。"""
+    onset = heart_model.parse_ts(_local(day, 23)) + timedelta(minutes=float(late_min))
+    sleep_module.record(sleep_module.KIND_ASLEEP, root=root, now=heart_model.iso(onset))
+    return sleep_module.record(
+        sleep_module.KIND_AWAKE, root=root,
+        now=heart_model.iso(onset + timedelta(minutes=float(minutes))))
 
 
 class HeartApiTest(unittest.TestCase):
@@ -62,11 +87,14 @@ class HeartApiTest(unittest.TestCase):
         self.root.mkdir()
         (self.root / card_module.CARD_FILE).write_bytes(REAL_CARD.read_bytes())
 
-    def get(self, route: str, **params: Any) -> Any:
-        """打一条 GET；root 一律指向临时根，payload 必须能 json.dumps。"""
+    def get(self, route: str, brain: Any = None, **params: Any) -> Any:
+        """打一条 GET；root 一律指向临时根，payload 必须能 json.dumps。
+
+        brain 是关键字参数、不进查询串：它是宿主给的那只脑（缺省 None = 心的降级路径）。
+        """
         query = dict((key, str(value)) for key, value in params.items() if value is not None)
         query.setdefault("root", str(self.root))
-        status, payload = api.handle("GET", route, None, None, query=query)
+        status, payload = api.handle("GET", route, None, None, query=query, brain=brain)
         json.dumps(payload, ensure_ascii=False)
         return status, payload
 
@@ -100,7 +128,7 @@ class EightReadonlyRoutes(HeartApiTest):
             self.assertEqual(200, status, route)
             for key in ("status", "ok", "readonly", "agent", "baseline", "render",
                         "mood", "energy", "offset", "pending", "thoughts", "window",
-                        "effective"):
+                        "effective", "intents"):
                 self.assertIn(key, payload, "%s 少了 %s" % (route, key))
             self.assertEqual("已接入", payload["status"])
             self.assertTrue(payload["ok"])
@@ -557,6 +585,198 @@ class WindowReachesTheEndpoint(HeartApiTest):
         overview = self.get("/heart/overview", now=T0)[1]["window"]
         self.assertEqual(judged, overview, "/heart/overview 的窗口与判决用的不是同一份 signal")
         self.assertEqual(1, overview["harsh"])
+
+
+class SleepAccountRoute(HeartApiTest):
+    """/heart/sleep：睡眠账的只读读数，且它真的接进了 energy 的结算。
+
+    三条口径：
+    - 纯读：GET 一次不长出 sleep.json（只有 sleep.record 才落账）；
+    - 派生量读时现算：连续熬夜把窗口整体后移、连续没睡够把回血封顶下调；
+    - 后移的窗口**真的**落到 /heart/energy 的结算上——不是只报一个数给人看。
+    """
+
+    def test_route_is_registered_with_the_readonly_envelope(self):
+        self.assertIn("/heart/sleep", api.ROUTES)
+        self.assertEqual("GET", api.ROUTES["/heart/sleep"])
+        status, payload = self.get("/heart/sleep", now=_local(1, 12))
+        self.assertEqual(200, status, payload)
+        for key in ("ok", "readonly", "agent", "status", "config", "last_asleep_at",
+                    "last_awake_at", "last_duration_min", "consecutive_late_nights",
+                    "consecutive_short_nights", "drift_hours", "effective_window",
+                    "wake_cap", "awake_minutes", "nights"):
+            self.assertIn(key, payload, "/heart/sleep 少了 %s" % key)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("heart", payload["agent"])
+        self.assertEqual("已接入", payload["status"])
+        # 空账：出厂窗口 (23, 8)，回血封顶就是 ENERGY_MAX，一个夜晚都还没落
+        self.assertEqual([23, 8], payload["effective_window"])
+        self.assertEqual(float(heart_model.ENERGY_MAX), payload["wake_cap"])
+        self.assertEqual([], payload["nights"])
+        self.assertEqual(0, payload["consecutive_late_nights"])
+
+    def test_empty_root_stays_empty(self):
+        self.get("/heart/sleep", now=_local(1, 12))
+        self.assertFalse((self.root / sleep_module.SLEEP_FILE).exists(),
+                         "/heart/sleep 是纯读：不许凭空落一个 sleep.json")
+
+    def test_three_late_nights_shift_the_window_and_energy_follows(self):
+        for day in (1, 2, 3):
+            _night(self.root, day, late_min=90)
+        status, payload = self.get("/heart/sleep", now=_local(4, 12))
+        self.assertEqual(200, status)
+        self.assertEqual(3, payload["consecutive_late_nights"])
+        self.assertEqual(1.5, payload["drift_hours"])
+        self.assertEqual([1, 10], payload["effective_window"])
+
+        energy_payload = self.get("/heart/energy", now=_local(4, 12))[1]
+        self.assertEqual([1, 10], energy_payload["sleep_window"],
+                         "/heart/energy 没有把睡眠账的生效窗口接进去")
+        self.assertEqual(payload["wake_cap"], energy_payload["wake_cap"])
+
+        # 结算真的变了：两个同源子根、同一个起点与结算区间，只差窗口
+        plain = self.root / "plain"
+        shifted = self.root / "shifted"
+        for sub in (plain, shifted):
+            sub.mkdir()
+            (sub / sleep_module.SLEEP_FILE).write_bytes(
+                (self.root / sleep_module.SLEEP_FILE).read_bytes())
+        start, later = _local(4, 12), _local(5, 12)
+        energy_module.read(plain, start)
+        energy_module.read(shifted, start)
+        factory = energy_module.read(plain, later, sleep_window=(23, 8))
+        moved = energy_module.read(shifted, later,
+                                   sleep_window=sleep_module.effective_window(shifted, later))
+        self.assertNotEqual(factory["value"], moved["value"],
+                           "窗口后移没有改变结算：这一格根本没接上")
+
+        shipped = self.get("/heart/energy", now=later, root=str(shifted))[1]
+        self.assertEqual(moved["value"], shipped["value"],
+                         "/heart/energy 算出来的值与它自报的窗口不是一回事")
+
+    def test_two_short_nights_lower_the_wake_cap(self):
+        _night(self.root, 1)
+        _night(self.root, 2, minutes=240)
+        first = self.get("/heart/sleep", now=_local(3, 4))[1]
+        self.assertEqual(1, first["consecutive_short_nights"])
+        self.assertEqual(float(heart_model.ENERGY_MAX), first["wake_cap"],
+                         "只差一晚，封顶还不该动")
+        _night(self.root, 3, minutes=240)
+        second = self.get("/heart/sleep", now=_local(4, 4))[1]
+        self.assertEqual(2, second["consecutive_short_nights"])
+        self.assertEqual(95.0, second["wake_cap"], "连续两晚没睡够要下调 5")
+        self.assertEqual(95.0, self.get("/heart/energy", now=_local(4, 4))[1]["wake_cap"],
+                         "/heart/energy 没有把回血封顶接进去")
+
+    def test_engage_gate_reads_the_same_energy_as_the_energy_route(self):
+        """门用的精力与 /heart/energy 那一格是同一个数——冷启动也不许分叉。
+
+        三个同源子根，账面与起点逐字相同：A 先跑一次判决、B 读 /heart/energy、
+        C 故意用出厂窗口结算。判决与 /heart/energy 必须同值，而 C 必须不等于 B——
+        最后这条是这条用例的牙：它证明这个场景下两本窗口算出来的数本来就不一样，
+        否则"两边相等"是白捡的。
+        """
+        for day in (1, 2, 3):
+            _night(self.root, day, late_min=90)
+        now = _local(4, 12)
+        onset = _local(3, 8, 10)  # 那一夜醒来的时刻：结算就从这儿算到 now
+        seed = json.dumps({"version": 1, "value": 80.0, "updated_at": onset,
+                           "day": onset[:10], "deducted": 0.0,
+                           "last_burst_at": None})
+        twins = {}
+        for name in ("a", "b", "c"):
+            sub = self.root / ("twin-" + name)
+            sub.mkdir()
+            (sub / sleep_module.SLEEP_FILE).write_bytes(
+                (self.root / sleep_module.SLEEP_FILE).read_bytes())
+            (sub / energy_module.ENERGY_FILE).write_text(seed, encoding="utf-8")
+            twins[name] = sub
+
+        engaged = self.get("/heart/engage", now=now, root=str(twins["a"]))[1]
+        route = self.get("/heart/energy", now=now, root=str(twins["b"]))[1]
+        factory = energy_module.read(twins["c"], now, sleep_window=(23, 8))
+
+        self.assertEqual(route["value"], engaged["readouts"]["energy"],
+                         "门用的精力不是按睡眠账窗口结算出来的那个数")
+        self.assertNotEqual(factory["value"], route["value"],
+                            "这个场景两本窗口算出来一样，上一条断言就没有牙了")
+
+    def test_overview_energy_uses_the_same_terms(self):
+        for day in (1, 2, 3):
+            _night(self.root, day, late_min=90)
+        now = _local(4, 12)
+        energy_payload = self.get("/heart/energy", now=now)[1]
+        overview = self.get("/heart/overview", now=now)[1]
+        self.assertEqual(energy_payload["value"], overview["energy"]["value"],
+                         "总览的精力与 /heart/energy 不是同一个数：两边窗口一定分叉了")
+        self.assertEqual(energy_payload["tier"], overview["energy"]["tier"])
+
+
+class IntentRankingReachesTheEndpoints(HeartApiTest):
+    """第四轮接线：意图排序要能从端点上看见，且 pass 真的会翻。
+
+    - /heart/overview 带 intents 块（order / top / score / threshold / clarity / pass）；
+    - /heart/engage 把同一份 rank 送进第 5 道软门，返回体原样带回；
+    - 阈值从**临时根**里的权重表读（出厂文件不动）：调高阈值，pass 从 True 变 False，
+      判决随之多一道 intent-below。
+    """
+
+    def _put_weights(self, **overrides: Any) -> None:
+        """把出厂权重表复制到临时根再改几格：人改文件即生效，不动出厂那份。"""
+        table = intent_module.load_weights()
+        table.update(overrides)
+        (self.root / intent_module.WEIGHTS_FILE).write_text(
+            json.dumps(table, ensure_ascii=False), encoding="utf-8")
+
+    def _talked_just_now(self) -> None:
+        """09:00 前 4 分钟刚回过一句：没聊完，30 分钟窗口内、之后没有收尾 normal。"""
+        events_module.deliver("replied", root=self.root, now=_stamp(5, 8, 56))
+
+    def test_overview_carries_the_ranking_block(self):
+        self._put_weights()
+        status, payload = self.get("/heart/overview", now=T0, brain=_WarmBrain())
+        self.assertEqual(200, status)
+        block = payload["intents"]
+        for key in ("order", "top", "score", "threshold", "clarity", "pass"):
+            self.assertIn(key, block, "intents 块少了 %s" % key)
+        self.assertEqual(len(intent_module.INTENT_ORDER), len(block["order"]))
+        for row in block["order"]:
+            self.assertEqual({"intent", "weight", "hit", "why"}, set(row))
+        weights = [row["weight"] for row in block["order"]]
+        self.assertEqual(sorted(weights, reverse=True), weights, "order 要按权重降序")
+        self.assertEqual(intent_module.DEFAULT_THRESHOLD, block["threshold"])
+
+    def test_engage_carries_the_same_rank_as_the_overview(self):
+        self._put_weights()
+        self._talked_just_now()
+        overview = self.get("/heart/overview", now=T0, brain=_WarmBrain())[1]
+        engaged = self.get("/heart/engage", now=T0, brain=_WarmBrain())[1]
+        self.assertEqual(overview["intents"], engaged["intents"],
+                         "总览与判决读到的排序不是同一份")
+        self.assertIsNotNone(engaged["intents"]["top"])
+        self.assertIn(engaged["intents"]["top"]["intent"],
+                      [row["intent"] for row in engaged["intents"]["order"]])
+
+    def test_raising_the_threshold_flips_pass_and_adds_the_gate(self):
+        self._put_weights()
+        self._talked_just_now()
+        passed = self.get("/heart/engage", now=T0, brain=_WarmBrain())[1]
+        self.assertTrue(passed["intents"]["pass"], passed["intents"])
+        self.assertNotIn(heart_model.REASON_INTENT_BELOW, passed["hits"],
+                         "pass=True 时第 5 道软门一个字都不该加")
+        self.assertEqual(heart_model.STATE_SPEAK, passed["state"])
+
+        self._put_weights(threshold=0.95)
+        blocked = self.get("/heart/engage", now=T0, brain=_WarmBrain())[1]
+        self.assertFalse(blocked["intents"]["pass"])
+        self.assertLess(blocked["intents"]["score"], blocked["intents"]["threshold"])
+        self.assertIn(heart_model.REASON_INTENT_BELOW, blocked["hits"],
+                      "pass=False 时第 5 道软门必须命中")
+        self.assertEqual(heart_model.STATE_LESS, blocked["state"])
+        # 阈值只改了「值不值得开口」那条线，排序与权重一个字不动
+        self.assertEqual([row["weight"] for row in passed["intents"]["order"]],
+                         [row["weight"] for row in blocked["intents"]["order"]])
 
 
 if __name__ == "__main__":

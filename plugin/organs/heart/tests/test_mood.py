@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from organs.day import model as day_model
 from organs.heart import events, model, mood
 from organs.heart.tests import helpers
 
@@ -67,7 +68,7 @@ class MoodTest(unittest.TestCase):
             "now": now_value,
             "baseline": baseline,
             "updated_at": at,
-            "day": day or model.day_key(at),
+            "day": day or day_model.day_key(at, cutover_hour=0),
             "conflict_used": conflict_used,
             "window": dict(window or {}),
         }
@@ -359,7 +360,7 @@ class MoodTest(unittest.TestCase):
         """昨天用满的配额不带进今天。"""
         start = _at()
         yesterday = _at(-24)
-        self._seed(60, 60, start, conflict_used=2, day=model.day_key(yesterday))
+        self._seed(60, 60, start, conflict_used=2, day=day_model.day_key(yesterday, cutover_hour=0))
         got = mood.apply_event("conflict", self.root, now=start, who="甲")
         self.assertTrue(got["ok"], "跨日了还按昨天的 conflict_used 封顶")
 
@@ -478,7 +479,7 @@ class MoodTest(unittest.TestCase):
         state = self._state()
         self.assertAlmostEqual(70.0, state["baseline"], places=1)
         self.assertEqual(0, state["conflict_used"])
-        self.assertEqual(model.day_key(start), state["day"])
+        self.assertEqual(day_model.day_key(start, cutover_hour=0), state["day"])
 
     def test_settle_day_keeps_baseline_in_range(self) -> None:
         """基线永远夹在刻度里，哪怕种子数据已经在边上。"""

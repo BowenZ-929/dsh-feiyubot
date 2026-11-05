@@ -1,4 +1,4 @@
-"""心的人可读自检：python3 -m organs.heart.cli <card|energy-day|mood-praise3|gates|pending|window|all>。
+"""心的人可读自检：python3 -m organs.heart.cli <card|energy-day|sleep|mood-praise3|gates|intent|pending|window|all>。
 
 只做演示与取证，不是产品入口：每条命令都把数据根指到 tempfile.mkdtemp() 的临时目录，
 第一行就把这个路径打印出来——**仓里的 data 一个字节都不碰**。
@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -20,12 +21,15 @@ from organs.heart import card as card_module
 from organs.heart import energy as energy_module
 from organs.heart import engage as engage_module
 from organs.heart import events as events_module
+from organs.heart import intent as intent_module
 from organs.heart import model
 from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
+from organs.heart import sleep as sleep_module
 
-SECTIONS = ("card", "energy-day", "mood-praise3", "gates", "pending", "window")
+SECTIONS = ("card", "energy-day", "sleep", "mood-praise3", "gates", "intent", "pending",
+            "window")
 
 # 三连夸的期望值：写成字面量，不按公式现算——现算就等于拿实现给它自己判卷。
 PRAISE_EXPECTED = (64.0, 67.3, 70.1)
@@ -103,6 +107,82 @@ def demo_energy_day(root: Path) -> None:
           % (again["value"], again["value"] == after["value"]))
     print("  第二次的结算区间：%s → %s（Δt 小于 10 分钟就不动，连文件都不碰）"
           % (again["settled_from"], again["settled_to"]))
+
+
+# ---- sleep：两晚没睡够 → wake_cap 95；三夜晚睡 → 窗口后移，energy 跟着变 ----
+
+
+_NIGHT_START = datetime(2026, 11, 1)
+
+
+def _local(day: int, hour: int = 0, minute: int = 0) -> str:
+    """起点之后第 day 天的 hour:minute（本机挂钟：睡眠账判熬夜按本地小时算锚点）。"""
+    return model.iso(_NIGHT_START + timedelta(days=day, hours=hour, minutes=minute))
+
+
+def _night(root: Path, day: int, late_min: float = 0.0,
+           minutes: float = 480.0) -> Dict[str, Any]:
+    """day 那天 23:00 之后第 late_min 分钟睡、睡 minutes 分钟后醒；返回醒来的那笔。"""
+    onset = model.parse_ts(_local(day, 23)) + timedelta(minutes=float(late_min))
+    sleep_module.record(sleep_module.KIND_ASLEEP, root=root, now=model.iso(onset))
+    return sleep_module.record(
+        sleep_module.KIND_AWAKE, root=root,
+        now=model.iso(onset + timedelta(minutes=float(minutes))))
+
+
+def demo_sleep(root: Path) -> None:
+    """六夜三幕：按时睡够 → 两晚没睡够（回血封顶降到 95）→ 三夜晚睡（窗口后移）。
+
+    两个派生量都读时现算、不落盘：drift 只修正 energy 那边的窗口（窗口整体后移），
+    wake_cap 只封睡着那一段的回血。最后拿两个同源子根把「后移的窗口真的改变结算」
+    摆出来——同一个起点、同一段 Δt，只差一个窗口。
+    """
+    _root_note(root)
+    print("  %-3s %-34s %-5s %-5s %-6s %-8s %s"
+          % ("夜", "这一夜", "熬夜", "睡够", "连续熬夜", "没睡够", "drift / 生效窗口 / wake_cap"))
+    plan = ((1, 0.0, 480.0, "按时睡够（23:00 → 07:00）"),
+            (2, 0.0, 240.0, "第一晚只睡 4 小时"),
+            (3, 0.0, 240.0, "第二晚只睡 4 小时"),
+            (4, 90.0, 460.0, "第一晚 00:30 才睡（睡够）"),
+            (5, 90.0, 460.0, "第二晚 00:30 才睡"),
+            (6, 90.0, 460.0, "第三晚 00:30 才睡"))
+    for day, late, minutes, label in plan:
+        got = _night(root, day, late_min=late, minutes=minutes)
+        night = got["night"] or {}
+        snap = sleep_module.overview(root, _local(day + 1, 12))
+        print("  %-3d %-34s %-5s %-5s %-8d %-8d %s"
+              % (day, label,
+                 "是" if night.get("late") else "否",
+                 "是" if night.get("enough") else "否",
+                 snap["consecutive_late_nights"], snap["consecutive_short_nights"],
+                 "%.1fh → %s 点 / wake_cap %.0f"
+                 % (snap["drift_hours"], snap["effective_window"], snap["wake_cap"])))
+    snap = sleep_module.overview(root, _local(7, 12))
+    print("  两晚没睡够（第 2、3 夜）→ 回血封顶 %.0f（= %d − %.0f）；"
+          "第 4 夜睡够就回满，所以末尾又是 %.0f。"
+          % (95.0, model.ENERGY_MAX, 5.0, snap["wake_cap"]))
+    print("  三夜晚睡（第 4、5、6 夜）→ drift %.1f 小时，生效窗口从 (23, 8) 后移到 %s 点。"
+          % (snap["drift_hours"], snap["effective_window"]))
+
+    plain = root / "energy-plain"
+    shifted = root / "energy-shifted"
+    for sub in (plain, shifted):
+        sub.mkdir()
+        (sub / sleep_module.SLEEP_FILE).write_bytes(
+            (root / sleep_module.SLEEP_FILE).read_bytes())
+    start, later = _local(7, 12), _local(8, 12)
+    energy_module.read(plain, start)
+    energy_module.read(shifted, start)
+    window = sleep_module.effective_window(shifted, later)
+    factory = energy_module.read(plain, later, sleep_window=energy_module.DEFAULT_SLEEP_WINDOW)
+    moved = energy_module.read(shifted, later, sleep_window=window)
+    print("  同一本睡眠账、同一个起点 %.1f、同一段 Δt（%s → %s）："
+          % (float(model.ENERGY_WAKE_DEFAULT), start, later))
+    print("    出厂窗口 %s：value=%.1f（%s）"
+          % (energy_module.DEFAULT_SLEEP_WINDOW, factory["value"], factory["tier"]))
+    print("    生效窗口 %s：value=%.1f（%s）  差 %+.1f"
+          % (window, moved["value"], moved["tier"], moved["value"] - factory["value"]))
+    print("  所以窗口不是给人看的数：它真的换了 energy 的结算。")
 
 
 # ---- mood-praise3：60 → 64.0 → 67.3 → 70.1（3 小时后 65.1） -----------------
@@ -184,6 +264,56 @@ def demo_gates(root: Path) -> None:
     print("  归因账：total=%d unattributed=%d" % (report["total"], report["unattributed"]))
     for reason in sorted(report["by_reason"]):
         print("    %-22s %d 次" % (reason, report["by_reason"][reason]))
+
+
+# ---- intent：三意图同命中 → order / top / pass；阈值 +0.15 → pass 翻成 false -------
+
+
+def _show_rank(rank: Dict[str, Any]) -> None:
+    """把一次排序摊开：order 的每一行 + top + 阈值 + pass。"""
+    print("  %-15s %-7s %-5s %s" % ("intent", "weight", "hit", "why"))
+    for row in rank["order"]:
+        print("  %-15s %-7.3f %-5s %s"
+              % (row["intent"], row["weight"], "是" if row["hit"] else "否", row["why"]))
+    top = rank["top"]
+    print("  命中 %d 条；top=%s（%.3f），阈值 %.2f，清醒度系数 %.2f → pass=%s"
+          % (len([row for row in rank["order"] if row["hit"]]),
+             top["intent"] if top else "（无）", rank["score"], rank["threshold"],
+             rank["clarity"]["factor"], rank["pass"]))
+
+
+def demo_intent(root: Path) -> None:
+    """三个意图同时成立时的排序，再改**临时根里**的阈值看 pass 怎么翻。
+
+    22:56 回过一句没人接、之后连着两条 ignored、精力 60 且今天没聊几条 →
+    没聊完 / 没出口的话 / 无聊同时命中。阈值从 0.55 抬到 0.70（+0.15）后
+    score 不动、pass 变 False——这就是「值不值得开口」那条线，它不决定闭不闭嘴。
+    出厂那份 engage_weights.json 一个字节都不动：改的是临时根里的副本。
+    """
+    _root_note(root)
+    table = intent_module.load_weights()  # 出厂那份：root=None → 数据目录（只读）
+    (root / intent_module.WEIGHTS_FILE).write_text(
+        json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    events_module.deliver("replied", root=root, now=_local(1, 22, 56))
+    for minute in (57, 58):
+        events_module.deliver("ignored", root=root, now=_local(1, 22, minute))
+    now = _local(1, 23)
+    context = {"today_count": 0, "familiarity": 2.0, "energy_value": 60.0}
+    print("  造境：%s 回过一句没人接，%s 两条 ignored；精力 60、今日 0 条、熟稔 2.0。"
+          % (_local(1, 22, 56), " / ".join(_local(1, 22, m) for m in (57, 58))))
+    first = intent_module.rank(root, now, context=context)
+    _show_rank(first)
+
+    table["threshold"] = round(float(table["threshold"]) + 0.15, 2)
+    (root / intent_module.WEIGHTS_FILE).write_text(
+        json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    second = intent_module.rank(root, now, context=context)
+    print("  只把临时根里的阈值 %.2f → %.2f（+0.15），权重与排序一个字没动："
+          % (first["threshold"], second["threshold"]))
+    _show_rank(second)
+    print("  结论：score %.3f 没变（%s），pass %s → %s——阈值那条线只管「值不值得开口」。"
+          % (second["score"], "权重 × 清醒度",
+             first["pass"], second["pass"]))
 
 
 # ---- pending：三条冷落长出「想被夸」→ 结算消失；轴念头 TTL 到点 fade + 回吐 -----
@@ -268,7 +398,8 @@ def demo_window(root: Path) -> None:
 
 
 DEMOS = {"card": demo_card, "energy-day": demo_energy_day,
-         "mood-praise3": demo_mood_praise3, "gates": demo_gates,
+         "sleep": demo_sleep, "mood-praise3": demo_mood_praise3,
+         "gates": demo_gates, "intent": demo_intent,
          "pending": demo_pending, "window": demo_window}
 
 

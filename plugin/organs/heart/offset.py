@@ -32,6 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from organs.day import model as day_model
 from organs.heart import model, store
 
 OFFSET_FILE = "offset.json"
@@ -201,7 +202,7 @@ def apply_daily(axis: str, delta: float, root: Any = None,
     if axis not in model.AXES:
         raise ValueError("未知轴：%r" % (axis,))
     stamp = now or model.now_iso()
-    today = model.day_key(stamp)
+    today = day_model.day_key(stamp, cutover_hour=0)
     state = _load_state(root)
 
     row = _row(state, axis)
@@ -260,7 +261,7 @@ def settle_week(values: Dict[str, float], root: Any = None,
             raise ValueError("未知轴：%r" % (axis,))
     stamp = now or model.now_iso()
     week = _week_key(stamp)
-    today = model.day_key(stamp)
+    today = day_model.day_key(stamp, cutover_hour=0)
     state = _load_state(root)
 
     settled: Dict[str, Dict[str, Any]] = {}

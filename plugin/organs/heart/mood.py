@@ -42,6 +42,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from organs.day import model as day_model
 from organs.heart import events, model, store
 
 MOOD_FILE = "mood.json"
@@ -121,7 +122,7 @@ def _load(root: Any, at: str) -> Dict[str, Any]:
         else at,
         "day": data.get("day")
         if isinstance(data.get("day"), str) and data.get("day")
-        else model.day_key(at),
+        else day_model.day_key(at, cutover_hour=0),
         "conflict_used": max(0, _as_int(data.get("conflict_used"), 0)),
         "window": dict(window) if isinstance(window, dict) else {},
     }
@@ -274,7 +275,7 @@ def apply_event(
     at = now if isinstance(now, str) and now else model.now_iso()
     state = _load(root, at)
     hour = _hour_key(at)
-    today = model.day_key(at)
+    today = day_model.day_key(at, cutover_hour=0)
     label = who if isinstance(who, str) and who else "主人"
 
     if state["window"].get(label) == hour:
@@ -353,7 +354,7 @@ def settle_day(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
     at = now if isinstance(now, str) and now else model.now_iso()
     state = _load(root, at)
     values = _effective(state, at)
-    today = model.day_key(at)
+    today = day_model.day_key(at, cutover_hour=0)
     absorbed = (values["now"] - values["baseline"]) / 2.0
     after_baseline = _clamp(values["baseline"] + absorbed)
 

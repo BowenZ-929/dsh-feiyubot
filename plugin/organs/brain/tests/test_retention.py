@@ -23,12 +23,9 @@ class RetentionTest(unittest.TestCase):
         self.assertTrue(before["has_material"])
         # 换日：今日全文进长期档，再改时间制造低 retention + 闲置超限
         store.today_entries("2026-11-20T10:00:00+00:00")
-        found = store._latest_longterm(entry_id)
-        updated = dict(found)
-        updated["ts"] = "2026-10-01T10:00:00+00:00"
-        updated["last_recalled_at"] = "2026-10-02T10:00:00+00:00"
-        updated["recall_count"] = 0
-        store._append_longterm([updated])
+        store._append_usage({"id": entry_id, "ts": "2026-10-02T10:00:00+00:00",
+                             "recall_count": 0, "last_recalled_at": "2026-10-02T10:00:00+00:00",
+                             "hit_count": 0})
         # 状态二：读时结算 → 落冷仓，回想想不起来
         after = store.recall("我妈", now_ts="2026-11-20T10:05:00+00:00")
         self.assertFalse(after["has_material"], "该想不起来了")

@@ -19,7 +19,10 @@ PAGE_ROUTES: Dict[str, str] = {}
 # 静态页：路径 → 页面文件（devserver 直接发字节，不经 api.handle）
 PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "soul.html",
                               "/heart": "heart.html", "/brain": "brain.html",
-                              "/home": "home.html"}
+                              "/home": "home.html",
+                              # 说话页：GET /chat 发这一页的字节，POST /chat 走 api.handle
+                              #（devserver._dispatch 只在 GET 时查 PAGE_FILES，两条不打架）。
+                              "/chat": "chat.html"}
 
 
 def read_page(name: str, root: Optional[Path] = None) -> Optional[bytes]:

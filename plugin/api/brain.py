@@ -22,6 +22,7 @@ BRAIN_ROUTES = {
     "/brain/proposals": "GET",
     "/brain/tiers": "GET",
     "/brain/cold": "GET",
+    "/brain/judge": "POST",
 }
 
 
@@ -41,7 +42,7 @@ def _overview(brain: Any) -> Result:
     }
 
 
-def dispatch(route: str, params: Mapping[str, str], brain: Any) -> Result:
+def dispatch(route: str, params: Mapping[str, str], body: Any, brain: Any) -> Result:
     """脑的六个只读端点。brain=None 时 /brain 保持「未接入」，其余如实报未载入。"""
     if brain is None:
         if route == "/brain":
@@ -61,6 +62,27 @@ def dispatch(route: str, params: Mapping[str, str], brain: Any) -> Result:
     if route == "/brain/selfnarration":
         return 200, {"latest": brain.selfnarration_latest(),
                      "versions": brain.selfnarration_versions()}
+    if route == "/brain/judge":
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "message": "body 必须是 JSON 对象"}
+        try:
+            from organs.brain.judge import JudgeInput, decide
+        except Exception as exc:  # noqa: BLE001
+            return 500, {"ok": False, "message": "judge 载入失败：%s" % exc}
+        inp = JudgeInput(
+            text=body.get("text", ""),
+            heart_state=body.get("heart_state") or {},
+            familiarity=float(body.get("familiarity", 0)),
+            material=body.get("material") or {},
+            daily_quota=body.get("daily_quota") or {"used": 0, "limit": 0},
+            named=bool(body.get("named")),
+            direct_question=bool(body.get("direct_question")),
+            redline_hits=body.get("redline_hits") or [],
+            ignore_hits=body.get("ignore_hits") or [],
+            who=body.get("who", "主人"),
+            intent=body.get("intent", "passive"),
+        )
+        return 200, decide(inp)
     if route == "/brain/tiers":
         try:
             return 200, brain.tiers_summary()
