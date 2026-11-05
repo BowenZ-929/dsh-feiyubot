@@ -1,0 +1,118 @@
+{
+  "measured_at": "2026-11-05T16:04:45+00:00",
+  "model": "真模型 deepseek-chat（key 来自 .env；真模型数字等 key 到位再跑）",
+  "runs": 3,
+  "questions": 4,
+  "brains": {
+    "isolated": {
+      "same": {
+        "empty": {
+          "a_drift_rate": 0.75,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "soul": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "memory": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "both": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        }
+      },
+      "shuffled": {
+        "empty": {
+          "a_drift_rate": 0.75,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "soul": {
+          "a_drift_rate": 1.0,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "memory": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "both": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        }
+      }
+    },
+    "snapshot": {
+      "same": {
+        "empty": {
+          "a_drift_rate": 0.0,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "通过"
+        },
+        "soul": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "memory": {
+          "a_drift_rate": 0.25,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "both": {
+          "a_drift_rate": 0.0,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "通过"
+        }
+      },
+      "shuffled": {
+        "empty": {
+          "a_drift_rate": 0.25,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "soul": {
+          "a_drift_rate": 0.25,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "memory": {
+          "a_drift_rate": 0.5,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        },
+        "both": {
+          "a_drift_rate": 0.25,
+          "b_same_rate": 0.0,
+          "c_rate": 0.0,
+          "verdict": "换人"
+        }
+      },
+      "rows": 10
+    }
+  },
+  "note": "这是基线读数，不是判据；下次跑先比这份，别拿旧数当回归的红"
+}

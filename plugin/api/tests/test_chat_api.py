@@ -42,6 +42,7 @@ from api.tests.helpers import copy_fixture, write_json
 from organs.brain import BrainStore
 from organs.home import anchors as home_anchors
 from organs.home import cards
+from organs.home import residents as home_residents
 from organs.mind import conversation, llm, recent, usage
 from organs.mouth import address as mouth_address
 from organs.mouth import audit as mouth_audit
@@ -88,10 +89,13 @@ def _mark_of(tag: str) -> str:
     return FATAL_BOOK["mark"].format(tag=tag)
 KEPT_MARK = "rewrite-failed"            # 改不动、留原话那句 reason 里必须出现的记号
 REWRITE_KEYS = {"status", "why", "from", "to"}
+# 借阅读数里「条款用掉几条」= 这一轮过闸真比过的条数（启用条款全表）：条数不写死，读数据。
+CLAUSES = json.loads((MOUTH_DATA / "clauses.json").read_text(encoding="utf-8"))["clauses"]
+ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
-                 "guard", "memory", "addressed"}
+                 "guard", "memory", "addressed", "borrow"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
 ACTION_KEYS = {"pool", "rule", "quota"}
 QUOTA_KEYS = {"window", "max", "used", "blocked", "stripped", "kept_because_empty"}
@@ -1267,6 +1271,152 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual([QUESTION], counter, "api.chat.dispatch 没走 conversation.answer")
         self.assertTrue(payload["reply"])
 
+    # —— 称呼接进出口（本轮加的）————————————————
+
+    def _fresh_book(self):
+        """换一本新的会话账（＝换一个进程）：模块级那本是进程内的，用例之间必须互不串味。"""
+        book = mouth_address.SessionAddressBook()
+        patcher = mock.patch.object(chat, "ADDRESS_BOOK", book)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return book
+
+    def _has_text(self, line: str) -> bool:
+        """脑的今日档里有没有这一条原文（投过没投过，查得到才算数）。"""
+        return line in [row.get("text") for row in self.brain.today_entries()]
+
+    def test_rename_is_switched_and_sticks_for_the_next_round(self):
+        """第一轮「以后叫我老李」：当场换 + 投脑一条亲历记忆 + 记进会话账；第二轮不要求也还在。"""
+        book = self._fresh_book()
+        table = mouth_address.load_table()
+        status, first = self._post({"text": "以后叫我老李", "who": "主人"}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual({"who", "address", "source"}, set(first["addressed"]))
+        self.assertEqual("主人", first["addressed"]["who"])
+        self.assertEqual("老李", first["addressed"]["address"])
+        self.assertEqual(table["source"]["rename"], first["addressed"]["source"])
+        self.assertEqual({"主人": "老李"}, book.snapshot(), "会话账上没记下这一笔")
+        self.assertTrue(self._has_text(mouth_address.rename_memory("主人", "老李")["text"]),
+                        "那条亲历记忆没投进脑")
+
+        status, second = self._post({"text": "今天有点累", "who": "主人"},
+                                    _body("那就早点睡，我把灯关了。"))
+        self.assertEqual(200, status)
+        self.assertEqual("老李", second["addressed"]["address"], "没重新要求，叫法也该还在")
+        self.assertEqual(table["source"]["session"], second["addressed"]["source"])
+
+    def test_a_new_process_falls_back_to_the_directory(self):
+        """换一个进程（新建一本账）：会话覆盖没了，回到人名录档位——「只活这个会话」。"""
+        self._fresh_book()
+        table = mouth_address.load_table()
+        self._post({"text": "以后叫我老李", "who": "主人"}, _body(LONG_REPLY))
+        self._fresh_book()
+        status, again = self._post({"text": "今天有点累", "who": "主人"},
+                                   _body("那就早点睡，我把灯关了。"))
+        self.assertEqual(200, status)
+        self.assertEqual(table["source"]["directory"], again["addressed"]["source"])
+        self.assertNotEqual("老李", again["addressed"]["address"])
+
+    def test_a_banned_self_name_falls_back_and_is_not_remembered(self):
+        """违禁自称过不了 self_guard：退中性叫法，会话账不记、那条记忆也不投——红线没被绕过。"""
+        book = self._fresh_book()
+        table = mouth_address.load_table()
+        banned = table["self_guard"]["words"][0]
+        status, payload = self._post({"text": "以后叫我" + banned, "who": "主人"}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual(table["fallback"]["address"], payload["addressed"]["address"])
+        self.assertEqual(table["source"]["fallback"], payload["addressed"]["source"])
+        self.assertEqual({}, book.snapshot(), "被拦下的叫法不许记进会话账")
+        self.assertFalse(self._has_text(mouth_address.rename_memory("主人", banned)["text"]),
+                         "被拦下的叫法不许投给脑")
+
+    # —— 借阅读数：这一轮借了家里哪几份词条、各用掉几条（本轮加的）————
+
+    def _borrow_rows(self) -> list:
+        path = self.tmp / "house" / "名片盒" / "borrow.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+
+    def _readouts(self) -> dict:
+        path = self.tmp / "house" / "名片盒" / "借阅读数.json"
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))["readouts"]
+
+    def test_a_round_registers_the_borrow_and_writes_the_readout(self):
+        """一轮之后：家里出现借阅条（source 是这一层真读过的那几份），读数按本轮真用掉的条数落盘。"""
+        status, payload = self._send()
+        self.assertEqual(200, status)
+        section = payload["borrow"]
+        self.assertEqual({"status", "files", "note"}, set(section))
+        self.assertEqual("ok", section["status"], section["note"])
+        sources = [one["source"] for one in section["files"]]
+        self.assertEqual(["clauses.json", "policy.json"], sources)
+
+        rows = self._borrow_rows()
+        self.assertEqual(sources, [row["source"] for row in rows], "一份词条一条借阅条")
+        for row in rows:
+            self.assertTrue(row["borrow_id"].startswith("借-"), row["borrow_id"])
+            self.assertEqual(64, len(row["sha256"]), "认身份靠全量指纹")
+            self.assertEqual(row["sha256"][:12], row["version"], "version 是 sha256 前 12 位")
+
+        readouts = self._readouts()
+        for one in section["files"]:
+            self.assertEqual(one["learned"], readouts[one["borrow_id"]]["learned"])
+            self.assertIsInstance(one["learned"], int)
+        clauses = next(one for one in section["files"] if one["source"] == "clauses.json")
+        self.assertEqual(ENABLED_CLAUSES, clauses["learned"], "有泡可过闸：启用条款逐条比过，整表算上")
+        self.assertIn(clauses["borrow_id"], readouts, "读数要真落一行")
+
+        ledger = home_residents.borrow_ledger(root=self.tmp / "house")
+        self.assertEqual("已接入", ledger["readout_status"])
+        self.assertEqual(2, len(ledger["borrows"]), "一 source 一条")
+        for row in ledger["borrows"]:
+            self.assertEqual("已接入", row["readout_status"], row)
+        self.assertEqual("已接入", home_residents.read_learned(root=self.tmp / "house")["status"])
+
+    def test_the_second_round_registers_nothing_new_and_refreshes_the_readout(self):
+        """第二轮：同一 source 只有一条借阅条，读数按本轮实际用到的条目数更新（整表 → 0）。"""
+        status, payload = self._send()
+        self.assertEqual(200, status)
+        first = self._borrow_rows()
+        strict = next(row for row in first if row["source"] == "clauses.json")
+        self.assertEqual(ENABLED_CLAUSES, self._readouts()[strict["borrow_id"]]["learned"])
+
+        # 第二轮的应答在装配那一步就被整句弃掉（一泡都没出来）：这一轮一条条款都没比过，
+        # 读数该更新成 0——0 是一次真实读数（这一轮没用上），不是缺失。
+        status, payload = self._post({"text": "今天吃什么"}, _body("总而言之，汤有点咸。"))
+        self.assertEqual(200, status)
+        self.assertEqual(0, payload["gate"]["in_parts"], "这一句该在装配那一步就被整句弃掉")
+        second = self._borrow_rows()
+        self.assertEqual([row["borrow_id"] for row in first],
+                         [row["borrow_id"] for row in second], "第二轮不许再登记一条")
+        self.assertEqual(["clauses.json", "policy.json"], [row["source"] for row in second])
+        learned = next(one for one in payload["borrow"]["files"]
+                       if one["source"] == "clauses.json")["learned"]
+        self.assertEqual(0, learned, "本轮一条条款都没比过")
+        self.assertEqual(0, self._readouts()[strict["borrow_id"]]["learned"],
+                         "0 也要写进读数单，不许干脆不写")
+
+    def test_a_home_that_cannot_be_written_does_not_eat_her_words(self):
+        """家里不可写：她照常说话，返回体 borrow.status=failed 并写清原因——回复一个字节都不少。"""
+        house = self.tmp / "house"
+        os.chmod(str(house), 0o500)
+        self.addCleanup(os.chmod, str(house), 0o700)
+        status, payload = self._send()
+        self.assertEqual(200, status)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(LONG_REPLY, payload["reply"], "投递失败绝不许动她的话")
+        self.assertTrue(payload["chunks"], "泡也照发")
+        section = payload["borrow"]
+        self.assertEqual("failed", section["status"])
+        self.assertEqual([], section["files"])
+        self.assertIn("PermissionError", section["note"], section["note"])
+        self.assertIn("读数", section["note"])
+        self.assertEqual([], self._borrow_rows(), "不可写时一条都没落地")
+        self.assertEqual({}, self._readouts())
 
 if __name__ == "__main__":
     unittest.main()

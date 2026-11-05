@@ -15,16 +15,26 @@
 7. **C 轨（口癖命中率）只读数、不进判定**：命中率全用 organs.mind.usage.match 算（测试里不重写
    匹配规则）；表里有 C 列、汇总里有「不进判定」那一句；C 拉满也不改四档判定；假模型一律 0.00。
 8. **前缀字数现读 assembly.json**：同一份逻辑喂 5/9 就出 5/9，缺件才退回文档默认值并记下缺了哪项。
+9. **脑的两列**：隔离脑（结构基线，照旧）／实盘脑快照（跑之前整份拷到临时目录，此后每轮从快照
+   再拷一份，实盘只读不写）；快照列条数 == 实盘条数；实盘脑为空就如实报「快照列不跑」并照出隔离脑
+   那一列；--brain both 出两张带标题的表。实盘未被写用整棵目录的内容哈希验。
+10. **基线**：--write-baseline 写得出去、load_baseline 读得回来（缺件／坏 JSON 抛人话），
+    compare_baseline 逐格比出「哪一格、哪个数、从 x 到 y」，同值不报、时刻/模型名/note 不参与比。
 """
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
+import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
+from organs.brain import BrainStore
 from organs.mind.bench import consistency as bench
 
 DATA = bench.load_data()
@@ -527,6 +537,254 @@ class CJsonTest(unittest.TestCase):
                                  questions=QUESTIONS[:1], data=DATA,
                                  config_data=bench.FAKE_CONFIG, env_data=bench.FAKE_ENV)
         self.assertEqual(bench.read_anchors()["total"], report["meta"]["anchors"]["total"])
+
+
+#: 合成基线：形状与 --write-baseline 写出来的那份一致（只留可比的数）。
+MIN_BASELINE = {
+    "measured_at": "2026-11-05T20:00:00+00:00", "model": "合成", "runs": 3, "questions": 1,
+    "brains": {
+        "isolated": {"same": {"empty": {"a_drift_rate": 0.0, "b_same_rate": 1.0,
+                                        "c_rate": 0.0, "verdict": "无效"}}, "shuffled": {}},
+        "snapshot": {"rows": 2, "same": {}, "shuffled": {}},
+    },
+    "note": bench.BASELINE_NOTE,
+}
+
+
+def write_baseline(path, blob=None) -> dict:
+    """把一份基线写到盘上（默认就用上面那份最小形状）。"""
+    data = blob if blob is not None else MIN_BASELINE
+    Path(path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return dict(data)
+
+
+class BrainSnapshotTest(unittest.TestCase):
+    """脑的两列：实盘脑快照只读、条数对得上、跑完实盘一个字节不变；隔离脑行为照旧。"""
+
+    def _home(self, tmp: str) -> Path:
+        """造一个临时实盘根：<tmp>/home/organs（paths.organ_dir 认 QQAGENT_HOME）。"""
+        home = Path(tmp) / "home" / "organs"
+        (home / "brain").mkdir(parents=True)
+        return home
+
+    def _seed(self, brain_root: Path) -> int:
+        """两条记忆：一条正常原话，一条 quote 空 + note 有值（迁移记忆就长这样）。"""
+        store = BrainStore(brain_root)
+        store.import_rows([{
+            "id": "m-live-1", "ts": "2026-11-04T09:00:00+00:00", "day": "2026-11-04",
+            "who": "主人", "text": "我这两天睡不好。", "quote": "我这两天睡不好。",
+            "note": "她说睡不好", "side": "他说", "source_type": "亲历",
+        }])
+        store._append_longterm([{
+            "id": "m-migrated-1", "ts": "2026-11-03T09:00:00+00:00", "day": "2026-11-03",
+            "who": "主人", "text": "", "quote": "", "note": "迁移过来的：她说医院那事",
+            "status": "active", "side": "他说", "source_type": "亲历", "count": 1,
+        }])
+        return bench.count_memory_rows(brain_root)
+
+    def _digest_tree(self, root: Path) -> dict:
+        """整棵目录的指纹：文件名 → 内容哈希（跑完对一次就知道实盘有没有被动过）。"""
+        return {str(item.relative_to(root)): hashlib.sha1(item.read_bytes()).hexdigest()
+                for item in sorted(root.rglob("*")) if item.is_file()}
+
+    def _run(self, home: Path, *, brain: str, snapshot_of=None, configs=("both",),
+             anchors=None, closed=None) -> dict:
+        """在临时实盘根下跑一遍：台词库/闭集要在切根之前读，所以这里显式传进去。"""
+        previous = os.environ.get("QQAGENT_HOME")
+        os.environ["QQAGENT_HOME"] = str(home)
+        try:
+            return bench.run_bench(runs=1, questions=QUESTIONS[:1], data=DATA,
+                                   configs=configs, modes=("same",),
+                                   transport=bench.template_transport(),
+                                   config_data=bench.FAKE_CONFIG, env_data=bench.FAKE_ENV,
+                                   anchors=anchors if anchors is not None else bench.read_anchors(),
+                                   closed=(closed if closed is not None
+                                           else bench.read_closed_sets(RULES)),
+                                   brain=brain,
+                                   brain_root=(snapshot_of if snapshot_of is not None
+                                               else home / "brain"))
+        finally:
+            if previous is None:
+                os.environ.pop("QQAGENT_HOME", None)
+            else:
+                os.environ["QQAGENT_HOME"] = previous
+
+    def test_snapshot_carries_the_real_brain_and_never_writes_it(self):
+        anchors, closed = bench.read_anchors(), bench.read_closed_sets(RULES)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home(tmp)
+            real = home / "brain"
+            rows = self._seed(real)
+            before = self._digest_tree(real)
+            seen = []
+            original = bench.ask
+
+            def spy(*args, **kwargs):
+                seen.append(len(kwargs["brain"].longterm_active_entries()))
+                return original(*args, **kwargs)
+
+            with mock.patch.object(bench, "ask", spy):
+                report = self._run(home, brain="snapshot", anchors=anchors, closed=closed)
+            self.assertEqual([rows], seen, "每一轮的脑应当是从快照再拷的一份（条数对得上）")
+            self.assertEqual(rows, report["meta"]["snapshot"]["rows"])
+            self.assertTrue(report["meta"]["snapshot"]["available"])
+            self.assertEqual(before, self._digest_tree(real), "跑完实盘脑被动过：快照必须只读")
+            self.assertIn("实盘脑只读", report["meta"]["brain_note"])
+
+    def test_isolated_column_carries_no_memories(self):
+        anchors, closed = bench.read_anchors(), bench.read_closed_sets(RULES)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home(tmp)
+            self._seed(home / "brain")
+            seen = []
+            original = bench.ask
+
+            def spy(*args, **kwargs):
+                seen.append(len(kwargs["brain"].longterm_active_entries()))
+                return original(*args, **kwargs)
+
+            with mock.patch.object(bench, "ask", spy):
+                report = self._run(home, brain="isolated", anchors=anchors, closed=closed)
+            self.assertEqual({0}, set(seen), "隔离脑不该带她的实盘记忆")
+            self.assertFalse(report["meta"]["snapshot"]["available"])
+            self.assertEqual(["isolated"], report["meta"]["brains"])
+
+    def test_both_brains_render_two_tables_with_titles(self):
+        anchors, closed = bench.read_anchors(), bench.read_closed_sets(RULES)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home(tmp)
+            rows = self._seed(home / "brain")
+            report = self._run(home, brain="both", anchors=anchors, closed=closed)
+            self.assertEqual(["isolated", "snapshot"], report["meta"]["brains"])
+            self.assertEqual({"isolated", "snapshot"}, {cell["brain"] for cell in report["cells"]})
+            tables = bench.render_tables(report)
+            self.assertIn("## 隔离脑（结构基线）", tables)
+            self.assertIn("## 实盘脑快照（%d 条记忆，拷贝于" % rows, tables)
+            self.assertEqual(2, len([line for line in tables.splitlines()
+                                     if line.startswith("## ")]))
+            self.assertIn("两列并列", report["meta"]["brain_note"])
+
+    def test_empty_real_brain_says_so_and_keeps_the_isolated_column(self):
+        anchors, closed = bench.read_anchors(), bench.read_closed_sets(RULES)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home(tmp)                       # 目录在，但一条记忆都没有
+            report = self._run(home, brain="both", anchors=anchors, closed=closed)
+            self.assertFalse(report["meta"]["snapshot"]["available"])
+            self.assertIn("目录是空的", report["meta"]["snapshot"]["reason"])
+            self.assertEqual(["isolated"], report["meta"]["brains"])
+            self.assertIn("实盘脑为空，快照列不跑", report["meta"]["brain_note"])
+            self.assertIn("实盘脑为空", bench.render_meta(report))
+            self.assertEqual(1, len(report["cells"]), "只跑了一格（both 配置 × 同序 1 轮）" +                              "；快照列不跑时这一格必须还在")
+
+    def test_missing_real_brain_falls_back_to_the_isolated_column(self):
+        anchors, closed = bench.read_anchors(), bench.read_closed_sets(RULES)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home(tmp)
+            report = self._run(home, brain="snapshot", snapshot_of=Path(tmp) / "没有这个目录",
+                               anchors=anchors, closed=closed)
+            self.assertIn("目录不在", report["meta"]["snapshot"]["reason"])
+            self.assertEqual(["isolated"], report["meta"]["brains"])
+            self.assertTrue(report["cells"], "快照列不跑时也要出隔离脑那一列")
+
+
+class BaselineTest(unittest.TestCase):
+    """基线：写得出去、读得回来、逐格比得出「哪一格、哪个数、从 x 到 y」。"""
+
+    def test_load_baseline_reads_a_minimal_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "baseline.json"
+            write_baseline(target)
+            self.assertEqual(MIN_BASELINE["brains"], bench.load_baseline(target)["brains"])
+
+    def test_missing_or_broken_baseline_is_an_error_not_an_empty_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                bench.load_baseline(Path(tmp) / "没有这个文件.json")
+            broken = Path(tmp) / "broken.json"
+            broken.write_text("{不是 JSON", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                bench.load_baseline(broken)
+            array = Path(tmp) / "array.json"
+            array.write_text("[1, 2]", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                bench.load_baseline(array)
+
+    def test_identical_baseline_reports_no_difference(self):
+        self.assertEqual([], bench.compare_baseline(MIN_BASELINE, MIN_BASELINE))
+
+    def test_changed_number_is_reported_with_cell_and_both_values(self):
+        current = json.loads(json.dumps(MIN_BASELINE))
+        current["brains"]["isolated"]["same"]["empty"]["a_drift_rate"] = 0.5
+        diffs = bench.compare_baseline(MIN_BASELINE, current)
+        self.assertEqual(1, len(diffs))
+        got = diffs[0]
+        self.assertEqual("brains.isolated.same.empty.a_drift_rate", got["path"])
+        self.assertEqual((0.0, 0.5), (got["before"], got["after"]))
+        self.assertIn("从 0.0 到 0.5", got["text"])
+
+    def test_changed_verdict_and_missing_cell_are_reported(self):
+        current = json.loads(json.dumps(MIN_BASELINE))
+        current["brains"]["isolated"]["same"]["empty"]["verdict"] = "换人"
+        del current["brains"]["snapshot"]["rows"]
+        diffs = bench.compare_baseline(MIN_BASELINE, current)
+        paths = [item["path"] for item in diffs]
+        self.assertIn("brains.isolated.same.empty.verdict", paths)
+        self.assertIn("brains.snapshot.rows", paths)
+        self.assertTrue(any("这次没有这一格" in item["text"] for item in diffs))
+
+    def test_non_metric_fields_do_not_count_as_differences(self):
+        current = json.loads(json.dumps(MIN_BASELINE))
+        current["measured_at"] = "2026-12-01T00:00:00+00:00"
+        current["model"] = "换了个模型"
+        current["note"] = "另一句注记"
+        self.assertEqual([], bench.compare_baseline(MIN_BASELINE, current))
+
+    def test_write_baseline_flag_writes_a_readable_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "baseline.json"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = bench.main(["--template", "--runs", "1", "--limit", "1",
+                                   "--write-baseline", str(target)])
+            self.assertEqual(0, code)
+            self.assertIn("基线已写入", out.getvalue())
+            blob = bench.load_baseline(target)
+            for key in ("measured_at", "model", "runs", "questions", "brains", "note"):
+                self.assertIn(key, blob)
+            self.assertEqual(bench.BASELINE_NOTE, blob["note"])
+            self.assertEqual((1, 1), (blob["runs"], blob["questions"]))
+            cell = blob["brains"]["isolated"]["same"]["empty"]
+            self.assertEqual(set(bench.BASELINE_FIELDS), set(cell))
+            self.assertEqual([], bench.compare_baseline(blob, blob))
+
+    def test_blob_keeps_the_snapshot_rows_when_both_brains_ran(self):
+        anchors, closed = bench.read_anchors(), bench.read_closed_sets(RULES)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home" / "organs"
+            (home / "brain").mkdir(parents=True)
+            store = BrainStore(home / "brain")
+            store._append_longterm([{"id": "m-1", "ts": "2026-11-03T09:00:00+00:00",
+                                     "day": "2026-11-03", "who": "主人", "text": "",
+                                     "quote": "", "note": "迁移过来的：她说医院那事",
+                                     "status": "active", "side": "他说", "source_type": "亲历"}])
+            previous = os.environ.get("QQAGENT_HOME")
+            os.environ["QQAGENT_HOME"] = str(home)
+            try:
+                report = bench.run_bench(runs=1, questions=QUESTIONS[:1], data=DATA,
+                                         configs=("both",), modes=("same",),
+                                         transport=bench.template_transport(),
+                                         config_data=bench.FAKE_CONFIG, env_data=bench.FAKE_ENV,
+                                         anchors=anchors, closed=closed, brain="both")
+            finally:
+                if previous is None:
+                    os.environ.pop("QQAGENT_HOME", None)
+                else:
+                    os.environ["QQAGENT_HOME"] = previous
+            blob = bench.baseline_blob(report)
+            self.assertEqual(1, blob["brains"]["snapshot"]["rows"])
+            self.assertEqual({"same", "rows"}, set(blob["brains"]["snapshot"]),
+                             "这次只跑了同序——基线只记跑过的跑法，不补空表")
+            self.assertEqual({"same"}, set(blob["brains"]["isolated"]))
 
 
 if __name__ == "__main__":                              # pragma: no cover

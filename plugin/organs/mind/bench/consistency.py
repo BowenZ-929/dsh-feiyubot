@@ -47,6 +47,7 @@ import hashlib
 import inspect
 import json
 import os
+from datetime import datetime, timezone
 import random
 import re
 import shutil
@@ -63,6 +64,8 @@ from organs.soul import load as load_soul
 
 HERE = Path(__file__).resolve().parent
 DATA_FILE = HERE / "data" / "questions.json"
+#: 基线读数（由 --write-baseline 生成，这里只读）：默认落点。
+BASELINE_FILE = HERE / "data" / "baseline.json"
 SOUL_FIXTURE = HERE.parents[1] / "soul" / "fixtures" / "valid"
 HEART_FACTORY = HERE.parents[1] / "heart" / "data"
 #: 出厂心的两件（卡 + 意图权重表）：每轮的心状态从零开始，卡不是——全新心根照抄这两件。
@@ -94,6 +97,15 @@ MODE_SHORT = {"same": "同序", "shuffled": "洗牌"}
 #: 退了会在报告头如实写出来——默认值不是配置。
 GUARD_PATH = ("anchors", "guard")
 GUARD_DEFAULTS = {"prefix_chars": 3, "opening_chars": 6}
+
+#: 脑的两列：隔离脑（每轮全新临时脑，结构基线）／实盘脑快照（她的真实基线）。
+BRAIN_ORGAN = "brain"
+BRAIN_MODES = ("isolated", "snapshot")
+BRAIN_CHOICES = ("isolated", "snapshot", "both")
+BRAIN_LABELS = {"isolated": "隔离脑（结构基线）", "snapshot": "实盘脑快照"}
+#: 基线 JSON 里逐格留哪些数：判据在 judge() 里，这里只是可比读数。
+BASELINE_FIELDS = ("a_drift_rate", "b_same_rate", "c_rate", "verdict")
+BASELINE_NOTE = "这是基线读数，不是判据；下次跑先比这份，别拿旧数当回归的红"
 
 #: 假模型的配置与 key：transport 注入了也照样要过 llm.complete 的 key 与配置校验
 #: （真 network 一次都不发，见 llm.complete 的 transport 参数）。
@@ -588,14 +600,98 @@ def _load_soul(target: Path) -> Any:
     return load_soul(target)
 
 
+# —— 脑的两列：隔离脑（结构基线）／实盘脑快照（真实基线） ————————————
+
+
+def now_iso() -> str:
+    """这一刻的 ISO 时刻（快照的「拷贝于」）。"""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def brain_source() -> Path:
+    """实盘脑的落点（只读）：paths.organ_dir("brain")。"""
+    return paths.organ_dir(BRAIN_ORGAN)
+
+
+def count_memory_rows(root: Any) -> Optional[int]:
+    """脑里几条在役长期记忆；读不动就是 None——条数是读数，不拿 0 冒充「没有」。"""
+    try:
+        return len(BrainStore(Path(root)).longterm_active_entries())
+    except Exception:
+        return None
+
+
+def resolve_brains(brain: str) -> List[str]:
+    """--brain 的三个取值落到实际要跑的列：isolated／snapshot／both（两列并列）。"""
+    if brain not in BRAIN_CHOICES:
+        raise ValueError("--brain 只认 %s，收到 %r" % ("／".join(BRAIN_CHOICES), brain))
+    return ["isolated"] if brain == "isolated" else (
+        ["snapshot"] if brain == "snapshot" else ["isolated", "snapshot"])
+
+
+def snapshot_brain(target: Any, root: Optional[Any] = None) -> Dict[str, Any]:
+    """评测开始那一刻把实盘脑整份拷到临时目录：之后每一轮都从这份快照再拷一份。
+
+    实盘只读不写——本函数没有任何写实盘的路径。目录不在／是空的／拷不动 → available=False
+    并带一句原因，快照列不跑（如实报，不崩，也不补默认值）。
+    """
+    source = Path(root) if root is not None else brain_source()
+    info: Dict[str, Any] = {"source": str(source), "rows": None, "copied_at": "",
+                            "available": False, "reason": ""}
+    if not source.is_dir():
+        info["reason"] = "目录不在（%s）" % source
+        return info
+    if not any(source.iterdir()):
+        info["reason"] = "目录是空的（%s）" % source
+        return info
+    try:
+        shutil.copytree(str(source), str(target))
+    except Exception as exc:               # 拷不动就是拷不动：报原因，不假装有快照
+        info["reason"] = "拷不动（%s）" % type(exc).__name__
+        return info
+    info.update({"rows": count_memory_rows(target), "copied_at": now_iso(), "available": True})
+    return info
+
+
+def brain_note(brain: str, snapshot: Mapping[str, Any]) -> str:
+    """报告头那一句：两列各是什么、快照什么时候拷的、实盘有没有被动过。"""
+    if brain == "isolated":
+        return ("隔离脑（**结构基线**）：每一轮一个全新临时脑，不带她的任何实盘记忆；"
+                "--brain snapshot／both 才跑实盘脑快照那一列。")
+    if not snapshot.get("available"):
+        return ("⚠ 实盘脑为空，快照列不跑：%s；这一轮只出隔离脑那一列（如实报，不补默认值）"
+                % (snapshot.get("reason") or "读不到"))
+    rows = snapshot.get("rows")
+    shot = ("实盘脑快照（**真实基线**，%s 条记忆，拷贝于 %s）：跑之前整份拷到临时目录，之后每一轮／"
+            "每一格都从这份快照再拷一份；**实盘脑只读，一个字节没写**。"
+            % ("?" if rows is None else rows, snapshot.get("copied_at") or "—"))
+    if brain == "both":
+        return ("两列并列：隔离脑＝结构基线（不带记忆）／实盘脑快照＝她的真实基线。" + shot)
+    return shot
+
+
+def _round_brain(round_root: Path, snapshot: Optional[Any]) -> Any:
+    """这一轮的脑：隔离脑就是空目录；快照模式从快照再拷一份（快照本身一份都不动）。"""
+    target = round_root / "brain"
+    if snapshot is not None:
+        shutil.copytree(str(snapshot), str(target))
+    return BrainStore(target)
+
+
 def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
              rules: Mapping[str, Any], transport: Optional[Callable[..., Any]] = None,
              seed: int = SEED_SAME, now: str = NOW, who: str = WHO,
              config_data: Optional[Mapping[str, Any]] = None,
              env_data: Optional[Mapping[str, Any]] = None,
              anchors: Optional[Mapping[str, Any]] = None,
-             closed: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """跑一格（配置 × 跑法）：每一轮全新脑 + 全新 recent_root + 全新心根，轮内共享累积。"""
+             closed: Optional[Mapping[str, Any]] = None,
+             brain_label: str = "isolated",
+             brain_snapshot: Optional[Any] = None) -> Dict[str, Any]:
+    """跑一格（配置 × 跑法）：每一轮一个脑 + 全新 recent_root + 全新心根，轮内共享累积。
+
+    brain_snapshot 不给 = 隔离脑（每轮全新临时脑，结构基线）；给了 = 实盘脑快照（每一轮从
+    快照再拷一份，快照本身只读）。
+    """
     per_question: Dict[str, List[Dict[str, Any]]] = {question: [] for question in questions}
     dropped = 0
     # 锚句与两套闭集整轮读一次（在外面读：isolated_environment 会把家根切到临时目录，
@@ -610,7 +706,7 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
         store = _load_soul(root / "soul")
         for run in range(int(runs)):
             round_root = root / ("run%02d" % run)
-            brain = BrainStore(round_root / "brain")
+            brain = _round_brain(round_root, brain_snapshot)
             assembly = assembly_for(config)
             for question in _order_for(mode, questions, run, seed):
                 got = ask(question, store=store, brain=brain,
@@ -629,6 +725,7 @@ def run_cell(mode: str, config: str, *, runs: int, questions: Sequence[str],
                                     opening_chars=guard["opening_chars"], module=usage)})
     rows = {question: question_stats(samples) for question, samples in per_question.items()}
     return {"config": config, "mode": mode, "runs": int(runs),
+            "brain": brain_label,
             "questions": list(questions), "dropped": dropped,
             "anchors": {"file": anchor_book.get("file"), "total": len(cards),
                         "available": usage is not None},
@@ -649,11 +746,17 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
               config_data: Optional[Mapping[str, Any]] = None,
               env_data: Optional[Mapping[str, Any]] = None,
               anchors: Optional[Mapping[str, Any]] = None,
-              closed: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    """整张表跑一遍：配置 × 跑法，一格一格来（格子之间不共享脑、不共享心、不共享最近 N 轮）。
+              closed: Optional[Mapping[str, Any]] = None,
+              brain: str = "isolated",
+              brain_root: Optional[Any] = None) -> Dict[str, Any]:
+    """整张表跑一遍：配置 × 跑法 × 脑的一列，一格一格来（格子之间不共享脑、心、最近 N 轮）。
 
     锚句**整轮开始前读一次**（就在这儿，没进 isolated_environment：家根切走之后读不到台词库），
     然后一路传给每一格；轮内不再重读。
+
+    脑的两列：isolated = 每轮全新临时脑（结构基线）；snapshot = 评测开始那一刻把实盘脑整份
+    拷到临时目录，之后每轮从快照再拷一份（她的真实基线）；both = 两列都跑、两张表并列。
+    实盘脑只读：快照在 isolated_environment 之外拷（家根一被切走就找不到实盘脑了）。
     """
     source = dict(data) if data is not None else load_data()
     picked = [str(item) for item in (questions or source["questions"])]
@@ -661,16 +764,29 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
     anchor_book = dict(anchors) if anchors is not None else read_anchors()
     # 闭集整轮读一次（在 isolated_environment 之外：家根一被切走就读不到魂的实盘卡）。
     closed_sets = dict(closed) if closed is not None else read_closed_sets(rules)
+    real_brain = Path(brain_root) if brain_root is not None else brain_source()
+    brains = resolve_brains(brain)
+    snapshot: Dict[str, Any] = {"source": str(real_brain), "rows": None, "copied_at": "",
+                                "available": False, "reason": "没请求快照列"}
     cells: List[Dict[str, Any]] = []
-    with isolated_environment():
-        for mode in modes:
-            for config in configs:
-                cells.append(run_cell(mode, config, runs=runs, questions=picked, rules=rules,
-                                      transport=transport,
-                                      seed=shuffle_seed if mode == "shuffled" else seed,
-                                      now=now, who=who,
-                                      config_data=config_data, env_data=env_data,
-                                      anchors=anchor_book, closed=closed_sets))
+    with tempfile.TemporaryDirectory(prefix="qqagent-bench-brain-") as brain_tmp:
+        if "snapshot" in brains:
+            snapshot = snapshot_brain(Path(brain_tmp) / "snapshot", real_brain)
+            if not snapshot["available"]:
+                # 快照列不跑，但这一轮照样出隔离脑那一列（不因为实盘脑为空就什么都不给）。
+                brains = [item for item in brains if item != "snapshot"] or ["isolated"]
+        with isolated_environment():
+            for brain_label in brains:
+                snap = Path(brain_tmp) / "snapshot" if brain_label == "snapshot" else None
+                for mode in modes:
+                    for config in configs:
+                        cells.append(run_cell(mode, config, runs=runs, questions=picked,
+                                              rules=rules, transport=transport,
+                                              seed=shuffle_seed if mode == "shuffled" else seed,
+                                              now=now, who=who,
+                                              config_data=config_data, env_data=env_data,
+                                              anchors=anchor_book, closed=closed_sets,
+                                              brain_label=brain_label, brain_snapshot=snap))
     params = answer_params()
     meta = {
         "model_label": model_label,
@@ -702,6 +818,11 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
         "closed_note": closed_source_note(closed_sets),
         "fallback_note": closed_fallback_note(closed_sets),
         "closed": closed_sets,
+        # 脑：请求的模式、实际跑的列、快照读数（条数 = 在役长期记忆）。
+        "brain": brain,
+        "brains": brains,
+        "snapshot": snapshot,
+        "brain_note": brain_note(brain, snapshot),
     }
     guard = dict(cells[0]["guard"]) if cells else dict(GUARD_DEFAULTS)
     meta["prefix_chars"] = guard.get("prefix_chars")
@@ -720,7 +841,10 @@ def run_bench(*, runs: int = 10, transport: Optional[Callable[..., Any]] = None,
         if meta["usage_ready"] else
         "⚠ organs.mind.usage 还没落地：C 轨报「未落地」（rate = None），不拿 0 冒充没命中")
     report = {"meta": meta, "cells": cells}
-    report["summary"] = summary_stats(report)
+    # 每一列各一份汇总；report["summary"] 留主列（默认隔离脑）那份，别让老调用方换写法。
+    report["summaries"] = {label: summary_stats(report, label) for label in brains}
+    primary = brains[0] if brains else "isolated"
+    report["summary"] = report["summaries"].get(primary) or summary_stats(report, primary)
     return report
 
 
@@ -732,17 +856,32 @@ def mode_label(mode: str, runs: Any) -> str:
     return "%s（%s %s 次）" % (mode, MODE_SHORT.get(mode, mode), runs)
 
 
-def _cell_index(report: Mapping[str, Any]) -> Dict[Tuple[str, str], Mapping[str, Any]]:
-    return {(cell["config"], cell["mode"]): cell for cell in report["cells"]}
+def _cell_brain(meta: Mapping[str, Any], cell: Mapping[str, Any]) -> str:
+    """这一格属于哪一列：老报告（没有 brain 字段）一律算隔离脑。"""
+    return str(cell.get("brain") or meta.get("brain") or "isolated")
+
+
+def _primary_brain(meta: Mapping[str, Any]) -> str:
+    """主列：实际跑的第一列（both 时是隔离脑），一张表/一份汇总默认报它。"""
+    return (list(meta.get("brains") or []) or [meta.get("brain") or "isolated"])[0]
+
+
+def _cell_index(report: Mapping[str, Any],
+                brain: Optional[str] = None) -> Dict[Tuple[str, str], Mapping[str, Any]]:
+    """(配置, 跑法) → 那一格；只取指定的脑那一列（默认主列）。"""
+    meta = report["meta"]
+    want = brain or _primary_brain(meta)
+    return {(cell["config"], cell["mode"]): cell for cell in report["cells"]
+            if _cell_brain(meta, cell) == want}
 
 
 def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def summary_stats(report: Mapping[str, Any]) -> Dict[str, Any]:
-    """表下面那三行汇总用的数：两跑法对比、空基线、净增益。"""
-    index = _cell_index(report)
+def summary_stats(report: Mapping[str, Any], brain: Optional[str] = None) -> Dict[str, Any]:
+    """表下面那三行汇总用的数：两跑法对比、空基线、净增益（只算指定那一列）。"""
+    index = _cell_index(report, brain)
     modes = list(report["meta"]["modes"])
     configs = list(report["meta"]["configs"])
     by_mode = {}
@@ -775,9 +914,9 @@ def summary_stats(report: Mapping[str, Any]) -> Dict[str, Any]:
             "gain": gain, "c_rates": c_rates}
 
 
-def render_table(report: Mapping[str, Any]) -> str:
+def render_table(report: Mapping[str, Any], brain: Optional[str] = None) -> str:
     """一张 Markdown 表：行 = 配置，列 = same / shuffled，格子里是 A/B 两个率 + C 命中 + 判定。"""
-    index = _cell_index(report)
+    index = _cell_index(report, brain)
     modes = list(report["meta"]["modes"])
     runs = report["meta"]["runs"]
     lines = ["| 配置 | " + " | ".join(mode_label(mode, runs) for mode in modes) + " |",
@@ -799,10 +938,14 @@ def render_table(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_reasons(report: Mapping[str, Any]) -> str:
-    """每格一行「为什么是这一格」：判词 + 第几条 + 那一句话。"""
+def render_reasons(report: Mapping[str, Any], brain: Optional[str] = None) -> str:
+    """每格一行「为什么是这一格」：判词 + 第几条 + 那一句话（只报指定那一列）。"""
+    meta = report["meta"]
+    want = brain or _primary_brain(meta)
     lines = ["判定理由（每格一行，顺序写死：1→2→3→4）："]
     for cell in report["cells"]:
+        if _cell_brain(meta, cell) != want:
+            continue
         stats = cell["stats"]
         lines.append("- %s × %s：第 %d 条 —— %s"
                      % (CONFIG_LABELS.get(cell["config"], cell["config"]),
@@ -860,6 +1003,7 @@ def render_meta(report: Mapping[str, Any]) -> str:
         % (meta["question_count"], meta["runs"], meta["seed_same"], meta["seed_shuffled"],
            meta["now"]),
         "- 心与嘴四格都在：那是她此刻的状态与说话的规矩，不是人设与记忆（所以四格都带心与嘴）。",
+        "- 脑：%s" % meta.get("brain_note", "未报"),
         "- A 轨怎么判（不该变）：%s" % meta.get("a_note", "口径未报"),
         "- A 轨的闭集从哪读：%s" % meta.get("closed_note", "未报"),
         "- A 轨有没有退回 fallback：%s" % meta.get("fallback_note", "未报"),
@@ -878,10 +1022,10 @@ def render_meta(report: Mapping[str, Any]) -> str:
     ])
 
 
-def render_summary(report: Mapping[str, Any]) -> str:
+def render_summary(report: Mapping[str, Any], brain: Optional[str] = None) -> str:
     """表下三行汇总：两跑法对比（只报同序会高估）、空基线、净增益。"""
     meta = report["meta"]
-    stats = report["summary"]
+    stats = summary_stats(report, brain)
     by_mode = stats["by_mode"]
     modes = list(meta["modes"])
     lines = []
@@ -938,10 +1082,127 @@ def render_summary(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def brain_title(meta: Mapping[str, Any], brain: str) -> str:
+    """这一列的表题：快照那一列把条数与拷贝时刻写进标题（读者一眼知道数字从哪来）。"""
+    if brain != "snapshot":
+        return BRAIN_LABELS.get(brain, brain)
+    shot = meta.get("snapshot") or {}
+    rows = shot.get("rows")
+    return "实盘脑快照（%s 条记忆，拷贝于 %s）" % ("?" if rows is None else rows,
+                                                 shot.get("copied_at") or "—")
+
+
+def render_tables(report: Mapping[str, Any]) -> str:
+    """一列就一张表；两列就两张表，各带标题（隔离脑／实盘脑快照）。"""
+    meta = report["meta"]
+    brains = list(meta.get("brains") or [meta.get("brain") or "isolated"])
+    if len(brains) <= 1:
+        return render_table(report, brains[0] if brains else None)
+    return "\n\n".join("## %s\n\n%s" % (brain_title(meta, brain), render_table(report, brain))
+                        for brain in brains)
+
+
 def render_report(report: Mapping[str, Any]) -> str:
-    """整份报告：头 + 表 + 判定理由 + 汇总（含只读数不判定的 C 列）。"""
-    return "\n\n".join([render_meta(report), render_table(report),
-                        render_reasons(report), render_summary(report)])
+    """整份报告：头 + 每列（表 + 判定理由 + 汇总；C 列只读数不判定）。"""
+    meta = report["meta"]
+    brains = list(meta.get("brains") or [meta.get("brain") or "isolated"])
+    parts = [render_meta(report), render_tables(report)]
+    for brain in brains:
+        if len(brains) > 1:
+            parts.append("### %s · 判定与汇总" % brain_title(meta, brain))
+        parts.append(render_reasons(report, brain))
+        parts.append(render_summary(report, brain))
+    return "\n\n".join(parts)
+
+
+# —— 基线（读数，不是判据） ————————————————————
+
+
+def baseline_blob(report: Mapping[str, Any]) -> Dict[str, Any]:
+    """把这次统计压成一份基线 JSON：脑 × 跑法 × 配置，每格只留几个可比的数。
+
+    形状写死成 {"brains": {列: {"same": {配置: {...}}, "shuffled": {...}}}}；快照那一列多一个
+    rows（在役记忆条数）——它是这一列的前提，不是判据。
+    """
+    meta = report["meta"]
+    index = {(_cell_brain(meta, cell), cell["config"], cell["mode"]): cell
+             for cell in report["cells"]}
+    brains: Dict[str, Any] = {}
+    for brain in (meta.get("brains") or ["isolated"]):
+        rows: Dict[str, Any] = {}
+        for mode in meta["modes"]:
+            per_config: Dict[str, Any] = {}
+            for config in meta["configs"]:
+                cell = index.get((brain, config, mode))
+                if cell is None:
+                    continue
+                per_config[config] = {field: cell["stats"].get(field)
+                                      for field in BASELINE_FIELDS}
+            rows[mode] = per_config
+        if brain == "snapshot":
+            rows["rows"] = (meta.get("snapshot") or {}).get("rows")
+        brains[brain] = rows
+    return {"measured_at": now_iso(), "model": meta["model_label"], "runs": meta["runs"],
+            "questions": meta["question_count"], "brains": brains, "note": BASELINE_NOTE}
+
+
+def load_baseline(path: Optional[Any] = None) -> Dict[str, Any]:
+    """读一份基线：缺件、坏 JSON、不是键值表都抛 ValueError（带人话），不返回空表冒充。"""
+    target = Path(path) if path is not None else BASELINE_FILE
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ValueError("基线文件不存在：%s" % target) from None
+    except OSError as exc:
+        raise ValueError("基线文件读不动：%s（%s）" % (target, exc)) from None
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError("基线文件不是合法 JSON：%s（%s）" % (target, exc)) from None
+    if not isinstance(data, Mapping):
+        raise ValueError("基线文件不是键值表：%s" % target)
+    return dict(data)
+
+
+def _metric_leaves(node: Any, path: str = "") -> Any:
+    """把基线摊平成「路径 → 标量」，只留可比的数（时刻、模型名、note 不参与比较）。"""
+    if isinstance(node, Mapping):
+        for key in node:
+            yield from _metric_leaves(node[key], "%s.%s" % (path, key) if path else str(key))
+        return
+    leaf = path.rsplit(".", 1)[-1]
+    if leaf in BASELINE_FIELDS or leaf == "rows":
+        if node is None or isinstance(node, (bool, int, float, str)):
+            yield path, node
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    """两个读数算不算同一个：数是数比（浮点留 1e-9 余量），其余按字面比。"""
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)) \
+            and not isinstance(left, bool) and not isinstance(right, bool):
+        return abs(float(left) - float(right)) <= 1e-9
+    return left == right
+
+
+def compare_baseline(baseline: Mapping[str, Any],
+                     current: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """逐格比出差异：哪一格、哪个数、从 x 到 y。同值不报；基线里没有的也报一句。"""
+    before = dict(_metric_leaves(baseline))
+    after = dict(_metric_leaves(current))
+    diffs: List[Dict[str, Any]] = []
+    for path in sorted(before):
+        if path not in after:
+            diffs.append({"path": path, "before": before[path], "after": None,
+                          "text": "%s：从 %r 到「这次没有这一格」" % (path, before[path])})
+            continue
+        if _same_value(before[path], after[path]):
+            continue
+        diffs.append({"path": path, "before": before[path], "after": after[path],
+                      "text": "%s：从 %r 到 %r" % (path, before[path], after[path])})
+    for path in sorted(set(after) - set(before)):
+        diffs.append({"path": path, "before": None, "after": after[path],
+                      "text": "%s：基线里没有（这次 %r）" % (path, after[path])})
+    return diffs
 
 
 # —— 命令行 ————————————————————————————————
@@ -977,6 +1238,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--now", default=NOW, help="固定时刻（默认 %s）" % NOW)
     parser.add_argument("--json", nargs="?", const="-", default=None,
                         metavar="路径", help="把原始统计打成 JSON：不给值 = 打到 stdout，给路径 = 写文件")
+    parser.add_argument("--brain", choices=BRAIN_CHOICES, default="isolated",
+                        help="脑从哪儿来：isolated=每轮全新临时脑（默认，结构基线）／"
+                             "snapshot=实盘脑快照（她的真实基线，实盘只读）／both=两列都跑")
+    parser.add_argument("--write-baseline", default=None, metavar="路径",
+                        help="把本次统计写成一份基线 JSON（默认关；那份是读数，不是判据）")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dry", action="store_true",
                        help="确定性假模型：回答由提示词哈希决定（同序多轮会判出无效轮，这是对的）")
@@ -1023,7 +1289,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     report = run_bench(runs=args.runs, transport=transport, questions=questions, data=data,
                        seed=args.seed, shuffle_seed=args.shuffle_seed, now=args.now,
-                       model_label=label, config_data=config_data, env_data=env_data)
+                       model_label=label, config_data=config_data, env_data=env_data,
+                       brain=args.brain)
     print(render_report(report))
 
     if args.json is not None:
@@ -1034,6 +1301,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             Path(args.json).write_text(blob + "\n", encoding="utf-8")
             print("\n原始统计已写入 %s" % args.json)
+
+    if args.write_baseline:
+        target = Path(args.write_baseline)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(baseline_blob(report), ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8")
+        print("\n基线已写入 %s（基线是读数，不是判据；下次跑先比这份）" % target)
     return 0
 
 

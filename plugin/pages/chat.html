@@ -5,103 +5,89 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>说话 · 她第一次开口</title>
 <style>
-  /* 颜色全部取宿主变量并带兜底值（docs/reference/ui.md §1.5）。 */
+  /* 颜色只取宿主变量，兜底用系统色（Canvas / CanvasText / GrayText）：宿主给了变量就跟宿主，
+     没给就让 color-scheme 带着系统色走。深色跟随宿主 [data-theme="dark"]，不自造色板
+     （docs/reference/ui.md §1.5）。 */
   :root {
     color-scheme: light;
-    --bg: var(--dsw-alias-bg-l1, #fbfbfb);
-    --panel: var(--dsw-alias-bg-l2, #ffffff);
-    --line: var(--dsw-alias-border-l2, #dcdcdc);
-    --fg: var(--dsw-alias-text-l1, #1b1b1b);
-    --dim: var(--dsw-alias-text-l2, #666666);
-    --brand: var(--dsw-alias-brand, #4d6bfe);
-    --warn: var(--dsw-alias-warn, #d98a3d);
+    --gap-1: 12px;
+    --gap-2: 20px;
     --radius: 8px;
+    --bg: var(--dsw-alias-bg-l1, Canvas);
+    --panel: var(--dsw-alias-bg-l2, Canvas);
+    --line: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+    --fg: var(--dsw-alias-text-l1, CanvasText);
+    --dim: var(--dsw-alias-text-l2, GrayText);
+    --brand: var(--dsw-alias-brand, #4d6bfe);
+    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --warn: var(--dsw-alias-warn, #d98a3d);
   }
-  @media (prefers-color-scheme: dark) {
-    :root { color-scheme: dark;
-      --bg: var(--dsw-alias-bg-l1, #0f1115);
-      --panel: var(--dsw-alias-bg-l2, #171a21);
-      --line: var(--dsw-alias-border-l2, rgba(128,128,128,.28));
-      --fg: var(--dsw-alias-text-l1, #e8eaf0);
-      --dim: var(--dsw-alias-text-l2, #9aa2b1); }
-  }
-  html[data-theme="dark"] { color-scheme: dark;
-    --bg: var(--dsw-alias-bg-l1, #0f1115);
-    --panel: var(--dsw-alias-bg-l2, #171a21);
-    --line: var(--dsw-alias-border-l2, rgba(128,128,128,.28));
-    --fg: var(--dsw-alias-text-l1, #e8eaf0);
-    --dim: var(--dsw-alias-text-l2, #9aa2b1); }
+  html[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { font: 15px/1.65 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
-         margin: 0; padding: 0 1.2rem 3rem; color: var(--fg); background: var(--bg); }
-  header.banner { position: sticky; top: 0; z-index: 2; margin: 0 -1.2rem .9rem;
-                  padding: .55rem 1.2rem; background: var(--panel);
-                  border-bottom: 1px solid var(--line); font-weight: 600; }
-  nav.links { max-width: 72rem; margin: 0 auto 1rem; font-size: .9rem; color: var(--dim); }
-  nav.links a { color: var(--brand); }
-  main { max-width: 72rem; margin: 0 auto; display: grid; gap: 1rem;
-         grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr); align-items: start; }
-  @media (max-width: 52rem) { main { grid-template-columns: minmax(0, 1fr); } }
-  section.card { background: var(--panel); border: 1px solid var(--line);
-                 border-radius: var(--radius); padding: .6rem 1rem 1rem; margin-bottom: 1rem; }
-  h1 { font-size: 1.25rem; margin: 1rem 0 .6rem; letter-spacing: .02em; }
-  h2 { font-size: 1rem; margin: 0 0 .4rem; letter-spacing: .02em; }
-  h3 { font-size: .92rem; margin: .7rem 0 .3rem; }
-  .owner { font-size: .78rem; color: var(--dim); margin: 0 0 .5rem; }
-  .muted { color: var(--dim); font-size: .85rem; }
+  body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
+         font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif; }
+  .banner { margin: 0 0 var(--gap-1); padding: var(--gap-1);
+            border: 1px solid var(--line); border-radius: var(--radius);
+            background: var(--panel); color: var(--dim); }
+  .backlink { margin: 0 0 var(--gap-2); }
+  .backlink a { color: var(--brand); }
+  main { display: grid; gap: var(--gap-2); grid-template-columns: minmax(0, 1fr);
+         max-width: 68rem; margin: 0 auto; }
+  @media (min-width: 60rem) { main { grid-template-columns: minmax(0, 1.4fr) minmax(16rem, 1fr); } }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: var(--gap-2); }
+  .col, .side { display: grid; gap: var(--gap-2); align-content: start; }
+  .head { display: flex; flex-wrap: wrap; gap: var(--gap-1);
+          align-items: baseline; justify-content: space-between; margin: 0 0 var(--gap-1); }
+  h1, h2 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  h3 { font-size: .95rem; font-weight: 600; margin: var(--gap-1) 0 0; color: var(--dim); }
+  .owner { margin: 0 0 var(--gap-1); color: var(--dim); }
+  .muted { margin: 0; color: var(--dim); }
   .hidden { display: none; }
-  /* 口癖护栏降档那一行：黄色（宿主变量，取不到就用同一个兜底色） */
   .warn { color: var(--warn, #d98a3d); }
-  /* 消息流 */
-  .thread { display: flex; flex-direction: column; gap: .5rem; min-height: 4rem; }
-  .bubble { max-width: 42rem; padding: .45rem .75rem; border-radius: var(--radius);
+  .thread { display: flex; flex-direction: column; gap: var(--gap-1); min-height: 4rem; }
+  .bubble { max-width: 42rem; padding: var(--gap-1); border-radius: var(--radius);
             border: 1px solid var(--line); background: var(--bg); overflow-wrap: anywhere; }
   .bubble.me { align-self: flex-end; border-color: var(--brand); }
-  .bubble.her .chunk-meta { display: block; margin-top: .2rem; font-size: .74rem;
-                            color: var(--dim); font-family: ui-monospace, Menlo, monospace; }
-  /* 输入行 */
-  .composer { display: flex; gap: .5rem; margin-top: .9rem; }
-  .composer input { flex: 1 1 auto; min-width: 8rem; font: inherit; font-size: .9rem;
-                    padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 6px;
-                    background: var(--bg); color: var(--fg); }
-  .composer input:focus { outline: 1px solid var(--brand); }
-  button { font: inherit; font-size: .88rem; padding: .38rem .9rem; cursor: pointer;
-           border: 1px solid var(--brand); border-radius: 6px;
-           background: var(--brand); color: #ffffff; }
+  .bubble .chunk-meta { display: block; margin-top: var(--gap-1); color: var(--dim); }
+  .composer { display: flex; gap: var(--gap-1); margin: var(--gap-1) 0 0; }
+  .composer input { flex: 1 1 auto; min-width: 8rem; }
+  input[type=text] { padding: var(--gap-1); border: 1px solid var(--line);
+          border-radius: var(--radius); background: var(--bg); color: var(--fg);
+          font: .95rem/1.6 inherit; }
+  button { padding: var(--gap-1) var(--gap-2); border: 1px solid var(--brand);
+           border-radius: var(--radius); background: var(--brand); color: var(--on-brand);
+           font: .95rem/1.4 inherit; cursor: pointer; }
   button:disabled { opacity: .5; cursor: progress; }
-  button.plain { background: var(--panel); color: var(--brand); }
-  /* 三态 */
-  #loading-card { border-style: dashed; color: var(--dim); }
-  #error-card { border-color: var(--warn); }
-  #error-card .card-title { color: var(--warn); font-weight: 600; margin-bottom: .3rem; }
-  #error-card .err-msg { margin: 0; overflow-wrap: anywhere; }
-  /* 右栏：想起什么 / 心 */
-  ul.rows { list-style: none; margin: 0; padding: 0; font-size: .84rem; }
-  ul.rows li { padding: .35rem 0; border-bottom: 1px dashed var(--line); }
-  ul.rows li:last-child { border-bottom: 0; }
-  .recall-text { overflow-wrap: anywhere; }
-  .recall-meta { display: block; margin-top: .15rem; }
+  button.plain { background: var(--panel); color: var(--fg); border-color: var(--line); }
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows li { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
+  ul.rows li:first-child { border-top: 0; }
+  .recall-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .recall-meta { display: block; margin-top: var(--gap-1); color: var(--dim); }
   .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
-           padding: 0 .4rem; font-size: .72rem; color: var(--dim); margin-right: .3rem; }
-  .badge.ev { border-style: dashed; font-family: ui-monospace, Menlo, monospace; }
+           padding: 0 var(--gap-1); color: var(--dim); margin-right: var(--gap-1); }
+  .badge.ev { border-style: dashed; }
   .assembly-name { overflow-wrap: anywhere; }
-  .row-meta { display: block; font-size: .74rem; color: var(--dim);
-              font-family: ui-monospace, Menlo, monospace; }
-  dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .2rem .6rem;
-          margin: 0; font-size: .86rem; }
+  .row-meta { display: block; color: var(--dim); }
+  dl.kv { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr);
+          gap: var(--gap-1); margin: 0; }
   dl.kv dt { color: var(--dim); }
   dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+  #loading-card { border-style: dashed; color: var(--dim); }
+  #error-card { border-color: var(--warn); }
+  #error-card .card-title { color: var(--warn); font-weight: 600; margin-bottom: var(--gap-1); }
+  #error-card .err-msg { margin: 0; overflow-wrap: anywhere; }
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
      直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
 <script src="panel-base.js" data-page="chat"></script>
 </head>
 <body>
-<header class="banner">说话 · 她第一次真说话：这一页只有一条写（POST /chat）。她的话按 chunks 分条出，心的档位与命中门只回显，人改不了。记忆的写入在核里，页面上没有开关。</header>
-<nav class="links" aria-label="页面导航"><a href="../">← 回魂面板</a></nav>
+<p class="banner">说话。这一页只有一条写（发一句）：她说的话要发出去，也只从这一处发。她的话按段落分开出，心的档位与过闸只回显，人改不了。记忆的写入在她那边，页面上没有开关。</p>
+<p class="backlink"><a href="../">← 回魂面板</a></p>
 <main>
-  <div>
-    <h1>跟她说一句话</h1>
+  <div class="col">
     <section class="card" id="chat-empty">
       <p class="muted">还没开始。在下面写一句，按回车或点「发送」——她先想起点什么，再开口。</p>
     </section>
@@ -113,7 +99,7 @@
       <p class="err-msg"></p>
     </section>
     <section class="card" id="thread-card">
-      <h2>这一场</h2>
+      <div class="head"><h1>跟她说一句话</h1><span class="owner">人写：整页只有「发送」这一处</span></div>
       <div class="thread" id="thread" aria-live="polite"></div>
       <div class="composer">
         <input id="chat-text" type="text" autocomplete="off" placeholder="跟她说一句话…" aria-label="要说的话">
@@ -146,16 +132,15 @@
       </dl>
     </section>
     <section class="card" id="assembly-card">
-      <h2>这次怎么装的</h2>
-      <p class="owner">装配是程序算的：谁进了上下文、各占多少字、回复允许多长。页面上改不了。</p>
+      <div class="head"><h2>这次怎么装的</h2><span class="owner">由程序写：谁进了上下文、各占多少字，人改不了</span></div>
       <ul class="rows" id="assembly-list"></ul>
       <p class="muted" id="assembly-empty">这次没有装配记录</p>
       <dl class="kv">
         <dt>回复上限</dt><dd id="assembly-budget-text">还没说话</dd>
       </dl>
-      <h3>这一轮的温度、连续性与锚句</h3>
-      <p class="owner">三个读数都只回显：温度档位是程序按数据选的，最近几轮是程序从账上读的，
-        锚句是人写在家的仓库里的。</p>
+    </section>
+    <section class="card" id="readouts-card">
+      <div class="head"><h2>这一轮的温度、连续性与锚句</h2><span class="owner">由程序写：温度档位按数据选，最近几轮从账上读；锚句是人写在家的仓库里的</span></div>
       <dl class="kv">
         <dt>温度</dt><dd id="llm-temperature">还没说话</dd>
         <dt>连续性</dt><dd id="continuity-line">还没说话</dd>
