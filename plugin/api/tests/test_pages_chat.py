@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import unittest
+from typing import Dict
 from urllib.parse import urljoin
 
 from api import api
@@ -61,6 +62,15 @@ def _text() -> str:
 
 def _calls() -> list:
     return [(method, path.partition("?")[0]) for method, path in CALL_RE.findall(_text())]
+
+
+def _kind_table(text: str) -> Dict[str, str]:
+    """从页面里把 KIND_TEXT 这张表解析成 {kind: 文案}。判据钉的是**键**，不是文案。"""
+    block = _between(text, "var KIND_TEXT = {", "};" )
+    rows: Dict[str, str] = {}
+    for match in re.finditer(r'"([^"]+)"\s*:\s*"([^"]*)"', block):
+        rows[match.group(1)] = match.group(2)
+    return rows
 
 
 def _between(text: str, start: str, end: str) -> str:
@@ -490,12 +500,25 @@ class ThreeStatesArePresent(unittest.TestCase):
         text = _text()
         self.assertIn('id="error-card"', text, "缺错误态")
         self.assertIn('show("error-card")', text)
-        for kind, words in (("no-key", "缺 key"), ("timeout", "超时"),
-                            ("rate_limit", "限流"), ("auth", "鉴权")):
-            self.assertIn('"%s"' % kind, text, "缺 kind：%s" % kind)
-            self.assertIn(words, text, "缺 kind %s 的中文归类：%s" % (kind, words))
+        table = _kind_table(text)
+        for kind in ("no-key", "timeout", "rate_limit", "auth"):
+            self.assertIn(kind, table, "缺 kind：%s（钉的是键，不是文案）" % kind)
+            self.assertTrue(table[kind].strip(), "kind %s 的文案不许空着" % kind)
         self.assertIn("data.message", text, "后端 message 要原样显示")
         self.assertIn('node("p", "err-msg"', text, "message 落在文本节点里（不拼 HTML）")
+
+    def test_the_assertion_does_not_pin_the_copy(self):
+        """反向证明：钉的是 kind 名，不是文案。改文案 → 照样绿；换掉键 → 才该红。
+
+        文案会改（这一轮就整批换过），键不会。钉错对象的断言迟早变成假绿。
+        """
+        text = _text()
+        before = set(_kind_table(text))
+        rewritten = text.replace("上游说太密了，等会儿再说", "换了个说法，照样是那句话")
+        self.assertEqual(before, set(_kind_table(rewritten)), "改了文案，键不该跟着变")
+        self.assertIn("rate_limit", _kind_table(rewritten), "文案换了，这一关仍该认得出它是限流")
+        broken = text.replace('"rate_limit":', '"rate-limit-renamed":')
+        self.assertNotIn("rate_limit", _kind_table(broken), "换掉键之后才该红——这才叫钉对了对象")
 
 
 class PageIsMountedAtChat(unittest.TestCase):

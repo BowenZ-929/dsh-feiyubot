@@ -168,8 +168,6 @@
   // 两种都靠 panelFetch(path) 把前缀补回来，路径本身只写核上的那一条。
 
   // 后端 kind → 人话归类。message 一律原样显示，不在这里改写、也不显示原始 JSON。
-  // kind 名对照（诊断用，页面上不显示）：no-key（缺 key）/ timeout（超时）/
-  // rate_limit（限流）/ auth（鉴权）/ empty / http。
   var KIND_TEXT = {
     "no-key": "核里还没配模型密钥",
     "timeout": "她想太久了，这句没说完",
