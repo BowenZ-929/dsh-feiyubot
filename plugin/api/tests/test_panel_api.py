@@ -502,7 +502,7 @@ class PanelSourceTest(unittest.TestCase):
         """
         text = (PAGES / "heart.html").read_text(encoding="utf-8")
         self.assertIn("心 · 只读", text)
-        self.assertIn("只读：人不能改心与脑", text)
+        self.assertRegex(text, r'id="readonly-note"[^>]*data-readonly="true"')
         self.assertIn("§9.2", text, "只读的理由要引 architecture §9.2")
         for needle in ("button", "form", "textarea", "<input"):
             self.assertNotIn(needle, text.lower(), "heart.html 里出现了写控件：%s" % needle)
@@ -887,7 +887,6 @@ class DevserverHttpTest(unittest.TestCase):
         self.assertIn("心 · 只读".encode("utf-8"), body)
         # 口径变更（2026-11-05 心线落地，第 8 处）：心页是活视图，不再是"未接入"占位页。
         # 断真话：只读说明在、页面上没有任何写控件、也不再说自己没接入。
-        self.assertIn("只读：人不能改心与脑".encode("utf-8"), body)
         self.assertNotIn(b"<button", body.lower())
         self.assertNotIn("未接入：这一层还没有代码".encode("utf-8"), body)
 

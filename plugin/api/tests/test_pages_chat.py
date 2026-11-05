@@ -140,7 +140,6 @@ class ControlsAreAlive(unittest.TestCase):
     def test_only_one_bubble_for_the_user_line(self):
         text = _text()
         self.assertEqual(text.count('bubble("me"'), 1, "用户那句只能画一次")
-        self.assertIn("用户那句只显示一次", text)
 
 
 class LinksStayOnReadablePages(unittest.TestCase):
@@ -323,7 +322,7 @@ class ReadoutsAreVisible(unittest.TestCase):
         self.assertIn("conf.reconciled", body, "补记条数要从回包的 continuity 里读")
         self.assertIn("reconciledText", body, "补记读数要单独一段，不塞进前半句")
         self.assertIn("补记", body, "页上看不出哪几轮是补的")
-        self.assertIn("没给", body, "缺字段时要如实写「没给」")
+        self.assertIn("补记没给", body, "补记条数缺失时要说是「没给」，不是零")
 
     def test_reconciled_rounds_are_named_one_by_one(self):
         """补记那一段：逐轮点名（fidelity === reconciled），没有补记就明说没有。"""

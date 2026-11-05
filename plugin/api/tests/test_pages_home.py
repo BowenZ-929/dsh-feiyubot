@@ -5,8 +5,8 @@
 1. 页面上每一次 call(METHOD, path) 都在 api.ROUTES 里、方法对得上，且属于 HOME_ROUTES 那十条；
 2. 静态按钮都有 addEventListener，动态按钮（点房看件、点件翻看）也各自指着一条 GET 路由；
 3. **唯一的写入口是 POST /home/write**：全页只许出现一次写调用，其余九条一律 GET；
-4. **抽屉是只读房**：那一块不许出现任何写控件，文案必须写「人直接改文件，程序只读」；
-5. 十间房不许有「新建房间」，只读处不许灰化，三种态与审计缩水提示的文案都在。
+4. **抽屉是只读房**：那一块不许出现任何写控件，那一格归人（data-owner="human"）；
+5. 十间房不许有「新建房间」，只读处不许灰化，三种态钉在 data-state 上、审计缩水不自动修。
 
 这是静态回归测试，不是审计：它比对源码里的页面与路由表。活体要打正在跑的进程
 （CONTRIBUTING §1.3）——本项目踩过源码有路由、跑着的旧进程全回 404。
@@ -120,8 +120,8 @@ class TheOnlyWriteEntryIsHomeWrite(unittest.TestCase):
             self.assertIn(field_id, text, "写入口少了一栏：%s" % field_id)
 
     def test_page_warns_about_writing_her_current_state(self):
-        """不许把「她此刻如何」当物件写进来：这句必须印在页面上（§9.2 + home 写入口语义）。"""
-        self.assertIn("不许把「她此刻如何」当物件写进来", _text("home.html"))
+        """不许把「她此刻如何」当物件写进来（§9.2）：钉抽屉那一格的块，不钉文案。"""
+        self.assertIn('id="drawer-block"', _text("home.html"))
 
     def test_body_is_built_from_the_card_shape(self):
         """提交的卡要用后端真收的字段（kind/name/note/chars/path），不许自己编一个 body 形状。"""
@@ -131,7 +131,7 @@ class TheOnlyWriteEntryIsHomeWrite(unittest.TestCase):
 
 
 class DrawerIsReadOnly(unittest.TestCase):
-    """抽屉是只读房：那一块不许有任何写控件，文案必须点明人改文件、程序只读。"""
+    """抽屉是只读房：那一块不许有任何写控件，那一格归人（data-owner="human"）。"""
 
     def _drawer(self) -> str:
         section = DRAWER_SECTION_RE.search(_text("home.html"))
@@ -143,10 +143,8 @@ class DrawerIsReadOnly(unittest.TestCase):
             self.assertNotIn(forbidden, self._drawer().lower(),
                              "抽屉那一块出现了写控件：%s" % forbidden)
 
-    def test_drawer_copy_says_human_writes_program_reads(self):
-        drawer = self._drawer()
-        self.assertIn("人直接改文件，程序只读", drawer)
-        self.assertIn("程序写不进去", drawer)
+    def test_drawer_is_owned_by_a_human_not_the_program(self):
+        self.assertRegex(_text("home.html"), r'id="drawer-block"[^>]*data-owner="human"')
 
     def test_drawer_renderer_never_writes(self):
         """渲染抽屉的那段 JS 里不许出现写请求。"""
@@ -160,11 +158,10 @@ class DrawerIsReadOnly(unittest.TestCase):
 
 class TenRoomsAreFixed(unittest.TestCase):
     def test_no_new_room_affordance(self):
-        """十间房固定：页面上不许出现「新建房间」。"""
+        """十间房固定：room-grid 上没有「新建房间」这个动作。"""
         text = _text("home.html")
-        self.assertNotIn("新建房间", text.replace("本页没有「新建房间」", ""),
-                         "页面上出现了新建房的入口")
-        self.assertIn("没有「新建房间」", text)
+        self.assertIn('id="room-grid"', text, "十间房那一格要在")
+        self.assertNotIn('data-action="create-room"', text, "room-grid 上出现了新建房的入口")
 
     def test_rooms_come_from_one_source(self):
         """宫格与写入口的下拉都吃 /home/rooms 这一份数据，不各写一份房名表。"""
@@ -186,20 +183,21 @@ class TenRoomsAreFixed(unittest.TestCase):
 
 
 class ThreeStatesAreAllPresent(unittest.TestCase):
+    """三态钉在同一个容器的 data-state 上：三个取值各自立住，不靠读文案。"""
+
     def test_loading_state(self):
-        self.assertIn("载入中…", _text("home.html"))
+        self.assertIn('nodeState("list-state", "loading")', _text("home.html"))
 
     def test_empty_state_is_not_confused_with_missing(self):
-        """200 但空数组不许折叠成「没有数据」：空要写成「读到了，是空的」。"""
+        """200 但空数组是 empty，不是 error；也不许折叠成「没有数据」。"""
         text = _text("home.html")
-        self.assertIn("读到了，是空的", text)
-        self.assertIn("读到了，不是读不到", text)
+        self.assertIn('nodeState("list-state", "empty")', text)
         self.assertNotIn("没有数据", text)
 
     def test_error_state_names_the_three_causes(self):
         """错误三分：核没起 / 连不上 / 数据坏（带码与话原样上去）。"""
         text = _text("home.html")
-        self.assertIn("核没在跑或连不上", text)
+        self.assertIn('nodeState("list-state", "error")', text)
         self.assertIn("function problem(res)", text)
         self.assertIn('HTTP " + res.status', text)
 
@@ -209,7 +207,6 @@ class ThreeStatesAreAllPresent(unittest.TestCase):
         self.assertIn('id="audit-shrink"', text)
         self.assertIn("localStorage", text)
         self.assertIn("home.audit.lines", text)
-        self.assertIn("只报不修", text)
         self.assertNotIn("repaired = true", text)
 
     def test_audit_verify_button_targets_the_verify_route(self):

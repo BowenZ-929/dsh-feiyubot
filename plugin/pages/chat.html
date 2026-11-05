@@ -517,7 +517,6 @@
     el("retry-btn").classList.add("hidden");
     if (!said) { showError("empty", "先说点什么再发。"); return; }
     hide("chat-empty");
-    // 用户那句只显示一次：发出去的当下就落进这一场，回包不再重复。
     el("thread").appendChild(bubble("me", said));
     el("chat-text").value = "";
     setBusy(true);

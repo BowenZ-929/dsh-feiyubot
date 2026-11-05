@@ -170,7 +170,7 @@
         提交后门会拒并带 door 说清是哪一道——structure＝这间房从不放东西，whitelist＝她今天被收回这间。</p>
     </section>
 
-    <section aria-labelledby="drawer-h" id="drawer-block">
+    <section aria-labelledby="drawer-h" id="drawer-block" data-owner="human">
       <h2 id="drawer-h">抽屉<small>只读房：人直接改文件，程序只读</small></h2>
       <div id="drawer-body"></div>
       <p class="state" id="drawer-state">载入中…</p>
@@ -267,6 +267,14 @@
     node.textContent = text;
   }
 
+  // 三态钉在属性上、不钉文案：载入中 / 读到了是空的 / 读不到（核没起、连不上、数据坏都算读不到）。
+  // 传空值就是「不在这三态里」，不留一个过期的态挂在容器上。
+  function nodeState(id, value) {
+    var node = el(id);
+    if (value) { node.setAttribute("data-state", value); }
+    else { node.removeAttribute("data-state"); }
+  }
+
   function call(method, path, body) {
     var init = { method: method, headers: {} };
     if (body !== undefined) {
@@ -355,6 +363,7 @@
     state.room = roomName;
     el("list-title").textContent = roomName;
     mark("list-state", "载入中…");
+    nodeState("list-state", "loading");
     var gridButtons = el("room-grid").getElementsByTagName("button");
     for (var i = 0; i < gridButtons.length; i += 1) {
       var label = gridButtons[i].getElementsByClassName("rn")[0];
@@ -366,6 +375,7 @@
         el("list-body").textContent = "";
         var node = el("list-state");
         node.className = "state bad";
+        nodeState("list-state", "error");
         node.textContent = "读 /home/list 失败：" + problem(res);
         return;
       }
@@ -379,6 +389,7 @@
     var items = data.items || [];
     if (!items.length) {
       // 200 且空数组：读到了，就是空的——不许折叠成读不到。
+      nodeState("list-state", "empty");
       mark("list-state", data.room + " 现在空着（0 件，读到了，不是读不到）。total=" + data.total + "，bad_lines=" + data.bad_lines + "。");
       return;
     }
@@ -421,6 +432,7 @@
     var tail = data.room + "：" + data.total + " 件，这次读到 " + items.length + " 行";
     if (data.truncated) { tail += "（截了：一次最多 " + data.limit + " 行 / 6000 字，total 是折叠后的件数）"; }
     if (data.bad_lines) { tail += "；有 " + data.bad_lines + " 行读不出来（数据坏，不是空）"; }
+    nodeState("list-state", "");
     mark("list-state", tail + "。");
   }
 

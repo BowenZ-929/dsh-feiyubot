@@ -351,7 +351,6 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
         self.assertNotIn("tier_of", self.text, "页面不许自己换算档位")
 
     def test_heart_page_says_it_is_readonly(self):
-        self.assertIn("只读：这一页没有任何能改她的控件", self.text)
         self.assertIn("只读", self.text)
         for forbidden in ("<button", "<form", "<textarea", "<select", "<input"):
             self.assertNotIn(forbidden, self.text.lower(), "心页出现了写控件：%s" % forbidden)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from organs.mouth import pace as pace_module
@@ -133,8 +134,11 @@ class GapsTest(unittest.TestCase):
         """这句必须写在 pace 自己的 docstring 里：15ms 是通道往返，不是节奏。"""
         doc = pace_module.__doc__ or ""
         self.assertIn("15ms 是通道往返，不是节奏", doc)
-        self.assertIn("plugin/api/README.md:130", doc)
         self.assertIn("不是随机数", doc)
+        # 「有出处」这件事要真去读一次：行号会漂，钉行号等于永远绿。
+        readme = Path(__file__).resolve().parents[3] / "api" / "README.md"
+        self.assertTrue(readme.is_file(), "README 不在，出处无从核起：%s" % readme)
+        self.assertIn("实测间隔（①→④）：15ms", readme.read_text(encoding="utf-8"))
 
 
 class WarehouseAndPolicyTest(unittest.TestCase):
