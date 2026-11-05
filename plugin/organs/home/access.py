@@ -217,26 +217,7 @@ def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
 
     两道门之后：路径形状 → 单次字数 → 单次文件数 → 该房件数 → 该房日频。
     """
-    try:
-        found = find(room)
-    except RoomMiss as miss:
-        raise _deny("ROOM_MISS", str(miss), 0, len(ROOM_NAMES), 1,
-                    room=room, nearest=miss.nearest)
-
-    if found.name in READONLY_ROOMS:
-        raise _deny("ROOM_READONLY", "这间只读，不放东西：%s" % found.name,
-                    0, 0, 1, door="structure", room=found.name,
-                    readonly=sorted(READONLY_ROOMS))
-
-    if role == "agent":
-        allowed = whitelist if whitelist is not None else load_whitelist(root)
-        if found.name not in allowed.writable:
-            raise _deny("ROOM_READONLY", "这间她现在不写：%s" % found.name,
-                        0, len(allowed.writable), 1, door="whitelist",
-                        room=found.name, writable=sorted(allowed.writable), source=allowed.source)
-    elif role not in ("organ", "human"):
-        raise _deny("ROLE_UNKNOWN", "不认识的角色：%r" % (role,), 0, len(ROLES), 1, role=role)
-
+    found = _doors(role=role, room=room, root=root, whitelist=whitelist)
     check_path_shape(found.name, name)
 
     if chars > MAX_CHARS_PER_WRITE:
@@ -258,6 +239,47 @@ def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
         raise _deny("DAY_QUOTA_REACHED", "这间今天已经写了 %d 次，上限 %d 次" % (today, MAX_WRITES_PER_ROOM_PER_DAY),
                     today, MAX_WRITES_PER_ROOM_PER_DAY, today + 1 - MAX_WRITES_PER_ROOM_PER_DAY,
                     room=found.name)
+
+
+def _doors(*, role: str, room: str, root=None,
+           whitelist: Optional[Whitelist] = None):
+    """两道门只在这里判一次：门一结构门（角色无关）、门二白名单门（只管 agent）。
+
+    写与消费共用一个实现——消费是「她拿走一件」，与「她放下一件」过的是同一扇门。
+    分两份写就迟早分叉：某一扇放行、另一扇忘了改，那时候谁也说不清「她到底能不能动这间」。
+    """
+    try:
+        found = find(room)
+    except RoomMiss as miss:
+        raise _deny("ROOM_MISS", str(miss), 0, len(ROOM_NAMES), 1,
+                    room=room, nearest=miss.nearest)
+
+    if found.name in READONLY_ROOMS:
+        raise _deny("ROOM_READONLY", "这间只读，不放东西：%s" % found.name,
+                    0, 0, 1, door="structure", room=found.name,
+                    readonly=sorted(READONLY_ROOMS))
+
+    if role == "agent":
+        allowed = whitelist if whitelist is not None else load_whitelist(root)
+        if found.name not in allowed.writable:
+            raise _deny("ROOM_READONLY", "这间她现在不写：%s" % found.name,
+                        0, len(allowed.writable), 1, door="whitelist",
+                        room=found.name, writable=sorted(allowed.writable), source=allowed.source)
+    elif role not in ("organ", "human"):
+        raise _deny("ROLE_UNKNOWN", "不认识的角色：%r" % (role,), 0, len(ROLES), 1, role=role)
+    return found
+
+
+def check_consume(*, role: str, room: str, name: str, root=None,
+                  whitelist: Optional[Whitelist] = None) -> None:
+    """消费前唯一的准入判定：两道门 + 路径形状，**五道上限不过**。
+
+    为什么少了字数与件数：消费不新增一件，它是「拿走」。拿一件东西去受「一次写 2000 字」
+    「这间 16000 件」管，等于满房的时候连拿都拿不出来——那不叫上限，叫锁死。
+    日频那一道仍会算到消费头上（审计账里同房同日的行一起数），这是已知的共用预算。
+    """
+    found = _doors(role=role, room=room, root=root, whitelist=whitelist)
+    check_path_shape(found.name, name)
 
 
 def check_read(*, room: str, name: str, lines: int, chars: int) -> None:

@@ -14,12 +14,12 @@ from . import cards
 from . import residents
 from . import rooms
 from . import store
-from .access import (AccessDenied, Whitelist, check_path_shape, check_read, check_write,
-                     load_whitelist)
+from .access import (AccessDenied, Whitelist, check_consume, check_path_shape, check_read,
+                     check_write, load_whitelist)
 from .anchors import (AnchorError, append_anchors, latest_by_scene, read_all as read_anchors,
                        read_seed, seed_path)
 from .audit import AuditShrunk, Entry, append_entry, read_tail, verify
-from .cards import CardError, append_cards, fold, list_room, read_item
+from .cards import CardError, append_cards, consume, fold, list_room, read_item
 from .residents import (borrow_ledger, read_drawer, read_learned, register_artwork,
                         register_asset, register_borrow, seed_mouth_pointers,
                         warehouse_pointers)
@@ -30,10 +30,11 @@ from .store import atomic_write_text, append_line, encode_name, home_root, sha25
 __all__ = [
     "access", "anchors", "audit", "cards", "residents", "rooms", "store",
     "AnchorError", "append_anchors", "latest_by_scene", "read_anchors", "read_seed", "seed_path",
-    "AccessDenied", "Whitelist", "check_path_shape", "check_read", "check_write",
+    "AccessDenied", "Whitelist", "check_consume", "check_path_shape", "check_read",
+    "check_write",
     "load_whitelist",
     "AuditShrunk", "Entry", "append_entry", "read_tail", "verify",
-    "CardError", "append_cards", "fold", "list_room", "read_item",
+    "CardError", "append_cards", "consume", "fold", "list_room", "read_item",
     "borrow_ledger", "read_drawer", "read_learned", "register_artwork", "register_asset",
     "register_borrow", "seed_mouth_pointers", "warehouse_pointers",
     "DEFAULT_WRITABLE", "READONLY_ROOMS", "ROOM_NAMES", "ROOMS", "Room", "RoomMiss", "find",

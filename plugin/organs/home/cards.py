@@ -31,12 +31,13 @@ INDEX_NAME = "index.jsonl"
 
 # 七种卡：物件（放着的）、痕迹（写下的经过）、名片（一人一卡）、借阅条（借来的一份语料）、
 # 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）。
-CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到")
+CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费")
 
 # 家里能当正文读的后缀；别的后缀（图、音视频）只认指纹与路径，不读正文。
 TEXT_SUFFIXES: Tuple[str, ...] = (".md", ".jsonl")
 
 MENTION_KIND = "提到"
+CONSUME_KIND = "消费"
 
 
 class CardError(Exception):
@@ -187,8 +188,16 @@ def append_cards(root=None, *, role: str, by: str, cards: list) -> dict:
     return {"cards": written, "audit": entries}
 
 
-def fold(rows: list) -> list:
-    """把「一行一张卡」的流水折成「一件东西一张卡」，重复的只加 mentions。"""
+def fold(rows: list, *, stats: Optional[Dict[str, Any]] = None) -> list:
+    """把「一行一张卡」的流水折成「一件东西一张卡」，重复的只加 mentions、被消费的标 consumed。
+
+    **只追加不变**：消费也在流水里追加一行（`kind="消费"`，`params.ref` 指向被拿走那张卡的
+    card_id），折的时候把目标标成 `consumed=True / left=0`。盘上一个字都不删——「少了」是读出来的
+    结论，不是擦掉一行。理由与痕迹、审计同源：只增不改才追得回「谁什么时候拿走的」。
+
+    `stats` 是个可选出参：孤儿消费（目标不在）与重复消费条数塞进去，由 list_room 如实报出来。
+    读不到就报，不把「折不上」悄悄吞掉。
+    """
     items: List[Dict[str, Any]] = []
     by_card: Dict[str, Dict[str, Any]] = {}
     by_key: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
@@ -199,6 +208,25 @@ def fold(rows: list) -> list:
         card = dict(row)
         card["params"] = dict(card.get("params") or {})
         card["mentions"] = 0
+        card["consumed"] = False
+        card["left"] = 1
+
+        if card.get("kind") == CONSUME_KIND:
+            target = _consume_target(card, items, by_card, by_key)
+            if target is None:
+                if stats is not None:
+                    stats["orphans"] = int(stats.get("orphans", 0)) + 1
+                continue
+            if target.get("consumed"):
+                if stats is not None:
+                    stats["repeats"] = int(stats.get("repeats", 0)) + 1
+                continue
+            target["consumed"] = True
+            target["left"] = 0
+            target["consumed_at"] = card.get("at")
+            target["consumed_by"] = card.get("by")
+            target["consume_reason"] = card["params"].get("reason") or card.get("note") or ""
+            continue
 
         if card.get("kind") == MENTION_KIND:
             ref = card["params"].get("ref") or card.get("card_id")
@@ -231,7 +259,100 @@ def fold(rows: list) -> list:
     return items
 
 
-def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200) -> dict:
+def _consume_target(card: Dict[str, Any], items: List[Dict[str, Any]],
+                    by_card: Dict[str, Dict[str, Any]],
+                    by_key: Dict[Tuple[Any, ...], Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """消费行指向哪一件：先认 `params.ref`（card_id），退到同名且还没被拿走的那一件。
+
+    同名多件时**不猜**——返回 None 交上去当孤儿消费报出来，比随便拿一件更诚实。
+    """
+    ref = card["params"].get("ref")
+    target = by_card.get(str(ref)) if isinstance(ref, str) else None
+    if target is not None:
+        return target
+    for key in _identity_keys(card):
+        target = by_key.get(key)
+        if target is not None:
+            return target
+    name = card.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    matches = [item for item in items
+               if item.get("name") == name and not item.get("consumed")]
+    return matches[0] if len(matches) == 1 else None
+
+
+def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] = None,
+            name: Optional[str] = None, reason: str = "") -> dict:
+    """她拿走一件东西：过两道门、追加一行消费、记一行审计。**盘上一行都不删。**
+
+    房名、门、路径形状与写入是同一套（access.check_consume）——消费也是动这间房，
+    不是绕过门的一条捷径。只多了半件都做不到的事：挑出到底拿走哪一件。
+    """
+    target_room = _target_room(room)
+    if (card_id is None) == (name is None):
+        raise CardError("BAD_ARGUMENT",
+                        {"card_id": card_id, "name": name},
+                        "消费要指定一件：给 card_id 或给 name，二选一")
+    if not isinstance(reason, str):
+        raise CardError("BAD_ARGUMENT", {"reason": reason}, "reason 要是字符串")
+
+    # 门先于找件：反过来就成了「从门外探测房间里有没有那件东西」——房名/门不对时该立刻拒，
+    # 而不是先翻一遍索引再拿查询结果回话。挑件用的标识（card_id 或名字）先过路径形状。
+    access.check_consume(role=role, room=target_room.name,
+                         name=str(name if name is not None else card_id), root=root)
+
+    home = store_module.home_root(root)
+    path = _index_path(home, target_room.name)
+    rows, _bad = _read_index(path)
+    folded = fold(rows)
+    if card_id is not None:
+        every = [item for item in folded if item.get("card_id") == card_id]
+        live = [item for item in every if not item.get("consumed")]
+        wanted = card_id
+    else:
+        every = [item for item in folded if item.get("name") == name]
+        live = [item for item in every if not item.get("consumed")]
+        wanted = name
+    if not live:
+        # 「没有这一件」与「这一件已经被拿走了」是两件事：分开报，不然人会一直找一件拿不走的东西。
+        if every:
+            gone = every[0]
+            raise CardError("CARD_ALREADY_CONSUMED",
+                            {"room": target_room.name, "card_id": gone.get("card_id"),
+                             "name": gone.get("name"), "consumed_at": gone.get("consumed_at"),
+                             "consumed_by": gone.get("consumed_by"),
+                             "reason": gone.get("consume_reason")},
+                            "这件已经被拿走了（%s，由 %s）：%s"
+                            % (gone.get("consumed_at"), gone.get("consumed_by"), wanted))
+        raise CardError("CARD_NOT_FOUND",
+                        {"room": target_room.name,
+                         "card_id": card_id, "name": name},
+                        "这间里没有这一件：%s" % wanted)
+    if len(live) > 1:
+        raise CardError("CARD_AMBIGUOUS",
+                        {"room": target_room.name, "name": name,
+                         "candidates": [item.get("card_id") for item in live]},
+                        "同名的不止一件，得给 card_id 才拿得准：%s" % name)
+    target = live[0]
+
+    access.check_path_shape(target_room.name, str(target.get("name")))
+    store_module.ensure_dir(home / target_room.name)
+    card = _new_card({"kind": CONSUME_KIND, "name": target.get("name"),
+                      "note": reason, "chars": len(reason),
+                      "params": {"ref": target.get("card_id"), "reason": reason}},
+                     role=role, by=by, room_name=target_room.name,
+                     seq=_line_count(path) + 1)
+    store_module.append_line(path, card)
+    entry = audit.append_entry(root=root, role=role, by=by, room=target_room.name,
+                               name="%s:%s" % (CONSUME_KIND, card["name"]),
+                               chars=len(reason), bytes=0)
+    return {"room": target_room.name, "card": card, "target": target,
+            "left": 0, "audit": entry}
+
+
+def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
+              include_consumed: bool = False) -> dict:
     """读一间房的索引：offset/limit 分页，再按 access 的读上限截断，截了就说截了。
 
     房名与 root 一样只能按关键字传：冻结契约里那句 `list_room(root=None, room: str, *)`
@@ -241,7 +362,11 @@ def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200) -> dic
     target = _target_room(room)
     home = store_module.home_root(root)
     rows, bad = _read_index(_index_path(home, target.name))
-    items = fold(rows)
+    stats: Dict[str, Any] = {}
+    items = fold(rows, stats=stats)
+    consumed = sum(1 for card in items if card.get("consumed"))
+    if not include_consumed:
+        items = [card for card in items if not card.get("consumed")]
 
     offset = max(0, int(offset))
     limit = max(0, int(limit))
@@ -264,7 +389,10 @@ def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200) -> dic
 
     return {"room": target.name, "slug": target.slug, "offset": offset, "limit": limit,
             "total": len(items), "lines": len(shown), "chars": chars,
-            "truncated": truncated, "bad_lines": bad, "items": shown}
+            "truncated": truncated, "bad_lines": bad, "items": shown,
+            "consumed": consumed,
+            "orphan_consumes": int(stats.get("orphans", 0)),
+            "repeat_consumes": int(stats.get("repeats", 0))}
 
 
 def _allowed_suffixes(card: Dict[str, Any]) -> set:

@@ -45,6 +45,7 @@ HOME_ROUTES = {
     "/home/warehouse": "GET",
     "/home/anchors": "GET",
     "/home/anchors/append": "POST",
+    "/home/consume": "POST",
     "/home/write": "POST",
 }
 AGENT = "home"
@@ -57,7 +58,7 @@ _DOORS = ("structure", "whitelist")
 # 库里的拒绝码 → HTTP。认不得的算 500：宁可报错，也不把「读不出来」说成 4xx 的入参问题。
 _REFUSED: Dict[str, int] = {
     # 400：入参或路径形状不对
-    "ROOM_MISS": 400, "BAD_ARGUMENT": 400, "BODY_NOT_SELF": 400,
+    "ROOM_MISS": 400, "BAD_ARGUMENT": 400, "BODY_NOT_SELF": 400, "BAD_CARD": 400,
     "PATH_EMPTY": 400, "PATH_CONTROL_CHAR": 400, "PATH_ABSOLUTE": 400, "PATH_SHAPE": 400,
     "PATH_TRAVERSAL": 400, "PATH_SEGMENT_TOO_LONG": 400, "PATH_TOO_DEEP": 400,
     "CHARS_OVER": 400, "FILES_OVER": 400, "READ_LINES_OVER": 400, "READ_CHARS_OVER": 400,
@@ -66,7 +67,7 @@ _REFUSED: Dict[str, int] = {
     # 403：角色不认识（门挡下来的那一类由 _status_of 按 detail.door 判，不在这张表里）
     "ROLE_UNKNOWN": 403,
     # 404：卡不在（房名对、件不在）
-    "CARD_NOT_FOUND": 404,
+    "CARD_NOT_FOUND": 404, "CARD_AMBIGUOUS": 400, "CARD_ALREADY_CONSUMED": 409,
     # 409：盘上的东西跟卡／账／高水位对不上——只报，不自动修
     "CARD_DISK_MISMATCH": 409, "AUDIT_SHRUNK": 409, "POINTER_STALE": 409,
     "ROOM_CAP_REACHED": 409, "DAY_QUOTA_REACHED": 409,
@@ -135,6 +136,8 @@ def _handle(route: str, params: Mapping[str, str], root: Any,
         return _anchors_list(root, params)
     if route == "/home/anchors/append":
         return _anchors_append(root, body)
+    if route == "/home/consume":
+        return _consume(root, body)
     return _warehouse(root)
 
 
@@ -216,9 +219,12 @@ def _list(root: Any, params: Mapping[str, str]) -> Result:
     offset = _int_param(params, "offset", 0)
     limit = _int_param(params, "limit", access.READ_MAX_LINES)
     payload: Dict[str, Any] = {"ok": True, "readonly": True, "agent": AGENT}
-    payload.update(cards.list_room(root, room=room, offset=offset, limit=limit))
+    payload.update(cards.list_room(
+        root, room=room, offset=offset, limit=limit,
+        include_consumed=params.get("include_consumed") in ("1", "true", "yes")))
     payload["note"] = "一次最多读 %d 行／%d 字：截了就 truncated=true，total 是折叠后的件数" \
-                      "（不是 index.jsonl 的行数）" % (access.READ_MAX_LINES, access.READ_MAX_CHARS)
+                      "（不是 index.jsonl 的行数）；被拿走的默认不列，include_consumed=1 才看得见" \
+                      % (access.READ_MAX_LINES, access.READ_MAX_CHARS)
     return 200, payload
 
 
@@ -489,6 +495,37 @@ def _unconnected(route: str, why: str, wrote: bool = False) -> Result:
         payload["wrote"] = 0
         payload["message"] += "；这一批一张卡都没写，也没有审计行"
     return 200, payload
+
+def _consume(root: Any, body: Optional[Dict[str, Any]]) -> Result:
+    """POST /home/consume：她拿走一件。过两道门、追加一行消费、记一行审计，盘上一行都不删。
+
+    **本层不判一次写权**：门与路径形状全在 access.check_consume，这里只把拒绝翻成 HTTP。
+    """
+    if not isinstance(body, dict):
+        raise _BadArgument("POST /home/consume 的 body 要是一个对象："
+                           "{\"role\",\"by\",\"room\",\"card_id\" 或 \"name\"}")
+    role = _clean(body.get("role"))
+    by = _clean(body.get("by"))
+    room = _clean(body.get("room"))
+    if role is None:
+        raise _BadArgument("body 要给 role（agent／organ／human）")
+    if by is None:
+        raise _BadArgument("body 要给 by（谁拿走的，会记进审计）")
+    if room is None:
+        raise _BadArgument("body 要给 room（哪一间）")
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise _BadArgument("reason 要是字符串")
+    outcome = cards.consume(root, role=role, by=by, room=room,
+                            card_id=_clean(body.get("card_id")),
+                            name=_clean(body.get("name")), reason=reason or "")
+    return 200, {
+        "ok": True, "readonly": False, "agent": AGENT,
+        "room": outcome["room"], "left": outcome["left"],
+        "card": outcome["card"], "target": outcome["target"],
+        "audit": _rows([outcome["audit"]])[0],
+    }
+
 
 def _anchors_list(root: Any, params: Mapping[str, str]) -> Result:
     """GET /home/anchors：仓库里的台词卡，按 scene 取最新一条。
