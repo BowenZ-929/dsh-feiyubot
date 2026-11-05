@@ -9,7 +9,7 @@
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
   recent     turns（读几轮）/ cap（每侧截多少字）/ notice（「更早还有 N 轮」那句模板）
   banned     rounds（抽她最近几轮）/ opening_chars（开场取几个字）/ note（那句禁令怎么说）
-  action     {"pool": 部位池, "rule": 换部位的规矩}：动作给池子，不给自由
+  action     {"pool": 部位池, "rule": 写法规矩, "quota": 配额}：动作给池子，但配额说了算
   anchors    {"label", "cap", "room", "name"}：锚句从家·哪一间房的哪一张卡读
 读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先（存在才读），否则读
 出厂 organs/mind/data/assembly.json。
@@ -38,7 +38,9 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
   recent  organs/mind/recent.py：最近几轮原文；omitted > 0 时把「更早还有 N 轮」放在段尾
   banned  organs/mind/repeat.py：只抽**她那一侧**最近几轮的动作行与开场，去重计次列成禁令——
           最近几轮那段原文一个字都不删，禁令另起一节；人的话一个字都不许进来
-  action  部位池与「这一轮换一个部位」的规矩，两项都来自 assembly.json（代码里没有部位词）
+  action  部位池、写法规矩与配额（assembly.json 的 action，代码里没有部位词与本层的配额数）；
+          配额按「最近 quota.window 轮里有几轮带动作」算（repeat.count_with_actions）——
+          已达 quota.max 就只写 quota.blocked 那一句，池子与规矩一个字都不给
   memory  brain.recall(query=text, who=who or None)：既进提示词，也原样进返回体
           recalled[]（页面要显示「想起了什么 + 证据指针」）
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
@@ -183,25 +185,36 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
     instruction = reply.get("instruction")
     if not isinstance(instruction, str):
         raise ValueError("reply.instruction 要一段字：%s" % where)
-    fmt = reply.get("format")
-    if not isinstance(fmt, list):
-        raise ValueError("reply.format 要是字符串列表（空列表 = 不加规矩）：%s" % where)
-    clean_format = []
-    for rule in fmt:
-        if not isinstance(rule, str) or not rule.strip():
-            raise ValueError("reply.format 里有空的规矩：%s" % where)
-        clean_format.append(rule.strip())
     return {
         "order": [key.strip() for key in order],
         "sections": checked,
         "prompt": {"system": prompt["system"], "user": prompt["user"]},
         "reply": {"budget_by_tier": clean_budgets, "default": default,
-                  "instruction": instruction, "format": clean_format},
+                  "instruction": instruction,
+                  "format": _check_rules(reply.get("format"), "format", where),
+                  "format_blocked": _check_rules(reply.get("format_blocked"),
+                                                 "format_blocked", where)},
         "recent": _check_recent(data.get("recent"), where),
         "banned": _check_banned(data.get("banned"), where),
         "action": _check_action(data.get("action"), where),
         "anchors": _check_anchors(data.get("anchors"), where),
     }
+
+
+def _check_rules(spec: Any, name: str, where: str) -> List[str]:
+    """reply 那两份说话规矩（format / format_blocked）同形：字符串列表，条目不许空。
+
+    两份都要在数据里：blocked 那一态换的是**整份规矩**（动作那条从「怎么写」改成「不许写」），
+    不在这里兜底补一条——数据缺了就当场报，缺的那一句会自动补成默认的话，人改不动它。
+    """
+    if not isinstance(spec, list):
+        raise ValueError("reply.%s 要是字符串列表（空列表 = 不加规矩）：%s" % (name, where))
+    clean: List[str] = []
+    for rule in spec:
+        if not isinstance(rule, str) or not rule.strip():
+            raise ValueError("reply.%s 里有空的规矩：%s" % (name, where))
+        clean.append(rule.strip())
+    return clean
 
 
 def _check_recent(spec: Any, where: str) -> Dict[str, Any]:
@@ -242,9 +255,9 @@ def _check_banned(spec: Any, where: str) -> Dict[str, Any]:
 
 
 def _check_action(spec: Any, where: str) -> Dict[str, Any]:
-    """动作池那一格：池子与规矩都在数据里，代码里一个部位词都不许写死。"""
+    """动作池那一格：池子、规矩、配额都在数据里，代码里一个部位词、一个配额数都不许写死。"""
     if not isinstance(spec, dict):
-        raise ValueError("装配说明缺 action（pool / rule）：%s" % where)
+        raise ValueError("装配说明缺 action（pool / rule / quota）：%s" % where)
     pool = spec.get("pool")
     if not isinstance(pool, list) or not pool:
         raise ValueError("action.pool 要一份非空的部位列表：%s" % where)
@@ -255,8 +268,35 @@ def _check_action(spec: Any, where: str) -> Dict[str, Any]:
         clean_pool.append(item.strip())
     rule = spec.get("rule")
     if not isinstance(rule, str) or not rule.strip():
-        raise ValueError("action.rule 要一句话（换部位的规矩，人能改）：%s" % where)
-    return {"pool": clean_pool, "rule": rule.strip()}
+        raise ValueError("action.rule 要一句话（写法规矩，人能改）：%s" % where)
+    return {"pool": clean_pool, "rule": rule.strip(),
+            "quota": _check_quota(spec.get("quota"), where)}
+
+
+def _check_quota(spec: Any, where: str) -> Dict[str, Any]:
+    """动作配额的四个键：window / max 两个数，blocked / sparing 两句话。
+
+    max 不大于 window 是硬规矩：窗口里一共只有 window 轮，配额比它还大就等于永远不禁，
+    那四个键也就是摆设了。blocked / sparing 不许空——空话进提示词等于这一轮没给规矩。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("action.quota 要给 {window, max, blocked, sparing}（动作配额的四个键）：%s"
+                         % where)
+    clean: Dict[str, Any] = {}
+    for name in ("window", "max"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("action.quota.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    if clean["max"] > clean["window"]:
+        raise ValueError("action.quota.max 不能大于 window（%d > %d）：%s"
+                         % (clean["max"], clean["window"], where))
+    for name in ("blocked", "sparing"):
+        value = spec.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("action.quota.%s 要一句非空的话：%s" % (name, where))
+        clean[name] = value.strip()
+    return clean
 
 
 def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
@@ -349,7 +389,8 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
       continuity{turns_loaded, omitted, notice} /
-      banned{rounds, action_lines[{text,count}], openings[开场前 N 字]} / action{pool, rule} /
+      banned{rounds, action_lines[{text,count}], openings[开场前 N 字]} /
+      action{pool, rule, quota{window,max,used,blocked}} /
       llm{model, temperature, temperature_tier} /
       anchors{configured, count, available, injected, instruction, items[实际注入的],
       skipped[没注入的 scene]|note} /
@@ -381,8 +422,11 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     recent_text = _recent_text(loaded.get("turns") or [], note, conf)
     # 近轮禁用：原文段一个字都不删，禁令另起一节，只抽她那一侧（store 里她的自称就是她）
     her_name = store.snapshot().identity.display
-    banned_text, banned_read = _banned_text(loaded.get("turns") or [], conf["banned"], her_name)
-    action_text = _action_text(conf)
+    history = loaded.get("turns") or []
+    banned_text, banned_read = _banned_text(history, conf["banned"], her_name)
+    # 动作配额：数最近 quota.window 轮里有几轮带动作（轮数不是行数，口径与禁令同一份）
+    action_text, action_read = _action_text(
+        conf, repeat.count_with_actions(history, conf["action"]["quota"]["window"], her_name))
     # 口癖护栏：先读**这一轮之前**的滚动窗口，再定这一轮注入几条（先记后算会自己踩自己）。
     # 家现行台词读一次，注入按 guard 裁，口癖统计仍看全量——两件事各用各的那一份。
     anchors_rows = _anchor_rows()
@@ -407,7 +451,11 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
 
     # 4) 提示词与回复预算
     tier = heart_words["mood"]["tier"]
-    reply_rule = "\n".join([conf["reply"]["instruction"]] + list(conf["reply"]["format"]))
+    # 配额满了就换另一份说话规矩：动作那条从「怎么写」改成「不许写」——格式要求本身也在
+    # 催她每轮写一行动作，只留一句禁令压不住它。
+    rules = (conf["reply"]["format_blocked"] if action_read["quota"]["blocked"]
+             else conf["reply"]["format"])
+    reply_rule = "\n".join([conf["reply"]["instruction"]] + list(rules))
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
                 "banned": banned_text, "action": action_text,
@@ -438,6 +486,9 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     # 5) 发模型（LLMError 原样上抛）
     said_back = llm.complete(messages, config=call_conf, env=env, transport=transport,
                              temperature=temperature)
+
+    # 5.5) 硬兜底：配额满了就替她把动作行删掉（不靠模型自觉）——删后的文本往下走全程
+    said_back = _strip_blocked_actions(said_back, action_read)
 
     # 6) 过嘴：切分 + 节奏 + 闸（重写器 None：本轮命中即弃）
     batch, verdict, ledger = _pass_mouth(said_back, who, at)
@@ -479,7 +530,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
         "continuity": {"turns_loaded": len(loaded.get("turns") or []),
                        "omitted": omitted, "notice": note},
         "banned": banned_read,
-        "action": {"pool": list(conf["action"]["pool"]), "rule": conf["action"]["rule"]},
+        "action": action_read,
         "llm": {"model": call_conf["model"], "temperature": temperature,
                 "temperature_tier": temperature_tier},
         "anchors": anchor_read,
@@ -534,14 +585,46 @@ def _banned_text(turns: List[Mapping[str, Any]], conf: Mapping[str, Any],
     return "\n".join(lines), got
 
 
-def _action_text(conf: Mapping[str, Any]) -> str:
-    """动作池这一段进提示词的样子：规矩与池子，两项都照抄 assembly.json。
+def _action_text(conf: Mapping[str, Any], used: int) -> Tuple[str, Dict[str, Any]]:
+    """动作池这一段进提示词的样子（两态）与返回体那一份 action。
 
-    这一段存在的理由：只说「写她自己的身体」，她就一直用尾巴；给了池子与「换一个部位」的
-    规矩，她才得挑。代码里一个部位词都没有——改数据就改装配。
+    未达 quota.max：规矩 + quota.sparing + 部位池，三样都照抄 assembly.json——只说「写她自己的
+    身体」，她就一直用尾巴；给了池子她才得挑。（旧口径「这一轮换一个部位」被她读成「每轮都要
+    写一个」，六轮六次带动作，所以现在的规矩是「偶尔才写」，配额这一层替她数。）
+    已达 quota.max：**整段只写 quota.blocked 那一句**，池子与规矩一个字都不给——给了她就会挑
+    一个写，而这一轮该写的正是零个。
+
+    返回体那一份照样三键齐全（pool / rule / quota）：blocked 时 pool 给空列表而不是 None，
+    页面照同一套键渲染，不必为这一态另写一支。
     """
     spec = conf["action"]
-    return "%s\n可用部位：%s" % (spec["rule"], POOL_SEP.join(spec["pool"]))
+    quota = spec["quota"]
+    blocked = used >= quota["max"]
+    read = {"pool": [] if blocked else list(spec["pool"]), "rule": spec["rule"],
+            "quota": {"window": quota["window"], "max": quota["max"],
+                      "used": used, "blocked": blocked,
+                      "stripped": 0, "kept_because_empty": False}}
+    if blocked:
+        return quota["blocked"], read
+    return ("%s\n%s\n可用部位：%s"
+            % (spec["rule"], quota["sparing"], POOL_SEP.join(spec["pool"]))), read
+
+
+def _strip_blocked_actions(reply: str, action: Dict[str, Any]) -> str:
+    """blocked 时把成品里的整行动作行删掉，并把删了几行记进 action.quota.stripped。
+
+    这里是「不许靠模型自觉」的落点：提示词那句禁令压不住另外几条同向指令（格式要求还在教她
+    怎么写动作行、锚句的规矩预设了有动作、最近几轮她自己的动作行一直在示范），所以这一轮
+    真写出来的动作行在这里删掉。删空就留原文（kept_because_empty）——不把一轮回复删没。
+    未 blocked 时一个字都不动，stripped 恒 0（这一态她本来就该偶尔写一个）。
+    """
+    quota = action["quota"]
+    if not quota["blocked"]:
+        return reply
+    clean, count, kept = repeat.strip_action_lines(reply)
+    quota["stripped"] = count
+    quota["kept_because_empty"] = kept
+    return clean
 
 
 def _anchor_rows() -> List[Mapping[str, Any]]:

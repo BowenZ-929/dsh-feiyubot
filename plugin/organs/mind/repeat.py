@@ -13,6 +13,12 @@
 
 **动作行原文照搬**（连圆括号一起），去重之后只多标一句「重复 N 次」：她下一轮要躲的是
 这一整行的形状，改写半句都躲不掉。
+
+**数配额的也是这里**（count_with_actions）：动作改配额制之后，这一轮该不该写动作要数
+「最近几轮里有几轮带动作」——一轮里写两行仍是一轮，数成两轮就会提前封顶。
+
+**删动作行的也是这里**（strip_action_lines）：配额满了就该一个动作都不写，可模型不听提示词，
+所以成品里那几行要在这里删掉——认行的口径与禁令、配额同一份（action_lines），三处不许分叉。
 """
 from __future__ import annotations
 
@@ -92,3 +98,50 @@ def banned(turns: Any, conf: Mapping[str, Any], her_name: Any = "") -> Dict[str,
     return {"rounds": rounds,
             "action_lines": [{"text": text, "count": count} for text, count in actions],
             "openings": openings}
+
+
+def count_with_actions(turns: Any, window: int, her_name: Any = None) -> int:
+    """最近 window 轮里**她带动作行的轮数**：一轮里写两行也只算一轮。
+
+    窗口与「她那一侧」的口径与 banned 段同一份（her_texts + action_lines），本函数不另写
+    正则、不另定谁算她：两处各认一套，同一段历史在禁令与配额上就会数出两个数。
+    窗口是**轮数**不是行数：只取最近 window 轮，更早的轮一律不进；window <= 0 等于没有历史。
+    调用方给进来的就是历史（不含本轮），所以这里不减去任何东西。
+    """
+    rounds = int(window)
+    if rounds <= 0:
+        return 0
+    used = 0
+    for row in list(turns or [])[-rounds:]:
+        if any(action_lines(text) for text in her_texts([row], her_name)):
+            used += 1
+    return used
+
+
+def strip_action_lines(text: Any) -> Tuple[str, int, bool]:
+    """删掉整行圆括号动作行（连着它后面那几行多余的空行）：(删后的原文, 删了几行, 是否留了原文)。
+
+    口径仍走 action_lines：动作行只认整行圆括号，混在句子里的括号一个字节都不动。
+    删完正文一个字都不剩时**不删**（第三项为 True，并把原文交回，删了几行报 0）——一轮回复被
+    剥成空比带着一行动作更糟：话被删没了，人那侧就只收到一个空回音。
+    第三项交给调用方去报 kept_because_empty，本函数不替它决定返回体长什么样。
+    """
+    body = str(text if text is not None else "")
+    lines = action_lines(body)
+    if not lines:
+        return body, 0, False
+    drops = set(lines)
+    kept: List[str] = []
+    skipping = False
+    for line in body.splitlines():
+        if line.strip() in drops:
+            skipping = True          # 动作行后面那几行空行是它留下的空档，一起收走
+            continue
+        if skipping and not line.strip():
+            continue
+        skipping = False
+        kept.append(line)
+    clean = "\n".join(kept).strip()
+    if not clean:
+        return body, 0, True
+    return clean, len(lines), False

@@ -8,6 +8,10 @@
 4. **只抽她那一侧**：said 是人的，一个字都不许进来；若某行 who 写成她的自称，那一行的
    said 才算她的。
 5. **窗口只取最近 N 轮**：更早那轮的动作行不在禁令里。
+6. **配额数的是轮数**：最近 N 轮里几轮带动作（一轮两行仍是一轮），窗口外那轮不算，
+   也只数她那一侧。
+7. **删动作行只删整行那几行**（连着它后面多余的空行）：删完是空就留原文并报「留了原文」，
+   夹在句子里的括号与正文一个字节都不动。
 
 全部是纯函数：不碰盘、不读 assembly.json，配置以参数传进来。
 """
@@ -101,6 +105,70 @@ class BannedTest(unittest.TestCase):
     def test_without_actions_drops_whole_lines_only(self):
         text = "正文（不是动作行）\n%s\n尾巴尖在水里" % ACTION
         self.assertEqual("正文（不是动作行）\n尾巴尖在水里", repeat.without_actions(text))
+
+
+class CountWithActionsTest(unittest.TestCase):
+    """动作配额要的是「几轮带动作」，不是「几条动作行」——两条判据差得最远。"""
+
+    WINDOW = 6
+
+    def test_window_keeps_only_the_latest_rounds(self):
+        """6 轮里 1 条动作 → 1；同一条动作落在第 7 轮（窗口外）→ 0。"""
+        inside = [_row("问%d" % index, "……嗯。") for index in range(self.WINDOW - 1)]
+        inside.append(_row("问最后", "%s\n\n……这个啊。" % ACTION))
+        self.assertEqual(1, repeat.count_with_actions(inside, self.WINDOW, HER_NAME),
+                         "最近 6 轮里那一条动作没数进来")
+
+        outside = [_row("问最早", "%s\n\n……这个啊。" % ACTION)]
+        outside.extend(_row("问%d" % index, "……嗯。") for index in range(self.WINDOW))
+        self.assertEqual(0, repeat.count_with_actions(outside, self.WINDOW, HER_NAME),
+                         "第 7 轮（窗口外）那一条动作被数进来了")
+
+    def test_two_action_lines_in_one_reply_are_still_one_round(self):
+        rows = [_row("问", "%s\n\n%s\n\n……这个啊。" % (ACTION, OTHER)),
+                _row("又问", "……嗯。")]
+        self.assertEqual(1, repeat.count_with_actions(rows, self.WINDOW, HER_NAME),
+                         "同一条回复里两行动作被算成了两轮")
+
+    def test_only_her_side_is_counted(self):
+        rows = [_row(HUMAN_ACTION, "……嗯。", who="人")]
+        self.assertEqual(0, repeat.count_with_actions(rows, self.WINDOW, HER_NAME),
+                         "人的动作行算进了她那一侧")
+        rows = [_row("（她自己那一侧）", "……嗯。", who=HER_NAME)]
+        self.assertEqual(1, repeat.count_with_actions(rows, self.WINDOW, HER_NAME),
+                         "who 写成她自称的那一行，said 也是她说的")
+
+    def test_no_history_and_no_window_are_zero(self):
+        for turns, window in (([], self.WINDOW), (None, self.WINDOW),
+                              ([_row("问", "%s\n\n一。" % ACTION)], 0)):
+            self.assertEqual(0, repeat.count_with_actions(turns, window, HER_NAME),
+                             "没有历史 / 窗口为 0 却数出了动作：%r" % (turns,))
+
+
+class StripActionLinesTest(unittest.TestCase):
+    """配额满了之后的硬兜底：删的是整行那几行，不碰正文。"""
+
+    def test_whole_lines_and_the_blank_run_after_them_go(self):
+        text = "正文第一句。\n\n%s\n\n尾巴尖还在水里。" % ACTION
+        got = repeat.strip_action_lines(text)
+        self.assertEqual(("正文第一句。\n\n尾巴尖还在水里。", 1, False), got)
+
+    def test_an_action_line_as_the_first_line_leaves_no_leading_gap(self):
+        self.assertEqual(("正文。", 1, False), repeat.strip_action_lines("%s\n\n正文。" % ACTION))
+
+    def test_every_withdrawn_line_is_counted(self):
+        text = "%s\n\n正文。\n\n%s" % (ACTION, OTHER)
+        clean, count, kept = repeat.strip_action_lines(text)
+        self.assertEqual(("正文。", 2, False), (clean, count, kept), "删了两行却只报了行数以外的东西")
+
+    def test_an_all_action_reply_is_kept_whole(self):
+        clean, count, kept = repeat.strip_action_lines(ACTION)
+        self.assertEqual((ACTION, 0, True), (clean, count, kept),
+                         "整轮只有一个动作行时该保留原文并报「留了原文」")
+
+    def test_parens_inside_a_sentence_are_untouched(self):
+        text = "她（笑了）一下。"
+        self.assertEqual((text, 0, False), repeat.strip_action_lines(text))
 
 
 if __name__ == "__main__":

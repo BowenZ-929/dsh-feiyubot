@@ -549,14 +549,19 @@ class ConversationAnswerTest(unittest.TestCase):
         for part in conf["action"]["pool"]:
             self.assertIn(part, block, "池子里的 %r 没进提示词" % (part,))
 
-        conf["action"] = {"pool": ["左耳", "右耳"], "rule": "这一轮只用耳边那些声响。"}
+        quota = dict(conf["action"]["quota"])
+        conf["action"] = {"pool": ["左耳", "右耳"], "rule": "这一轮只用耳边那些声响。",
+                          "quota": quota}
         changed = []
         got = self._answer(assembly=conf, captured=changed)
         block2 = _section(changed[0]["messages"][0]["content"], label)
         self.assertIn("这一轮只用耳边那些声响。", block2)
         self.assertIn("左耳", block2)
         self.assertNotIn("尾巴", block2, "换了池子还带着旧部位：%r" % (block2,))
-        self.assertEqual({"pool": ["左耳", "右耳"], "rule": "这一轮只用耳边那些声响。"},
+        self.assertEqual({"pool": ["左耳", "右耳"], "rule": "这一轮只用耳边那些声响。",
+                          "quota": {"window": quota["window"], "max": quota["max"],
+                                    "used": 0, "blocked": False,
+                                    "stripped": 0, "kept_because_empty": False}},
                          got["action"])
 
     def test_broken_banned_and_action_data_is_reported_not_defaulted(self):
@@ -568,7 +573,17 @@ class ConversationAnswerTest(unittest.TestCase):
                  (lambda conf: conf.__setitem__("action", None), "action"),
                  (lambda conf: conf["action"].__setitem__("pool", []), "action.pool"),
                  (lambda conf: conf["action"].__setitem__("pool", ["尾巴", ""]), "action.pool"),
-                 (lambda conf: conf["action"].pop("rule"), "action.rule"))
+                 (lambda conf: conf["action"].pop("rule"), "action.rule"),
+                 (lambda conf: conf["action"].pop("quota"), "action.quota"),
+                 (lambda conf: conf["action"]["quota"].__setitem__("window", 0),
+                  "action.quota.window"),
+                 (lambda conf: conf["action"]["quota"].__setitem__("max", 9),
+                  "action.quota.max"),
+                 (lambda conf: conf["action"]["quota"].__setitem__("max", True),
+                  "action.quota.max"),
+                 (lambda conf: conf["action"]["quota"].__setitem__("blocked", " "),
+                  "action.quota.blocked"),
+                 (lambda conf: conf["action"]["quota"].pop("sparing"), "action.quota.sparing"))
         for mutate, needle in cases:
             conf = conversation.load_assembly()
             mutate(conf)
@@ -576,6 +591,161 @@ class ConversationAnswerTest(unittest.TestCase):
                 self._answer(assembly=conf)
             self.assertIn(needle, str(caught.exception),
                           "数据坏在 %s 时没有指名报错：%s" % (needle, caught.exception))
+
+    # —— 14) 动作配额 ————————————————————————
+
+    QUIET = "……嗯。"
+
+    def _action_block(self, capture, conf=None):
+        """提示词里动作池那一节的正文（标题从数据读，不写死中文名）。
+
+        去掉标题后那个换行：这一节被判成「只有一句话」时，要能逐字对着数据里的那一句比。
+        """
+        label = (conf or conversation.load_assembly())["sections"]["action"]["label"]
+        return _section(capture[0]["messages"][0]["content"], label).strip()
+
+    def test_zero_actions_in_the_window_give_the_pool_and_the_sparing_line(self):
+        """最近 6 轮一条动作都没有：规矩 + sparing + 池子全给，配额报 used 0 / blocked False。"""
+        conf = conversation.load_assembly()
+        quota = conf["action"]["quota"]
+        root = self._her_history([self.QUIET] * quota["window"], "quota_none")
+        capture = []
+        got = self._answer(captured=capture, recent_root=root)
+        block = self._action_block(capture, conf)
+        self.assertIn(conf["action"]["rule"], block, "新口径的规矩没进提示词")
+        self.assertIn(quota["sparing"], block, "没顶到配额时该补那句 sparing")
+        self.assertNotIn(quota["blocked"], block, "还没顶到配额就写了「不许写动作」")
+        for part in conf["action"]["pool"]:
+            self.assertIn(part, block, "池子里的 %r 没进提示词" % (part,))
+        self.assertEqual({"window": quota["window"], "max": quota["max"],
+                          "used": 0, "blocked": False,
+                          "stripped": 0, "kept_because_empty": False}, got["action"]["quota"])
+        self.assertEqual(conf["action"]["pool"], got["action"]["pool"])
+
+    def test_one_action_in_the_window_blocks_the_whole_pool(self):
+        """最近 6 轮里已经有一轮带动作：这一节只剩「本轮不许写动作」，池子与规矩一个字不给。"""
+        conf = conversation.load_assembly()
+        quota = conf["action"]["quota"]
+        replies = ["%s\n\n……这个啊。" % self.HER_ACTION] + [self.QUIET] * (quota["window"] - 1)
+        root = self._her_history(replies, "quota_one")
+        capture = []
+        got = self._answer(captured=capture, recent_root=root)
+        block = self._action_block(capture, conf)
+        self.assertEqual(quota["blocked"], block,
+                         "顶到配额时这一节该只有那一句：%r" % (block,))
+        # 只查这一节：别处的锚句 instruction 里也有部位词，那不是这一段给的
+        for part in conf["action"]["pool"]:
+            self.assertNotIn(part, block, "顶到配额还给着部位 %r：%r" % (part, block))
+        self.assertNotIn(conf["action"]["rule"], block, "顶到配额还给了写法规矩")
+        self.assertNotIn(quota["sparing"], block, "顶到配额还给了 sparing 那一句")
+        self.assertEqual({"window": quota["window"], "max": quota["max"],
+                          "used": 1, "blocked": True,
+                          "stripped": 0, "kept_because_empty": False}, got["action"]["quota"])
+        self.assertEqual([], got["action"]["pool"], "blocked 时 pool 要给空列表，不是 None")
+        self.assertEqual(conf["action"]["rule"], got["action"]["rule"])
+
+    def test_an_action_outside_the_window_does_not_block(self):
+        """动作落在第 7 轮（窗口就是 6）：不算，照旧给池子与 sparing。"""
+        conf = conversation.load_assembly()
+        quota = conf["action"]["quota"]
+        replies = ["%s\n\n……这个啊。" % self.HER_ACTION] + [self.QUIET] * quota["window"]
+        root = self._her_history(replies, "quota_outside")
+        capture = []
+        got = self._answer(captured=capture, recent_root=root)
+        block = self._action_block(capture, conf)
+        self.assertFalse(got["action"]["quota"]["blocked"], "窗口外那一条动作把这一轮封了")
+        self.assertEqual(0, got["action"]["quota"]["used"])
+        self.assertIn(quota["sparing"], block)
+        self.assertIn(conf["action"]["pool"][0], block)
+
+    def test_quota_numbers_come_from_the_data_file(self):
+        """配额从数据现读：max 改成 2，同样 1 轮带动作就不再 blocked。"""
+        conf = conversation.load_assembly()
+        quota = conf["action"]["quota"]
+        conf["action"]["quota"] = dict(quota, max=2)
+        replies = ["%s\n\n……这个啊。" % self.HER_ACTION] + [self.QUIET] * (quota["window"] - 1)
+        root = self._her_history(replies, "quota_data")
+        capture = []
+        got = self._answer(assembly=conf, captured=capture, recent_root=root)
+        block = self._action_block(capture, conf)
+        self.assertEqual({"window": quota["window"], "max": 2, "used": 1, "blocked": False,
+                          "stripped": 0, "kept_because_empty": False},
+                         got["action"]["quota"], "配额数没有跟着数据走")
+        self.assertIn(conf["action"]["pool"][0], block, "max 改成 2 了还给不出池子")
+        self.assertIn(conf["action"]["quota"]["sparing"], block)
+
+    # —— 15) blocked 的硬兜底（不靠模型自觉） ————————————
+
+    STRIPPED_ACTION = "（尾巴轻轻摆了一下）"
+    KEPT_ACTION = "（尾巴轻轻蜷了一下）"
+    BODY = "今天水里不冷。"
+
+    def _blocked_root(self, name: str) -> Path:
+        """一份配额已经满了的历史：最近 window 轮里有一轮带动作。"""
+        quota = conversation.load_assembly()["action"]["quota"]
+        replies = ["%s\n\n……这个啊。" % self.HER_ACTION] + [self.QUIET] * (quota["window"] - 1)
+        return self._her_history(replies, name)
+
+    def test_blocked_round_strips_the_action_line_out_of_the_reply(self):
+        """配额满了模型还写动作行：过嘴之前就删掉，chunks / 落账 / 落脑都不含它。"""
+        root = self._blocked_root("quota_strip")
+        got = self._answer(reply="%s\n\n%s" % (self.BODY, self.STRIPPED_ACTION),
+                           recent_root=root)
+        self.assertEqual(self.BODY, got["reply"], "删掉动作行之后正文该原样留着")
+        self.assertEqual(1, got["action"]["quota"]["stripped"], "删了几行要记账")
+        self.assertFalse(got["action"]["quota"]["kept_because_empty"])
+        self.assertTrue(got["chunks"], "删掉一行动作之后 chunks 不该是空的")
+        for chunk in got["chunks"]:
+            self.assertNotIn("尾巴", chunk["text"], "chunks 里还带着动作行：%r" % (chunk,))
+        row = recent.load(root=root, turns=12)["turns"][-1]
+        self.assertEqual(self.BODY, row["reply"], "落进最近几轮的那句还带着动作行：%r" % (row,))
+        texts = [entry.get("text") for entry in self.brain.today_entries(_at(30))]
+        self.assertNotIn(self.STRIPPED_ACTION, texts, "落脑的那句还带着动作行")
+
+    def test_blocked_round_that_is_only_an_action_line_keeps_the_original(self):
+        """整轮只有一个动作行：不删（删空比带一行动作更糟），stripped 记 0 并标 kept_because_empty。"""
+        root = self._blocked_root("quota_kept")
+        got = self._answer(reply=self.KEPT_ACTION, recent_root=root)
+        self.assertEqual(self.KEPT_ACTION, got["reply"], "把一轮回复删空了")
+        self.assertEqual(0, got["action"]["quota"]["stripped"])
+        self.assertTrue(got["action"]["quota"]["kept_because_empty"])
+
+    def test_action_line_survives_when_the_quota_is_not_reached(self):
+        """没顶到配额：动作行是这一轮该有的那一个，一个字都不动。"""
+        quota = conversation.load_assembly()["action"]["quota"]
+        root = self._her_history([self.QUIET] * quota["window"], "quota_keep")
+        reply = "%s\n\n%s" % (self.BODY, self.KEPT_ACTION)
+        got = self._answer(reply=reply, recent_root=root)
+        self.assertEqual(reply, got["reply"], "没顶到配额却动了动作行")
+        self.assertEqual(0, got["action"]["quota"]["stripped"])
+        self.assertFalse(got["action"]["quota"]["kept_because_empty"])
+
+    def test_blocked_swaps_the_whole_set_of_speaking_rules(self):
+        """blocked 时提示词用 format_blocked：动作那条从「怎么写」换成「不许写」。"""
+        conf = conversation.load_assembly()
+        root = self._blocked_root("quota_rules")
+        capture = []
+        self._answer(captured=capture, recent_root=root)
+        system = capture[0]["messages"][0]["content"]
+        blocked_rules = conf["reply"]["format_blocked"]
+        self.assertTrue(blocked_rules, "format_blocked 是空的：那一态就没有规矩了")
+        for rule in blocked_rules:
+            self.assertIn(rule, system, "blocked 的规矩没进提示词：%s" % rule)
+        for rule in conf["reply"]["format"]:
+            if "圆括号" in rule:
+                self.assertNotIn(rule, system, "blocked 时还在教她怎么写动作行：%s" % rule)
+
+    def test_broken_blocked_rules_are_reported_not_defaulted(self):
+        """format_blocked 缺 / 动作那条为空 → ValueError（代码里不补默认规矩）。"""
+        for mutate in (lambda conf: conf["reply"].pop("format_blocked"),
+                       lambda conf: conf["reply"]["format_blocked"].__setitem__(1, ""),
+                       lambda conf: conf["reply"]["format_blocked"].append(" ")):
+            conf = conversation.load_assembly()
+            mutate(conf)
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn("reply.format_blocked", str(caught.exception),
+                          "format_blocked 坏了却没有指名报错：%s" % caught.exception)
 
     # —— 9) 温度两档 ————————————————————————————
 

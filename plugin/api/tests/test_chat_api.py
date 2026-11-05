@@ -8,6 +8,9 @@
   kind 与 message 原样交出去，**绝不把空串当成功**。
 - GET / PUT / DELETE /chat 全 405（这一条是写）。
 - 落脑：一轮之后脑的今日档里有人那句与她那句，source_type 都是亲历、evidence_key 非空。
+- **闸在 /chat 生效（本轮加的）**：逐泡过一遍闸，结论真的落到返回体——复读（反复读）、动作括注
+  （动作带场景）、复述设定段三条命中的路都走到 dropped；一句正常的回话一处都不改（chunks 的 text
+  与不接闸时逐字相同）；全被弃掉时 chunks=[]、reply=""，并各记一行弃言账。
 - 只有一份装配：api.chat.dispatch 走的就是 conversation.answer（数一遍调用次数）。
 - 拒绝的**唯一投递点**在这一层（本轮加的）：判成软转向或那三句标准拒绝之一就投一次心
   （refusals.json 多一行）+ 记一行我们自己的 refuse.jsonl；正面答了不添 refusal 一节、一行都不写。
@@ -21,6 +24,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,13 +32,15 @@ from unittest import mock
 
 import hashlib
 
-from api import api
-from api.tests.helpers import copy_fixture
+from api import api, chat
+from api.tests.helpers import copy_fixture, write_json
 from organs.brain import BrainStore
 from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.mind import conversation, llm, recent, usage
+from organs.mouth import audit as mouth_audit
 from organs.mouth import refusal as mouth_refusal
+from organs.mouth import warehouse
 from organs.soul import load
 
 CONFIG = {"provider": "fake", "model": "fake-model", "base_url": "http://example.invalid/v1",
@@ -57,7 +63,8 @@ CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
                  "guard", "memory"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
-ACTION_KEYS = {"pool", "rule"}
+ACTION_KEYS = {"pool", "rule", "quota"}
+QUOTA_KEYS = {"window", "max", "used", "blocked", "stripped", "kept_because_empty"}
 GUARD_KEYS = {"window", "threshold", "min_rounds", "rounds", "hits", "rate",
               "over", "injected", "available"}
 
@@ -164,7 +171,7 @@ class ChatApiTest(unittest.TestCase):
                          [item["role"] for item in capture[0]["messages"]])
 
     def test_banned_and_action_ride_along_in_the_success_body(self):
-        """防抄自己那两块也要随成功体出去：禁令读三键、动作池读两键，形状对外冻结。"""
+        """防抄自己那两块也要随成功体出去：禁令读三键、动作池读三键（含配额四键），形状对外冻结。"""
         conf = conversation.load_assembly()
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
@@ -186,6 +193,17 @@ class ChatApiTest(unittest.TestCase):
             self.assertTrue(head)
         self.assertEqual(conf["action"]["pool"], action["pool"], "池子该照抄 assembly.json")
         self.assertEqual(conf["action"]["rule"], action["rule"])
+        quota = action["quota"]
+        self.assertEqual(QUOTA_KEYS, set(quota), "quota 的六个键对外冻结：%s" % sorted(quota))
+        self.assertEqual(conf["action"]["quota"]["window"], quota["window"])
+        self.assertEqual(conf["action"]["quota"]["max"], quota["max"])
+        self.assertIsInstance(quota["used"], int)
+        self.assertIsInstance(quota["blocked"], bool)
+        self.assertEqual(quota["used"] >= quota["max"], quota["blocked"],
+                         "blocked 要跟着 used 与 max 算，不许另写一个值")
+        self.assertIsInstance(quota["stripped"], int)
+        self.assertIsInstance(quota["kept_because_empty"], bool)
+        self.assertEqual(0, quota["stripped"], "没顶到配额时一行都不许删")
         # 两段真的进了提示词（不是只在回包里挂个空壳）
         system = capture[0]["messages"][0]["content"]
         self.assertIn("[%s]" % conf["sections"]["banned"]["label"], system,
@@ -253,6 +271,141 @@ class ChatApiTest(unittest.TestCase):
         self.assertTrue(dropped[1]["gate"]["hit"]["clause_id"])
         self.assertTrue(dropped[1]["gate"]["hit"]["reason"])
         self.assertGreaterEqual(dropped[1]["gate"]["drops"]["today"], 1)
+
+# —— 闸：逐泡过一遍，结论真的落到返回体（本轮加的） ————————————
+
+    HER_LINE = "主人回来啦，我把碗放桌上了。"          # 她自己说过的一句（复读那一关的靶子）
+    NOTED_LINE = "（尾巴在水里蜷了一下）"              # 括号里写了我们没给过的场景（action_note 的 env_words）
+
+    def _drops_rows(self):
+        """弃言账本（drops.jsonl）现在有几行——每被弃一泡就多一行。"""
+        path = Path(os.environ["MOUTH_TRACE_DIR"]) / "drops.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def _mouth_root(self) -> Path:
+        """把嘴的整份判据拷到临时根：改哪个数就改哪个 JSON，代码里一个数都不动。"""
+        root = self.tmp / "mouth"
+        if not root.is_dir():
+            shutil.copytree(str(MOUTH_DATA), str(root))
+        return root
+
+    def test_a_repeated_reply_is_dropped_by_the_gate(self):
+        """第二轮她说了一模一样的一句：内容去重拦下，chunks 少一条，blocked 里看得见「反复读」。"""
+        status, first = self._send(text="我回来了", reply=self.HER_LINE)
+        self.assertEqual(200, status)
+        self.assertEqual("pass", first["gate"]["decision"])
+        self.assertEqual(1, len(first["chunks"]))
+        status, second = self._send(text="我回来了", reply=self.HER_LINE)
+        self.assertEqual(200, status)
+        gate = second["gate"]
+        self.assertEqual("dropped", gate["decision"])
+        self.assertEqual([], second["chunks"], "被弃的那一泡该从 chunks 里删掉")
+        self.assertEqual("", second["reply"])
+        self.assertEqual(1, gate["in_parts"])
+        self.assertEqual(0, gate["out_parts"])
+        self.assertEqual("dropped", gate["parts"][0]["decision"])
+        self.assertIn("反复读", gate["blocked"], "拦下她的 clause_id 要能被指认")
+        self.assertIn("反复读", gate["hit"]["clause_id"])
+        self.assertEqual("ok", gate["parts"][0]["repeat_status"], "这一关真的比过了")
+
+    def test_a_noted_line_with_an_uninvited_scene_is_dropped(self):
+        """动作括注里出现了我们没给过的场景：命中、弃掉，人话原因里带着那个场景词。"""
+        status, payload = self._send(text="你在干嘛", reply=self.NOTED_LINE)
+        self.assertEqual(200, status)
+        gate = payload["gate"]
+        self.assertEqual([], payload["chunks"])
+        self.assertEqual("", payload["reply"])
+        part = gate["parts"][0]
+        self.assertEqual("dropped", part["decision"])
+        self.assertEqual("ok", part["action_status"], "这一关真的判过了（不是没跑）")
+        self.assertEqual("动作带场景", gate["hit"]["clause_id"])
+        self.assertIn("水里", gate["hit"]["reason"], "拦下她要说出是哪个场景词")
+        self.assertIn("动作带场景", gate["blocked"])
+
+    def test_reciting_the_soul_card_is_dropped_by_the_audit(self):
+        """她把魂那张卡上的话原样念了出来：复述审计命中设定段，弃掉；audit.status 是 ok。"""
+        line = "我嘴上不认，行动先到"
+        soul = self.tmp / "soul"
+        write_json(soul / "manner.json", {"stance": line})
+        store = load(soul)
+        status, payload = self._post({"text": "你是不是又不承认"}, _body(line), store=store)
+        self.assertEqual(200, status)
+        gate = payload["gate"]
+        part = gate["parts"][0]
+        self.assertEqual("dropped", part["decision"])
+        self.assertEqual("ok", part["audit"]["status"], "审计没真的比过（这里该是 ok）")
+        self.assertEqual("复述设定段", part["audit"]["hit"]["kind"])
+        self.assertEqual("魂", part["audit"]["hit"]["seg_kind"])
+        self.assertEqual("复述设定段", gate["hit"]["clause_id"])
+        self.assertEqual([], payload["chunks"])
+        self.assertIn("复述设定段", gate["blocked"])
+
+    def test_a_normal_reply_passes_and_keeps_every_chunk_verbatim(self):
+        """一句正常回话一处都不改：chunks 的 text 与**不接闸**那一遍逐字相同（diff 为空）。"""
+        reply = ("今天风大，我把窗关上了。晚上想喝粥，我给你留了一碗。"
+                 "你要是回来晚，我就先不睡。")
+        # 先跑过闸那一遍（账上还没有历史、脑里也还没有她这一句），再跑不接闸那一遍做对照：
+        # 反过来的话，第一遍会把她这句话记进脑与账，第二遍就变成「复述/复读自己」了。
+        status, gated = self._send(text="今天怎么样", reply=reply)
+        self.assertEqual(200, status)
+        with mock.patch.object(chat, "_gate_round", lambda *args, **kw: None):
+            status, plain = self._send(text="今天怎么样", reply=reply)
+        self.assertEqual(200, status)
+        self.assertEqual([one["text"] for one in plain["chunks"]],
+                         [one["text"] for one in gated["chunks"]],
+                         "一泡都没被改时 chunks 的 text 要与不接闸时逐字相同")
+        gate = gated["gate"]
+        self.assertEqual("pass", gate["decision"])
+        self.assertEqual([], gate["blocked"])
+        self.assertEqual(gate["in_parts"], gate["out_parts"])
+        self.assertTrue(all(row["decision"] == "pass" for row in gate["parts"]))
+        self.assertEqual(reply, gated["reply"])
+
+    def test_all_parts_dropped_leaves_nothing_and_records_one_drop(self):
+        """全被弃掉：chunks=[]、reply=""，弃言账本多一行，reason 里带着 clause_id。"""
+        before = len(self._drops_rows())
+        status, payload = self._send(text="窗台上是什么",
+                                     reply="（水面上有月亮）尾巴慢慢蜷了一下")
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["chunks"])
+        self.assertEqual("", payload["reply"])
+        self.assertEqual("dropped", payload["gate"]["decision"])
+        self.assertEqual(0, payload["gate"]["out_parts"])
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows), "弃掉的这一泡要留一行弃言账")
+        self.assertEqual("动作带场景", rows[-1]["clause_id"])
+        self.assertIn("动作带场景", rows[-1]["reason"], "弃言账的 reason 里要能看见 clause_id")
+
+    def test_the_repeat_window_comes_from_the_data(self):
+        """复读窗口不写死：repeat.json 的 rounds 改成 1 之后，隔了一轮的那句就不算复读了。"""
+        root = self._mouth_root()
+        book = json.loads((root / "repeat.json").read_text(encoding="utf-8"))
+        book["rounds"] = 1
+        (root / "repeat.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"MOUTH_DATA_DIR": str(root)}):
+            self._send(text="第一句", reply="第一句的回话，我记得的。")
+            self._send(text="第二句", reply="第二句的回话，我也记得的。")
+            status, payload = self._send(text="第三句", reply="第一句的回话，我记得的。")
+        self.assertEqual(200, status)
+        self.assertEqual("pass", payload["gate"]["decision"],
+                         "窗口只有 1 轮，隔了一轮的同一句不该算复读")
+
+    def test_no_inject_at_all_is_audit_unavailable_not_a_pass(self):
+        """一段注入原文都取不到时交给审计的是 None：审计报 audit-unavailable，不许伪造通过。"""
+        class _Bare:
+            def raw(self, block):
+                return {}
+
+        table = warehouse.load("audit")
+        with mock.patch.object(chat, "_rule_text", lambda: ""):
+            inject = chat._inject("", {"anchors": {}, "recalled": [], "heart": {}},
+                                 _Bare(), table)
+        self.assertIsNone(inject, "一段都取不到时要交 None，不是空清单")
+        seen = mouth_audit.audit("一句正常的话", inject=None)
+        self.assertEqual("audit-unavailable", seen.status)
+        self.assertIsNone(seen.hit)
 
     # —— 拒绝：全仓唯一的投递点（本轮加的） ————————————————
 
