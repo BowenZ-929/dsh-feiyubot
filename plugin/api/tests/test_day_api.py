@@ -161,10 +161,12 @@ class DayApiTest(unittest.TestCase):
 
     def test_plan_route_exposes_the_never_ran_column(self):
         """/day/plan 的第五栏：试满 4 次后那条进 never_ran，之后再 tick 条数不变。"""
-        query = {"now": at("2026-11-05T03:31:00"), "heart_root": str(self.heart),
-                 "break_step": 2}
-        for _ in range(4):
-            status, _ = self._call("POST", "/day/tick", query=query)
+        # 退避 1 → 5 → 15 分钟：四次尝试分别在 T / T+1 / T+6 / T+21
+        for now in ("2026-11-05T03:31:00", "2026-11-05T03:32:00",
+                    "2026-11-05T03:37:00", "2026-11-05T03:52:00"):
+            status, _ = self._call("POST", "/day/tick",
+                                   query={"now": at(now), "heart_root": str(self.heart),
+                                          "break_step": 2})
             self.assertEqual(200, status)
         status, plan_payload = self._call("GET", "/day/plan")
         self.assertEqual(200, status)
@@ -173,7 +175,9 @@ class DayApiTest(unittest.TestCase):
         self.assertEqual(1, len(plan_payload["never_ran"]))
         self.assertIn("brain_decay", plan_payload["never_ran"][0]["reason"])
         self.assertIn("4 次尝试", plan_payload["never_ran"][0]["reason"])
-        status, again = self._call("POST", "/day/tick", query=query)
+        status, again = self._call("POST", "/day/tick",
+                                   query={"now": at("2026-11-05T03:53:00"),
+                                          "heart_root": str(self.heart), "break_step": 2})
         self.assertEqual(200, status)
         self.assertEqual(plan_payload["counts"], again["counts"])
         self.assertEqual(plan_payload["plan_ids"], again["plan_ids"])
@@ -198,6 +202,23 @@ class DayApiTest(unittest.TestCase):
         self.assertNotEqual(morning["slot"], evening["slot"], "slot 跟着注入时刻走")
         self.assertEqual(before, sorted(path.name for path in self.root.iterdir()),
                          "GET /day/schedule 不落任何文件")
+
+    def test_plan_route_shows_required_on_every_row(self):
+        """/day/plan 每行带 required：人一眼看出这条受不受额度管。"""
+        capped = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 1,
+                  "kinds": {"night": {"at": "03:30", "required": True},
+                            "greet": {"at": "09:00"}}}
+        plan.add([{"kind": "night", "at": at("2026-11-05T03:30:00")}], root=self.root,
+                 config=capped)
+        plan.add([{"kind": "greet", "at": at("2026-11-05T09:00:00")}], root=self.root,
+                 config=capped)
+        plan.add([{"kind": "greet", "at": at("2026-11-05T10:00:00")}], root=self.root,
+                 config=capped)
+        status, payload = self._call("GET", "/day/plan")
+        self.assertEqual(200, status)
+        self.assertEqual([True, False], [row["required"] for row in payload["pending"]])
+        self.assertEqual(["quota_optional"], [row["reason"] for row in payload["blocked"]])
+        self.assertEqual([False], [row["required"] for row in payload["blocked"]])
 
     def test_bad_now_is_400_and_points_at_the_plus_trap(self):
         status, payload = self._call("POST", "/day/tick", query={"now": "2026-11-05T09:00:00 09:00"})

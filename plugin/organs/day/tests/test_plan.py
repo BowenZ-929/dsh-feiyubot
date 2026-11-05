@@ -335,5 +335,124 @@ class NeverRanTest(unittest.TestCase):
         self.assertEqual(1, len(other["added"]), "没跑成的那条不占名额：明天那条照排")
 
 
+class RequiredOptionalTest(unittest.TestCase):
+    """额度只约束 optional：required 的既不占额度、也不被额度挡。"""
+
+    CAPPED = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 1,
+              "kinds": {"night": {"at": "03:30", "required": True},
+                        "greet": {"at": "09:00"}}}
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+
+    def test_required_kind_ignores_quota_and_gap(self):
+        rows = [{"kind": "night", "at": at("2026-11-05T03:%02d:00" % (index * 5))}
+                for index in range(3)]
+        out = plan.add(rows, root=self.root, config=self.CAPPED)
+        self.assertEqual(3, len(out["added"]), "required 的三条都排得上（额度 1 也不挡）")
+        self.assertEqual([], out["blocked"], "min_gap / 额度都不管 required")
+        self.assertEqual([True, True, True], [row["required"] for row in out["added"]])
+
+    def test_optional_kind_is_blocked_by_the_optional_quota(self):
+        rows = [{"kind": "greet", "at": at("2026-11-05T%02d:00:00" % hour)}
+                for hour in (9, 10, 11)]
+        out = plan.add(rows, root=self.root, config=self.CAPPED)
+        self.assertEqual(1, len(out["added"]))
+        self.assertEqual([plan.REASON_QUOTA_OPTIONAL, plan.REASON_QUOTA_OPTIONAL],
+                         [row["reason"] for row in out["blocked"]])
+        self.assertEqual("quota_optional", out["blocked"][0]["reason"])
+        self.assertIn("可有可无", out["blocked"][0]["message"], "文案要读得出这是可有可无那类的额度")
+        self.assertEqual([False, False], [row["required"] for row in out["blocked"]])
+
+    def test_kind_outside_kinds_is_optional_not_exempt(self):
+        out = plan.add([{"kind": "临时", "at": at("2026-11-05T09:00:00")},
+                        {"kind": "临时", "at": at("2026-11-05T10:00:00")}],
+                       root=self.root, config=self.CAPPED)
+        self.assertEqual(1, len(out["added"]), "kinds 里没写的 kind 一律 optional")
+        self.assertEqual(plan.REASON_QUOTA_OPTIONAL, out["blocked"][0]["reason"])
+
+    def test_candidate_required_overrides_the_config(self):
+        forced = plan.add([{"kind": "greet", "at": at("2026-11-05T09:00:00"), "required": True},
+                           {"kind": "greet", "at": at("2026-11-05T10:00:00"), "required": True}],
+                          root=self.root, config=self.CAPPED)
+        self.assertEqual(2, len(forced["added"]), "候选自己写 required：额度不管它")
+        self.assertEqual([True, True], [row["required"] for row in forced["added"]])
+
+        other = temp_root(self)
+        relaxed = plan.add([{"kind": "night", "at": at("2026-11-05T03:00:00"), "required": False},
+                            {"kind": "night", "at": at("2026-11-05T03:10:00"), "required": False}],
+                           root=other, config=self.CAPPED)
+        self.assertEqual(1, len(relaxed["added"]), "反过来也认：候选说 optional 就受额度管")
+        self.assertEqual(plan.REASON_QUOTA_OPTIONAL, relaxed["blocked"][0]["reason"],
+                         "配置说 required、候选说 optional：按候选算，额度照样拦")
+
+    def test_required_rows_do_not_fill_the_optional_quota(self):
+        plan.add([{"kind": "night", "at": at("2026-11-05T03:%02d:00" % (index * 5))}
+                  for index in range(3)], root=self.root, config=self.CAPPED)
+        optional = plan.add([{"kind": "night", "at": at("2026-11-05T09:00:00"),
+                              "required": False}], root=self.root, config=self.CAPPED)
+        self.assertEqual(1, len(optional["added"]),
+                         "三条 required 不占 optional 的额度：第 1 条 optional 照样进账")
+
+    def test_never_ran_does_not_take_the_optional_quota(self):
+        first = plan.add([{"kind": "greet", "at": at("2026-11-05T09:00:00")}],
+                         root=self.root, config=self.CAPPED)["added"][0]
+        plan.never_ran([first["id"]], root=self.root, reasons={first["id"]: "没跑成"})
+        again = plan.add([{"kind": "greet", "at": at("2026-11-05T10:00:00")}],
+                         root=self.root, config=self.CAPPED)
+        self.assertEqual(1, len(again["added"]), "没跑成那条不占 optional 额度")
+
+    def test_listing_shows_required_on_every_row(self):
+        plan.add([{"kind": "night", "at": at("2026-11-05T03:30:00")}], root=self.root,
+                 config=self.CAPPED)
+        plan.add([{"kind": "greet", "at": at("2026-11-05T09:00:00")}], root=self.root,
+                 config=self.CAPPED)
+        plan.add([{"kind": "greet", "at": at("2026-11-05T10:00:00")}], root=self.root,
+                 config=self.CAPPED)
+        listing = plan.listing(self.root)
+        self.assertEqual([True, False], [row["required"] for row in listing["pending"]])
+        self.assertEqual([False], [row["required"] for row in listing["blocked"]])
+        for column in ("pending", "consumed", "blocked", "expired", "never_ran"):
+            for row in listing[column]:
+                self.assertIsInstance(row["required"], bool)
+
+
+class RetryWindowTest(unittest.TestCase):
+    """退避窗口只在 plan 里判一次：due() 跳过窗口内的那条，next_at() 报它的边界。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        self.row = plan.add([{"kind": "night", "at": at("2026-11-05T03:30:00")}],
+                            root=self.root, now_ts=at("2026-11-05T03:00:00"))["added"][0]
+
+    def _mark(self, next_retry: str) -> None:
+        plan.note_night([self.row["id"]], root=self.root,
+                        nights={self.row["id"]: {
+                            "attempts": 0, "steps": {}, "failed_steps": ["brain_decay"],
+                            "next_retry_at": next_retry}})
+
+    def test_due_skips_the_row_inside_the_window(self):
+        self.assertEqual(1, len(plan.due(at("2026-11-05T03:31:00"), root=self.root)))
+        self._mark(at("2026-11-05T03:32:00"))
+        self.assertEqual([], plan.due(at("2026-11-05T03:31:00"), root=self.root),
+                         "窗口内不算到点")
+        self.assertEqual([], plan.due(at("2026-11-05T03:31:59"), root=self.root))
+        self.assertEqual(1, len(plan.due(at("2026-11-05T03:32:00"), root=self.root)),
+                         "窗口刚过就到点")
+
+    def test_next_at_reports_the_retry_boundary_not_the_past_at(self):
+        self._mark(at("2026-11-05T03:32:00"))
+        self.assertEqual(at("2026-11-05T03:32:00"),
+                         plan.next_at(at("2026-11-05T03:31:00"), root=self.root))
+        plan.add([{"kind": "diary", "at": at("2026-11-05T04:00:00")}], root=self.root,
+                 now_ts=at("2026-11-05T03:31:00"))
+        self.assertEqual(at("2026-11-05T03:32:00"),
+                         plan.next_at(at("2026-11-05T03:31:00"), root=self.root),
+                         "退避边界比后面那条早，就该报它")
+
+    def test_row_without_a_retry_boundary_is_due_as_usual(self):
+        self.assertEqual(1, len(plan.due(at("2026-11-05T03:30:00"), root=self.root)))
+
+
 if __name__ == "__main__":
     unittest.main()

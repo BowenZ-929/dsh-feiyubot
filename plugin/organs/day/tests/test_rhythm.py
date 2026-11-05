@@ -17,6 +17,9 @@ NOW = "2026-11-05T09:30:00"
 # 关掉自动排程的那份配置：验证"tick 只数到点"这条纯算术判据要靠它
 NO_KINDS = {"tick_seconds": 60, "min_gap_minutes": 10, "daily_cap": 12,
             "day_cutover_hour": 4, "kinds": {}}
+# 只排夜的那份配置：退避/重试次数的测试从它派生（night 段按需覆盖）
+NIGHT_CONFIG = {"tick_seconds": 60, "min_gap_minutes": 10, "daily_cap": 12,
+                "day_cutover_hour": 4, "kinds": {"night": {"at": "03:30"}}}
 
 
 class TickTest(unittest.TestCase):
@@ -198,13 +201,20 @@ class NightLoopTest(unittest.TestCase):
 
 
 class NightRetryTest(unittest.TestCase):
-    """失败的那次不下账：留 pending、只重跑失败步、试满次数进 never_ran 并写审计。"""
+    """失败的那次不下账：留 pending、退避后才重试、只重跑失败步、试满进 never_ran。
+
+    退避是累加的（limits.json 的 night.backoff_minutes = [1, 5, 15]）：
+    首跑 T=03:31 → 03:32 → 03:37 → 03:52（第 4 次尝试）。
+    """
 
     def setUp(self) -> None:
         self.root = temp_root(self)
         self.heart = temp_root(self)
         self.brain = brain(self.root)
         self.addCleanup(rhythm.stop, 2.0)
+
+    SCHEDULE = ("2026-11-05T03:31:00", "2026-11-05T03:32:00",
+                "2026-11-05T03:37:00", "2026-11-05T03:52:00")
 
     def _tick(self, now: str = "2026-11-05T03:31:00", break_step: Any = 2, **kwargs):
         params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
@@ -237,10 +247,32 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(["brain_decay"], lines[0]["failed"])
         self.assertNotIn("event", lines[0], "跑过的那一行不是审计行")
 
+    def test_first_failure_writes_next_retry_at_from_backoff(self):
+        payload = self._tick()
+        expected = at("2026-11-05T03:32:00")
+        row = plan.listing(self.root)["pending"][0]
+        self.assertEqual(expected, row["night"]["next_retry_at"], "首跑失败后等 1 分钟")
+        self.assertEqual(expected, self._lines()[0]["next_retry_at"], "日志行也写下一次几点")
+        self.assertEqual(expected, payload["night"]["retried"][0]["next_retry_at"])
+        self.assertEqual(expected, plan.next_at(at("2026-11-05T03:31:00"), root=self.root),
+                         "下一次几点报的是退避边界，不是早就过去的 at")
+
+    def test_retry_inside_the_backoff_window_is_not_due(self):
+        self._tick()
+        before = plan.listing(self.root)["pending"][0]
+        lines = len(self._lines())
+        payload = self._tick(now="2026-11-05T03:31:30")     # 窗口内：+30 秒
+        self.assertEqual([], payload["due"], "退避窗口内不算到点")
+        self.assertEqual([], payload["night"]["retried"])
+        self.assertEqual(lines, len(self._lines()), "没跑夜就不写日志")
+        after = plan.listing(self.root)["pending"][0]
+        self.assertEqual(before["night"]["attempts"], after["night"]["attempts"])
+        self.assertEqual(at("2026-11-05T03:32:00"), payload["next_at"])
+
     def test_retry_only_reruns_the_failed_step_and_keeps_other_results(self):
         self._tick()
         first = plan.listing(self.root)["pending"][0]["night"]["steps"]
-        payload = self._tick()
+        payload = self._tick(now=self.SCHEDULE[1])          # 窗口刚过：03:32
         self.assertEqual(1, len(payload["night"]["retried"]))
         row = plan.listing(self.root)["pending"][0]
         self.assertEqual(1, row["night"]["attempts"], "第二次 tick 用掉 1 次重试")
@@ -253,10 +285,12 @@ class NightRetryTest(unittest.TestCase):
                              "%s 沿用上一次的结果，不重跑也不重写" % name)
         self.assertEqual(first["brain_compact"]["detail"],
                          row["night"]["steps"]["brain_compact"]["detail"])
+        self.assertEqual(at("2026-11-05T03:37:00"), row["night"]["next_retry_at"],
+                         "第二次失败后等 5 分钟（累加）")
 
     def test_two_attempts_then_success_consumes_with_all_four_steps(self):
         self._tick()
-        payload = self._tick(break_step=None)      # 第二次尝试治好，四步全成
+        payload = self._tick(now=self.SCHEDULE[1], break_step=None)   # 第二次治好，四步全成
         self.assertEqual(1, len(payload["night"]["executed"]))
         listing = plan.listing(self.root)
         self.assertEqual([], listing["pending"])
@@ -266,9 +300,9 @@ class NightRetryTest(unittest.TestCase):
                          listing["consumed"][0]["result"]["statuses"])
 
     def test_four_attempts_then_never_ran_with_one_audit_line(self):
-        for _ in range(3):
-            self._tick()
-        last = self._tick()
+        for now in self.SCHEDULE[:3]:
+            self._tick(now=now)
+        last = self._tick(now=self.SCHEDULE[3])
         self.assertEqual(1, len(last["night"]["never_ran"]))
         self.assertEqual([], last["night"]["executed"])
         listing = plan.listing(self.root)
@@ -284,14 +318,31 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(["brain_decay"], audit[0]["failed_steps"])
         self.assertEqual(3, audit[0]["attempt"])
         self.assertIn("brain_decay", audit[0]["reason"])
-        self.assertEqual(5, len(self._lines()), "四次尝试四行 + 一条 never_ran")
+        self.assertIsNone(audit[0]["next_retry_at"], "不再重试就不写一个不会发生的时刻")
+        lines = self._lines()
+        self.assertEqual(5, len(lines), "四次尝试四行 + 一条 never_ran")
+        self.assertEqual([at(now) for now in self.SCHEDULE],
+                         [line["ts"] for line in lines[:4]],
+                         "四次尝试的时刻 = T / T+1 / T+6 / T+21")
+        self.assertEqual([at("2026-11-05T03:32:00"), at("2026-11-05T03:37:00"),
+                          at("2026-11-05T03:52:00"), None],
+                         [line["next_retry_at"] for line in lines[:4]])
+
+    def test_backoff_comes_from_limits_not_from_code(self):
+        config = dict(NIGHT_CONFIG, night={"max_retries": 3, "backoff_minutes": [2]})
+        self._tick(config=config)
+        row = plan.listing(self.root)["pending"][0]
+        self.assertEqual(at("2026-11-05T03:33:00"), row["night"]["next_retry_at"],
+                         "退避换成 2 分钟：下一次就是 03:33")
+        self.assertEqual([], self._tick(now="2026-11-05T03:32:59", config=config)["due"])
+        self.assertEqual(1, len(self._tick(now="2026-11-05T03:33:00", config=config)["due"]))
 
     def test_after_never_ran_the_next_tick_runs_nothing(self):
-        for _ in range(4):
-            self._tick()
+        for now in self.SCHEDULE:
+            self._tick(now=now)
         before = plan.listing(self.root)
         lines = len(self._lines())
-        again = self._tick()
+        again = self._tick(now="2026-11-05T03:53:00")   # 还在同一天里：04:00 之后是新的一天
         self.assertEqual([], again["night"]["retried"])
         self.assertEqual([], again["night"]["never_ran"])
         self.assertEqual([], again["due"])
@@ -302,12 +353,10 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(lines, len(self._lines()), "不再跑夜就不再写日志")
 
     def test_retry_budget_comes_from_limits_not_from_code(self):
-        config = {"tick_seconds": 60, "min_gap_minutes": 10, "daily_cap": 12,
-                  "day_cutover_hour": 4, "kinds": {"night": {"at": "03:30"}},
-                  "night": {"max_retries": 1}}
+        config = dict(NIGHT_CONFIG, night={"max_retries": 1})
         first = self._tick(config=config)
         self.assertEqual(1, len(first["night"]["retried"]))
-        second = self._tick(config=config)
+        second = self._tick(now=self.SCHEDULE[1], config=config)
         self.assertEqual(1, len(second["night"]["never_ran"]), "max_retries=1：两次就试满")
         self.assertIn("2 次尝试", plan.listing(self.root)["never_ran"][0]["reason"])
 
@@ -325,8 +374,6 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual([], listing["never_ran"])
         self.assertEqual(1, len([row for row in listing["expired"]
                                  if row["night"]["attempts"] == 0]))
-
-
 class ThreadTest(unittest.TestCase):
     """线程只验启停与"不起第二个"；节律本身的判据一律靠直接调 tick()。"""
 

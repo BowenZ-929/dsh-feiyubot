@@ -60,8 +60,13 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(12, values["daily_cap"])
         self.assertEqual(4, values["day_cutover_hour"])
         # 自动排程表也在这份文件里：删掉它就没有自动排程，所以包内那份必须真的带着 night
-        self.assertEqual({"night": {"at": "03:30", "min_gap_minutes": 10, "daily_cap": 1}},
+        # （required: true 是这一版新加的：夜是"必须跑的"，不受额度管）
+        self.assertEqual({"night": {"at": "03:30", "min_gap_minutes": 10, "daily_cap": 1,
+                                    "required": True}},
                          values["kinds"])
+        # 重试口径也在数据文件里：次数与退避都从这里读，代码只留兜底
+        self.assertEqual(3, values["night"]["max_retries"])
+        self.assertEqual([1, 5, 15], values["night"]["backoff_minutes"])
 
     def test_missing_config_falls_back_to_defaults(self):
         values = model.load_limits(temp_root(self))

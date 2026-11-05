@@ -13,6 +13,9 @@
    **失败的那次不下账**：计划留 pending，行里写下这一次的夜间快照（第几次尝试、四步
    各自结果、哪几步没成功），下一 tick 只重跑没成功的那几步、其余沿用上次结果。
    首跑 1 次 + 最多重试 max_retries 次（limits.json 的 night.max_retries，默认 3），
+   每次失败到下一次重试之间按 night.backoff_minutes 退避（累加：T → T+1 → T+6 → T+21），
+   窗口右边界落进计划行的 night.next_retry_at；退避窗口内 plan.due() 不把那条算到点
+   （"窗口内不算到点"只在 plan 里判一次，本文件不再判第二遍）。
    试满仍失败 → 进 never_ran 第五栏 + 一条 never_ran 审计，**不许静默 consume**。
    单飞：进程内 NIGHT_LOCK 非阻塞抢，抢不到就 skipped="night_running"，同一晚不跑两遍。
    **不生成任何内容**：排的只是配置里写好的钟点，日程内容归 schedule，夜的四步归 night。
@@ -42,6 +45,8 @@ NIGHT_KIND = "night"
 # 兜底：真正的取值在 limits.json 的 night.max_retries（首跑 1 次 + 重试这么多次）。
 # 代码里只留这一份兜底，别处不许再写第二份阈值。
 DEFAULT_MAX_RETRIES = 3
+# 兜底同上：真正的取值在 limits.json 的 night.backoff_minutes（每次失败后等几分钟）。
+DEFAULT_BACKOFF_MINUTES = (1, 5, 15)
 
 # 夜只能一个人跑：tick 线程与手工 POST /day/tick 可能同时到点。
 # 非阻塞抢锁，抢不到就跳过（night.skipped = "night_running"）——同一晚绝不跑两遍。
@@ -107,6 +112,20 @@ def max_retries(config: Optional[Dict[str, Any]]) -> int:
         return DEFAULT_MAX_RETRIES
 
 
+def backoff_minutes(config: Optional[Dict[str, Any]]) -> List[int]:
+    """每次失败后等几分钟：limits.json 的 night.backoff_minutes，读不到就用兜底值。"""
+    entry = (config or {}).get(NIGHT_KIND)
+    entry = entry if isinstance(entry, dict) else {}
+    raw = entry.get("backoff_minutes", list(DEFAULT_BACKOFF_MINUTES))
+    out: List[int] = []
+    for value in raw if isinstance(raw, (list, tuple)) else []:
+        try:
+            out.append(max(0, int(value)))
+        except (TypeError, ValueError):
+            continue
+    return out or list(DEFAULT_BACKOFF_MINUTES)
+
+
 def _night_summary(result: Dict[str, Any]) -> Dict[str, Any]:
     """夜跑完的摘要：四步各自 status + 状态计数 + failed + 落了几行。"""
     steps = result.get("steps") or {}
@@ -117,7 +136,8 @@ def _night_summary(result: Dict[str, Any]) -> Dict[str, Any]:
             "written": int(result.get("written") or 0)}
 
 
-def _snapshot(attempt: int, steps: Dict[str, Any], failed: List[str]) -> Dict[str, Any]:
+def _snapshot(attempt: int, steps: Dict[str, Any], failed: List[str],
+              next_retry_at: Optional[str] = None) -> Dict[str, Any]:
     """这一次尝试的夜间快照：下一次就靠它只重跑没成功的那几步、其余沿用结果。
 
     steps 里存的是那一步的**整份结果**（至少有 status / detail，外加各步自己的
@@ -126,7 +146,9 @@ def _snapshot(attempt: int, steps: Dict[str, Any], failed: List[str]) -> Dict[st
     """
     return {"attempts": int(attempt),
             "steps": {name: dict(item) for name, item in steps.items()},
-            "failed_steps": list(failed)}
+            "failed_steps": list(failed),
+            # 退避窗口的右边界：plan.due() 认这个字段，所以窗口内不会被当成到点
+            "next_retry_at": next_retry_at}
 
 
 def _never_ran_reason(failed: List[str], attempt: int, steps: Dict[str, Any]) -> str:
@@ -155,6 +177,7 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
           "skipped": "night_running"|None}。
     """
     limit = max_retries(config)
+    backoff = backoff_minutes(config)
     out: Dict[str, Any] = {"executed": [], "retried": [], "never_ran": [],
                            "expired": [], "skipped": None}
     rows = [row for row in due_rows if row.get("kind") == NIGHT_KIND]
@@ -188,7 +211,8 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
             carry = (snap.get("steps") or {}) if tried else {}
             result = night.run(at, root=root, brain=brain, heart_root=heart_root,
                                break_step=break_step, only=only, carry=carry,
-                               attempt=attempt)
+                               attempt=attempt, backoff_minutes=backoff,
+                               max_retries=limit)
             failed = list(result.get("failed") or [])
             if not failed:
                 summary = _night_summary(result)
@@ -196,13 +220,15 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
                 out["executed"].append({"id": row["id"], "at": row["at"], "attempt": attempt,
                                         "ok": True, "summary": summary})
                 continue
-            snapshot = _snapshot(attempt, result.get("steps") or {}, failed)
+            snapshot = _snapshot(attempt, result.get("steps") or {}, failed,
+                                 result.get("next_retry_at"))
             if attempt < limit:
                 plan.note_night([row["id"]], root=root, now_ts=at,
                                 nights={row["id"]: snapshot})
                 out["retried"].append({"id": row["id"], "at": row["at"], "attempt": attempt,
                                        "ok": False, "failed_steps": failed,
                                        "next_attempt": attempt + 1,
+                                       "next_retry_at": result.get("next_retry_at"),
                                        "max_retries": limit,
                                        "failed": _night_summary(result)})
                 continue
@@ -211,7 +237,8 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
                            reasons={row["id"]: reason}, nights={row["id"]: snapshot})
             night.audit_never_ran(at, root=root,
                                   day=str(row.get("day") or model.day_key(row["at"])),
-                                  attempt=attempt, failed_steps=failed, reason=reason)
+                                  attempt=attempt, failed_steps=failed, reason=reason,
+                                  next_retry_at=None)
             out["never_ran"].append({"id": row["id"], "at": row["at"], "attempt": attempt,
                                      "failed_steps": failed, "reason": reason})
     finally:

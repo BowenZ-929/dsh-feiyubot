@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -114,7 +115,9 @@ def _append_log(line: Dict[str, Any], root: Any = None) -> Path:
 def run(now_ts: Any = None, *, root: Any = None, brain: Any = None, heart_root: Any = None,
         break_step: Optional[int] = None, only: Optional[List[str]] = None,
         carry: Optional[Dict[str, Dict[str, Any]]] = None,
-        attempt: int = 0) -> Dict[str, Any]:
+        attempt: int = 0,
+        backoff_minutes: Optional[List[int]] = None,
+        max_retries: Optional[int] = None) -> Dict[str, Any]:
     """跑一次夜：四步固定顺序，每步单独兜错，末尾落一行日志。
 
     break_step=N 只给验收用：让第 N 步（1 起数）当场抛错，看后面几步还跑不跑。
@@ -122,6 +125,9 @@ def run(now_ts: Any = None, *, root: Any = None, brain: Any = None, heart_root: 
     only= 只跑这几步（重试时只重跑没成功的那几步）；其余步骤原样取 carry 里上一次的
     结果合并回去，不跑、不重写。carry 里没有的那一步报 carried 并说明，不假装跑过。
     attempt 是这次尝试的序号（0 起数），与 only/carry 一起落进日志那一行。
+    backoff_minutes / max_retries 给了就顺手算出这次失败后的下一次几点
+    （next_retry_at = 此刻 + backoff[attempt] 分钟，末项之后沿用末项）：退避算术只有这一处，
+    rhythm 只负责把它抄进计划行，别处不许再算一遍。
     """
     at = model.iso(now_ts) if now_ts is not None else model.now_iso()
     day = model.day_key(at)
@@ -145,17 +151,35 @@ def run(now_ts: Any = None, *, root: Any = None, brain: Any = None, heart_root: 
             steps[name] = {"status": STATUS_FAILED,
                           "detail": "%s: %s" % (type(exc).__name__, exc)}
     failed: List[str] = [name for name in STEPS if steps[name]["status"] == STATUS_FAILED]
+    next_retry_at = _next_retry(at, attempt, bool(failed), backoff_minutes, max_retries)
     line = {"ts": at, "day": day, "attempt": int(attempt), "retried_steps": wanted,
-            "written": 1, "steps": steps, "failed": failed}
+            "next_retry_at": next_retry_at, "written": 1, "steps": steps, "failed": failed}
     target = _append_log(line, root)
     return {"ok": not failed, "now": at, "day": day, "attempt": int(attempt),
-            "retried_steps": wanted, "steps": steps, "failed": failed,
-            "written": 1, "log_path": str(target), "log_line": line}
+            "retried_steps": wanted, "next_retry_at": next_retry_at, "steps": steps,
+            "failed": failed, "written": 1, "log_path": str(target), "log_line": line}
+
+
+def _next_retry(at: str, attempt: int, failed: bool,
+                backoff_minutes: Optional[List[int]],
+                max_retries: Optional[int]) -> Optional[str]:
+    """这次失败后的下一次重试几点；不再重试就是 None（**不写一个不会发生的时刻**）。
+
+    退避是累加的：第 attempt 次尝试失败后等 backoff[attempt] 分钟。成功 / 额度用完 /
+    没给退避表 → None。
+    """
+    if not failed or max_retries is None or int(attempt) >= int(max_retries):
+        return None
+    window = [int(minute) for minute in (backoff_minutes or [])]
+    if not window:
+        return None
+    minutes = window[min(int(attempt), len(window) - 1)]
+    return model.iso(model.parse_ts(at) + timedelta(minutes=minutes))
 
 
 def audit_never_ran(now_ts: Any = None, *, root: Any = None, day: str = "",
                     attempt: int = 0, failed_steps: Optional[List[str]] = None,
-                    reason: str = "") -> Dict[str, Any]:
+                    reason: str = "", next_retry_at: Optional[str] = None) -> Dict[str, Any]:
     """never-ran 的那一条审计：追加到同一个 night_log.jsonl（**不另开第二个审计文件**）。
 
     attempt 是最后一次尝试的序号（0 起数），reason 用人的话写清"哪一步、试了几次"——
@@ -163,8 +187,8 @@ def audit_never_ran(now_ts: Any = None, *, root: Any = None, day: str = "",
     """
     at = model.iso(now_ts) if now_ts is not None else model.now_iso()
     line = {"ts": at, "day": day or model.day_key(at), "event": EVENT_NEVER_RAN,
-            "attempt": int(attempt), "failed_steps": list(failed_steps or []),
-            "reason": reason}
+            "attempt": int(attempt), "next_retry_at": next_retry_at,
+            "failed_steps": list(failed_steps or []), "reason": reason}
     target = _append_log(line, root)
     return {"ok": True, "log_path": str(target), "log_line": line}
 

@@ -139,6 +139,59 @@ class NightRetryScopeTest(unittest.TestCase):
         self.assertEqual(out["log_path"], str(self.root / "night_log.jsonl"))
 
 
+class NightBackoffTest(unittest.TestCase):
+    """退避算术只在 night.run 这一处：失败写下一次几点，成功或额度用完就不写。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        self.heart = self.root / "heart"
+        self.heart.mkdir()
+        self.brain = brain(self.root)
+
+    def _run(self, **kwargs):
+        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
+                  "backoff_minutes": [1, 5, 15], "max_retries": 3}
+        params.update(kwargs)
+        return night.run(at(NOW), **params)
+
+    def test_first_failure_points_one_minute_ahead(self):
+        payload = self._run(break_step=2, attempt=0)
+        expected = at("2026-11-06T05:01:00")
+        self.assertEqual(expected, payload["next_retry_at"])
+        self.assertEqual(expected, log_lines(self.root)[-1]["next_retry_at"],
+                         "日志行也要看得见下一次几点")
+        self.assertEqual(expected, payload["log_line"]["next_retry_at"])
+
+    def test_second_and_third_failures_take_five_and_fifteen_minutes(self):
+        """按尝试序号取退避时长：第 2 次失败等 5 分钟、第 3 次等 15 分钟。
+
+        累加成 T / T+1 / T+6 / T+21 由 rhythm 的 tick 时刻决定（那是真跑出来的）。
+        """
+        self.assertEqual(at("2026-11-06T05:05:00"),
+                         self._run(break_step=2, attempt=1)["next_retry_at"])
+        self.assertEqual(at("2026-11-06T05:15:00"),
+                         self._run(break_step=2, attempt=2)["next_retry_at"])
+
+    def test_budget_used_up_writes_no_next_retry_at(self):
+        payload = self._run(break_step=2, attempt=3)
+        self.assertIsNone(payload["next_retry_at"], "不再重试就不写一个不会发生的时刻")
+        self.assertIsNone(log_lines(self.root)[-1]["next_retry_at"])
+
+    def test_success_writes_no_next_retry_at(self):
+        self.assertIsNone(self._run(attempt=0)["next_retry_at"])
+
+    def test_without_a_backoff_table_nothing_is_promised(self):
+        self.assertIsNone(self._run(break_step=2, attempt=0, backoff_minutes=None)["next_retry_at"])
+
+    def test_audit_line_carries_the_attempt_and_the_boundary_key(self):
+        night.audit_never_ran(at(NOW), root=self.root, day="2026-11-05", attempt=3,
+                              failed_steps=["brain_decay"], reason="试满了")
+        line = log_lines(self.root)[-1]
+        self.assertEqual(3, line["attempt"])
+        self.assertIn("next_retry_at", line, "审计行也要能看出下一次几点（这里是没有）")
+        self.assertIsNone(line["next_retry_at"])
+
+
 class NightLogTest(unittest.TestCase):
     def setUp(self) -> None:
         self.root = temp_root(self)

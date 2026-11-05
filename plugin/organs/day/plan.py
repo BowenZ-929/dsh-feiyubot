@@ -5,9 +5,13 @@
    （09:00+08:00 与 01:00+00:00）落到同一个 id。
 2. id 由 (kind, at) 算出来，不是随机数：所以同一 now 连跑两次，第二次拿到的是
    同一个 id，落进 duplicates，pending/consumed 一条都不增。幂等不靠「记得跑过」。
-3. 两道闸门拦在这里，**不进 pending**：
+3. 两道闸门拦在这里，**不进 pending**，而且只拦 optional 那类：
    - min_gap：同类型两条计划之间至少隔 min_gap_minutes（默认 10 分钟）；
-   - daily_cap：同类型每天最多 daily_cap 条（默认 12）。
+   - 额度：同类型每天最多 daily_cap 条（默认 12），reason 码是 quota_optional。
+   **required 的计划既不看 min_gap 也不看额度**：该跑的那件事不该被"今天排满了"挡掉。
+   required 由谁定：候选自己写的 required > kinds 里那一栏的 required > **默认 optional**。
+   所以 kinds 里没写的、kind 根本不在 kinds 里（临时 add 的候选）一律 optional——
+   额度管"可有可无"，写错一个 kind 名不该变成免检。
    被拦的候选记进 blocked 留痕（reason 给机器、message 给人），而且**事后不许补**：
    同一个 (kind, at) 再进来一次仍然被拦，理由照旧，不会因为后来松了就偷偷放行。
 4. ensure() 只为"当天该跑的那几件事"排计划：limits.json 的 kinds 里每个 kind 确保
@@ -21,16 +25,17 @@
    never_ran 与 expired 一样算"已处理"：同一天不许再排第二条夜（它也是没跑成，不重排）。
    blocked 是"闸门拦的"，never_ran 是"该跑却没跑成"——两种没落地不能叠成一个桶。
 6. 失败的那次**不下账**：那条留在 pending，行里带夜间快照 night（第几次尝试、四步各自
-   结果、哪几步没成功），下一 tick 照快照只重跑没成功的那几步。
+   结果、哪几步没成功、下次几点重试 next_retry_at），退避窗口内的那一条**不算到点**——
+   due() 与 next_at() 都认这个字段，判断只在本文件这一处，别处不许再判一遍。
 
 账的形状（plans.json，不许悄悄加顶层键）：
     {"version": 1, "pending": [行], "consumed": [行], "blocked": [行],
      "expired": [行], "never_ran": [行]}
-    行：{id, kind, at, day, status, note, created_at, consumed_at}
-    blocked 行：{id, kind, at, day, reason, message, blocked_at}
+    行：{id, kind, at, day, status, required, note, created_at, consumed_at}
+    blocked 行：{id, kind, at, day, required, reason, message, blocked_at}
     never_ran 行：/ expired 行 = 原行 + {status, reason, expired_at|never_ran_at}
     pending 行里的夜间快照：night = {"attempts": 0..n, "steps": {名字: {status, detail}},
-                                      "failed_steps": [名字]}
+                                      "failed_steps": [名字], "next_retry_at": iso|None}
 """
 from __future__ import annotations
 
@@ -50,8 +55,14 @@ VERSION = 1
 STATUS_PENDING = "pending"
 STATUS_CONSUMED = "consumed"
 REASON_MIN_GAP = "min_gap"
-REASON_DAILY_CAP = "daily_cap"
+# 额度只约束 optional 那类，码就叫 quota_optional：读到它就知道"这是可有可无那类的额度"。
+REASON_QUOTA_OPTIONAL = "quota_optional"
+# 旧名留成别名：额度以前按 kind 无差别计（码叫 daily_cap），现在只拦 optional，
+# 读 REASON_DAILY_CAP 的地方拿到的仍是"额度不够"这同一个理由。
+REASON_DAILY_CAP = REASON_QUOTA_OPTIONAL
 KINDS_KEY = "kinds"
+# 计划行上的 required：True 的不受 min_gap / 额度约束；没写＝optional（受约束）
+REQUIRED_KEY = "required"
 # 到期没执行的计划不补跑，标这一栏：它不进 pending（没人会再去执行它），
 # 也不占 min_gap / daily_cap（它本来就没发生）。
 STATUS_EXPIRED = "expired"
@@ -144,10 +155,46 @@ def listing(root: Any = None) -> Dict[str, Any]:
     never_ran 是该跑却没跑成的，consumed 是真跑过的——四种没落地的原因不能叠成一个桶。
     """
     data = load(root)
+    rows = [row for column in ("pending", "consumed", "blocked", "expired", "never_ran")
+            for row in data[column]]
+    for row in rows:
+        # 每行都带 required：人一眼就能看出这条受不受额度管（老账里没这个键的按 optional）
+        row[REQUIRED_KEY] = _row_required(row)
     return {"ok": True, "root": str(model.day_root(root)), "pending": data["pending"],
             "consumed": data["consumed"], "blocked": data["blocked"],
             "expired": data["expired"], "never_ran": data["never_ran"],
             "counts": counts(data), "plan_ids": plan_ids(data)}
+
+
+def _row_required(row: Dict[str, Any]) -> bool:
+    """账上这一行是不是 required；没写、写坏了一律 optional（额度管"可有可无"）。"""
+    return row.get(REQUIRED_KEY) is True
+
+
+def required_of(item: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> bool:
+    """这条候选算不算"必须跑的"：候选自己写的 > kinds 里那一栏 > 默认 optional。
+
+    默认 optional 是有意的：kinds 里没写、甚至 kind 根本不在 kinds 里的候选（临时 add
+    的那条）都受额度管——写错一个 kind 名不该变成免检。
+    """
+    declared = item.get(REQUIRED_KEY)
+    if declared is not None:
+        return declared is True
+    kinds = (config or {}).get(KINDS_KEY) or {}
+    entry = kinds.get(item.get("kind"))
+    entry = entry if isinstance(entry, dict) else {}
+    return entry.get(REQUIRED_KEY) is True
+
+
+def retry_at(row: Dict[str, Any]) -> Optional[datetime]:
+    """这条计划的下次重试时刻（退避窗口的右边界）；没有就是按 at 到点。"""
+    raw = night_of(row).get("next_retry_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return model.parse_ts(raw)
+    except ValueError:
+        return None
 
 
 def night_of(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,34 +209,59 @@ def _now(now_ts: Any = None) -> datetime:
 
 def due(now_ts: Any = None, *, root: Any = None,
         data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """到点的计划：pending 里 at <= now 的那些（按时刻升序）。只看，不改。
+    """到点的计划：pending 里 at <= now **且退避窗口已过**的那些（按时刻升序）。只看，不改。
 
+    "窗口内不算到点"只在这里判一次：重试失败的那条带着 next_retry_at，窗口没过就继续
+    留在 pending 里等，别处（rhythm 尤其）不许再判第二遍。
     data 传了就用那份已经读好的账（一次请求里省一次读盘）。
     """
     at = _now(now_ts)
     ledger = data if data is not None else load(root)
-    rows = [row for row in ledger["pending"] if model.parse_ts(row["at"]) <= at]
+    rows: List[Dict[str, Any]] = []
+    for row in ledger["pending"]:
+        if model.parse_ts(row["at"]) > at:
+            continue
+        retry = retry_at(row)
+        if retry is not None and retry > at:
+            continue        # 还在退避窗口里：这一 tick 不算到点，等窗口过了再来
+        rows.append(row)
     return sorted(rows, key=lambda row: row["at"])
 
 
 def next_at(now_ts: Any = None, *, root: Any = None,
             data: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    """下一次几点：pending 里最早一条 at > now 的绝对时刻；没有就 None（纯算术）。"""
+    """下一次几点：pending 里最早一条"还要等到什么时候"；没有就 None（纯算术）。
+
+    退避中的那条不按它的 at 报（那个时刻早就过去了），按 next_retry_at 报——
+    否则"下一次几点"会说谎。
+    """
     at = _now(now_ts)
     ledger = data if data is not None else load(root)
-    ahead = [row["at"] for row in ledger["pending"] if model.parse_ts(row["at"]) > at]
+    ahead: List[str] = []
+    for row in ledger["pending"]:
+        when = model.parse_ts(row["at"])
+        retry = retry_at(row)
+        if when > at:
+            ahead.append(row["at"])
+        elif retry is not None and retry > at:
+            ahead.append(model.iso(retry))
     return min(ahead) if ahead else None
 
 
 # ---- 写 -------------------------------------------------------------------
 
 
-def _candidate(item: Any) -> Dict[str, str]:
-    """候选 → {kind, at, note}；at 归一成绝对时刻，kind 不许空。"""
+def _candidate(item: Any) -> Dict[str, Any]:
+    """候选 → {kind, at, note, required}；at 归一成绝对时刻，kind 不许空。
+
+    required 只有候选自己明确写了才是 True/False，没写就是 None（到 add 里再按配置定）。
+    """
+    declared: Any = None
     if isinstance(item, dict):
         kind = str(item.get("kind") or "").strip()
         raw_at = item.get("at")
         note = str(item.get("note") or "")
+        declared = item.get(REQUIRED_KEY)
     elif isinstance(item, (tuple, list)) and len(item) >= 2:
         kind = str(item[0] or "").strip()
         raw_at = item[1]
@@ -198,7 +270,8 @@ def _candidate(item: Any) -> Dict[str, str]:
         raise ValueError("候选计划要 {kind, at} 字典或 (kind, at) 二元组，收到 %r" % (item,))
     if not kind:
         raise ValueError("候选计划缺 kind：%r" % (item,))
-    return {"kind": kind, "at": model.iso(raw_at), "note": note}
+    return {"kind": kind, "at": model.iso(raw_at), "note": note,
+            "required": None if declared is None else declared is True}
 
 
 def thresholds(config: Optional[Dict[str, Any]], kind: str) -> Tuple[int, int]:
@@ -274,7 +347,8 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
     """候选计划过闸门入账：added / duplicates / blocked 三份，一个候选只落一处。
 
     幂等：同一个 (kind, at) 第二次进来落 duplicates（或原样落 blocked），账不变。
-    闸门：先看 min_gap（与同类型最近的一条隔多久），再看 daily_cap（同类型当天几条）。
+    闸门只拦 optional：先看 min_gap（与同类型最近的一条隔多久），再看额度（同类型当天
+    几条 optional）。required 的那条两条都不看——该跑的事不该被"今天排满了"挡掉。
     """
     cfg = config or model.load_limits()
     created = model.iso(now_ts) if now_ts is not None else model.now_iso()
@@ -287,7 +361,9 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
         taken[str(row.get("id", ""))] = str(row.get("status") or STATUS_PENDING)
         kind = str(row.get("kind", ""))
         same_kind.setdefault(kind, []).append(model.parse_ts(row["at"]))
-        per_day[(kind, str(row.get("day") or model.day_key(row["at"])))] += 1
+        if not _row_required(row):
+            # 额度只数 optional：required 的行不占"可有可无"那类的名额
+            per_day[(kind, str(row.get("day") or model.day_key(row["at"])))] += 1
     for row in data["expired"]:
         # 过期的计划不再重排（它就是那一条，重排等于偷偷补跑），但也不占闸门：
         # 它本来没发生，占着名额就等于把今天的那条挤掉。
@@ -312,32 +388,37 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
             continue
         at = model.parse_ts(item["at"])
         day = model.day_key(item["at"])
-        min_gap_seconds, cap = thresholds(cfg, item["kind"])
-        nearest = min((abs((at - other).total_seconds()) for other in same_kind.get(item["kind"], [])),
-                      default=None)
+        required = required_of(item, cfg)
         reason = message = ""
-        if nearest is not None and nearest < min_gap_seconds:
-            reason = REASON_MIN_GAP
-            message = ("同类型两条计划之间至少隔 %d 分钟，这一条离最近的一条只隔 %d 秒"
-                       % (min_gap_seconds // 60, int(nearest)))
-        elif per_day[(item["kind"], day)] >= cap:
-            reason = REASON_DAILY_CAP
-            message = ("同类型每天最多 %d 条，%s 已经排了 %d 条"
-                       % (cap, day, per_day[(item["kind"], day)]))
+        if not required:
+            min_gap_seconds, cap = thresholds(cfg, item["kind"])
+            nearest = min((abs((at - other).total_seconds())
+                           for other in same_kind.get(item["kind"], [])), default=None)
+            if nearest is not None and nearest < min_gap_seconds:
+                reason = REASON_MIN_GAP
+                message = ("同类型两条计划之间至少隔 %d 分钟，这一条离最近的一条只隔 %d 秒"
+                           % (min_gap_seconds // 60, int(nearest)))
+            elif per_day[(item["kind"], day)] >= cap:
+                reason = REASON_QUOTA_OPTIONAL
+                message = ("这是「可有可无」那类的额度：同类型每天最多 %d 条，%s 已经排了 %d 条"
+                           "（required 的计划不受这条额度管）"
+                           % (cap, day, per_day[(item["kind"], day)]))
         if reason:
             row = {"id": pid, "kind": item["kind"], "at": item["at"], "day": day,
-                   "reason": reason, "message": message, "blocked_at": created}
+                   REQUIRED_KEY: required, "reason": reason, "message": message,
+                   "blocked_at": created}
             data["blocked"].append(row)
             blocked_index[pid] = row
             blocked.append(row)
             continue
         row = {"id": pid, "kind": item["kind"], "at": item["at"], "day": day,
-               "status": STATUS_PENDING, "note": item["note"], "created_at": created,
-               "consumed_at": None}
+               "status": STATUS_PENDING, REQUIRED_KEY: required, "note": item["note"],
+               "created_at": created, "consumed_at": None}
         data["pending"].append(row)
         taken[pid] = STATUS_PENDING
         same_kind.setdefault(item["kind"], []).append(at)
-        per_day[(item["kind"], day)] += 1
+        if not required:
+            per_day[(item["kind"], day)] += 1
         added.append(row)
 
     if added or blocked:
