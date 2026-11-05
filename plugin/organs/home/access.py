@@ -22,7 +22,10 @@ MAX_CHARS_PER_WRITE = 2000
 MAX_FILES_PER_WRITE = 20
 READ_MAX_LINES = 200
 READ_MAX_CHARS = 6000
-MAX_WRITES_PER_ROOM_PER_DAY = 50
+# 两本账：写与消费各一份日额度。**数值的真源是 limits.json**，这里只是「还没人调过」时的默认值；
+# 文件在就一律按文件，绝不用这里的数去覆盖它。
+DEFAULT_WRITES_PER_ROOM_PER_DAY = 50
+DEFAULT_CONSUMES_PER_ROOM_PER_DAY = 50
 ROOM_CAP = {"仓库": 16000, "卧室": 32000, "橱柜": 8000}   # 只这三间有件数上限
 MAX_SEGMENT = 64
 MAX_DEPTH = 4
@@ -32,10 +35,25 @@ ENV_ACCESS = "HOME_ACCESS_FILE"
 # 门一用的名字：与 rooms.READONLY_ROOMS 是同一份事实，这只给个本模块的叫法，不另写一遍
 ROOM_READONLY = READONLY_ROOMS
 ACCESS_NAME = "access.json"
+LIMITS_NAME = "limits.json"
+ENV_LIMITS = "HOME_LIMITS_FILE"
+LIMITS_VERSION = 1
+# 消费在审计账里的名字前缀。分桶就靠它——不另开文件、不另开计数器：
+# 账头是唯一计数真源（另开一份迟早与账分叉）。
+CONSUME_AUDIT_PREFIX = "消费:"
 AUDIT_NAME = "audit.jsonl"
 ACCESS_VERSION = 1
 _CONTROL_MAX = 32
 _CONTROL_DEL = 127
+
+
+@dataclass(frozen=True)
+class Limits:
+    """两本账的日额度。source 要能说清这次是文件给的还是默认值。"""
+
+    writes_per_room_per_day: int
+    consumes_per_room_per_day: int
+    source: str
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,63 @@ def load_whitelist(root=None, explicit=None) -> Whitelist:
         return _read_file(path, "env:" + env)
     path = Path(home_root(root)) / ACCESS_NAME
     return _read_file(path, "root:" + str(path))
+
+
+def limits_seed_path() -> Path:
+    """**出厂默认**那份额度文件：随包发、只读参数，不是真源。"""
+    return factory_path(LIMITS_NAME)
+
+
+def read_limits_seed() -> Limits:
+    """读出厂默认那份额度，**仅供补件／对照**。它答的不是「这台机器的额度是多少」。"""
+    path = limits_seed_path()
+    return _parse_limits(path.read_text(encoding="utf-8"), "seed:" + str(path))
+
+
+def load_limits(root=None, explicit=None) -> Limits:
+    """两本账的额度：显式参数 > HOME_LIMITS_FILE > home_root()/limits.json > 「还没人调过」的默认值。
+
+    文件在就一律按文件（坏件响亮抛），文件不在才落到默认值并把 source 记成 default——
+    「还没人调过」是合法状态，不是「读不到也算 0」，两者在回执里分得开。
+    """
+    if explicit is not None:
+        if isinstance(explicit, Limits):
+            return explicit
+        if isinstance(explicit, (str, Path)):
+            path = Path(explicit)
+            return _parse_limits(path.read_text(encoding="utf-8"), "explicit:" + str(path))
+        return _parse_limits(json.dumps(explicit, ensure_ascii=False), "explicit")
+    env = os.environ.get(ENV_LIMITS, "")
+    if env:
+        path = Path(env)
+        return _parse_limits(path.read_text(encoding="utf-8"), "env:" + env)
+    path = Path(home_root(root)) / LIMITS_NAME
+    if not path.exists():
+        return Limits(DEFAULT_WRITES_PER_ROOM_PER_DAY, DEFAULT_CONSUMES_PER_ROOM_PER_DAY,
+                      "default:文件不在（%s）" % path)
+    return _parse_limits(path.read_text(encoding="utf-8"), "root:" + str(path))
+
+
+def _parse_limits(text: str, source: str) -> Limits:
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise _deny("LIMITS_FILE_BAD", "额度文件读不出来：%s" % exc, 0, 1, 1, source=source)
+    if not isinstance(data, dict):
+        raise _deny("LIMITS_FILE_BAD", "额度文件顶层必须是对象", 0, 1, 1, source=source)
+    version = data.get("version", LIMITS_VERSION)
+    if version != LIMITS_VERSION:
+        raise _deny("LIMITS_VERSION_UNKNOWN", "额度文件版本不认识：%r" % (version,), 0, 1, 1,
+                    source=source, version=version)
+    values = []
+    for key, fallback in (("writes_per_room_per_day", DEFAULT_WRITES_PER_ROOM_PER_DAY),
+                          ("consumes_per_room_per_day", DEFAULT_CONSUMES_PER_ROOM_PER_DAY)):
+        raw = data.get(key, fallback)
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 1:
+            raise _deny("LIMITS_FILE_BAD", "%s 必须是 >=1 的整数：%r" % (key, raw),
+                        0, 1, 1, source=source, field=key)
+        values.append(raw)
+    return Limits(values[0], values[1], source)
 
 
 def seed_path() -> Path:
@@ -191,8 +266,12 @@ def _room_files(root, room: str) -> int:
     return total
 
 
-def _writes_today(root, room: str) -> int:
-    """按审计账数今天这间写过几次。账头是唯一的计数真源，不另开计数器（另开会与账分叉）。"""
+def _count_today(root, room: str, *, consume: bool) -> int:
+    """按审计账数今天这间**某一本账**动了几次。
+
+    分桶只看名字前缀（`消费:`）：写与消费都进同一本审计账，所以不必另开文件，
+    也不会出现「计数器与账分叉」。同一本账、两个桶，各数各的。
+    """
     path = Path(home_root(root)) / AUDIT_NAME
     rows, _bad = read_lines(path)
     today = datetime.now().astimezone().strftime("%Y-%m-%d")
@@ -202,8 +281,22 @@ def _writes_today(root, room: str) -> int:
             continue
         if str(row.get("at", ""))[:10] != today:
             continue
+        is_consume = str(row.get("name") or "").startswith(CONSUME_AUDIT_PREFIX)
+        if is_consume != consume:
+            continue
         count += 1
     return count
+
+
+def _day_quota(*, root, room: str, consume: bool, limit: int) -> None:
+    """这一本账今天到点没有。两本账分开判——互不相干的行为不该互相饿死。"""
+    used = _count_today(root, room, consume=consume)
+    if used + 1 <= limit:
+        return
+    label = "拿走" if consume else "写"
+    raise _deny("DAY_QUOTA_REACHED",
+                "这间今天已经%s %d 次，上限 %d 次（%s那本账单独计）" % (label, used, limit, label),
+                used, limit, used + 1 - limit, room=room, bucket="consume" if consume else "write")
 
 
 def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
@@ -234,11 +327,9 @@ def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
             raise _deny("ROOM_CAP_REACHED", "这间已经 %d 件，上限 %d 件" % (used, cap),
                         used, cap, used + files - cap, room=found.name)
 
-    today = _writes_today(root, found.name)
-    if today + 1 > MAX_WRITES_PER_ROOM_PER_DAY:
-        raise _deny("DAY_QUOTA_REACHED", "这间今天已经写了 %d 次，上限 %d 次" % (today, MAX_WRITES_PER_ROOM_PER_DAY),
-                    today, MAX_WRITES_PER_ROOM_PER_DAY, today + 1 - MAX_WRITES_PER_ROOM_PER_DAY,
-                    room=found.name)
+    limits = load_limits(root)
+    _day_quota(root=root, room=found.name, consume=False,
+               limit=limits.writes_per_room_per_day)
 
 
 def _doors(*, role: str, room: str, root=None,
@@ -280,6 +371,9 @@ def check_consume(*, role: str, room: str, name: str, root=None,
     """
     found = _doors(role=role, room=room, root=root, whitelist=whitelist)
     check_path_shape(found.name, name)
+    limits = load_limits(root)
+    _day_quota(root=root, room=found.name, consume=True,
+               limit=limits.consumes_per_room_per_day)
 
 
 def check_read(*, room: str, name: str, lines: int, chars: int) -> None:

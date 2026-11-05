@@ -345,7 +345,7 @@ def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] 
                      seq=_line_count(path) + 1)
     store_module.append_line(path, card)
     entry = audit.append_entry(root=root, role=role, by=by, room=target_room.name,
-                               name="%s:%s" % (CONSUME_KIND, card["name"]),
+                               name="%s%s" % (access.CONSUME_AUDIT_PREFIX, card["name"]),
                                chars=len(reason), bytes=0)
     return {"room": target_room.name, "card": card, "target": target,
             "left": 0, "audit": entry}

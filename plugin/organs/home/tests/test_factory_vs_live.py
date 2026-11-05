@@ -118,12 +118,52 @@ class FactoryVsLiveTest(unittest.TestCase):
         for banned in ("seed_path", "read_seed", '"data"', "'data'"):
             self.assertNotIn(banned, source, "check_rooms_json 里出现了 %s" % banned)
 
+    # —— limits.json（两本账的额度）——————————————————
+
+    def test_limits_default_read_goes_through_the_home_root(self) -> None:
+        self.assertNotEqual(store.home_root(self.live) / access.LIMITS_NAME,
+                            access.limits_seed_path(),
+                            "实盘与出厂默认必须是两条不同的路")
+
+    def test_limits_live_change_is_what_reads(self) -> None:
+        path = self.live / access.LIMITS_NAME
+        path.write_text(json.dumps({"version": 1, "writes_per_room_per_day": 7,
+                                    "consumes_per_room_per_day": 8}), encoding="utf-8")
+        seed_before = access.limits_seed_path().read_bytes()
+        self.assertEqual((7, 8), (access.load_limits(self.live).writes_per_room_per_day,
+                                  access.load_limits(self.live).consumes_per_room_per_day))
+        self.assertEqual(seed_before, access.limits_seed_path().read_bytes(),
+                         "改实盘不许改到出厂那份")
+
+    def test_limits_seed_corruption_does_not_affect_reads(self) -> None:
+        path = self.live / access.LIMITS_NAME
+        path.write_text(json.dumps({"version": 1, "writes_per_room_per_day": 7,
+                                    "consumes_per_room_per_day": 8}), encoding="utf-8")
+        seed = access.limits_seed_path()
+        original = seed.read_bytes()
+        try:
+            seed.write_text('{"version": 1, "writes_per_room_per_day": 999, '
+                            '"consumes_per_room_per_day": 999}', encoding="utf-8")
+            loaded = access.load_limits(self.live)
+            self.assertEqual((7, 8), (loaded.writes_per_room_per_day,
+                                      loaded.consumes_per_room_per_day),
+                             "把出厂那份额度改掉，读出来不许变")
+        finally:
+            seed.write_bytes(original)
+        self.assertEqual(original, seed.read_bytes(), "验完必须把出厂那份还原成原样")
+
+    def test_limits_read_path_never_touches_the_seed(self) -> None:
+        source = inspect.getsource(access.load_limits)
+        for banned in ("limits_seed_path", "read_limits_seed"):
+            self.assertNotIn(banned, source, "load_limits 里出现了 %s" % banned)
+
     # —— 三份的一致口径 ————————————————————————————
 
     def test_three_seed_paths_live_under_the_factory_dir_and_off_the_live_root(self):
         factory = store.factory_path("")
         for name, path in (("access", access.seed_path()), ("rooms", rooms.seed_path()),
-                           ("anchors", anchors.seed_path())):
+                           ("anchors", anchors.seed_path()),
+                           ("limits", access.limits_seed_path())):
             with self.subTest(seed=name):
                 self.assertTrue(str(path).startswith(str(factory)),
                                 "%s 的出厂默认要落在 %s 下面" % (name, factory))

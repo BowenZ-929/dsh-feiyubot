@@ -14,8 +14,9 @@ from . import cards
 from . import residents
 from . import rooms
 from . import store
-from .access import (AccessDenied, Whitelist, check_consume, check_path_shape, check_read,
-                     check_write, load_whitelist)
+from .access import (AccessDenied, Limits, Whitelist, check_consume, check_path_shape,
+                     check_read, check_write, limits_seed_path, load_limits, load_whitelist,
+                     read_limits_seed)
 from .anchors import (AnchorError, append_anchors, latest_by_scene, read_all as read_anchors,
                        read_seed, seed_path)
 from .audit import AuditShrunk, Entry, append_entry, read_tail, verify
@@ -30,8 +31,8 @@ from .store import atomic_write_text, append_line, encode_name, home_root, sha25
 __all__ = [
     "access", "anchors", "audit", "cards", "residents", "rooms", "store",
     "AnchorError", "append_anchors", "latest_by_scene", "read_anchors", "read_seed", "seed_path",
-    "AccessDenied", "Whitelist", "check_consume", "check_path_shape", "check_read",
-    "check_write",
+    "AccessDenied", "Limits", "Whitelist", "check_consume", "check_path_shape", "check_read",
+    "check_write", "limits_seed_path", "load_limits", "read_limits_seed",
     "load_whitelist",
     "AuditShrunk", "Entry", "append_entry", "read_tail", "verify",
     "CardError", "append_cards", "consume", "fold", "list_room", "read_item",

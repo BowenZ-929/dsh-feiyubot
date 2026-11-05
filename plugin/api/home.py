@@ -190,6 +190,8 @@ def _access_now(root: Any) -> Result:
     whitelist, why = _whitelist(root)
     if whitelist is None:
         raise access.AccessDenied(why["code"], why["message"], why["detail"])
+    limits = access.load_limits(root)
+    limit_kind, _, limit_path = limits.source.partition(":")
     kind, _, path = whitelist.source.partition(":")
     structural = [room.name for room in rooms.ROOMS if room.writable_default]
     readonly = [room.name for room in rooms.ROOMS if not room.writable_default]
@@ -202,9 +204,20 @@ def _access_now(root: Any) -> Result:
         "env": access.ENV_ACCESS,
         "default": sorted(structural),
         "readonly_rooms": sorted(readonly),
+        "limits": {
+            "writes_per_room_per_day": limits.writes_per_room_per_day,
+            "consumes_per_room_per_day": limits.consumes_per_room_per_day,
+            "source": limits.source,
+            "source_kind": limit_kind,
+            "file": None if limit_kind == "default" else (limit_path or None),
+            "seed_file": str(access.limits_seed_path()),
+            "env": access.ENV_LIMITS,
+        },
         "root": str(home_store.home_root(root)),
         "note": "白名单只记她（role=agent）今天能写哪几间；只读五间是结构决定的，不进这份配置。"
-                "file 就是现在生效的那一份：改它的 writable 数组，下一次请求立刻照新的算（不缓存）。",
+                "file 就是现在生效的那一份：改它的 writable 数组，下一次请求立刻照新的算（不缓存）。"
+                "limits 是两本账：写与消费各一份日额度、分开计（审计账按名字前缀分桶，不另开文件）；"
+                "两本账分开是为了不让互不相干的两种行为互相饿死。",
     }
 
 

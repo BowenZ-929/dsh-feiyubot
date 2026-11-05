@@ -157,5 +157,87 @@ class ConsumeTest(unittest.TestCase):
                          "拿走的指针卡不再参与对齐判定，也不该冒出一条假 stale")
 
 
+class TwoLedgersTest(unittest.TestCase):
+    """写与消费分开记日额度：互不相干的行为不该互相饿死。
+
+    数值不写在代码里——这条测试自己写一份 limits.json 交上去，顺便证明「数值进数据文件」。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = make_home(Path(self._tmp.name))
+
+    def _limits(self, writes: int, consumes: int) -> None:
+        (self.root / access.LIMITS_NAME).write_text(json.dumps({
+            "version": 1, "writes_per_room_per_day": writes,
+            "consumes_per_room_per_day": consumes}), encoding="utf-8")
+
+    def test_consume_quota_does_not_starve_writes(self) -> None:
+        """拿满消费额度之后，写仍然正常。"""
+        self._limits(writes=50, consumes=2)
+        for name in ("甲.md", "乙.md", "丙.md"):
+            put(self.root, name)
+        cards.consume(root=self.root, role="organ", by="day", room="工作台", name="甲.md")
+        cards.consume(root=self.root, role="organ", by="day", room="工作台", name="乙.md")
+        with self.assertRaises(access.AccessDenied) as caught:
+            cards.consume(root=self.root, role="organ", by="day", room="工作台", name="丙.md")
+        self.assertEqual("DAY_QUOTA_REACHED", caught.exception.code)
+        self.assertEqual("consume", caught.exception.detail.get("bucket"), "拒因要归到消费那本账")
+        card = put(self.root, "丁.md")
+        self.assertEqual("丁.md", card["name"], "消费到点了，写照旧——两本账不许互相饿死")
+
+    def test_write_quota_does_not_starve_consumes(self) -> None:
+        """写满之后，消费仍然正常。"""
+        self._limits(writes=2, consumes=50)
+        put(self.root, "甲.md")
+        put(self.root, "乙.md")
+        with self.assertRaises(access.AccessDenied) as caught:
+            put(self.root, "丙.md")
+        self.assertEqual("DAY_QUOTA_REACHED", caught.exception.code)
+        self.assertEqual("write", caught.exception.detail.get("bucket"), "拒因要归到写那本账")
+        cards.consume(root=self.root, role="organ", by="day", room="工作台", name="甲.md")
+        self.assertEqual(1, cards.list_room(self.root, room="工作台")["total"],
+                         "写满了，消费照旧——两本账不许互相饿死")
+
+    def test_the_two_buckets_are_split_by_name_prefix(self) -> None:
+        """分桶只看审计账里的名字前缀，不另开文件：同一本账、两个桶。"""
+        self._limits(writes=50, consumes=50)
+        put(self.root, "甲.md")
+        cards.consume(root=self.root, role="organ", by="day", room="工作台", name="甲.md")
+        names = [entry.name for entry in audit.read_tail(self.root, limit=50)]
+        self.assertEqual(2, len(names))
+        self.assertTrue(any(name.startswith(access.CONSUME_AUDIT_PREFIX) for name in names),
+                        "消费那行的名字要带前缀，分桶才有依据")
+        self.assertEqual(1, access._count_today(self.root, "工作台", consume=False))
+        self.assertEqual(1, access._count_today(self.root, "工作台", consume=True))
+
+    def test_limits_ship_in_a_data_file_not_in_code(self) -> None:
+        """额度来自 limits.json；改文件立刻改额度，不重启、不缓存。"""
+        self._limits(writes=1, consumes=9)
+        loaded = access.load_limits(self.root)
+        self.assertEqual((1, 9), (loaded.writes_per_room_per_day,
+                                  loaded.consumes_per_room_per_day))
+        self.assertTrue(loaded.source.startswith("root:"), loaded.source)
+        (self.root / access.LIMITS_NAME).write_text(json.dumps({
+            "version": 1, "writes_per_room_per_day": 3,
+            "consumes_per_room_per_day": 4}), encoding="utf-8")
+        again = access.load_limits(self.root)
+        self.assertEqual((3, 4), (again.writes_per_room_per_day, again.consumes_per_room_per_day),
+                         "重读盘，不缓存")
+
+    def test_missing_limits_file_is_a_named_default_not_a_zero(self) -> None:
+        loaded = access.load_limits(self.root)
+        self.assertTrue(loaded.source.startswith("default:"), loaded.source)
+        self.assertEqual(access.DEFAULT_WRITES_PER_ROOM_PER_DAY, loaded.writes_per_room_per_day)
+
+    def test_bad_limits_file_is_loud(self) -> None:
+        (self.root / access.LIMITS_NAME).write_text('{"version": 1, "writes_per_room_per_day": 0}',
+                                                    encoding="utf-8")
+        with self.assertRaises(access.AccessDenied) as caught:
+            access.load_limits(self.root)
+        self.assertEqual("LIMITS_FILE_BAD", caught.exception.code)
+
+
 if __name__ == "__main__":
     unittest.main()
