@@ -2,6 +2,7 @@
   "_note": "装配说明书：先后、每段字数上限、提示词模板、回复预算全在这里——改这一份就改装配，代码里一个数都不写死。读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先，没有才读这份出厂默认（organ/mind/data/assembly.json）。order 里 anchors 与 recent 两段可以缺（缺 anchors 就是「未配锚句」），sections 里对应的那一节必须还在。banned 与 action 两节是防她抄自己：banned 只抽她那一侧最近 rounds 轮的动作行与开场（opening_chars 用 usage.opening 的口径），action 给出部位池、写法规矩与配额（quota：window 看最近几轮 / max 几轮允许带动作 / blocked 顶到配额时那一句 / sparing 没顶到时补的那一句）；两块的数都在本文件里，代码里一个部位词、一个配额数都没有。reply.format_blocked 是 quota 顶到之后替换 reply.format 的那一份说话规矩：格式要求本身也在催她每轮写一行动作，所以 blocked 那一态换整份规矩；成品里若还留着整行圆括号动作行，装配这一层直接删掉（stripped 记账，删空则保留原文）。",
   "order": [
     "soul",
+    "person",
     "anchors",
     "recent",
     "banned",
@@ -42,6 +43,10 @@
     "mouth": {
       "label": "嘴语气",
       "cap": 400
+    },
+    "person": {
+      "label": "关于他",
+      "cap": 220
     }
   },
   "prompt": {

@@ -448,6 +448,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     # 3) 嘴：称呼 → 语气档（口径行进提示词）
     voice = _voice(store, brain, who, mood_read, energy_read)
     mouth_text = _mouth_text(voice)
+    person_text = _person_text(brain, who)
 
     # 4) 提示词与回复预算
     tier = heart_words["mood"]["tier"]
@@ -459,7 +460,8 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
                 "banned": banned_text, "action": action_text,
-                "memory": memory_text, "heart": heart_text, "mouth": mouth_text}
+                "memory": memory_text, "heart": heart_text, "mouth": mouth_text,
+                "person": person_text}
     blocks: List[str] = []
     sections: List[Dict[str, Any]] = []
     for key in conf["order"]:
@@ -796,6 +798,35 @@ def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
     )
     return engage_module.decide(judgement)
 
+
+def _person_text(brain: Any, who: str) -> str:
+    """关于他这一段：从名片取，每轮都进提示词，不占记忆名额、不被遗忘曲线淡掉。"""
+    if brain is None or not who:
+        return ""
+    try:
+        person = brain.lookup(who)
+    except Exception:
+        return ""
+    if not person:
+        return ""
+    try:
+        got = brain.card_view(person.get("id") or who) or {}
+        card = got if isinstance(got, dict) else {}
+    except Exception:
+        card = {}
+
+    def join(value: Any) -> str:
+        if isinstance(value, (list, tuple)):
+            return "、".join(str(x) for x in value if str(x).strip())
+        return str(value or "").strip()
+
+    bits = []
+    for label, key in (("称呼", "display"), ("生日", "birthday"),
+                       ("备注", "notes"), ("雷点", "prefs")):
+        value = join(card.get(key))
+        if value:
+            bits.append("%s：%s" % (label, value))
+    return "｜".join(bits)
 
 def _heart_words(eff: Mapping[str, Any], judgement: Mapping[str, Any]) -> Dict[str, Any]:
     """心这一块**只给档位词**：两个数（now / baseline）一律不出门。

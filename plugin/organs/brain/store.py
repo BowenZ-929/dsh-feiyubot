@@ -43,7 +43,8 @@ TOPIC_CANDIDATES_FILE = "topic_candidates.json"
 PEOPLE_CARD_HISTORY = "people_card_history.jsonl"
 USAGE_FILE = "usage.jsonl"
 NOTE_HISTORY = "note_history.jsonl"
-CARD_FIELDS = {"称呼": "display", "雷点": "prefs", "备注": "notes", "照片说明": "photo_note"}
+CARD_FIELDS = {"称呼": "display", "雷点": "prefs", "备注": "notes", "照片说明": "photo_note",
+               "生日": "birthday"}  # 生日是结构化字段：不占记忆名额、不被遗忘曲线淡掉
 
 TIERS_DEFAULT = {"today_max": 60, "today_demote_count": 20, "hot_max": 20, "hot_lines_max": 3}
 RETENTION_DEFAULT = {
@@ -146,6 +147,14 @@ def _read_jsonl_strict(path: Path) -> List[Dict[str, Any]]:
 def _usage_rows(path: Path) -> List[Dict[str, Any]]:
     return _read_jsonl(path)
 
+
+def _as_list(value: Any) -> List[str]:
+    """名片里的多行字段：字符串按行拆，列表照旧，空值給空列表。"""
+    if isinstance(value, str):
+        return [ln.strip() for ln in value.split(chr(10)) if ln.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value]
+    return []
 
 def _short(value: Any) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
@@ -1011,8 +1020,9 @@ class BrainStore:
             return None
         return {"id": person.get("id", ""),
                 "display": person.get("display", ""),
-                "prefs": list(person.get("prefs", [])),
-                "notes": list(person.get("notes", [])),
+                "prefs": _as_list(person.get("prefs")),
+                "notes": _as_list(person.get("notes")),
+                "birthday": person.get("birthday", "") or "",
                 "photo_note": person.get("photo_note", "")}
 
     def card_view(self, person_id: str) -> Optional[Dict[str, Any]]:
@@ -1048,7 +1058,10 @@ class BrainStore:
             if label not in fields:
                 continue
             old_value = person.get(key, "")
-            person[key] = fields[label]
+            value = fields[label]
+            if key in ("prefs", "notes") and isinstance(value, str):
+                value = [ln.strip() for ln in value.split(chr(10)) if ln.strip()]
+            person[key] = value
             line = {"ts": now_iso(), "actor": actor, "person_id": person_id,
                     "field": label, "old_summary": _short(old_value),
                     "new_summary": _short(fields[label])}
