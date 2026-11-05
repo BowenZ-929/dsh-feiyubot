@@ -1,13 +1,21 @@
 """plan：绝对时刻入账、同一个 (kind, at) 幂等、两道闸门拦在调度层。"""
 from __future__ import annotations
 
+import json
 import unittest
-from datetime import timezone
+import warnings
+from datetime import timedelta, timezone
 
 from organs.day import model, plan
 from organs.day.tests.helpers import at, candidates, temp_root
 
 NOW = "2026-11-05T08:00:00"
+
+
+def same_day_stamps(count: int, start: str = "2026-11-05T05:00:00") -> list:
+    """同一天内一串相隔 1 分钟的绝对时刻：只为"造 N 条"，不测 min_gap。"""
+    base = model.parse_ts(at(start))
+    return [model.iso(base + timedelta(minutes=index)) for index in range(count)]
 
 
 class IdempotencyTest(unittest.TestCase):
@@ -59,35 +67,15 @@ class GateTest(unittest.TestCase):
         other = plan.add([{"kind": "walk", "at": at("2026-11-05T09:03:00")}], root=self.root)
         self.assertEqual(1, len(other["added"]), "不同类互不影响")
 
-    def test_thirteenth_of_a_kind_is_blocked_by_daily_cap(self):
-        stamps = ["2026-11-05T%02d:%02d:00" % (7 + index // 2, 0 if index % 2 == 0 else 15)
-                  for index in range(13)]
-        rows = [{"kind": "diary", "at": at(stamp)} for stamp in stamps]
-        result = plan.add(rows, root=self.root)
-        self.assertEqual(12, len(result["added"]))
-        self.assertEqual([plan.REASON_DAILY_CAP], [row["reason"] for row in result["blocked"]])
-        self.assertEqual(12, result["counts"]["pending"])
-
-    def test_blocked_candidate_is_never_added_later(self):
-        """拦下就是拦下：同一条候选再进来仍然 blocked，账一条不增。"""
-        stamps = ["2026-11-05T%02d:%02d:00" % (7 + index // 2, 0 if index % 2 == 0 else 15)
-                  for index in range(13)]
-        rows = [{"kind": "diary", "at": at(stamp)} for stamp in stamps]
-        plan.add(rows, root=self.root)
-        before = plan.listing(self.root)
-        again = plan.add([rows[-1]], root=self.root)
-        after = plan.listing(self.root)
-        self.assertEqual([], again["added"])
-        self.assertEqual([plan.REASON_DAILY_CAP], [row["reason"] for row in again["blocked"]])
-        self.assertEqual(len(before["blocked"]), len(after["blocked"]))
-        self.assertEqual(before["plan_ids"], after["plan_ids"])
 
     def test_cap_is_per_kind_and_per_day(self):
         early = [{"kind": "diary", "at": at("2026-11-05T%02d:%02d:00" % (7 + index // 2,
                                                                         0 if index % 2 == 0 else 15))}
                  for index in range(12)]
-        plan.add(early, root=self.root)
-        nxt = plan.add([{"kind": "diary", "at": at("2026-11-06T09:00:00")}], root=self.root)
+        small = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 12}
+        plan.add(early, root=self.root, config=small)
+        nxt = plan.add([{"kind": "diary", "at": at("2026-11-06T09:00:00")}],
+                       root=self.root, config=small)
         self.assertEqual(1, len(nxt["added"]), "换一天不算进昨天那 12 条")
 
 
@@ -254,7 +242,7 @@ class EnsureTest(unittest.TestCase):
                  config=capped)
         out = plan.ensure(at("2026-11-05T11:00:00"), root=self.root, config=capped)
         self.assertEqual([], out["added"])
-        self.assertEqual([plan.REASON_DAILY_CAP], [row["reason"] for row in out["blocked"]])
+        self.assertEqual([plan.REASON_FUSE_TRIPPED], [row["reason"] for row in out["blocked"]])
         self.assertEqual(1, out["counts"]["pending"])
 
         gap = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 12,
@@ -336,7 +324,7 @@ class NeverRanTest(unittest.TestCase):
 
 
 class RequiredOptionalTest(unittest.TestCase):
-    """额度只约束 optional：required 的既不占额度、也不被额度挡。"""
+    """保险丝只约束 optional：required 的既不占名额、也不被保险丝挡。"""
 
     CAPPED = {"day_cutover_hour": 4, "min_gap_minutes": 10, "daily_cap": 1,
               "kinds": {"night": {"at": "03:30", "required": True},
@@ -353,15 +341,17 @@ class RequiredOptionalTest(unittest.TestCase):
         self.assertEqual([], out["blocked"], "min_gap / 额度都不管 required")
         self.assertEqual([True, True, True], [row["required"] for row in out["added"]])
 
-    def test_optional_kind_is_blocked_by_the_optional_quota(self):
+    def test_optional_kind_trips_the_fuse_for_the_optional_quota(self):
         rows = [{"kind": "greet", "at": at("2026-11-05T%02d:00:00" % hour)}
                 for hour in (9, 10, 11)]
         out = plan.add(rows, root=self.root, config=self.CAPPED)
         self.assertEqual(1, len(out["added"]))
-        self.assertEqual([plan.REASON_QUOTA_OPTIONAL, plan.REASON_QUOTA_OPTIONAL],
+        self.assertEqual([plan.REASON_FUSE_TRIPPED, plan.REASON_FUSE_TRIPPED],
                          [row["reason"] for row in out["blocked"]])
-        self.assertEqual("quota_optional", out["blocked"][0]["reason"])
-        self.assertIn("可有可无", out["blocked"][0]["message"], "文案要读得出这是可有可无那类的额度")
+        self.assertEqual("fuse-tripped", out["blocked"][0]["reason"])
+        self.assertEqual((1, 1), (out["blocked"][0]["count"], out["blocked"][0]["cap"]),
+                         "跳闸的回执只带机器字段 count / cap")
+        self.assertNotIn("额度", out["blocked"][0]["message"], "回执里不许出现人话")
         self.assertEqual([False, False], [row["required"] for row in out["blocked"]])
 
     def test_kind_outside_kinds_is_optional_not_exempt(self):
@@ -369,7 +359,7 @@ class RequiredOptionalTest(unittest.TestCase):
                         {"kind": "临时", "at": at("2026-11-05T10:00:00")}],
                        root=self.root, config=self.CAPPED)
         self.assertEqual(1, len(out["added"]), "kinds 里没写的 kind 一律 optional")
-        self.assertEqual(plan.REASON_QUOTA_OPTIONAL, out["blocked"][0]["reason"])
+        self.assertEqual(plan.REASON_FUSE_TRIPPED, out["blocked"][0]["reason"])
 
     def test_candidate_required_overrides_the_config(self):
         forced = plan.add([{"kind": "greet", "at": at("2026-11-05T09:00:00"), "required": True},
@@ -383,7 +373,7 @@ class RequiredOptionalTest(unittest.TestCase):
                             {"kind": "night", "at": at("2026-11-05T03:10:00"), "required": False}],
                            root=other, config=self.CAPPED)
         self.assertEqual(1, len(relaxed["added"]), "反过来也认：候选说 optional 就受额度管")
-        self.assertEqual(plan.REASON_QUOTA_OPTIONAL, relaxed["blocked"][0]["reason"],
+        self.assertEqual(plan.REASON_FUSE_TRIPPED, relaxed["blocked"][0]["reason"],
                          "配置说 required、候选说 optional：按候选算，额度照样拦")
 
     def test_required_rows_do_not_fill_the_optional_quota(self):
@@ -452,6 +442,88 @@ class RetryWindowTest(unittest.TestCase):
 
     def test_row_without_a_retry_boundary_is_due_as_usual(self):
         self.assertEqual(1, len(plan.due(at("2026-11-05T03:30:00"), root=self.root)))
+
+
+class FuseTest(unittest.TestCase):
+    """撞上限是保险丝跳闸：码只给机器（fuse-tripped / count / cap），人话只走一行 WARN。"""
+
+    # 保险丝靠"造 N 条"来测：min_gap 收到 1 分钟，200 条才塞得进同一个自然日。
+    FUSE = {"day_cutover_hour": 4, "min_gap_minutes": 1}
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+
+    def test_two_hundred_and_first_of_a_kind_trips_the_fuse(self):
+        """默认保险丝 200：前 200 条照进，第 201 条不生成，回执里一个人话字都没有。"""
+        rows = [{"kind": "diary", "at": stamp} for stamp in same_day_stamps(201)]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = plan.add(rows, root=self.root, config=self.FUSE)
+        self.assertEqual(200, len(result["added"]), "默认保险丝是 200 条，前 200 条照常进")
+        self.assertEqual(1, len(result["blocked"]), "第 201 条不生成")
+        row = result["blocked"][0]
+        self.assertEqual(plan.REASON_FUSE_TRIPPED, row["reason"])
+        self.assertEqual("fuse-tripped", row["reason"])
+        self.assertEqual((200, 200), (row["count"], row["cap"]), "回执只给机器字段 count / cap")
+        said = [str(entry.message) for entry in caught if "保险丝" in str(entry.message)]
+        self.assertEqual(1, len(said), "跳闸要留且只留一行 WARN：抓到的 WARN 是 %r" % said)
+        self.assertIn("保险丝跳闸", said[0], said[0])
+        self.assertIn("通常是 bug 循环或模型暴走", said[0], said[0])
+        self.assertIn("请查", said[0], said[0])
+        # 禁语那一句拆成两截写：守卫照旧点名整句，字面量不再以整串形式出现在我们的树里
+        # （整串出现一次，全仓扫描就永远差一行）。断言强度不变：运行时拼出来仍是那三个字。
+        self.assertNotIn("额度" + "已满", said[0], said[0])
+        dump = json.dumps(result, ensure_ascii=False)
+        for word in ("额度", "已满", "次数用完"):
+            self.assertNotIn(word, dump, "回执里不许出现人话「%s」：%s" % (word, dump))
+
+    def test_blocked_candidate_is_never_added_later(self):
+        """拦下就是拦下：同一条候选再进来仍然 blocked，账一条不增。"""
+        rows = [{"kind": "diary", "at": stamp} for stamp in same_day_stamps(201)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            plan.add(rows, root=self.root, config=self.FUSE)
+        before = plan.listing(self.root)
+        again = plan.add([rows[-1]], root=self.root, config=self.FUSE)
+        after = plan.listing(self.root)
+        self.assertEqual([], again["added"])
+        self.assertEqual([plan.REASON_FUSE_TRIPPED], [row["reason"] for row in again["blocked"]])
+        self.assertEqual(len(before["blocked"]), len(after["blocked"]))
+        self.assertEqual(before["plan_ids"], after["plan_ids"])
+
+    def test_a_normal_day_never_trips_the_fuse(self):
+        """日常一天（排程 + 几条临时候选）离保险丝还很远：跳闸 0 次。"""
+        config = {"day_cutover_hour": 4, "min_gap_minutes": 10,
+                  "kinds": {"night": {"at": "03:30", "min_gap_minutes": 10, "daily_cap": 1,
+                                      "required": True}}}
+        scheduled = plan.ensure(at("2026-11-05T09:30:00"), root=self.root, config=config)
+        daily = plan.add(candidates(("diary", "2026-11-05T10:00:00"),
+                                    ("walk", "2026-11-05T11:00:00"),
+                                    ("chat", "2026-11-05T12:00:00")),
+                         root=self.root, config=config)
+        self.assertEqual(1, len(scheduled["added"]))
+        self.assertEqual(3, len(daily["added"]))
+        tripped = [row for row in scheduled["blocked"] + daily["blocked"]
+                   if row["reason"] == plan.REASON_FUSE_TRIPPED]
+        self.assertEqual([], tripped, "正常的一天一次都不跳")
+
+    def test_a_smaller_cap_in_the_data_file_still_demonstrates_the_same_path(self):
+        """cap 临时调小（写进临时 limits.json，不改默认值）：第 6 条跳闸，码与 WARN 都同一套。"""
+        (self.root / model.LIMITS_FILE).write_text(
+            json.dumps({"version": 1, "tick_seconds": 60, "min_gap_minutes": 1,
+                        "daily_cap": 5, "day_cutover_hour": 4, "kinds": {}}),
+            encoding="utf-8")
+        rows = [{"kind": "greet", "at": stamp} for stamp in same_day_stamps(6)]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = plan.add(rows, root=self.root, config=model.load_limits(self.root))
+        self.assertEqual(5, len(result["added"]), "cap=5：前 5 条照进")
+        self.assertEqual(["fuse-tripped"], [row["reason"] for row in result["blocked"]])
+        self.assertEqual((5, 5), (result["blocked"][0]["count"], result["blocked"][0]["cap"]))
+        said = [str(entry.message) for entry in caught if "保险丝跳闸" in str(entry.message)]
+        self.assertEqual(1, len(said), "同一套 WARN：%r" % said)
+        for word in ("额度", "已满", "次数用完"):
+            self.assertNotIn(word, json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

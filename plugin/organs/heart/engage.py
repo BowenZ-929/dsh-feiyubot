@@ -4,9 +4,10 @@
 - 硬门先于软门，次序固定：① 夜间窗口 → ② 被骂当天 → ③ mood 与 energy 双低。
 - 硬门命中一条就不再算软门（soft_skipped=True、soft=[]）：夜里、被骂、双低，
   这三件事发生的时候再去数今天说了几条没有意义。
-- 没有硬门才把软门五条全算一遍（不短路）：今日量硬线判不说 / 软线判少说、
+- 没有硬门才把软门六条全算一遍（不短路）：今日量硬线判不说 / 软线判少说、
   熟稔偏低判少说、刚被打断判少说、近期连着被无视/被凶判少说或不说、意图排序
-  层没过阈值判少说。命中集全列，最强的那门定三态。
+  层没过阈值判少说、主动开口连着没人理判不说（只对主动那一侧）。命中集全列，
+  最强的那门定三态。
 - 第 4 道软门读「近期事件窗口」（window_signal）：连续被无视、最近 2 小时内
   被凶 → 判少说/不说，理由码 model.REASON_IGNORED。**窗口是现算的**：每次判决
   现读 events.recent、现算每条事件的 age；"越来越冷"是窗口内加权叠出来的，
@@ -17,6 +18,10 @@
   model.REASON_INTENT_BELOW。**pass == True 时一个字都不加**——它只决定
   "值不值得开口"，不决定"必须开口"；没传 intents 时这道门不参与，判决与本轮
   之前逐行一致。
+- 第 6 道软门读「主动开口的反馈」（proactive.is_muted 的返回，调用方传进来）：
+  **只有 intent == proactive 且 muted["muted"] is True** 才主张不说，理由码
+  model.REASON_PROACTIVE_MUTED。被动回复**永不受这条影响**——被叫了就得答，她安静
+  的是"没人理她还继续自说自话"这件事，不是"人来了也不理"。没传 muted 时这道门不参与。
 - 每次出结论都要能说出"哪几个门命中"：hits 为空而态不是"说"，那就是
   "判了但不知道为什么"，属失败——塞 model.REASON_UNATTRIBUTED 并 WARN 出来。
 
@@ -86,6 +91,9 @@ class EngageInput:
     # 意图排序层的读数（intent.rank() 的返回，调用方传进来）。
     # 同样只是入参：decide 不读权重表、不读 pending，只看这一份。
     intents: Optional[Dict[str, Any]] = None
+    # 主动开口的反馈读数（proactive.is_muted() 的返回，调用方传进来）。
+    # 仍然只是入参：decide 不读盘、不改 streak，只看这一份里的 muted 是不是 True。
+    muted: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_effective(cls, eff: Dict[str, Any], energy: float, familiarity: float,
@@ -236,12 +244,15 @@ def _window_hit(sig: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
-    """五道软门全算一遍（不短路），返回 (理由码, 它主张的态)。
+    """六道软门全算一遍（不短路），返回 (理由码, 它主张的态)。
 
     今日量一档只出一条码：过硬线判不说，只过软线判少说。第 4 道是近期事件
-    窗口，第 5 道是意图排序层，两者都只读调用方传进来的入参（本函数自己不读盘）。
+    窗口，第 5 道是意图排序层，第 6 道是主动开口的反馈，三道都只读调用方传进来的
+    入参（本函数自己不读盘）。
     第 5 道只在 pass 明确为 False 时命中：pass=True 表示"值得开口"，绝不因此
     多给一口气；没传 intents / 形状不对 → 这道门不参与。
+    第 6 道是**单向**的：只认 intent == proactive，被动回复一个字都不加——她安静的
+    是"没人理还继续说"，不是"人来了也不答"；没传 muted / 形状不对 → 这道门不参与。
     """
     hits: List[Tuple[str, str]] = []
     if inp.today_count >= model.ENGAGE_TODAY_HARD:
@@ -258,6 +269,9 @@ def _soft_hits(inp: EngageInput, now: str) -> List[Tuple[str, str]]:
         hits.append((model.REASON_IGNORED, window_state))
     if isinstance(inp.intents, dict) and inp.intents.get("pass") is False:
         hits.append((model.REASON_INTENT_BELOW, model.STATE_LESS))
+    if inp.intent == model.INTENT_PROACTIVE and isinstance(inp.muted, dict) \
+            and inp.muted.get("muted") is True:
+        hits.append((model.REASON_PROACTIVE_MUTED, model.STATE_SILENT))
     return hits
 
 

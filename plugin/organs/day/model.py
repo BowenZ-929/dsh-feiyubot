@@ -36,7 +36,7 @@ DEFAULTS: Dict[str, Any] = {
     "version": 1,
     "tick_seconds": 60,          # 节律线程的间隔
     "min_gap_minutes": 10,       # 同类型两条计划之间的硬下限
-    "daily_cap": 12,             # 同类型每天最多几条
+    "daily_cap": 200,            # 保险丝，不是日常节奏：撞到就是异常（bug 循环、模型暴走）
     "day_cutover_hour": 4,       # 本地时区的换日钟点
     # 自动排程：哪个 kind 每天几点排一条，全在 data/limits.json 的 kinds 里。
     # 兜底是空的——配置读不到就不自动排（宁可少排，也不在代码里另写一份钟点）。

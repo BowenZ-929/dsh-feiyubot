@@ -133,13 +133,15 @@ REASON_INTERRUPTED = "recently-interrupted"
 REASON_IGNORED = "ignored-recently"
 # 意图排序层（intent.rank 现算）：这一刻最值得开口的念头也没过阈值 → 少说。
 REASON_INTENT_BELOW = "intent-below-threshold"
+# 主动开口连着没人理（proactive.is_muted 现算）：只关**主动**那一侧，被动回复不受影响。
+REASON_PROACTIVE_MUTED = "proactive-muted"
 REASON_UNATTRIBUTED = "unattributed"
 
 # 硬理由：一条就足够闭嘴，不看别的。
 HARD_REASONS = (REASON_NIGHT, REASON_INSULTED, REASON_DOUBLE_LOW)
 # 软理由：单独不足以沉默，累积才降态。
 SOFT_REASONS = (REASON_TODAY_VOLUME, REASON_FAMILIARITY, REASON_INTERRUPTED,
-                REASON_IGNORED, REASON_INTENT_BELOW)
+                REASON_IGNORED, REASON_INTENT_BELOW, REASON_PROACTIVE_MUTED)
 REASONS = HARD_REASONS + SOFT_REASONS + (REASON_UNATTRIBUTED,)
 
 INTENT_PASSIVE = "passive"

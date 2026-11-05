@@ -1,7 +1,7 @@
-"""心的十一条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
+"""心的十二条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
 
 判据（architecture §9.2：心与脑只能看）：
-- 十一条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
+- 十二条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
 - 合成只有一处：/heart/effective 的三块（mood / axes / voice）由
   organs/heart/effective.py 出；/heart/overview 的 effective 块、/heart/mood 的
   两个数与档位词、/heart/engage 的 mood_now 都从那里取，本模块不自己换算档位。
@@ -36,6 +36,7 @@ from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
 from organs.heart import ports as ports_module
+from organs.heart import proactive as proactive_module
 from organs.heart import refuse as refuse_module
 from organs.heart import sleep as sleep_module
 
@@ -53,6 +54,7 @@ HEART_ROUTES = {
     "/heart/pending": "GET",
     "/heart/sleep": "GET",
     "/heart/refusals": "GET",
+    "/heart/proactive": "GET",
 }
 
 # /heart/offset 每轴对外只承诺这四个键；offset 模块以后多出来的键原样透传。
@@ -303,7 +305,7 @@ def _refusals_block(root: Optional[Path], now: Optional[str]) -> Dict[str, Any]:
             "items": cooling}
 
 
-# ---- 十一个端点 ----------------------------------------------------------
+# ---- 十二个端点 ----------------------------------------------------------
 
 
 def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
@@ -336,6 +338,8 @@ def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
                                   energy_read)
     # 拒绝记录块：额度 + 冷却中的话题与剩余分钟（纯读，check 一个字段都不写盘）。
     payload["refusals"] = _refusals_block(root, now)
+    # 主动开口的反馈块：与 /heart/proactive 同一份纯读（静音到期在这里现算）。
+    payload["proactive"] = proactive_module.overview(root, now)
     return 200, payload
 
 
@@ -443,6 +447,20 @@ def _refusals_route(params: Mapping[str, str]) -> Result:
     return 200, payload
 
 
+def _proactive_route(params: Mapping[str, str]) -> Result:
+    """/heart/proactive：主动开口的反馈闭环（config + streak + 静音 + 最近 5 条 history）。
+
+    纯读：proactive.overview 不落笔，静音到期在这里读时现算（muted_until 报 null）。
+    与 /heart/engage 进门的那份读数是同一个函数出的：门说"不说"时，这一块必定
+    能说清"为什么"（连续几次没人理、还差几分钟）。
+    """
+    root, now = _root(params), _now(params)
+    payload = proactive_module.overview(root, now)
+    payload.update({"ok": True, "readonly": True, "agent": "heart",
+                    "status": STATUS_CONNECTED})
+    return 200, payload
+
+
 def _engage(params: Mapping[str, str], brain: Any) -> Result:
     """/heart/engage：干跑一次判决——只调 engage.decide，不写日志、不说话。
 
@@ -472,10 +490,13 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
     energy_read = energy_module.read(root, now, **_sleep_terms(root, now))
     # 第 5 道软门读的是意图排序：整份 rank 原样送进门，返回体也原样带回。
     intents = _intents(root, now, readout, who, energy_read)
+    # 第 6 道软门读的是主动开口的反馈：与 /heart/proactive 同一份读数（同一个纯读）。
+    muted = proactive_module.is_muted(root, now)
     judgement = engage_module.EngageInput.from_effective(
         eff,
         window=window,
         intents=intents,
+        muted=muted,
         energy=energy_read["value"],
         familiarity=readout.familiarity(who, now),
         today_count=readout.today_count(who, now),
@@ -493,7 +514,7 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
 
 def dispatch(route: str, params: Mapping[str, str],
              store: Any = None, brain: Any = None) -> Result:
-    """心的十一条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
+    """心的十二条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
 
     只收 ValueError 这一种：查询串里的时间戳坏了一个（now / interrupted）就走 400，
     把坏值原样带出来——失败必须响，但响成一条能读的 400，不是一条 traceback。
@@ -530,4 +551,6 @@ def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Resul
         return _sleep_route(params)
     if route == "/heart/refusals":
         return _refusals_route(params)
+    if route == "/heart/proactive":
+        return _proactive_route(params)
     return 404, {"ok": False, "message": "没有这个端点：%s" % route}

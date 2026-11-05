@@ -52,12 +52,13 @@ class TimestampTest(unittest.TestCase):
 
 class LimitsTest(unittest.TestCase):
     def test_config_ships_with_the_four_thresholds(self):
-        """阈值优先读 data/limits.json；包内那份必须真的在。"""
-        self.assertTrue(model.limits_file().exists(), "包内 data/limits.json 不见了")
+        """阈值优先读 limits.json（没给 root 就是实盘 home/organs/day 那份）；文件必须真的在。"""
+        self.assertTrue(model.limits_file().exists(), "%s 不见了" % model.limits_file())
         values = model.load_limits()
         self.assertEqual(60, values["tick_seconds"])
         self.assertEqual(10, values["min_gap_minutes"])
-        self.assertEqual(12, values["daily_cap"])
+        self.assertEqual(model.DEFAULTS["daily_cap"], values["daily_cap"],
+                         "这一条读的是文件里的 daily_cap，不写死数字：默认值一改它就该跟着改")
         self.assertEqual(4, values["day_cutover_hour"])
         # 自动排程表也在这份文件里：删掉它就没有自动排程，所以包内那份必须真的带着 night
         # （required: true 是这一版新加的：夜是"必须跑的"，不受额度管）
@@ -67,6 +68,19 @@ class LimitsTest(unittest.TestCase):
         # 重试口径也在数据文件里：次数与退避都从这里读，代码只留兜底
         self.assertEqual(3, values["night"]["max_retries"])
         self.assertEqual([1, 5, 15], values["night"]["backoff_minutes"])
+
+    def test_the_shipped_default_cap_is_a_fuse_not_a_rhythm(self):
+        """DEFAULTS 里的 daily_cap 是保险丝：撞到是异常，所以离日常节奏很远（12 → 200）。"""
+        self.assertEqual(200, model.DEFAULTS["daily_cap"])
+
+    def test_the_data_file_and_the_defaults_never_drift_apart(self):
+        """真源是文件，DEFAULTS 只是回落：两份副本不一致就是改了一半。"""
+        self.assertEqual(model.DEFAULTS["daily_cap"], model.load_limits()["daily_cap"],
+                         "出厂/实盘 limits.json 与 DEFAULTS 必须一致：默认值只是回落，真源是文件；"
+                         "两边不一致就是改了一半")
+        shipped = json.loads((model.DATA_DIR / model.LIMITS_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(model.load_limits()["daily_cap"], shipped["daily_cap"],
+                         "包内 data/limits.json 是实盘那份的出厂副本：两份 daily_cap 也得一致")
 
     def test_missing_config_falls_back_to_defaults(self):
         values = model.load_limits(temp_root(self))

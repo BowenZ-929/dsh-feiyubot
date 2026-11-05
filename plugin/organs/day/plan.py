@@ -7,11 +7,13 @@
    同一个 id，落进 duplicates，pending/consumed 一条都不增。幂等不靠「记得跑过」。
 3. 两道闸门拦在这里，**不进 pending**，而且只拦 optional 那类：
    - min_gap：同类型两条计划之间至少隔 min_gap_minutes（默认 10 分钟）；
-   - 额度：同类型每天最多 daily_cap 条（默认 12），reason 码是 quota_optional。
-   **required 的计划既不看 min_gap 也不看额度**：该跑的那件事不该被"今天排满了"挡掉。
+   - 保险丝：同类型每天最多 daily_cap 条（默认 200），reason 码是 fuse-tripped。
+     这不是"今天用完了"，是保险丝跳闸：撞到本身就是异常（bug 循环、模型暴走），
+     所以回执里只有机器字段，人话只走一行 WARN。
+   **required 的计划既不看 min_gap 也不看保险丝**：该跑的那件事不该被"今天排满了"挡掉。
    required 由谁定：候选自己写的 required > kinds 里那一栏的 required > **默认 optional**。
    所以 kinds 里没写的、kind 根本不在 kinds 里（临时 add 的候选）一律 optional——
-   额度管"可有可无"，写错一个 kind 名不该变成免检。
+   保险丝管"可有可无"，写错一个 kind 名不该变成免检。
    被拦的候选记进 blocked 留痕（reason 给机器、message 给人），而且**事后不许补**：
    同一个 (kind, at) 再进来一次仍然被拦，理由照旧，不会因为后来松了就偷偷放行。
 4. ensure() 只为"当天该跑的那几件事"排计划：limits.json 的 kinds 里每个 kind 确保
@@ -43,6 +45,7 @@ import hashlib
 import json
 import os
 import secrets
+import warnings
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,13 +58,11 @@ VERSION = 1
 STATUS_PENDING = "pending"
 STATUS_CONSUMED = "consumed"
 REASON_MIN_GAP = "min_gap"
-# 额度只约束 optional 那类，码就叫 quota_optional：读到它就知道"这是可有可无那类的额度"。
-REASON_QUOTA_OPTIONAL = "quota_optional"
-# 旧名留成别名：额度以前按 kind 无差别计（码叫 daily_cap），现在只拦 optional，
-# 读 REASON_DAILY_CAP 的地方拿到的仍是"额度不够"这同一个理由。
-REASON_DAILY_CAP = REASON_QUOTA_OPTIONAL
+# 撞上限是保险丝跳闸，不是"今天用完了"：码只给机器看，码就叫 fuse-tripped。
+# 只留这一个码，不设同义别名——多一个同义码就等于多一种"这到底啥意思"的猜法。
+REASON_FUSE_TRIPPED = "fuse-tripped"
 KINDS_KEY = "kinds"
-# 计划行上的 required：True 的不受 min_gap / 额度约束；没写＝optional（受约束）
+# 计划行上的 required：True 的不受 min_gap / 保险丝约束；没写＝optional（受约束）
 REQUIRED_KEY = "required"
 # 到期没执行的计划不补跑，标这一栏：它不进 pending（没人会再去执行它），
 # 也不占 min_gap / daily_cap（它本来就没发生）。
@@ -158,7 +159,7 @@ def listing(root: Any = None) -> Dict[str, Any]:
     rows = [row for column in ("pending", "consumed", "blocked", "expired", "never_ran")
             for row in data[column]]
     for row in rows:
-        # 每行都带 required：人一眼就能看出这条受不受额度管（老账里没这个键的按 optional）
+        # 每行都带 required：人一眼就能看出这条受不受保险丝管（老账里没这个键的按 optional）
         row[REQUIRED_KEY] = _row_required(row)
     return {"ok": True, "root": str(model.day_root(root)), "pending": data["pending"],
             "consumed": data["consumed"], "blocked": data["blocked"],
@@ -167,7 +168,7 @@ def listing(root: Any = None) -> Dict[str, Any]:
 
 
 def _row_required(row: Dict[str, Any]) -> bool:
-    """账上这一行是不是 required；没写、写坏了一律 optional（额度管"可有可无"）。"""
+    """账上这一行是不是 required；没写、写坏了一律 optional（保险丝管"可有可无"）。"""
     return row.get(REQUIRED_KEY) is True
 
 
@@ -175,7 +176,7 @@ def required_of(item: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -
     """这条候选算不算"必须跑的"：候选自己写的 > kinds 里那一栏 > 默认 optional。
 
     默认 optional 是有意的：kinds 里没写、甚至 kind 根本不在 kinds 里的候选（临时 add
-    的那条）都受额度管——写错一个 kind 名不该变成免检。
+    的那条）都受保险丝管——写错一个 kind 名不该变成免检。
     """
     declared = item.get(REQUIRED_KEY)
     if declared is not None:
@@ -347,7 +348,7 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
     """候选计划过闸门入账：added / duplicates / blocked 三份，一个候选只落一处。
 
     幂等：同一个 (kind, at) 第二次进来落 duplicates（或原样落 blocked），账不变。
-    闸门只拦 optional：先看 min_gap（与同类型最近的一条隔多久），再看额度（同类型当天
+    闸门只拦 optional：先看 min_gap（与同类型最近的一条隔多久），再看保险丝（同类型当天
     几条 optional）。required 的那条两条都不看——该跑的事不该被"今天排满了"挡掉。
     """
     cfg = config or model.load_limits()
@@ -362,7 +363,7 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
         kind = str(row.get("kind", ""))
         same_kind.setdefault(kind, []).append(model.parse_ts(row["at"]))
         if not _row_required(row):
-            # 额度只数 optional：required 的行不占"可有可无"那类的名额
+            # 保险丝只数 optional：required 的行不占"可有可无"那类的名额
             per_day[(kind, str(row.get("day") or model.day_key(row["at"])))] += 1
     for row in data["expired"]:
         # 过期的计划不再重排（它就是那一条，重排等于偷偷补跑），但也不占闸门：
@@ -390,6 +391,7 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
         day = model.day_key(item["at"])
         required = required_of(item, cfg)
         reason = message = ""
+        fuse: Optional[Tuple[int, int]] = None  # 跳闸时带 (count, cap)，回执里的机器字段
         if not required:
             min_gap_seconds, cap = thresholds(cfg, item["kind"])
             nearest = min((abs((at - other).total_seconds())
@@ -399,14 +401,21 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
                 message = ("同类型两条计划之间至少隔 %d 分钟，这一条离最近的一条只隔 %d 秒"
                            % (min_gap_seconds // 60, int(nearest)))
             elif per_day[(item["kind"], day)] >= cap:
-                reason = REASON_QUOTA_OPTIONAL
-                message = ("这是「可有可无」那类的额度：同类型每天最多 %d 条，%s 已经排了 %d 条"
-                           "（required 的计划不受这条额度管）"
-                           % (cap, day, per_day[(item["kind"], day)]))
+                # 保险丝跳闸：回执里只留机器字段（count/cap），人话走 WARN 那一行。
+                reason = REASON_FUSE_TRIPPED
+                already = per_day[(item["kind"], day)]
+                fuse = (already, cap)
+                message = "fuse-tripped count=%d cap=%d" % fuse
+                warnings.warn(
+                    "日子·计划闸门：保险丝跳闸——%s 在 %s 已经有 %d 条（上限 %d 条），这一条不生成。"
+                    "这通常是 bug 循环或模型暴走，不是日常节奏；请查这一类的调用方与当日计划账。"
+                    % (item["kind"], day, already, cap), RuntimeWarning, stacklevel=3)
         if reason:
             row = {"id": pid, "kind": item["kind"], "at": item["at"], "day": day,
                    REQUIRED_KEY: required, "reason": reason, "message": message,
                    "blocked_at": created}
+            if fuse is not None:
+                row["count"], row["cap"] = fuse
             data["blocked"].append(row)
             blocked_index[pid] = row
             blocked.append(row)
