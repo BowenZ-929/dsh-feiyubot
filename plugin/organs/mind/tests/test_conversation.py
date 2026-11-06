@@ -43,6 +43,12 @@
     rounds 逐轮给 {ts, fidelity, msg_id}；对不上打一行「缺 N 轮」的 warning。
     四条都在账上就一条都不标、一行日志都不打；回填幂等（同一个 msg_id 只补一次）。
 
+18. **主动开口（她自己起头那一轮）**：answer(seed=...) 才是主动，seed 是 None 一律被动。
+    主动那一轮——提示词换成 assembly.json 的 prompt.proactive（由头与理由进提示词、user 那一问
+    是空串）、「这一小段」写 NO_SEGMENT（段给了也忽略）、心判决的 intent 是 proactive（夜里因此
+    判 SILENT / reason=night，被动只判 LESS）、落脑只有她那句（side=SIDE_SELF，**没有假的人话**）、
+    recent 照记一行但 said 空；回包多 mode 与 seed{text, reason}。数据缺 prompt.proactive → ValueError。
+
 全部注入假 transport：一个字节都不发真网络。心 / 嘴 / 装配的临时根都经环境变量切走，
 仓库里的真数据一个字节不写。
 """
@@ -89,8 +95,13 @@ SOUL_HEADINGS = ("【自称】", "【形象】", "【性格底色】", "【怕�
 QUESTION = "你还记得医院那回事吗？"
 MEMORY_TEXT = "我上次去医院是陪我妈复查，我对花生过敏"
 SENTENCE = "今天挺好的。你问医院那回事，我记得的，是陪你妈去复查对吧。"
+# 她自己开口那一轮的由头（素材，不是判据）：装配拿它当「一问」，回想也用它。
+SEED = "今天想问问他吃饭了没有"
+SEED_REASON = "night"                     # 由头那一侧的理由码：装配不解释它，原样进提示词与回包
 
 BASE = datetime(2025, 1, 15, 14, 0, 0, tzinfo=datetime.now().astimezone().tzinfo)
+# 夜里那一轮：夜间窗口在 organs/heart/model.py 的 NIGHT_START_H / NIGHT_END_H 之间。
+NIGHT = datetime(2025, 1, 15, 1, 0, 0, tzinfo=datetime.now().astimezone().tzinfo)
 
 
 def _at(minutes: float = 0.0, base: datetime = BASE) -> str:
@@ -2112,6 +2123,125 @@ class ConversationAnswerTest(unittest.TestCase):
                 self._answer(assembly=conf)
             self.assertIn(needle, str(caught.exception),
                           "数据坏在 %s 时没有指名报错：%s" % (needle, caught.exception))
+
+
+    # —— 18) 主动开口：她自己起头那一轮 ————————————————
+
+    def test_a_proactive_round_uses_the_proactive_template_and_an_empty_question(self):
+        """主动那一轮：提示词换 prompt.proactive（由头 + 理由在里面），user 那一问是空串。
+
+        判据三件：① 用的是主动那份模板（被动那句一个字都不在）；② 由头与理由码逐字进提示词，
+        没给理由时用数据里那句顶上（本文件不写这句中文）；③ user 那一问是空串——没有对方的话。
+        """
+        conf = conversation.load_assembly()
+        proactive = conf["prompt"]["proactive"]
+        passive = conf["prompt"]["system"]
+        capture = []
+        got = self._answer(text=SEED, seed=SEED, reason=SEED_REASON, captured=capture)
+        prompt = capture[0]["messages"][0]["content"]
+        self.assertEqual("proactive", got["mode"])
+        self.assertEqual({"text": SEED, "reason": SEED_REASON}, got["seed"])
+        self.assertIn(proactive.split("{sections}")[0].strip(), prompt,
+                      "提示词没用 prompt.proactive 那份模板")
+        self.assertNotIn(passive.split("{sections}")[0].strip(), prompt,
+                         "主动那一轮还在用被动的模板")
+        self.assertIn(SEED, prompt, "由头没进提示词")
+        self.assertIn(SEED_REASON, prompt, "理由码没进提示词")
+        self.assertEqual("", capture[0]["messages"][1]["content"],
+                         "主动那一轮没有对方的话：user 那一问该是空串")
+        # 没给理由码：用数据里那句顶上，读的仍是同一份数据（代码里没有这句中文）
+        capture = []
+        got = self._answer(text=SEED, seed=SEED, captured=capture)
+        self.assertEqual({"text": SEED, "reason": ""}, got["seed"], "没给理由却记下了一个")
+        self.assertIn(conf["prompt"]["proactive_reason_missing"],
+                      capture[0]["messages"][0]["content"], "没给理由时该用数据那句顶上")
+        # 装配的几段照旧：order 一位不动、这一节是「这一段没有别的发言」
+        self.assertEqual(conversation.load_assembly()["order"], got["assembly"]["order"])
+        label = conf["sections"]["segment"]["label"]
+        self.assertEqual(conversation.NO_SEGMENT, _section(prompt, label).strip("\n"),
+                         "主动那一轮的段不是「这一段没有别的发言」")
+
+    def test_the_segment_is_ignored_on_a_proactive_round(self):
+        """段给了也忽略：这一轮没有别人说话，段进不了提示词（连形状都不判）。"""
+        capture = []
+        got = self._answer(text=SEED, seed=SEED, captured=capture,
+                           segment=[["阿黄", "我妈住院了"]])
+        label = conversation.load_assembly()["sections"]["segment"]["label"]
+        self.assertEqual(conversation.NO_SEGMENT,
+                         _section(capture[0]["messages"][0]["content"], label).strip("\n"),
+                         "段被塞进了主动那一轮")
+        self.assertEqual(0, got["continuity"]["turns_loaded"])
+
+    def test_a_proactive_round_carries_the_proactive_intent(self):
+        """心判决的意图：主动 → INTENT_PROACTIVE，被动照旧 INTENT_PASSIVE；被骂恒 False。
+
+        intent 是「夜里主动 → SILENT」那条硬门生效的前提：给了它，门才判得出两种起头的差别。
+        """
+        got = self._answer(text=SEED, seed=SEED)
+        inp = got["_gate_input"]
+        self.assertEqual(heart_model.INTENT_PROACTIVE, inp.intent, "主动那一轮的心意图不是 proactive")
+        self.assertFalse(inp.insulted_today, "没人说话，就没有「被骂」")
+        passive = self._answer()
+        self.assertEqual(heart_model.INTENT_PASSIVE, passive["_gate_input"].intent,
+                         "被动那条路被改了")
+
+    def test_a_night_time_proactive_round_is_silenced_by_the_heart(self):
+        """同样是她自己起头：白天判「说」，夜里判 SILENT 且理由码是 night（被动夜里只判少说）。"""
+        day = self._answer(text=SEED, seed=SEED)
+        self.assertNotEqual(heart_model.STATE_SILENT, day["heart"]["engage"]["state"],
+                            "白天的主动这一轮不该被判「不说」：%r" % (day["heart"]["engage"],))
+        night = self._answer(text=SEED, seed=SEED, now=_at(0, base=NIGHT))
+        self.assertEqual(heart_model.STATE_SILENT, night["heart"]["engage"]["state"],
+                         "夜里主动该判「不说」：%r" % (night["heart"]["engage"],))
+        self.assertEqual(heart_model.REASON_NIGHT, night["heart"]["engage"]["reason"])
+        # 被动那条路一字不改：同样在夜里，它只判「少说」
+        passive = self._answer(now=_at(0, base=NIGHT))
+        self.assertNotEqual(heart_model.STATE_SILENT, passive["heart"]["engage"]["state"],
+                            "被动夜里被改成了「不说」：%r" % (passive["heart"]["engage"],))
+
+    def test_a_proactive_round_lands_only_her_own_line(self):
+        """落脑只有一条：她说、side=她说。**不许**为凑形状写一条假的人话（由头不是人的原话）。"""
+        got = self._answer(text=SEED, seed=SEED)
+        rows = self.brain.today_entries(_at(30))
+        self.assertEqual([SENTENCE], [row.get("text") for row in rows],
+                         "主动那一轮多落了一条（那是她自己编的「对方说的话」）：%r" % (rows,))
+        self.assertEqual(brain_model.SIDE_SELF, rows[0].get("side"), "她那句的 side 不对")
+        self.assertEqual(1, len(got["memory"]["wrote"]), "这一轮该只落她那一条")
+        self.assertEqual(self.store.snapshot().identity.display, got["memory"]["wrote"][0]["who"])
+        # recent 照记一行（她这一轮同样是一轮），但 said 是空串：没有对方原话
+        ledger = recent.load(turns=conversation.load_assembly()["recent"]["turns"])["turns"]
+        self.assertEqual(1, len(ledger), "主动那一轮没记进最近几轮")
+        self.assertEqual("", ledger[0]["said"], "由头被记成了「他说了什么」")
+        self.assertEqual(SENTENCE, ledger[0]["reply"])
+        self.assertEqual("", ledger[0]["msg_id"], "没有人的那条凭据，就不该有 msg_id")
+
+    def test_a_round_with_no_words_out_lands_nothing(self):
+        """模型什么都没说（这一层拿到空串）：reply 空、chunks 空、落脑一条都不落。"""
+        with mock.patch.object(conversation.llm, "complete", lambda *a, **k: ""):
+            got = self._answer(text=SEED, seed=SEED)
+        self.assertEqual("", got["reply"], "空的那一轮还是把话交出去了")
+        self.assertEqual([], got["chunks"])
+        self.assertEqual(0, len(got["memory"]["wrote"]), "没出口的话不该落脑")
+
+    def test_a_missing_proactive_template_is_an_error_not_a_fallback(self):
+        """数据缺 prompt.proactive → ValueError 且指名道姓（不兜底成被动那一份）。"""
+        conf = conversation.load_assembly()
+        conf["prompt"].pop("proactive")
+        with self.assertRaises(ValueError) as caught:
+            self._answer(text=SEED, seed=SEED, assembly=conf)
+        self.assertIn("prompt.proactive", str(caught.exception),
+                      "数据坏在这一格却没有点名：%s" % (caught.exception,))
+        # 空白也算缺：不许用一句空话把这一轮糊过去
+        conf = conversation.load_assembly()
+        conf["prompt"]["proactive"] = "   "
+        with self.assertRaises(ValueError):
+            self._answer(text=SEED, seed=SEED, assembly=conf)
+
+    def test_an_empty_seed_is_an_error(self):
+        """给了 seed 却空着：这一轮不是「她想开口」，是调用方写错了（当场报，不悄悄退回被动）。"""
+        with self.assertRaises(ValueError) as caught:
+            self._answer(text=SEED, seed="   ")
+        self.assertIn("seed", str(caught.exception))
 
 
 class ConversationEventTest(unittest.TestCase):

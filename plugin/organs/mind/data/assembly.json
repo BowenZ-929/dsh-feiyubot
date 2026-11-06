@@ -68,7 +68,9 @@
   },
   "prompt": {
     "system": "你正在装配这一轮对话的上下文：下面几段按顺序拼好，一个字都不许改。\n\n{sections}\n\n这一次回复不超过 {reply_budget} 个字。{reply_instruction}",
-    "user": "{text}"
+    "user": "{text}",
+    "proactive": "你正在装配这一轮**她自己开口**的话：这一次没有人在问她，是她先开口。\n\n{sections}\n\n这一轮开口的由头：{seed}\n理由：{reason}\n\n三条规矩，一件都不许反：\n一、不许拿「最近几轮」当开场白——她没有对方的新话，手上只有这个由头；用旧对话开头就成了「接着说」，不是「我想找你」。\n二、不许说「我刚才想起来」这种没来处的话——由头必须来自真的念头或未了的事，不是随便找个话头。\n三、这一轮她拿到的只有由头（{seed} 与理由两样）：「这一小段」是空的，最近几轮只当背景，不许当话头。\n\n这一次回复不超过 {reply_budget} 个字。{reply_instruction}",
+    "proactive_reason_missing": "（这一轮没给理由码：由头自己说得清就行）"
   },
   "reply": {
     "budget_by_tier": {
@@ -131,6 +133,7 @@
     "neutral_mood_below": 0.55,
     "max_chars_low": 60,
     "max_chars_neutral": null,
+    "no_question_in_proactive": false,
     "joke_words": ["哈哈", "开玩笑", "逗你", "嘿嘿", "乐死", "笑死"],
     "question_chars": "？?",
     "sentence_end_chars": "。！？!?…；;\n",

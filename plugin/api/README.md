@@ -280,6 +280,40 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 页面 `pages/chat.html` 的「命中门」因此多一行 `refusal-line`，原样转述 `refusal.line`——
 话题、理由、还剩多久，页面一个词都不自己拼。
 
+**出口认 audience：私密记忆在群里守边界（这一轮加的）。** `/chat` 的 body 多一个可选 `scope`，
+只认 `group` / `private`（缺省 `private`——今天实盘都是私聊）；**非法值当场 400 并点名**，message
+里带着读到的那个值，也列出认得的两个。场景只决定「私密记忆这一轮能不能被引用」，别的行为一个字都
+不改。判据全在 `organs/mouth/data/refusal.json` 的 `audience` 节：记忆行上哪一栏（`field`）、哪个
+值算私密（`private_value`）、两个场景值与缺省（`scopes`）、边界话（`say`）、模糊化备用（`blur`）、
+事件形状（`event_shape`，指向 `shapes` 里那一节的完整名 `refused-topic`）、账本记号（`mark`）与
+四个阈值（`criteria`：`overlap_min` / `gram_n` / `gram_cover` / `excerpt_chars`）。
+
+装配之后、过闸之前，`recalled[*]` 里标成私密的那些条目在 `scope=group` 时**从出口剔除**：不再进
+`recalled`（页面不再引用它，复述审计的「记忆原文」那一档也不再拿它当注入原文），剔了谁记在回包的
+`audience_held` 里：
+
+```json
+{"audience_held": [{"id": "记忆-7", "text_min": "我妈住院那事", "source": "longterm"}]}
+```
+
+读数只给 id 与一小截摘要（截几个字也在数据里），**不贴正文**。**被直接问到就必须出声**：用户这句
+与该条 `text` 去掉空白后的最长连续重合 ≥ `overlap_min` 字，或该条 `text` 的 `gram_n` 元组覆盖率
+≥ `gram_cover`（两条判据都能离线复算）——这时她这一轮说的不是模型那句，而是数据里那句边界话
+`say`，并走拒绝那条路（事件形状取 `event_shape`、`refuse.jsonl` 记一行、心那边记一次冷却，事件
+的 `why` 与账本那一行的 `why` 里带 `mark` 记号）。**没被问到就不出声**：不为没发生的事拒绝，但
+照样剔除（`audience_held` 里看得见）。`scope=private` 一律照常：既不剔除也不出声。
+
+顺序钉死：**冷却 → audience 边界 → 闸 → 长度**。冷却排在前面，是因为它早于装配（那一轮没有
+`recalled`，本就没有边界话可说），也因为「这个话题已经拒过」比「这条记忆是私密」更靠前——让边界话
+抢在冷却之前，就是把一次已经记过的拒绝再说一遍、再投一遍。边界话也要过八股闸（她的话都过闸）。
+判据读不动时：场景判不出就不判场景，私密判不出就**一条记忆都不引用**（没有判据，就没有哪一条敢说
+它能往外讲），只记一行 WARNING。
+
+**谁给记忆打这个标记，本轮不在边界内**：`audience` 那一栏的生产者是脑与家——脑的 `ingest` 早就收
+`audience`（`organs/brain/model.py` 的 `AUDIENCE_PRIVATE`），`recall` 在 `scene=group` 时也已经会
+给私密条目打 `retellable=False`；缺的一环是装配：`organs/mind/conversation.py` 的 `_recall` 只搬
+固定那几栏，`/chat` 的 `scope` 也没有当成 `scene` 传下去。下一轮把这两处接上，这一层就自动认了。
+
 **借阅读数也随成功体出去（这一轮加的）**：多一节 `borrow`（不破坏既有键）：
 
 ```json
@@ -430,6 +464,62 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 刚把他的原话落进脑，人名录里才查得到这个人），而闸可能把整轮弃掉——他改的叫法不该跟着她那句被弃
 的话一起丢。提示词里那一段称呼仍由 `organs/mind/conversation.py` 按人名录算（不在本次边界内），
 会话覆盖目前落在出口读数与脑那条记忆上。
+### 6.1.1 两个 `mode`：人问她（passive）/ 她自己开口（proactive）
+
+`POST /chat` 的 body 多一个**可选** `mode`：`passive`（缺省，人发消息触发的）与 `proactive`
+（日子线给她一个由头，她自己开口）。**非法值不 400**，回落 `passive`——与 `scene` 同一个口径：
+这一格只决定她这一轮的提示词与心判决，认不出就按常态走，不拿一个错字段把人拦在门外。
+
+| 字段 | passive（缺省） | proactive |
+| --- | --- | --- |
+| `mode` | `"passive"` 或不给 | `"proactive"` |
+| `text` | **必填**，对方那句话（缺了 / 全空白 → 400 并点名） | 不用给（给了也不用） |
+| `seed` | 不用给 | **必填**，这一轮她开口的由头（缺了或全空白 → 400 并点名 `seed`） |
+| `reason` | 不用给 | 可选，理由码（原样进提示词与回包的 `seed.reason`） |
+| `who` / `scene` / `scope` | 照旧 | 照旧（同一个认法与同一个缺省） |
+| `segment` | 刚刚这一小段（两种形状都收） | **给了也忽略**：这一轮没有别人说话，段连形状都不判 |
+
+proactive 与常态的差别**只有输入**：
+
+```json
+{"mode": "proactive", "seed": "今天想问问他吃饭了没有", "reason": "evening",
+ "who": "3425635473", "scene": "private"}
+```
+
+- 提示词换成 `organs/mind/data/assembly.json` 的 `prompt.proactive`（占位符 `{sections}` /
+  `{reply_budget}` / `{reply_instruction}` / `{seed}` / `{reason}`），`user` 那一问是**空串**
+  ——没有对方的话；没给 `reason` 时用 `prompt.proactive_reason_missing` 那句顶上。
+- 「这一小段」写「这一段没有别的发言」；最近几轮照常只当背景（不许当开场白——见
+  `docs/modules/mind.md`）。
+- 心判决的意图是 `proactive`：**夜里主动判「不说」**（夜里被动只判「少说」），出站闸因此
+  `send=false`；这一条路径与被动完全共用同一个 `_outbound_round`。
+- 落脑**只有她那句**（`side=她说`）：没有对方那句可落，也不为凑形状写一条假的人话。
+
+回包因此多两格：
+
+```json
+{"mode": "proactive",
+ "seed": {"text": "今天想问问他吃饭了没有", "reason": "evening"}}
+```
+
+被动那一轮两格也在，值是 `"passive"` 与 `{"text": "", "reason": ""}`（形状不随状态变）。
+**顶层的 `reason` / `level` 一直是出站闸的理由码**（`night` / `today-volume` …），与由头的理由码
+不是一回事，两处不共用一个字段。
+
+**空产出与 `send=false` 是两件事，别混：**
+
+- `send=false`：门说这一轮**不发**（夜里主动、今天话太多、双低…）。回包 `chunks=[]`、
+  `reply=""`，`send` / `reason` / `level` / `limits` 照门说的写，心那边照写一行出站账。
+  `gate.outbound` **不出现**——沉默是门的结论，不是没话可说。
+- 空产出：门说**发**，装配却一个字都没拿出来（模型那句被八股闸弃掉、或改完仍是空）。
+  `chunks=[]`、`reply=""`，`gate.outbound` 写 `{"status": "core_empty"}`。**不重试**：
+  这一轮就到这里，不为了凑出一句话再问一遍模型。
+
+```json
+{"send": true,  "reason": null, "reply": "", "chunks": [], "gate": {"outbound": {"status": "core_empty"}}}
+{"send": false, "reason": "night", "reply": "", "chunks": []}
+```
+
 ## 7 家（第四批：十间房 + 存取接口 + 审计）
 
 十条路由：九条 GET、一条 POST。房名表、两道门、审计、索引卡都在 `organs/home/`，

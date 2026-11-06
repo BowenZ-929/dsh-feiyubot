@@ -23,6 +23,11 @@ prompt 的两段模板各认几个占位符（花括号，装配时逐键**纯�
           {reply_budget}      这一档的回复字数上限（来自 reply.budget_by_tier）
           {reply_instruction} 回复口径那句话（来自 reply.instruction）
   user    {text}              本人这一次的原话
+  proactive （她自己开口那一轮换的是这一份，见下面「主动开口」）
+          {sections} / {reply_budget} / {reply_instruction} 同上三项
+          {seed}              这一轮的由头（她要说出口的那件事，就是这一轮的「一问」）
+          {reason}            由头那一侧的理由码；没给就用 prompt.proactive_reason_missing 顶上
+  主动那一轮 user 是**空串**（没有对方的话），不套 prompt.user。
 
 三拍的顺序是钉死的：**先回想、再发模型、最后写记忆**。
 先回想，是因为这一轮该想起什么要在写提示词之前定下来；写记忆放在最后，是因为
@@ -72,6 +77,20 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           输入，谁也不许顶替谁**：段是刚刚这一小段，recent 是更早的那 12 轮，同一条消息不会既
           当段又当 recent——recent 的写入在说完之后，段从不回写进 recent。段尾那句「几个人在
           说话」只在这一轮是群聊、且段里至少两个人说话时才接（assembly.json 的 segment.notice）。
+
+**主动开口（seed 不是 None 的那一轮）**：日子线给她一个「由头」，她自己开口。它与被动的差别
+**只有输入**，别的一处都不改：
+  · 没有对方原话——text 让位给 seed（回想也用 seed，回想的是「由头这件事」）；
+  · 「这一小段」写 NO_SEGMENT（段是别人刚刚说的话，这一轮没有别人说话）；段给了也忽略；
+  · 提示词换整份 prompt.proactive（由头与理由进提示词，占位符见上）；user 那一问是空串；
+  · 心判决的 intent 用 INTENT_PROACTIVE（夜里那一道硬门因此对她生效：被动只判「少说」，
+    主动判「不说」）；被动仍 INTENT_PASSIVE；被骂恒 False（没人说话，就没有人骂她）；
+  · 落脑只有她那句（side=SIDE_SELF）：没有对方那句可落，也**不许**为凑形状写一条假的人话；
+    她这句话没出口（被闸弃掉 / 空）就一条都不落；
+  · recent 照旧记一行（她这一轮同样是一轮），但 said 记空串——由头是她的念头，不是人的话。
+回包因此多两格：mode（这一轮是谁起的头）与 seed{text, reason}（由头原样与理由码，被动为空）。
+注意 payload.reason 一直是**出站闸**的理由码（night / today-volume…），与由头的理由码不是一回事，
+所以后者只在这一格，两处不共用一个字段。
 
 **四个旋钮落到能验收的东西上**（阈值、字数上限、玩笑词表全在 assembly.json 的 tone_rules 里，
 本文件一个数都不写）：
@@ -230,7 +249,9 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
     prompt = data.get("prompt")
     if not isinstance(prompt, dict):
         raise ValueError("装配说明缺 prompt（system / user 两段模板）：%s" % where)
-    for name in ("system", "user"):
+    # proactive 两格也必须在数据里：缺了就是「她自己开口那一轮没有提示词模板」，
+    # 不许在代码里补一份默认话（补了人改数据还以为生效了）。
+    for name in ("system", "user", "proactive", "proactive_reason_missing"):
         if not isinstance(prompt.get(name), str) or not prompt.get(name).strip():
             raise ValueError("prompt.%s 不能为空：%s" % (name, where))
     reply = data.get("reply")
@@ -263,7 +284,9 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
     return {
         "order": [key.strip() for key in order],
         "sections": checked,
-        "prompt": {"system": prompt["system"], "user": prompt["user"]},
+        "prompt": {"system": prompt["system"], "user": prompt["user"],
+                   "proactive": prompt["proactive"],
+                   "proactive_reason_missing": prompt["proactive_reason_missing"]},
         "reply": {"budget_by_tier": clean_budgets, "default": default,
                   "instruction": instruction,
                   "format": _check_rules(reply.get("format"), "format", where),
@@ -305,6 +328,11 @@ def _check_tone_rules(spec: Any, where: str) -> Dict[str, Any]:
         raise ValueError("tone_rules.max_chars_neutral 要么 null（照旧用档位预算），"
                          "要么正整数：%s" % where)
     clean["max_chars_neutral"] = neutral
+    spare = spec.get("no_question_in_proactive", False)
+    if not isinstance(spare, bool):
+        raise ValueError("tone_rules.no_question_in_proactive 要么 true 要么 false"
+                         "（缺省 false = 主动开口那一轮不删问句）：%s" % where)
+    clean["no_question_in_proactive"] = spare
     words = spec.get("joke_words")
     if not isinstance(words, list) or not words:
         raise ValueError("tone_rules.joke_words 要一份非空的玩笑词表：%s" % where)
@@ -635,6 +663,7 @@ def _her_replies(turns: Sequence[Mapping[str, Any]],
 def answer(text: str, who: str = "", *, scene: Optional[str] = None,
            segment: Optional[Any] = None,
            mode: str = events.MODE_PASSIVE,
+           seed: Optional[str] = None, reason: Optional[str] = None,
            store: Any = None, brain: Any = None,
            heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
            now: Optional[str] = None,
@@ -662,8 +691,21 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
 
     mode：这一轮是谁起的头——events.MODE_PASSIVE（"passive"，人发消息触发的，/chat 走这条）
     或 events.MODE_PROACTIVE（"proactive"，她自己开口那条路），其它值一律回落 passive（口径在
-    events.record 里，本层不再判第二遍）。它只进事件账的那一栏与回包 event.mode：
+    events.record 里，本层不再判第二遍）。它只进事件账的那一栏与回包 event.mode / mode：
     不进提示词、不动任何判据。
+
+    seed / reason：**她自己开口**那一轮的两个入参。seed 是 None 就是被动（老调用一字不改）；
+    不是 None 就是主动（回包 mode 与事件账那一栏因此都是 proactive，调用方传 passive 也不改口），
+    此时：
+      · text 让位给 seed（这一轮的「一问」就是由头，回想也用 seed），seed 空着当场 ValueError
+        ——空由头不是「她想开口」，是调用方写错了；
+      · segment 一律忽略（段是别人刚刚说的话，这一轮没有别人说话，见上面「主动开口」）；
+      · 提示词用 assembly.json 的 prompt.proactive（占位符 {sections} / {reply_budget} /
+        {reply_instruction} / {seed} / {reason}），user 那一问是空串；
+      · reason 是理由码（参数里怎么给就怎么进提示词；没给就用 prompt.proactive_reason_missing）；
+      · 心判决 intent=INTENT_PROACTIVE、被骂恒 False；
+      · 落脑只有她那句（side=SIDE_SELF），recent 照记但 said 是空串。
+    回包多两格：mode（这一轮谁起的头）与 seed{text, reason}（由头与理由码；被动两格都是空串）。
 
     **事件排在所有器官之前**（这一条必须留在这里：位置一挪，整轮读到的就是旧心情）：
     装配先调一次 events.record，它落一行事件账、并把事件投给心（praise 上行 / insult、cold
@@ -707,11 +749,25 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         raise ValueError("魂未载入（store=None）：没有魂就没有装配的底色")
     if brain is None:
         raise ValueError("脑未载入（brain=None）：没有记忆就不开口")
+    # 主动那一轮没有「对方原话」：由头（seed）就是这一轮的一问，text 让位给它。
+    proactive = seed is not None
+    # 给了 seed 就是主动，所以这一轮落账的 mode 也是 proactive——调用方传了 passive 也不改口：
+    # 回包与事件账上的那一栏说「被动」，这一轮却是她自己起的头，那就是记错账。
+    if proactive:
+        mode_value = events.MODE_PROACTIVE
+    else:
+        mode_value = mode if mode in events.MODES else events.MODE_PASSIVE
     said = str(text or "").strip()
-    if not said:
+    if proactive:
+        said = str(seed or "").strip()
+        if not said:
+            raise ValueError("seed 不能为空：她自己开口那一轮，由头就是那一问")
+    elif not said:
         raise ValueError("text 不能为空：没有一句话就没有这一轮")
+    reason_text = str(reason or "").strip() if proactive else ""
     # 段先归一化：形状不对就在动任何器官之前当场报（不兜底，也不把它悄悄当空段）。
-    rows = normalize_segment(segment) or []
+    # 主动那一轮**段一律不认**（给了也忽略，连形状都不判）：这一轮没有别人说话。
+    rows = [] if proactive else (normalize_segment(segment) or [])
     conf = _check_assembly(assembly, "传入的 assembly") if assembly is not None else load_assembly()
     at = now if isinstance(now, str) and now else brain_model.now_iso()
     # 场合先归一化：后面三处（装配 / 落脑 / 回想）都只认这一个值，不各自再判一遍。
@@ -737,7 +793,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     event = events.record(said, last_reply=last_reply, scene=where, who=who, at=at,
                           mode=mode, recent_replies=recent_replies, data=event_conf)
     # 被骂那一门与上面这条事件同一个函数（events.is_insult）：两处各写一份判据，迟早就分叉。
-    insulted = events.is_insult(said, data=event_conf)
+    # 主动那一轮恒 False：没有人说话，就没有人骂她。拿她自己的由头去判，等于让她自己把这一轮
+    # 判成「被骂」（那是心的一道硬门，判错了整轮都变了口径）。
+    insulted = False if proactive else events.is_insult(said, data=event_conf)
 
     # 1) 魂与脑：先回想（这一轮该想起什么，要在写提示词之前定下来）
     soul_text = store.render()
@@ -770,7 +828,11 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     offsets = offset_module.overview(root=heart_root, now=at)
     eff = _effective(heart_root, at, mood_read, offsets)
     energy_read = energy_module.read(heart_root, at, **_sleep_terms(heart_root, at))
-    gate_input, judgement = _engage(heart_root, at, eff, energy_read, brain, who, insulted)
+    # 主动那一轮把 intent 交给心：夜里那一道硬门只对主动判「不说」（被动判「少说」）——
+    # 同样是夜里，一样的话，两种起头就该两个结论。这是「夜里主动 → SILENT」生效的前提。
+    gate_input, judgement = _engage(
+        heart_root, at, eff, energy_read, brain, who, insulted,
+        intent=(heart_model.INTENT_PROACTIVE if proactive else heart_model.INTENT_PASSIVE))
     heart_words = _heart_words(eff, judgement)
     heart_text = _heart_text(eff, heart_words)
 
@@ -779,7 +841,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     heart_read = _heart_readings(mood_read, energy_read, offsets, judgement)
     voice = _voice(store, brain, who, heart_read)
     # 四个旋钮：判据全在 assembly.json 的 tone_rules 里，这一层只照着判，一个阈值都不带。
-    knobs = _knobs(conf["tone_rules"], heart_read, judgement)
+    knobs = _knobs(conf["tone_rules"], heart_read, judgement, mode)
     mouth_text = _mouth_text(voice, knobs, conf["tone_rules"])
     person_text = _person_text(brain, who)
 
@@ -807,12 +869,19 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         clipped = body if len(body) <= spec["cap"] else body[:spec["cap"]]
         blocks.append("[%s]\n%s" % (spec["label"], clipped))
         sections.append({"key": key, "chars": len(clipped), "cap": spec["cap"]})
-    system = _fill(conf["prompt"]["system"], {
-        "sections": "\n\n".join(blocks),
-        "reply_budget": str(max_chars),
-        "reply_instruction": reply_rule,
-    })
-    user = _fill(conf["prompt"]["user"], {"text": said})
+    # 主动那一轮换的是**整份模板**（prompt.proactive：由头与理由都进提示词），user 那一问是空串
+    # ——没有对方的话，就没有可替换的 {text}。两态只差模板与那一问，装配出来的几段一模一样。
+    values = {"sections": "\n\n".join(blocks), "reply_budget": str(max_chars),
+              "reply_instruction": reply_rule}
+    if proactive:
+        values["seed"] = said
+        values["reason"] = reason_text or str(conf["prompt"]["proactive_reason_missing"])
+        template = conf["prompt"]["proactive"]
+        user = ""
+    else:
+        template = conf["prompt"]["system"]
+        user = _fill(conf["prompt"]["user"], {"text": said})
+    system = _fill(template, values)
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
 
@@ -850,10 +919,14 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     chunks = [] if dropped else _bubbles(reply, who, at)
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
-    wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at, where)
+    wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at, where,
+                              proactive=proactive)
     # 7.5) 落账：这一轮的原文进最近几轮（reply 不管有没有说出口，人那句一定留着）。
     # msg_id 取人那句进脑回来的 id：下一次装配对账就靠它把「脑里有、账上也有」认出来。
-    recent.append({"ts": at, "who": who or HUMAN_WHO, "said": said, "reply": reply,
+    # 主动那一轮也照记一行（她这一轮同样是一轮），但 said 记空串：这一轮**没有对方原话**，
+    # 不拿由头去冒充「他说了什么」——那是她的念头，不是人的话。
+    recent.append({"ts": at, "who": who or HUMAN_WHO,
+                   "said": "" if proactive else said, "reply": reply,
                    "msg_id": msg_id}, root=recent_root, cap=conf["recent"]["cap"])
     # 8) 落口癖账：放在最后一步。被闸弃掉的轮（reply 空）不记——她没说出口就没有开头；
     #    命中一律对**家现行全部台词**，不是只注入的那几条（口癖统计看的是全部台词）。
@@ -877,6 +950,12 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         "reply": reply,
         "chunks": chunks,
         "scene": {"value": where},
+        # 这一轮是谁起的头（passive / proactive）。页面与验收照这一格分两条路。
+        "mode": mode_value,
+        # 由头原样与理由码（被动两格都是空串，形状不随状态变）。理由码只在这一格：
+        # 下面 payload.reason 一直是**出站闸**的理由码，两处不共用一个字段。
+        "seed": {"text": said if proactive else "",
+                 "reason": reason_text},
         # 核·识别这一轮的读数（五键冻结）：kind 是五类之一或空串——空串＝"没识别出"，
         # 与"心拒了"是两件事，reason 上分得开。它只落账与投心，一个字都没进提示词。
         "event": {"kind": str(event.get("kind") or ""),
@@ -1525,7 +1604,7 @@ def _intent_context(readout: Any, name: str, at: str,
 
 def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
             energy_read: Mapping[str, Any], brain: Any, who: str,
-            insulted: bool = False
+            insulted: bool = False, intent: Optional[str] = None
             ) -> Tuple[Any, Dict[str, Any]]:
     """一次判决：只 decide，不 decide_and_log（核不写门的日志，那是心的账）。
 
@@ -1541,6 +1620,10 @@ def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
     不判、也不许另写一张脏话表——engage 的硬门（第 2 道）与投 insult 事件用的必须是同一个
     布尔、同一个函数（全仓唯一被骂判据在 organs/mind/events.is_insult），否则"她今天被骂了
     没有"会有两份结论。不给就是 False（老调用与面板那条路一字不改）。
+
+    intent 是这一轮谁起的头：heart.model 的 INTENT_PASSIVE / INTENT_PROACTIVE，别的值一律回落
+    passive（不猜成主动——猜错了，夜里那一道硬门就会替她整轮闭口）。它是心判「夜里说不说」的
+    前提：夜里 + 主动 → SILENT，夜里 + 被动 → LESS。调用方按 seed 给不给传，本层不另判一遍。
     """
     readout = ports_module.from_brain(brain)
     name = who or DEFAULT_WHO
@@ -1553,7 +1636,7 @@ def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
         energy=energy_read["value"],
         familiarity=readout.familiarity(name, at),
         today_count=readout.today_count(name, at),
-        intent=heart_model.INTENT_PASSIVE,
+        intent=(intent if intent in heart_model.INTENTS else heart_model.INTENT_PASSIVE),
         who=name,
         now=at,
         insulted_today=bool(insulted),
@@ -1707,7 +1790,8 @@ def _offset_readings(offsets: Any) -> Optional[Dict[str, float]]:
 
 
 def _knobs(rules: Mapping[str, Any], heart: Mapping[str, Any],
-           judgement: Mapping[str, Any]) -> Dict[str, Any]:
+           judgement: Mapping[str, Any], mode: str = events.MODE_PASSIVE
+           ) -> Dict[str, Any]:
     """四个旋钮这一轮各按哪个档：判据全部来自 tone_rules，本函数一个阈值都不带。
 
     low_mood / low_energy 是「长度收紧 + 玩笑全不产出」那两条；neutral 只管字数那一格
@@ -1722,7 +1806,11 @@ def _knobs(rules: Mapping[str, Any], heart: Mapping[str, Any],
     return {"low_mood": low_mood, "low_energy": low_energy,
             "low": bool(low_mood or low_energy),
             "neutral": mood is not None and mood < float(rules["neutral_mood_below"]),
-            "no_question": state == heart_model.STATE_LESS,
+            # 主动开口那一轮默认不删问句：LESS 的本意是「别追问」，而她自己开口时那句
+            # 由头本身可能就是问题（「想问问他手术结果」）。开关进数据，改数据即改行为。
+            "no_question": bool(state == heart_model.STATE_LESS
+                                and (mode != events.MODE_PROACTIVE
+                                     or bool(rules.get("no_question_in_proactive", False)))),
             "ban_joke": bool(low_mood)}
 
 
@@ -1942,7 +2030,8 @@ def _day() -> str:
 
 
 def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
-              dropped: bool, at: str, scene: Optional[str] = None
+              dropped: bool, at: str, scene: Optional[str] = None, *,
+              proactive: bool = False
               ) -> Tuple[List[Dict[str, str]], str]:
     """落脑：人的原话先记；她真说出口的那句再记（被弃的那句没说出口，不进脑）。
 
@@ -1953,14 +2042,19 @@ def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
     id 用的是 ingest 回来的 evidence_key——亲历这一条的 id 就是它自己的证据指针。
     第二半是**人那一句**的 id，交给最近几轮那一份账当 msg_id（对账靠它对齐）；
     人那句没落成（脑拒了）就是空串：没有凭据，下一轮对账认不出来也不要假装认出来了。
+
+    proactive 是她自己开口那一轮：**只有她那句**。没有对方那句可落，也不为凑形状写一条假的
+    人话（写了就是她自己给自己编了一句对方说的话）；msg_id 因此恒空串——这一轮没有人的那条
+    凭据，下一轮对账也就没有它对得上，那是实话。
     """
     wrote: List[Dict[str, str]] = []
-    human = brain.ingest(who=who or HUMAN_WHO, text=said, ts=at, scene=scene)
     msg_id = ""
-    if human.get("ok"):
-        row = _wrote_row(human)
-        wrote.append(row)
-        msg_id = row["id"]
+    if not proactive:
+        human = brain.ingest(who=who or HUMAN_WHO, text=said, ts=at, scene=scene)
+        if human.get("ok"):
+            row = _wrote_row(human)
+            wrote.append(row)
+            msg_id = row["id"]
     if dropped or not reply:
         return wrote, msg_id
     hers = brain.ingest(who=store.snapshot().identity.display, text=reply, ts=at,
