@@ -24,6 +24,8 @@ class Room:
 
 
 # 顺序固定：从进门到日子，人改这里才加房
+# 口径变更（2026-11-06 人拍）：十间 → **十一间**。新增「素材盒」——
+# 给她把"今天的一点事"先存成草稿，将来能变 QQ 空间素材。它是独立一间，不是抽屉的格子。
 ROOMS: Tuple[Room, ...] = (
     Room("玄关", "entrance", "刚进门的东西先落这儿：谁给的、哪天的", True),
     Room("客厅", "living", "家里最公开的一间，放着等人来看的东西", False),
@@ -35,6 +37,7 @@ ROOMS: Tuple[Room, ...] = (
     Room("橱柜", "closet", "衣服与随身物件", False),
     Room("抽屉", "drawer", "她自己的资料卡，只读，只有人能直接改文件", False),
     Room("台历", "calendar", "今天是哪天、什么日子", False),
+    Room("素材盒", "materials", "她自己写的今天的一点事：草稿、说说、梗（将来发空间的原料）", True),
 )
 
 ROOM_NAMES: Tuple[str, ...] = tuple(room.name for room in ROOMS)

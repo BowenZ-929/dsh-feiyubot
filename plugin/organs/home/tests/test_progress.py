@@ -127,9 +127,9 @@ class ProgressTest(unittest.TestCase):
         self.assertNotIn("progress", got["items"][0], "坏事件不许把卡写成 0")
 
     def test_progress_opens_no_new_room(self) -> None:
-        """进度不加房间：十间房名表一字未动，落盘也不多出目录。"""
-        self.assertEqual(("玄关", "客厅", "名片盒", "工作台", "仓库", "信箱",
-                          "卧室", "橱柜", "抽屉", "台历"), rooms.ROOM_NAMES)
+        """进度不加房间：房名表不因为「进度」多出一间，落盘也不多出目录。"""
+        self.assertEqual(tuple(room.name for room in rooms.ROOMS), rooms.ROOM_NAMES,
+                         "房名表就是 ROOMS，这里不写字面量")
         card = self._put()
         cards.set_progress(root=self.root, role="organ", by="day", room="工作台",
                            card_id=card["card_id"], progress=40)

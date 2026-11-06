@@ -21,7 +21,8 @@ from api import core as api_core
 from api import home as home_api
 from organs.home import access, audit, cli, residents, rooms, store
 
-FIVE = ("玄关", "名片盒", "工作台", "仓库", "信箱")
+# 可写哪几间**从房表派生**，不写字面量：加一间房不该改这里。
+FIVE = tuple(room.name for room in rooms.ROOMS if room.writable_default)
 READONLY = ("客厅", "卧室", "台历", "橱柜", "抽屉")
 SOURCE = Path(home_api.__file__).read_text(encoding="utf-8")
 DRAWER_CARD = "她的资料卡.md"
@@ -97,7 +98,7 @@ class HomeApiTest(unittest.TestCase):
         status, payload = self.call("GET", "/home/rooms")
         self.assertEqual(status, 200, payload)
         rows = {row["name"]: row for row in payload["rooms"]}
-        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(rows), len(rooms.ROOMS))
         self.assertEqual([name for name, row in rows.items() if row["writable_by_structure"]],
                          list(FIVE))
         self.assertEqual([name for name, row in rows.items() if row["writable_now"]], list(FIVE))

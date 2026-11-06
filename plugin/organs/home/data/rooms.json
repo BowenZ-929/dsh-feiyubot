@@ -60,6 +60,12 @@
       "slug": "calendar",
       "purpose": "今天是哪天、什么日子",
       "writable": false
+    },
+    {
+      "name": "素材盒",
+      "slug": "materials",
+      "purpose": "她自己写的今天的一点事：草稿、说说、梗（将来发空间的原料）",
+      "writable": true
     }
   ]
 }

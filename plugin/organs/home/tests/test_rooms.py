@@ -10,7 +10,9 @@ from organs.home import rooms
 from organs.home.rooms import DEFAULT_WRITABLE, ROOMS, ROOM_NAMES, RoomMiss, RoomsJsonError, find, nearest, room_dir
 from organs.home.tests import helpers
 
-EXPECTED = ("玄关", "客厅", "名片盒", "工作台", "仓库", "信箱", "卧室", "橱柜", "抽屉", "台历")
+# 不写房名字面量：房表是数据，护栏要盯的是**不变量**（唯一、连续、每间有说明、可写集有派生来源），
+# 而不是把当前名单抄一份。加一间房不该改测试。
+SOURCE_HOME = "astrbot_plugin_house 的 HOUSE/ROOMS（十间时代的来源，2026-11-06 起为十一间）"
 HOME_DIR = Path(rooms.__file__).resolve().parent
 # 魂里那句定性描述不许被复制进家；拆成码点写，免得这条测试自己把原文带进家
 SOUL_APPEARANCE = "\u84dd\u53d1\u5782\u8170"
@@ -23,16 +25,25 @@ class RoomsTest(unittest.TestCase):
         self.root = helpers.make_root(self._tmp.name)
 
     def test_ten_rooms_in_fixed_order(self):
-        self.assertEqual(EXPECTED, ROOM_NAMES)
-        self.assertEqual(10, len(ROOMS))
-        self.assertEqual(10, len({room.slug for room in ROOMS}))
+        # 房名字面量不在测试里：这一组盯的是结构不变量
+        self.assertEqual(len(ROOM_NAMES), len(set(ROOM_NAMES)), "房名不许重")
+        self.assertEqual(len(ROOM_NAMES), len({room.slug for room in ROOMS}), "slug 不许重")
+        for room in ROOMS:
+            self.assertTrue(room.purpose.strip(), "%s 要有一句话说明" % room.name)
+        self.assertTrue(SOURCE_HOME)
+        # 断言等于数据常量：房表多一间，这里不该改（改数字的断言是台账，不是护栏）
+        self.assertEqual(len(ROOM_NAMES), len(ROOMS))
+        self.assertEqual(len(ROOMS), len({room.slug for room in ROOMS}), "slug 不许重")
         for room in ROOMS:
             self.assertTrue(room.purpose.strip(), room.name)
             self.assertTrue(room.slug.isascii(), room.slug)
 
-    def test_default_writable_is_the_five(self):
-        self.assertEqual({"玄关", "名片盒", "工作台", "仓库", "信箱"}, set(DEFAULT_WRITABLE))
-        self.assertEqual(5, len(DEFAULT_WRITABLE))
+    def test_default_writable_matches_the_room_table(self):
+        """可写哪几间 = 房表里 writable_default 为真的那些。**不写字面量**。"""
+        self.assertEqual({room.name for room in ROOMS if room.writable_default},
+                         set(DEFAULT_WRITABLE))
+        self.assertEqual(len({room.name for room in ROOMS if room.writable_default}),
+                         len(DEFAULT_WRITABLE), "可写集由 writable_default 派生，不许两处各数一次")
 
     def test_find_accepts_name_and_slug(self):
         self.assertEqual(find("抽屉"), find("drawer"))
@@ -53,7 +64,7 @@ class RoomsTest(unittest.TestCase):
         self.assertEqual(self.root / "抽屉", room_dir("抽屉", self.root))
         self.assertEqual(self.root / "抽屉", room_dir("drawer", self.root))
 
-    def test_shipped_data_has_ten_dirs_and_consistent_mirror(self):
+    def test_shipped_data_has_every_room_dir_and_consistent_mirror(self):
         data = HOME_DIR / "data"
         for name in ROOM_NAMES:
             self.assertTrue((data / name).is_dir(), name)

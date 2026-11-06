@@ -99,7 +99,7 @@ class FactoryVsLiveTest(unittest.TestCase):
     def test_rooms_live_change_is_what_reads(self):
         self._write_live_rooms(rooms.rooms_json_text())
         seed_before = rooms.seed_path().read_bytes()
-        self.assertEqual(10, len(rooms.check_rooms_json(self.live)["rooms"]))
+        self.assertEqual(len(rooms.ROOMS), len(rooms.check_rooms_json(self.live)["rooms"]))
         self._write_live_rooms('{"version": 1, "rooms": []}')
         with self.assertRaises(rooms.RoomsJsonError) as caught:
             rooms.check_rooms_json(self.live)
@@ -110,7 +110,8 @@ class FactoryVsLiveTest(unittest.TestCase):
         self._write_live_rooms(rooms.rooms_json_text())
         broken = self._broken("rooms.json", '{"version": 1, "rooms": [{"name": "厨房"}]}')
         with mock.patch.object(rooms, "seed_path", return_value=broken):
-            self.assertEqual(10, len(rooms.check_rooms_json(self.live)["rooms"]),
+            self.assertEqual(len(rooms.ROOMS),
+                             len(rooms.check_rooms_json(self.live)["rooms"]),
                              "把出厂那份镜像改坏，实盘读出来不许受影响")
             self.assertEqual([{"name": "厨房"}], rooms.read_seed()["rooms"],
                              "sanity: 被改坏的是出厂那份")

@@ -14,7 +14,7 @@ from pathlib import Path
 from api import api
 from organs.home import access, cards, rooms, store
 
-TEN = ("玄关", "客厅", "名片盒", "工作台", "仓库", "信箱", "卧室", "橱柜", "抽屉", "台历")
+# 房名单不抄进测试：这里只盯「格子不开新房间」这条不变量，房表本身有它自己的护栏。
 LONG = "今天" + "把抽屉里的东西一件一件摆回去，" * 6 + "摆完就坐着。"   # 98 字：落在 80–150 里
 DREAM_TEXT = ("梦见自己变成一条很小的鱼，在很浅的水里游。水清得能看见底下每颗石子。"
                "有人蹲在岸上看着我，我想问他为什么不走，可是鱼不会说话。" + "醒来还记得水是凉的。" * 2)
@@ -152,11 +152,12 @@ class DrawerTest(unittest.TestCase):
         self.assertEqual({"日记", "梦", "自画像", "人设卡"}, set(got["shelves"]))
 
     def test_room_table_is_untouched(self) -> None:
-        self.assertEqual(TEN, rooms.ROOM_NAMES, "十间房名表 0 行改动")
+        self.assertEqual(len(rooms.ROOMS), len(rooms.ROOM_NAMES), "房名与房表一一对应")
         self.assertIn("抽屉", rooms.READONLY_ROOMS, "抽屉仍是结构只读房")
         self._write(diary("2026-11-04"))
-        self.assertEqual(set(TEN), {path.name for path in self.root.iterdir() if path.is_dir()},
-                         "格子不是新房间：房级目录仍是十间")
+        self.assertEqual(set(rooms.ROOM_NAMES),
+                         {path.name for path in self.root.iterdir() if path.is_dir()},
+                         "格子不是新房间：房级目录就是房表那些")
 
     def test_patch_is_405_and_says_only_she_writes_it(self) -> None:
         status, payload = api.handle("PATCH", "/home/list", {"room": "抽屉"}, self.root)

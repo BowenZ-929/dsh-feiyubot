@@ -34,7 +34,8 @@ INDEX_NAME = "index.jsonl"
 # 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）、
 # 偏好（一人一张：她想怎么对这个人说话）。
 CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费",
-                               "进度", "日记", "梦", "人设卡", "任务", "偏好")
+                               "进度", "日记", "梦", "人设卡", "任务", "偏好",
+                               "草稿", "说说", "梗")
 #: 抽屉里的「格子」：这四个 kind 各自落一个子目录，各一份 index.jsonl。
 #: 房名表不变（还是十间）——格子是**一间房里的抽屉分格**，不是新房间。
 SHELF_KINDS: Tuple[str, ...] = ("自画像", "人设卡", "日记", "梦")
@@ -168,7 +169,9 @@ def _last_wins(card: Dict[str, Any]) -> bool:
     只能靠人翻流水自己找。口径与台词卡（`anchors`）一致：**按追加顺序取最新，不比 ts**
     ——`ts` 是人给的，可错、可重复，拿它当权威等于让写错的时间戳盖掉后写的那行。
     """
-    return bool((card.get("params") or {}).get(LAST_WINS_PARAM))
+    params = card.get("params") or {}
+    # current：草稿这类「同名即同一条」的现状卡（标记 used_in_diary 就是再写一行同名卡）
+    return bool(params.get(LAST_WINS_PARAM) or params.get("current"))
 
 
 def _replace_with_later(items: List[Dict[str, Any]], by_card: Dict[str, Dict[str, Any]],
@@ -233,6 +236,10 @@ def _identity_keys(card: Dict[str, Any]) -> List[Tuple[Any, ...]]:
     path = card.get("path")
     if path:
         keys.append(("path", room, path, card.get("name")))
+    params = card.get("params") or {}
+    if params.get("current") and isinstance(card.get("name"), str) and card["name"]:
+        # 现状卡按名字认同一条：改标记就是再写一行同名卡，读时取最新。
+        keys.append(("current", room, card["name"]))
     return keys
 
 
@@ -393,7 +400,8 @@ def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
 def _new_card(raw: Dict[str, Any], *, role: str, by: str, room_name: str, seq: int,
               progress: Any = _ABSENT, prefix: Optional[str] = None) -> Dict[str, Any]:
     card = {
-        "card_id": "%s-%d" % (prefix or room_name, seq),
+        # 现状卡改标记时要保住 id（mark_note 追加一行同名卡，卡的 id 不许漂）。
+        "card_id": raw.get("card_id") or "%s-%d" % (prefix or room_name, seq),
         "room": room_name,
         "kind": raw["kind"],
         "name": raw["name"],
@@ -606,6 +614,104 @@ def _event_target(card: Dict[str, Any], items: List[Dict[str, Any]],
     matches = [item for item in items
                if item.get("name") == name and not item.get("consumed")]
     return matches[0] if len(matches) == 1 else None
+
+
+SPACE_RULES_NAME = "space_rules.json"
+NOTE_KINDS: Tuple[str, ...] = ("草稿", "说说", "梗")
+NOTE_TEXT_MAX = 120
+
+
+def space_rules_path(root=None) -> Path:
+    """「能不能发」的词表与阈值：只在数据里，代码不写死。"""
+    return store_module.home_root(root) / SPACE_RULES_NAME
+
+
+def load_space_rules(root=None) -> Dict[str, Any]:
+    """读取能否发空间的判据：缺件就报错（fail-closed），不默认放行。"""
+    path = space_rules_path(root)
+    if not path.exists():
+        raise CardError("SPACE_RULES_MISSING", {"path": str(path)},
+                        "发空间的判据文件不在：%s（没有判据就不给 space_ready=true）" % path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise CardError("SPACE_RULES_BAD", {"path": str(path), "detail": str(exc)},
+                        "发空间的判据文件读不出来：%s" % exc)
+    if not isinstance(data, dict) or not isinstance(data.get("private_markers"), list):
+        raise CardError("SPACE_RULES_BAD", {"path": str(path)},
+                        "判据文件要有 private_markers 数组")
+    return data
+
+
+def judge_space_ready(text: str, rules: Dict[str, Any]) -> Dict[str, Any]:
+    """三条：有具体的事 ／ 不涉私密 ／ 不评价别人。词表全部来自数据文件。"""
+    text = text or ""
+    reasons = []
+    if len(text) < int(rules.get("min_chars", 0)):
+        reasons.append("太短：没有具体的事")
+    for marker in rules.get("private_markers") or []:
+        if marker and marker in text:
+            reasons.append("涉私密：命中 %r" % marker)
+            break
+    for marker in rules.get("judge_others_markers") or []:
+        if marker and marker in text:
+            reasons.append("评价别人：命中 %r" % marker)
+            break
+    return {"space_ready": not reasons, "reasons": reasons}
+
+
+def add_note(root=None, *, role: str, by: str, text: str, source: str = "",
+             mood: str = "", at: str = "") -> dict:
+    """记一句今天的小事：落一张 kind=草稿。**只追加，不覆盖**。
+
+    space_ready 由数据文件里的词表算，默认 false；
+    家**不判「能不能发」**——发之前要人点头。
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise CardError("BAD_ARGUMENT", {"text": text}, "草稿要有一句话")
+    if len(text) > NOTE_TEXT_MAX:
+        raise CardError("NOTE_TEXT_LENGTH", {"length": len(text), "max": NOTE_TEXT_MAX},
+                        "草稿最多 %d 字，这句 %d 字" % (NOTE_TEXT_MAX, len(text)))
+    decision = judge_space_ready(text, load_space_rules(root))
+    params = {"text": text, "source": source, "mood": mood,
+              "space_ready": bool(decision["space_ready"]),
+              "used_in_diary": False, "space_reasons": decision["reasons"],
+              "current": True}
+    stamp = at or _now()
+    # 名字要唯一：同一天（甚至同一秒）写多张是正常事，靠时间戳当名字会被「同名即同一条」折掉。
+    seq = _line_count(_index_path(store_module.home_root(root), "素材盒")) + 1
+    out = append_cards(root=root, role=role, by=by, cards=[{
+        "room": "素材盒", "kind": "草稿", "name": "草稿 %s #%d" % (stamp[:16], seq),
+        "chars": len(text), "at": stamp, "params": params}])
+    card = out["cards"][0]
+    card["space_ready"] = params["space_ready"]
+    card["space_reasons"] = decision["reasons"]
+    return card
+
+
+def mark_note(root=None, *, role: str, by: str, note_id: str, used_in_diary: bool = True) -> dict:
+    """草稿被夜跑日记引用 → 追加一行同名卡（used_in_diary=true），**不删**。"""
+    home = store_module.home_root(root)
+    rows, _bad = _read_room_rows(home, "素材盒")
+    target = _pick_target(fold(rows), card_id=note_id, name=None, room_name="素材盒")
+    params = dict(target.get("params") or {})
+    params["used_in_diary"] = bool(used_in_diary)
+    out = append_cards(root=root, role=role, by=by, cards=[{
+        "room": "素材盒", "kind": "草稿", "name": target.get("name"),
+        "card_id": target.get("card_id"),
+        "chars": int(target.get("chars") or 0), "params": params}])
+    return out["cards"][0]
+
+
+def notes(root=None, *, day: str) -> dict:
+    """取某一天的草稿（夜跑写日记时用）。按卡上的 at 前 10 位对日。"""
+    got = list_room(root=root, room="素材盒", limit=access.READ_MAX_LINES, excerpt_chars=0)
+    items = [card for card in got["items"]
+             if card.get("kind") == "草稿" and str(card.get("at") or "")[:10] == day]
+    return {"day": day, "room": "素材盒", "total": len(items),
+            "notes": items,
+            "used": [card["card_id"] for card in items
+                     if (card.get("params") or {}).get("used_in_diary")]}
 
 
 BATCH_KIND = "批量入档"
