@@ -9,6 +9,9 @@ const A = 3000000001;
 const B = 3000000002;
 const C = 3000000004;
 const GROUP: Where = { scene: "group", groupId: 700000001 };
+// 会话键与 gate.targetOf 同源（M4 起 hub 按会话分批：state/consume 都要 key）
+const K = "group:700000001";
+const PK = "user:3000000003";
 
 const hub = () => new BatchHub(structuredClone(loadPolicy()).batch);
 
@@ -35,7 +38,7 @@ test("段渲染：3 条（含 @ 她 + 一条带换行）→ 每行 昵称(id)：
     600,
   );
 
-  const batch = h.consume(1100);
+  const batch = h.consume(K, 1100);
   assert.ok(batch);
   const rendered = renderSegment(batch);
 
@@ -83,7 +86,7 @@ test("段渲染：每一条物理行都带 speaker——两行消息 + 单行消
     100,
   );
 
-  const batch = h.consume(2000);
+  const batch = h.consume(K, 2000);
   assert.ok(batch);
   const rendered = renderSegment(batch);
   const lines = rendered.text.split("\n");
@@ -121,7 +124,7 @@ test("段渲染：私聊只有 userId，没有 groupId", () => {
     { senderId: 3000000003, senderName: "路人甲", text: "在吗", mentioned: false, bareImage: false, sticker: false, where: P },
     1000,
   );
-  const batch = h.consume(1000);
+  const batch = h.consume(PK, 1000);
   assert.ok(batch);
   const rendered = renderSegment(batch);
 

@@ -58,6 +58,7 @@ test("决策：每批恰好一行，字段顺序固定", () => {
     "scene",
     "target",
     "reason",
+    "source",
   ]);
   assert.deepEqual(Object.keys(row.machine.batch), ["id", "msgs", "waited_ms", "tier", "at"]);
   assert.equal(row.kind, "decision");
@@ -178,6 +179,17 @@ test("决策：没有门拦时 why 说门全过；替换批次 why 说上限超�
     policy.decide.reasonCodes,
   );
   assert.match(replaced.machine.why, /三道上限超了/);
+});
+
+test("决策：source 必须显式区分入站与主动开口，缺省是 inbound", () => {
+  const inbound = makeDecision(input(), "t", policy.decide.reasonCodes);
+  assert.equal(inbound.machine.source, "inbound", "缺省必须是 inbound：入站调用点一行不改也得对");
+  const proactive = makeDecision(input({ source: "proactive" }), "t", policy.decide.reasonCodes);
+  assert.equal(proactive.machine.source, "proactive");
+  assert.throws(
+    () => makeDecision(input({ source: "cron" as unknown as "inbound" }), "t", policy.decide.reasonCodes),
+    /machine.source 只认 inbound/,
+  );
 });
 
 test("决策：target 原样进账；reason 只收非空字符串，why 里不许出现理由", () => {

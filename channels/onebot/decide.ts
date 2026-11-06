@@ -28,6 +28,9 @@ export type DecisionInput = {
   // reason 是核给的自由文本（例如主动沉默的理由），没有就 null。
   // 它由 machine.reason 单独承载——why 只描述门，绝不许再把理由塞进门名里。
   reason?: string | null;
+  // source 缺省必须是 inbound：既有的入站调用点一行不改也能继续工作。
+  // 主动开口（POST /say）必须显式写 proactive，别让两条路在账上长得一样。
+  source?: "inbound" | "proactive";
   batch: BatchSnapshot;
   gates: GateInput[];
 };
@@ -41,6 +44,7 @@ export type DecisionMachine = {
   scene: "group" | "private";
   target: string;
   reason: string | null;
+  source: "inbound" | "proactive";
 };
 
 export type DecisionRow = {
@@ -109,6 +113,11 @@ export const makeDecision = (
   // 自由文本只收非空字符串：对象/数组/空串在账里都读不出来，一律记 null。
   const reason =
     typeof input.reason === "string" && input.reason.trim().length > 0 ? input.reason.trim() : null;
+  // 来源只有两种（入站 / 主动开口）。认不出的值当场炸，别让面板收到第三种。
+  const source = input.source ?? "inbound";
+  if (source !== "inbound" && source !== "proactive") {
+    throw new RangeError(`machine.source 只认 inbound / proactive，拿到 ${JSON.stringify(input.source)}`);
+  }
   const gates: GateRecord[] = input.gates.map((gate) => ({ name: gate.name, hit: gate.hit === true }));
   const blockingIndex = input.gates.findIndex((gate) => gate.hit === true);
   const reasonCode = blockingIndex >= 0 ? input.gates[blockingIndex].code : "sent";
@@ -143,6 +152,7 @@ export const makeDecision = (
       scene: input.scene,
       target: input.target,
       reason,
+      source,
     },
   };
 };

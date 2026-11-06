@@ -4,13 +4,26 @@
 // M4：不再是「一条消息一次核调用」，而是「一段消息一次核调用」——
 //   入站 → 判重 → 落一行 batched → BatchHub 攒段 → 到期取件 → 每段查配额 → 调核一次 →
 //   三道上限 → 每泡出站 → 每段恰好一行决策账（.state/decisions.jsonl）。
+// M5：同一条出站管线多一个内部入口——`POST /say`（没人说话、她自己想说时用它）。
+//   门 → 配额 → 三道上限 → planChunks + runBatch → 每段一行决策账（`machine.source=proactive`）。
 // 解析不在这里重写：一律走 M0 已验收的 parse.ts；合批 / 渲染 / 上限 / 配额 / 决策账都是现成模块，这里只接线。
 import WebSocket, { WebSocketServer } from "ws";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEvent, type ParsedEvent, type Where } from "./parse.ts";
 import { LEDGER_RELATIVE_PATH, Ledger, dedupKey, dedupNote, readMode, sceneOf, targetOf, type Scene } from "./gate.ts";
-import { ACK_TIMEOUT_MS, readCoreTimeout, parseCoreResponse, settleRound, type AckOutcome, type CoreAttempt } from "./outbox.ts";
+import {
+  ACK_TIMEOUT_MS,
+  planChunks,
+  readCoreTimeout,
+  parseCoreResponse,
+  runBatch,
+  settleRound,
+  type AckOutcome,
+  type Chunk,
+  type CoreAttempt,
+} from "./outbox.ts";
 import { loadPolicy, type Policy } from "./policy.ts";
 import { BatchHub, type BatchSnapshot } from "./batch.ts";
 import { renderSegment } from "./segment.ts";
@@ -97,6 +110,9 @@ let connectionSeq = 0;
 let eventSeq = 0;
 let requestSeq = 0;
 
+// /say 没有「来源 socket」：主动开口只能往当前连着的那个协议端发。没有连接就是发不出去（不是崩溃）。
+let lastSocket: WebSocket | null = null;
+
 type AckFrame = { echo: string; status: string | null; retcode: number | null; note: string };
 type AckWaiter = (outcome: AckOutcome) => void;
 const ackWaiters = new Map<string, AckWaiter>();
@@ -157,36 +173,38 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 type BatchMeta = { key: string; messageId: number | null; socket: WebSocket; who: ParsedEvent["who"]; where: Where; hasImage: boolean };
 const batchMeta = new Map<string, BatchMeta>();
 
-// 定时器只有一个：永远指向 hub 报的那个 deadline。已到期不延长——到点就取件，秒回优先于等齐。
-let batchTimer: ReturnType<typeof setTimeout> | null = null;
+// 每个会话（group:<id> / user:<id>）一个定时器：永远指向 hub.state(key) 报的那个 deadline。
+// 一个群热闹不该把另一个群的取件推迟或提前——定时器也必须按会话来排。
+const batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-const disarmTimer = (): void => {
-  if (batchTimer !== null) {
-    clearTimeout(batchTimer);
-    batchTimer = null;
+const disarmTimer = (key: string): void => {
+  const timer = batchTimers.get(key);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    batchTimers.delete(key);
   }
 };
 
-const armTimer = (): void => {
-  disarmTimer();
+const armTimer = (key: string): void => {
+  disarmTimer(key);
   if (hub === null) return;
-  const state = hub.state();
+  const state = hub.state(key);
   // 私聊的排队段（上一条还没取走）不等时间：有排队就立刻取。
   if (!state.open && state.queued === 0) return;
   const remaining =
     state.queued > 0 || !state.open || state.deadline === null
       ? 0
       : Math.max(0, state.deadline - Date.now());
-  batchTimer = setTimeout(onDeadline, remaining);
+  batchTimers.set(key, setTimeout(() => onDeadline(key), remaining));
 };
 
-const onDeadline = (): void => {
-  batchTimer = null;
+const onDeadline = (key: string): void => {
+  batchTimers.delete(key);
   if (hub === null) return;
-  const snapshot = hub.consume(Date.now());
+  const snapshot = hub.consume(key, Date.now());
   if (snapshot === null) {
-    // 到点但取不到件（deadline 被后到的消息推后了/已经取走）：什么都不做，但把定时器对回新 deadline。
-    armTimer();
+    // 到点但取不到件（deadline 被后到的消息推后了/已经取走）：只把这一个会话的定时器对回新 deadline。
+    armTimer(key);
     return;
   }
   const meta = batchMeta.get(snapshot.batchId);
@@ -194,11 +212,11 @@ const onDeadline = (): void => {
   if (meta === undefined) {
     // 没有 meta 就没有目标与 key：宁可这一步什么都不发，也不猜一个对象发出去。
     log("error", `段 ${snapshot.batchId} 找不到来源（没有 meta），本轮丢弃`);
-    armTimer();
+    armTimer(key);
     return;
   }
   void runSegment(snapshot, meta);
-  armTimer();
+  armTimer(key);
 };
 
 // 每段一次核调用。这一段里所有「为什么没发」的结论都收成恰好一行决策账。
@@ -231,6 +249,8 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         scene: snapshot.scene,
         mentioned: snapshot.mentioned,
         target,
+        // 入站路径永远是 inbound；主动开口（/say）显式传 proactive。
+        source: "inbound",
         // 核给的理由是自由文本，由 machine.reason 单独承载；why 只描述门，不许再塞门名里。
         reason,
         // msgs 是条数，不是 segment.ts 里那份消息数组：名字撞了，写错会让面板把条数算成 NaN。
@@ -392,7 +412,8 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     // 这一次配额不该占着。sent>=1 算出手过，不退——部分发出也是一句真话。
     // 退款的四个入口（core_error / core_empty / send:false / 出站全败）共用同一个 refund()，
     // 它带 charged 标志，所以一条路径只会真退一次，绝不重复退。
-    if (result.batch !== null && result.batch.sent === 0) {
+    // 只有门开着（send）才谈得上「出站全败」：silent 下 sent=0 是门挡的，由 mode 那道门说明。
+    if (result.batch !== null && result.batch.sent === 0 && gate.mode === "send") {
       refund(`sent=0，stopped=${result.batch.stopped ?? "—"}`);
       // 出站全败有自己的 code（outbound_failed）：ack 超时 / 连接断开时我们不知道对方收没收到，
       // 措辞是「没确认」——不是「核坏了」，也不是「没发」。decided 仍是 silent，退款照旧只退一次。
@@ -464,7 +485,7 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
       Date.now(),
     );
 
-    const state = hub.state();
+    const state = hub.state(target);
     const batchId = state.batchId ?? "unknown";
     const before = batchMeta.get(batchId);
     batchMeta.set(batchId, {
@@ -495,7 +516,8 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
     ledger.release(key);
   }
 
-  armTimer();
+  // 只重排这个会话自己的定时器（target 就是会话键：group:<id> / user:<id>）。
+  armTimer(target);
 };
 
 const handleEvent = (socket: WebSocket, raw: string): void => {
@@ -522,14 +544,264 @@ const handleEvent = (socket: WebSocket, raw: string): void => {
   }
 };
 
-const wss = new WebSocketServer({ host: HOST, port: PORT, path: WS_PATH });
+// ---------- M5：内部入口 POST /say（主动开口） ----------
+// 它走的是**同一条**出站管线：门 → 配额 → 三道上限 → planChunks + runBatch → 一行决策账。
+// 不复制发送逻辑：分泡、send_at、ack、每泡一行账全在 outbox.ts 里，这里只接线。
+const BODY_LIMIT = 64 * 1024;
+
+type SayInput = { scene: "group" | "private"; target: number; chunks: Chunk[] };
+type SayResult = {
+  ok: boolean;
+  id: string;
+  source: "proactive";
+  sent: number;
+  stopped: string | null;
+  reason_code: string;
+};
+
+let saySeq = 0;
+
+const sendJson = (response: ServerResponse, status: number, body: unknown): void => {
+  try {
+    const text = JSON.stringify(body);
+    response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(text) });
+    response.end(text);
+  } catch (error) {
+    // 对端早走了：说一声就够，不许把进程带下去。
+    log("warn", `回 /say 失败：${(error as Error).message}`);
+  }
+};
+
+// 请求体最多 64KB：主动开口是内部接口，不该有人往这里灌大包。
+const readBody = (request: IncomingMessage): Promise<{ ok: true; text: string } | { ok: false; message: string }> =>
+  new Promise((resolve) => {
+    let size = 0;
+    let tooBig = false;
+    const parts: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > BODY_LIMIT) {
+        tooBig = true;
+        parts.length = 0;
+        return; // 继续排空但不再留数据：直接 destroy 会让 400 发不回去。
+      }
+      if (!tooBig) parts.push(chunk);
+    });
+    request.on("end", () => {
+      if (tooBig) resolve({ ok: false, message: "请求体超过 64KB，不收" });
+      else resolve({ ok: true, text: Buffer.concat(parts).toString("utf8") });
+    });
+    request.on("error", (error) => resolve({ ok: false, message: `读请求体失败：${error.message}` }));
+  });
+
+// 校验只认这三样：scene / target / chunks。请求体里的 source 一律忽略——这条路的来源恒为 proactive。
+const parseSayBody = (raw: unknown): { ok: true; value: SayInput } | { ok: false; message: string } => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, message: "请求体应为 JSON 对象" };
+  }
+  const body = raw as Record<string, unknown>;
+  const scene = body.scene;
+  // 主动开口没有「不知道发给谁」这一档：只认这两个值。
+  if (scene !== "group" && scene !== "private") {
+    return { ok: false, message: `scene 只认 group 或 private（拿到 ${JSON.stringify(scene)}）` };
+  }
+  const target = body.target;
+  if (typeof target !== "number" || !Number.isFinite(target) || !Number.isInteger(target) || target <= 0) {
+    return { ok: false, message: `target 必须是有限正整数（拿到 ${JSON.stringify(target)}）` };
+  }
+  const rawChunks = body.chunks;
+  if (!Array.isArray(rawChunks) || rawChunks.length === 0) {
+    return { ok: false, message: "chunks 必须是非空数组" };
+  }
+  const chunks: Chunk[] = [];
+  for (let index = 0; index < rawChunks.length; index += 1) {
+    const item: unknown = rawChunks[index];
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      return { ok: false, message: `chunks[${index}] 必须是对象` };
+    }
+    const text = (item as Record<string, unknown>).text;
+    if (typeof text !== "string" || text.length === 0) {
+      return { ok: false, message: `chunks[${index}].text 必须是非空字符串` };
+    }
+    const rawSendAt = (item as Record<string, unknown>).send_at;
+    let sendAt = 0;
+    if (rawSendAt !== undefined) {
+      if (typeof rawSendAt !== "number" || !Number.isFinite(rawSendAt)) {
+        return { ok: false, message: `chunks[${index}].send_at 必须是数字（秒）` };
+      }
+      sendAt = rawSendAt;
+    }
+    chunks.push({ text, gap_before: 0, send_at: sendAt });
+  }
+  return { ok: true, value: { scene, target, chunks } };
+};
+
+// 主动开口这一段：与入站共用 decide / quota / enforceLimits / planChunks / runBatch，
+// 差别只在「没有核、没有入站消息、source=proactive」。发送逻辑一行都没复制。
+const runSay = async (input: SayInput): Promise<SayResult> => {
+  if (policy === null || decisions === null || quota === null) {
+    throw new Error("M1 模式（没给 --core）没有决策账 / 配额，/say 不接活");
+  }
+  const id = `say-${(saySeq += 1)}`;
+  const where: Where =
+    input.scene === "group" ? { scene: "group", groupId: input.target } : { scene: "private", userId: input.target };
+  const scene: Scene = input.scene;
+  const target = targetOf(where);
+  // 主动开口没有来源 socket：往当前连着的那个协议端发；一个都没连就按「发不出去」收尾。
+  const socket = lastSocket;
+  const gates: GateInput[] = [];
+  let charged = false;
+  let decidedCode: string | null = null;
+
+  const decide = (extra: GateInput[]): string => {
+    if (decidedCode !== null) return decidedCode;
+    try {
+      const row = decisions.append({
+        scene,
+        mentioned: false,
+        target,
+        source: "proactive",
+        reason: null,
+        // msgs=0：这一段没有入站消息（别塞 chunks 数——那是「泡」，不是「消息」）。
+        batch: { id, msgs: 0, waited_ms: 0, tier: "proactive", at: new Date().toISOString() },
+        gates: [...gates, ...extra],
+      });
+      decidedCode = row.machine.reason_code;
+    } catch (error) {
+      log("error", `${id} 决策账没写成：${(error as Error).message}`);
+      decidedCode = "core_error";
+    }
+    return decidedCode;
+  };
+  const refund = (why: string): void => {
+    if (!charged) return;
+    charged = false;
+    quota.refund(target, Date.now());
+    log("quota", `${id} target=${target} 没出手（${why}），退回这一次配额`);
+  };
+
+  const isSend = gate.mode === "send";
+  gates.push({ name: "mode", code: "silent_mode", hit: !isSend });
+
+  if (isSend) {
+    // 主动开口也计群配额（不然它能刷屏）；mentioned 恒 false：主动开口没有「被 @」。
+    const charge = quota.charge(target, Date.now(), false);
+    if (!charge.ok) {
+      gates.push({ name: "quota", code: "quota_exceeded", hit: true });
+      log("quota", `${id} target=${target} 配额用尽（used=${charge.used}），主动开口被挡`);
+      return { ok: false, id, source: "proactive", sent: 0, stopped: null, reason_code: decide([]) };
+    }
+    charged = true;
+    gates.push({ name: "quota", code: "quota_exceeded", hit: false });
+  }
+
+  // 三道上限：越界就整批换成一句短的（sha256 按 id 选，同一批永远同一句）。
+  const limited = enforceLimits(input.chunks, id, policy);
+  const plan = planChunks(limited.chunks, Date.now());
+  log("say", `${id} → ${target} chunks=${plan.length} send_at=[${plan.map((entry) => entry.send_at).join(",")}] mode=${gate.mode}`);
+
+  const result = await runBatch({
+    mode: gate.mode,
+    batch: { key: id, messageId: null, scene, target },
+    where,
+    plan,
+    requestSeq: (requestSeq += 1),
+    ledger: { appendNew: (row) => ledger.appendNew(row) },
+    isGateOpen: () => gate.mode === "send",
+    isSocketOpen: () => socket !== null && socket.readyState === WebSocket.OPEN,
+    send: (frame) => {
+      if (socket === null) throw new Error("没有协议端连着");
+      socket.send(frame);
+    },
+    waitAck,
+    sleep,
+    now: () => Date.now(),
+    log,
+  });
+
+  // 同入站：silent 下 sent=0 是门挡的（blocked 行已经说了），不算「出站全败」。
+  if (result.sent === 0 && isSend) {
+    // 与入站同一套：出站全败（含「没有连接」「全是空白泡」）→ 退配额。
+    if (plan.length === 0) {
+      refund("chunks 全是空白泡");
+      gates.push({ name: "limits", code: "core_empty", hit: true });
+    } else {
+      refund(`sent=0，stopped=${result.stopped ?? "—"}`);
+      gates.push({ name: "outbound", code: "outbound_failed", hit: true });
+    }
+  }
+  if (limited.reason === "replaced_too_long") {
+    gates.push({ name: "limits", code: "replaced_too_long", hit: true });
+  } else if (result.sent > 0) {
+    gates.push({ name: "limits", code: "core_empty", hit: false });
+  }
+
+  const reasonCode = decide([]);
+  return {
+    ok: reasonCode === "sent" || reasonCode === "replaced_too_long",
+    id,
+    source: "proactive",
+    sent: result.sent,
+    stopped: result.stopped,
+    reason_code: reasonCode,
+  };
+};
+
+const handleHttp = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+  const path = (request.url ?? "").split("?")[0];
+  if (path !== "/say" || request.method !== "POST") {
+    sendJson(response, 404, { ok: false, message: "只有 POST /say" });
+    return;
+  }
+  const body = await readBody(request);
+  if (!body.ok) {
+    sendJson(response, 400, { ok: false, message: body.message });
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.text);
+  } catch (error) {
+    sendJson(response, 400, { ok: false, message: `请求体不是合法 JSON：${(error as Error).message}` });
+    return;
+  }
+  const say = parseSayBody(parsed);
+  if (!say.ok) {
+    sendJson(response, 400, { ok: false, message: say.message });
+    return;
+  }
+  if (policy === null || decisions === null || quota === null) {
+    // M1（没给 --core）：没有系数、没有账、也不许建 .state——这条路直说不接活。
+    sendJson(response, 503, { ok: false, message: "M1 模式（没给 --core）：/say 不接活" });
+    return;
+  }
+  try {
+    const result = await runSay(say.value);
+    log(
+      "say",
+      `${result.id} 完成：sent=${result.sent} stopped=${result.stopped ?? "—"} reason=${result.reason_code} ok=${result.ok}`,
+    );
+    sendJson(response, 200, result);
+  } catch (error) {
+    log("error", `/say 处理异常：${(error as Error).message}`);
+    sendJson(response, 500, { ok: false, message: `服务内部错误：${(error as Error).message}` });
+  }
+};
+
+// HTTP 与 WS 共用同一个端口：WS 挂在 /ws 上，其余交给 handleHttp（只认 POST /say，别的一律 404）。
+const httpServer = createServer((request, response) => {
+  void handleHttp(request, response);
+});
+
+const wss = new WebSocketServer({ server: httpServer, path: WS_PATH });
 
 // 监听是否已经成功：监听阶段出错（典型 EADDRINUSE）与运行期出错是两回事，不能混成一句话。
 let listening = false;
 
-wss.on("listening", () => {
+httpServer.on("listening", () => {
   listening = true;
   log("listen", `反向 WS 已监听 ws://${HOST}:${PORT}${WS_PATH}，等客户端连进来`);
+  log("listen", `内部入口 POST http://${HOST}:${PORT}/say 已就绪（主动开口，走同一条出站管线）`);
   log(
     "mode",
     CORE_URL
@@ -542,6 +814,8 @@ wss.on("connection", (socket, request) => {
   const id = ++connectionSeq;
   const peer = `${request.socket.remoteAddress}:${request.socket.remotePort}`;
   log("conn", `#${id} 已连接 来自 ${peer}，当前在线 ${wss.clients.size}`);
+  // /say 没有来源 socket：记住最近连上的这个，主动开口就发给它。
+  lastSocket = socket;
 
   socket.on("message", (data) => {
     const raw = data.toString();
@@ -559,6 +833,7 @@ wss.on("connection", (socket, request) => {
 
   socket.on("close", (code, reason) => {
     log("conn", `#${id} 已断开 code=${code} reason=${reason.toString() || "（无）"}，当前在线 ${wss.clients.size}`);
+    if (lastSocket === socket) lastSocket = null;
     // 连接没了就别让还在等 ack 的泡空等到超时：它已经「不确定」了，早说早收尾。
     for (const [echo, waiter] of ackWaiters) {
       ackWaiters.delete(echo);
@@ -571,18 +846,31 @@ wss.on("connection", (socket, request) => {
   });
 });
 
-wss.on("error", (error) => {
+// ws 挂在已有的 http.Server 上时，会把 server 的 error 原样转发成 wss 的 'error'。
+// 没有监听器就是「Unhandled 'error' event」——进程会带着堆栈崩，把我们那句人话吃掉。
+// 所以这里留一个空的：真正的处置在下面 httpServer 的监听器里（只打一行、退出码 1）。
+wss.on("error", () => {
+  /* 已由 httpServer 的 error 监听器接管 */
+});
+
+// 监听失败（典型 EADDRINUSE）必须还是「打一行 + 退出码 1」：WS 挂在 http.Server 上之后，
+// 这个错误由 http.Server 发出，所以处置挂在它身上；上面的 wss 监听器只负责别崩。
+httpServer.on("error", (error) => {
   if (listening) {
     log("error", `服务出错：${error.message}`);
     return;
   }
-  // 端口没拿到就是没上线：说清楚原因，并且真的退出（退出码 1，便于外部脚本判断）。
   log("error", `监听失败：${error.message}，进程退出`);
   process.stdout.write("", () => process.exit(1));
 });
 
+httpServer.listen(PORT, HOST);
+
 process.on("SIGINT", () => {
   log("exit", "收到 Ctrl-C，关闭监听");
-  disarmTimer();
-  wss.close(() => process.exit(0));
+  // 有定时器的会话 + 还开着批的会话，两边都停一次（它们不一定重合）。
+  for (const key of new Set<string>([...batchTimers.keys(), ...(hub?.openKeys() ?? [])])) disarmTimer(key);
+  wss.close(() => {
+    httpServer.close(() => process.exit(0));
+  });
 });

@@ -50,6 +50,8 @@ export type Config = {
   channelLog: string | null;
   // G 组（合批）：自成一体地起假核 + 通道，只跑 G 断言。
   batch: boolean;
+  // G14 组（POST /say 主动开口）：同样自成一体，默认不跑，免得影响既有 40 条节奏。
+  say: boolean;
   decisions: string;
   help: boolean;
 };
@@ -90,6 +92,7 @@ export const parseConfig = (argv: string[]): Config => {
     channelLog: raw(argv, "channel-log") ?? null,
     // G 组（合批）自成一体：自己起假核 + 通道，不碰 --url 上那个。
     batch: has(argv, "batch"),
+    say: has(argv, "say"),
     decisions: raw(argv, "decisions") ?? DEFAULT_DECISIONS,
     help: has(argv, "help"),
   };
@@ -115,6 +118,7 @@ export const printHelp = (): void => {
     "  --no-inflight              关掉断言 F（不想在通道里制造在飞并发时）",
     "  --channel-log <path>       通道的 stdout 文件；给了就真数 plan 行（F4），不给按 echo 请求号反推",
     "  --batch                    只跑 G 组（合批）：drill 自己起假核 + 独用端口的通道，不碰 --url 上那个",
+    "  --say                      只跑 G14 组（POST /say 主动开口），自己起通道，不调核",
     "  --decisions <path>         G 组读的决策账，默认 channels/onebot/.state/decisions.jsonl",
     "  --help                     打印这段说明",
     "",
@@ -732,12 +736,8 @@ const runBatchSuite = async (config: Config): Promise<void> => {
 
     // ---- G3：A/B 交替 6 条（3s）→ 4 段，每段一次核调用 ----
     {
-      // 安静档（quietOpen 2000ms）只在「上一条已经过去 >quietGapMs」时才开，而这个计时器是
-      // 进程级、跨群的（batch.ts 的 lastArrivalAt）——刚跑完 G2 就接着发，第一条会按活跃档
-      // （5000ms）开，整段变成 [2,2,2]。要验安静档就得先真等一个空档。
-      const idle = policy.batch.quietGapMs + 1000;
-      say("G3：先等 " + idle + "ms 让合批回到安静档（quietGapMs=" + policy.batch.quietGapMs + "）");
-      await sleep(idle);
+      // 合批已按会话分开：G3 用的是新群号，「上一条到达」为空 → 第一条必然是安静档（quietOpen 2000ms）。
+      // 以前为了躲开「进程级 lastArrivalAt」要空等 31s，现在不需要了。
       const caseStart = Date.now();
       const groupId = nextGroup();
       const plan = [SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B];
@@ -1043,6 +1043,58 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
     }
 
+    // ---- G15：两个群交替说话 → 各自成段、各自回复（会话隔离） ----
+    {
+      const groupA = nextGroup();
+      const groupB = nextGroup();
+      const caseStart = Date.now();
+      const start = mark();
+      post(groupA, SPEAKER_A, "A 群第 1 句");
+      await sleep(150);
+      post(groupB, SPEAKER_B, "B 群第 1 句");
+      await sleep(150);
+      post(groupA, SPEAKER_A, "A 群第 2 句");
+      await sleep(150);
+      post(groupB, SPEAKER_B, "B 群第 2 句");
+      const decisions = await waitForDecisionRows(config.decisions, caseStart, 2, 14000);
+      await sleep(500);
+      const hitsA = hitsOf(groupA);
+      const hitsB = hitsOf(groupB);
+      const actions = actionsSince(start);
+      const targets = decisions.map((row) => String(row.machine?.target ?? "")).sort();
+      const wantTargets = ["group:" + groupA, "group:" + groupB].sort();
+      add(
+        "G15a",
+        "两群交替说话 → 恰好 2 段，决策行 target 各自正确、每段 2 条",
+        decisions.length === 2 &&
+          targets.join(",") === wantTargets.join(",") &&
+          decisions.every((row) => row.machine?.batch?.msgs === 2),
+        "决策 " + decisions.length + " 行 targets=[" + targets.join(",") + "] msgs=[" +
+          decisions.map((row) => String(row.machine?.batch?.msgs)).join(",") + "]",
+      );
+      const linesOfBody = (body: Record<string, any> | undefined): number =>
+        typeof body?.text === "string" ? body.text.split("\n").length : -1;
+      const speakersOk =
+        hitsA.length === 1 &&
+        hitsB.length === 1 &&
+        (hitsA[0]?.body?.batch?.msgs ?? []).every((item: any) => item.id === SPEAKER_A) &&
+        (hitsB[0]?.body?.batch?.msgs ?? []).every((item: any) => item.id === SPEAKER_B);
+      add(
+        "G15b",
+        "每群各调核 1 次，段里只带本群的行（不串群、不串人）",
+        speakersOk && linesOfBody(hitsA[0]?.body) === 2 && linesOfBody(hitsB[0]?.body) === 2,
+        "A 群调核 " + hitsA.length + " 次（" + linesOfBody(hitsA[0]?.body) + " 行）、B 群 " + hitsB.length +
+          " 次（" + linesOfBody(hitsB[0]?.body) + " 行）",
+      );
+      const actionGroups = actions.map((frame) => Number(frame?.params?.group_id)).sort();
+      add(
+        "G15c",
+        "两段各回一条，action 分别进各自的群（不串群）",
+        actions.length === 2 && actionGroups.join(",") === [groupA, groupB].sort().join(","),
+        "action " + actions.length + " 个 → groups=[" + actionGroups.join(",") + "]",
+      );
+    }
+
     // ---- G13：出站全败（协议端不回 ack）→ 配额退还 ----
     {
       const groupId = nextGroup();
@@ -1167,6 +1219,247 @@ const runBatchSuite = async (config: Config): Promise<void> => {
   process.exit(allPass ? 0 : 1);
 };
 
+// /say 的 ledger key 是 `say-<n>`，而 n 是**进程内**序号：通道重启后会从 say-1 重来，
+// 所以同一个 key 在账里会有好几组。演练按「本段开始时刻之后的行」归属，再核对 key 与响应 id 一致。
+const sayRowsSince = (path: string, caseStart: number): LedgerRow[] =>
+  readRowsFile(path).filter((row) => {
+    if (typeof row.key !== "string" || !row.key.startsWith("say-")) return false;
+    const stamp = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    return Number.isFinite(stamp) && stamp >= caseStart - 100;
+  });
+
+// ---------- G14 组：POST /say（主动开口） ----------
+// 这条路一个核调用都没有，所以不需要假核：通道随便给个不可达的 --core 地址就行（/say 永远不碰它）。
+const postJson = async (url: string, body: unknown): Promise<{ status: number; json: Record<string, any> | null }> => {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let json: Record<string, any> | null = null;
+  try {
+    json = (await response.json()) as Record<string, any>;
+  } catch {
+    json = null;
+  }
+  return { status: response.status, json };
+};
+
+const runSaySuite = async (config: Config): Promise<void> => {
+  const policy = loadPolicy();
+  const defaultReplies = policy.outbound.defaultReplies;
+  const perGroupMax = policy.quota.perGroupMax;
+  let channel = await startChannel("http://127.0.0.1:1", "send");
+  ackEnabled = true;
+  socket = await connect(channel.url);
+  const sayUrl = (): string => "http://127.0.0.1:" + channel.port + "/say";
+  let groupSeq = 0;
+  const groupBase = 760_000_000 + (Date.now() % 90_000) * 100;
+  const nextGroup = (): number => {
+    groupSeq += 1;
+    return groupBase + groupSeq;
+  };
+  say("G14：/say 通道 " + channel.url + "（mode=send；核地址故意不可达——这条路不调核）");
+  add("G14-0", "/say 的通道起来了（send 模式，不需要核）", true, channel.url);
+
+  try {
+    // ---- G14a：真发 ----
+    {
+      const groupId = nextGroup();
+      const caseStart = Date.now();
+      const start = mark();
+      const res = await postJson(sayUrl(), {
+        scene: "group",
+        target: groupId,
+        chunks: [
+          { text: "主动第一泡", send_at: 0 },
+          { text: "主动第二泡", send_at: 0 },
+        ],
+      });
+      await sleep(300);
+      const actions = actionsSince(start);
+      const id = String(res.json?.id ?? "");
+      const sentRows = sayRowsSince(config.ledger, caseStart).filter(
+        (row) => row.kind === "sent" && row.key === id,
+      );
+      const decision = decisionRowsSince(config.decisions, caseStart).pop();
+      add(
+        "G14a",
+        "群 2 泡：2 个 action、2 行 sent retcode=0、决策 sent+proactive（msgs=0）、响应 ok:true sent:2",
+        res.status === 200 &&
+          res.json?.ok === true &&
+          res.json?.sent === 2 &&
+          actions.length === 2 &&
+          sentRows.length === 2 &&
+          sentRows.every((row) => row.retcode === 0) &&
+          decision?.machine?.reason_code === "sent" &&
+          decision?.machine?.source === "proactive" &&
+          decision?.machine?.batch?.msgs === 0 &&
+          decision?.machine?.target === "group:" + groupId,
+        "status=" + res.status + " ok=" + String(res.json?.ok) + " sent=" + String(res.json?.sent) +
+          " actions=" + actions.length + " sentRows=" + sentRows.length +
+          " decision=" + String(decision?.machine?.reason_code) + "/" + String(decision?.machine?.source) +
+          " msgs=" + String(decision?.machine?.batch?.msgs),
+      );
+      add(
+        "G14a2",
+        "echo 仍是 req-<n>-<i>、泡序号从 0 递增",
+        checkEchoSequence(actions.map((frame) => String(frame?.echo))).length === 0,
+        actions.map((frame) => String(frame?.echo)).join(","),
+      );
+    }
+
+    // ---- G14c：群配额打满（先跑，后面的 G14d 要借它的「已满」状态） ----
+    const quotaGroup = nextGroup();
+    {
+      const responses: Array<Record<string, any> | null> = [];
+      for (let index = 0; index < perGroupMax; index += 1) {
+        const res = await postJson(sayUrl(), { scene: "group", target: quotaGroup, chunks: [{ text: "配额" + (index + 1) }] });
+        responses.push(res.json);
+      }
+      const start = mark();
+      const seventh = await postJson(sayUrl(), { scene: "group", target: quotaGroup, chunks: [{ text: "该被挡了" }] });
+      await sleep(400);
+      const actions = actionsSince(start);
+      const lastRow = readDecisionRows(config.decisions).pop();
+      add(
+        "G14c",
+        "同群连发 " + perGroupMax + " 次后第 " + (perGroupMax + 1) + " 次：ok:false quota_exceeded、0 action、决策 quota_exceeded",
+        responses.every((json) => json?.ok === true) &&
+          seventh.status === 200 &&
+          seventh.json?.ok === false &&
+          seventh.json?.reason_code === "quota_exceeded" &&
+          actions.length === 0 &&
+          lastRow?.machine?.reason_code === "quota_exceeded" &&
+          lastRow?.machine?.target === "group:" + quotaGroup,
+        "前 " + perGroupMax + " 次 ok=" + JSON.stringify(responses.map((json) => json?.ok)) +
+          " 第 " + (perGroupMax + 1) + " 次 ok=" + String(seventh.json?.ok) + " reason=" + String(seventh.json?.reason_code) +
+          " actions=" + actions.length + " 决策末行=" + String(lastRow?.machine?.reason_code),
+      );
+    }
+
+    // ---- G14d：群配额已满时，私聊照样能开口 ----
+    {
+      const start = mark();
+      const res = await postJson(sayUrl(), { scene: "private", target: 3000000003, chunks: [{ text: "私聊也说一句" }] });
+      await sleep(300);
+      const actions = actionsSince(start);
+      add(
+        "G14d",
+        "群配额已满时私聊 /say 仍 ok:true 且真发出去（send_private_msg）",
+        res.json?.ok === true &&
+          actions.length === 1 &&
+          actions[0]?.action === "send_private_msg" &&
+          actions[0]?.params?.user_id === 3000000003,
+        "ok=" + String(res.json?.ok) + " action=" + String(actions[0]?.action) + " user=" + String(actions[0]?.params?.user_id),
+      );
+    }
+
+    // ---- G14e：三道上限（4 泡 > maxChunks） ----
+    {
+      const groupId = nextGroup();
+      const caseStart = Date.now();
+      const start = mark();
+      const res = await postJson(sayUrl(), {
+        scene: "group",
+        target: groupId,
+        chunks: [1, 2, 3, 4].map((index) => ({ text: "第" + index + "泡", send_at: 0 })),
+      });
+      await sleep(300);
+      const actions = actionsSince(start);
+      const text = String(actions[0]?.params?.message?.[0]?.data?.text ?? "");
+      const decision = decisionRowsSince(config.decisions, caseStart).pop();
+      add(
+        "G14e",
+        "4 泡（>maxChunks=" + policy.outbound.maxChunks + "）→ 只发 1 条默认短句、决策 replaced_too_long",
+        res.json?.ok === true && actions.length === 1 && defaultReplies.includes(text) &&
+          decision?.machine?.reason_code === "replaced_too_long",
+        "ok=" + String(res.json?.ok) + " actions=" + actions.length + " text=" + JSON.stringify(text) +
+          " reason=" + String(decision?.machine?.reason_code),
+      );
+    }
+
+    // ---- G14f：坏输入一律 400 ----
+    {
+      const cases: Array<{ name: string; body: unknown }> = [
+        { name: "scene=unknown", body: { scene: "unknown", target: 700000001, chunks: [{ text: "x" }] } },
+        { name: "target 非数字", body: { scene: "group", target: "700000001", chunks: [{ text: "x" }] } },
+        { name: "chunks:[]", body: { scene: "group", target: 700000001, chunks: [] } },
+      ];
+      const results: string[] = [];
+      let allBad = true;
+      for (const item of cases) {
+        const res = await postJson(sayUrl(), item.body);
+        if (res.status !== 400 || res.json?.ok !== false) allBad = false;
+        results.push(item.name + ":" + res.status + "/ok=" + String(res.json?.ok));
+      }
+      add("G14f", "坏输入（scene / target / chunks 各一条）一律 400 + ok:false", allBad, results.join(" "));
+    }
+
+    // ---- G14g：别的路径一律 404 ----
+    {
+      const res = await postJson("http://127.0.0.1:" + channel.port + "/other", { hello: 1 });
+      add(
+        "G14g",
+        "非 /say 路径 → 404 且 message 固定",
+        res.status === 404 && res.json?.message === "只有 POST /say",
+        "status=" + res.status + " message=" + JSON.stringify(String(res.json?.message ?? "")),
+      );
+    }
+
+    // ---- G14b：silent（换一条 silent 通道） ----
+    {
+      await channel.stop();
+      channel = await startChannel("http://127.0.0.1:1", "silent");
+      ackEnabled = false;
+      try {
+        socket.close();
+      } catch {
+        /* 收尾而已 */
+      }
+      socket = await connect(channel.url);
+      const groupId = nextGroup();
+      const caseStart = Date.now();
+      const start = mark();
+      const res = await postJson(sayUrl(), {
+        scene: "group",
+        target: groupId,
+        chunks: [
+          { text: "silent 第一泡", send_at: 0 },
+          { text: "silent 第二泡", send_at: 0 },
+        ],
+      });
+      await sleep(Math.min(3000, config.wait));
+      const actions = actionsSince(start);
+      const id = String(res.json?.id ?? "");
+      const blocked = sayRowsSince(config.ledger, caseStart).filter(
+        (row) => row.kind === "blocked" && row.key === id,
+      );
+      const decision = decisionRowsSince(config.decisions, caseStart).pop();
+      add(
+        "G14b",
+        "silent：0 个 action、1 行 blocked（text 是整段原文）、决策 silent_mode+proactive、响应 ok:false",
+        res.status === 200 &&
+          res.json?.ok === false &&
+          actions.length === 0 &&
+          blocked.length === 1 &&
+          String(blocked[0]?.text ?? "").includes("silent 第一泡") &&
+          String(blocked[0]?.text ?? "").includes("silent 第二泡") &&
+          decision?.machine?.reason_code === "silent_mode" &&
+          decision?.machine?.source === "proactive",
+        "ok=" + String(res.json?.ok) + " reason=" + String(res.json?.reason_code) + " actions=" + actions.length +
+          " blocked=" + blocked.length + " text=" + JSON.stringify(String(blocked[0]?.text ?? "")) +
+          " decision=" + String(decision?.machine?.reason_code) + "/" + String(decision?.machine?.source),
+      );
+    }
+  } finally {
+    await channel.stop();
+  }
+
+  const allPass = printTable();
+  process.exit(allPass ? 0 : 1);
+};
+
 const main = async (): Promise<void> => {
   const config = parseConfig(process.argv.slice(2));
   if (config.help) {
@@ -1179,6 +1472,11 @@ const main = async (): Promise<void> => {
   // G 组自成一体：自己起假核 + 通道，不碰 --url 上那个（也不读它的模式）。
   if (config.batch) {
     await runBatchSuite(config);
+    return;
+  }
+  // G14 组（/say）同样自成一体：这条路不调核，所以不需要假核。
+  if (config.say) {
+    await runSaySuite(config);
     return;
   }
 

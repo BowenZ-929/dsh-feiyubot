@@ -606,7 +606,7 @@ M4 只换**粒度**：原来是「一条消息一次核调用」，现在是「*
 
 | 文件 | 作用 |
 | --- | --- |
-| `batch.ts` | 合批：什么时候开段、deadline 到哪、这段装了谁（时钟由调用方传入，边界才能被钉成数字） |
+| `batch.ts` | 合批：什么时候开段、deadline 到哪、这段装了谁（**按会话分开**：`group:<id>` / `user:<id>` 各有自己的 open 与「上一条到达时刻」） |
 | `segment.ts` | 段渲染：一行一条 `昵称(id)：原话`，原话里的换行原样保留 |
 | `compose.ts` | 三道上限（字 / 句 / 条）：越界**整批换成一句短的**，绝不截半句 |
 | `decide.ts` | 决策账：每段恰好一行，人话给人看、结构化给面板指认 |
@@ -794,6 +794,7 @@ node channels/onebot/tools/drill.ts --batch
 | G11a..G11c | refund：同群 6 段 `send:false` 后配额仍是 **0 条**、第 7 段真的出手（配额只被它自己占一次）；对照组 6 次真出手后第 7 次 `quota_exceeded` 且不出手 |
 | G12a..G12d | silent 仍然**调核 1 次**、0 个 action、`blocked` 行 `text` 非空、决策账 `silent_mode`、且该群配额**没有新增时间戳** |
 | G13a..G13d | **出站全败**（假核回两泡、drill 故意不回 ack）：该群配额仍是 0 条（退还）、ledger 里有 `uncertain`/`unsent` 行、决策账仍一行且 `decided=silent`；对照组正常 ack 的那段配额 1 条不退 |
+| G15a..G15c | **会话隔离**：A/B 两群交替各说 2 句 → 恰好 2 段、决策行 `target` 各自正确、每群只调核 1 次且段里只带本群的人、两条 action 分别进各自的群 |
 
 跑一遍约 2 分钟（G3 要真等 31s 空档，G5 要等满 8s 硬顶，G11 要跑 13 段）。全 PASS 退出码 0。
 
@@ -802,6 +803,7 @@ node channels/onebot/tools/drill.ts --batch
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--batch` | 关 | 只跑 G 组，自己起假核 + 通道，不碰 `--url` 上那个 |
+| `--say` | 关 | 只跑 G14 组（`POST /say` 主动开口），自己起通道，不调核 |
 | `--decisions <path>` | `channels/onebot/.state/decisions.jsonl` | G 组读的决策账；必须和通道写的是同一个 |
 | `server.ts --port <n>` | `6200` | 端口。G 组靠它起独用端口的通道（不抢线上那个 6200） |
 
@@ -819,28 +821,118 @@ node channels/onebot/tools/drill.ts --batch
    （`waited_ms=0` 但 `ts−at≈2000`），这是合批的本意，不是误差。
 4. **G1 用 1.6s 而不是 2.0s**：`tiersMs.sameSpeaker` 就是 2000ms，2.0s 正好压在 deadline 上
    （谁先跑由定时器与网络抖动决定），实测会劈成两段。1.6s 才是「同人连说三句进一段」的稳定判据。
-5. **G3 要先等一个真空档**：`quietGapMs`（30s）的计时器是**进程级、跨群**的（`batch.ts` 的 `lastArrivalAt`），
-   刚跑完上一段就接着发，第一条会按**活跃档 5000ms** 开段，整段变成 `[2,2,2]`（实测）。
-   所以 G3 先真等 31s，才有 `[1,2,2,1]`；speaker 序列按实测 `A | B,A | B,A | B` 断言。
+5. **G3 用新群号就够，不用再空等**：`quietGapMs`（30s）的「上一条到达」现在是**按会话**存的，
+   新群的第一条必然是安静档（`quietOpen` 2000ms），所以 `[1,2,2,1]` 直接成立。
+   （旧实现是进程级单值，那时不空等 31s 就会变成 `[2,2,2]`——实测过，已随按会话分批一起修掉。）
+   speaker 序列按实测 `A | B,A | B,A | B` 断言。
 6. **@ 的 ≤1000ms 只能是「等待上限」**：`mentionCapMs=1000` 卡的是**等多久**，之后还要送核 + 下发，
    实测 1004–1007ms。所以判据写成「≤1200ms（1000 + 余量）」，实测值打进结论表。
 7. **G5 用无竞态版本**：第 9 条（t=8000）正好压在 `hardCap` 上，谁先跑由抖动决定，所以断言写成
-   `waited_ms≤8000` + `出手−firstAt≤8500` + 条数≥8 + **第二段 firstAt − 第一段 firstAt ≥ 8000**，
-   不去赌「第二段恰好 1 条、firstAt=9000」。
-8. **refund 只在「确认她没出手」之后**：`send:false` / `chunks:[]` / 全空白泡 / 核出错 / **出站全败（`sent === 0`）**
-   会 `quota.refund` 退回刚扣的那一次；`replaced_too_long`（她真发了一条短句）与正常 `sent`（`sent ≥ 1`）不退；
-   `silent_mode` 本来就没扣。所有入口共用同一个带 `charged` 标志的 `refund()`，所以**一条路径只退一次**。
-   实测：同群连打 6 段 `send:false` 后配额 **0 条**、第 7 段照样出手（G11）；6 段真出手后第 7 段 `quota_exceeded`（G11c/G8）；
-   协议端不回 ack 的那段配额也回到 0 条（G13）。
-9. **决策账有 `target` / `reason` / `outbound_failed` 了**：`machine.target` 是 `group:<id>` / `user:<id>`；
-   `machine.reason` 是核给的自由文本（没有就 `null`）；`why` 只描述门（`第 N 道门 X 拦下了`），**不再把理由塞进门名**。
-   `outbound_failed` 是「出站全败」自己的 code（人话「没回：发出去了但没确认（协议端没回执）」），
-   不再借 `core_error`——措辞差别是刻意 的：ack 超时时我们并不知道对方收没收到。
-10. **`--port` 是演练必需的**：G 组要起自己的通道（不能抢线上 6200），默认值仍是 `6200`，线上行为没变。
-11. **演练的群号默认每次新造**：M4 有每群 1 小时配额，写死一个群（原来是 `700000001`）会让一小时内的**第二遍**
-    `--expect-mode send` 被 `quota_exceeded` 挡住、结论表全红——那不是回归，是配额在按设计工作。
-    显式写 `--group <id>` 就照用（要复现「配额用尽」时正好用得上）。
-12. **配额拒绝只落决策账**：`quota_exceeded` 那一段在 `ledger.jsonl` 里只有 `batched` 行、没有结论行
-    （「为什么没发」写在 `decisions.jsonl`）。这是「消息账讲进没进来、决策账讲为什么没发」的直接结果。
-13. **决策行按时间窗归属**：G 组各段串行跑，drill 用「本段开始时刻之后的行」来认领自己的决策行；
-    要按群直接过滤，得给决策行再加 `groupId`（本轮只有 `target`）。
+# M5 主动开口：`POST /say`
+
+M5 给通道加一个**内部入口**：没人说话、她自己想说的时候，由核侧（或运维）直接投一段话。
+它走的**是同一条出站管线**，不是第二条发送路径：
+
+```
+POST /say → 门（silent）→ 群配额 → 三道上限 → planChunks + runBatch（分泡/ack/每泡一行账）→ 决策账一行
+```
+
+## HTTP 与 WS 共用一个端口
+
+```ts
+const httpServer = createServer(handleHttp);          // 只认 POST /say，别的一律 404
+const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+httpServer.listen(PORT, HOST);                        // 仍然是 127.0.0.1:6200（--port 可覆盖）
+```
+
+- **只绑 `127.0.0.1`，不做鉴权**：这是本机内部接口。
+- 只处理一条路：`POST /say`；其它路径/方法一律 `404 {"ok":false,"message":"只有 POST /say"}`。
+- 监听失败（`EADDRINUSE`）行为不变：打一行 `监听失败：…，进程退出`，**退出码 1**（实测见下）。
+  注意：`ws` 挂在已有 `http.Server` 上时会把 server 的 `error` 再转发成 `wss` 的 `'error'`，
+  所以 `wss.on("error")` 要留一个空监听器（否则进程会带着堆栈崩，把我们那句人话吃掉）。
+- 请求体上限 **64KB**，非 JSON 一律 `400` + 一句中文。
+
+## 请求 / 响应（实测）
+
+```bash
+curl -s -X POST http://127.0.0.1:6261/say \
+  -H 'content-type: application/json' \
+  -d '{"scene":"group","target":791000001,"chunks":[{"text":"主动第一泡","send_at":0},{"text":"主动第二泡","send_at":0.5}]}'
+# {"ok":true,"id":"say-1","source":"proactive","sent":2,"stopped":null,"reason_code":"sent"}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `scene` | **只认** `group` / `private`（`unknown` 400：主动开口没有「不知道发给谁」这一档） |
+| `target` | 群号 / QQ 号，必须有限正整数 |
+| `chunks` | 非空数组；每项 `text` 非空字符串，`send_at` 可缺省为 0（浮点秒） |
+| `source` | **请求里的 source 一律忽略**：这条路恒为 `proactive` |
+
+坏输入一律 `400`，`ok:false` + 一句中文（`scene 只认 group 或 private（拿到 "unknown"）` /
+`target 必须是有限正整数（拿到 "700000001"）` / `chunks 必须是非空数组`）。
+
+响应（除 400/404 外一律 `200`，**发送同步等完再回**，方便调用方和 drill 立刻对账）：
+
+```json
+{ "ok": true, "id": "say-1", "source": "proactive", "sent": 2, "stopped": null, "reason_code": "sent" }
+```
+
+- `ok` = 这一轮算不算「出手了」：`sent` / `replaced_too_long` 为 `true`，其余（`silent_mode` /
+  `quota_exceeded` / `core_empty` / `outbound_failed`）为 `false`。
+- **被拒也是 200**：`silent` 与 `quota_exceeded` 是「正常决定」，不是服务器错误。
+
+## 管线顺序（钉死）
+
+1. **门**：`silent` → 不发送，落 1 行 `blocked`（`text` 是整段原文、note 带 `chunks=N send_at=[…]`，
+   仍然是 `runBatch` 的 silent 分支在写）+ 决策账 `silent_mode`。
+2. **配额**：`quota.charge(targetOf(where), now, false)` —— 群也计（不然主动开口能刷屏），
+   `mentioned` 恒 `false`；私聊按 `user:` 前缀自动跳过。不 ok → 决策账 `quota_exceeded`、`ok:false`、0 个 action。
+3. **三道上限**：`enforceLimits(chunks, id, policy)`：越界整批换成一句短的（sha256 按 id 选，永远同一句）。
+4. **发送**：`planChunks` + `runBatch`（**这一层一个字都没改**），`echo` 仍是 `req-<n>-<i>`。
+5. **收尾**：恰好一行决策账：`machine.source="proactive"`、
+   `machine.batch={id:"say-<n>", msgs:0, waited_ms:0, tier:"proactive", at:<墙钟 ISO>}`
+   （`msgs=0` 表示「没有入站消息」，不是泡数）；gates 顺序 `mode → quota → limits`（没有 `core` 门）。
+6. **出站全败**（`sent===0` 且 stopped 是 failed/uncertain/unsent/ack 超时/没有连接）→
+   与入站一致：`reason_code="outbound_failed"` + 退还这一次配额（同一个带 `charged` 的 `refund()`，只退一次）。
+
+## 决策账多一个 `source`
+
+```json
+{"ts":"…","kind":"decision","scene":"group","human":"回了：接话","machine":{"batch":{"id":"say-1","msgs":0,"waited_ms":0,"tier":"proactive","at":"2026-11-06T04:41:5x.xxxZ"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":false}],"decided":"sent","why":"门全过（2 道），照发","reason_code":"sent","scene":"group","target":"group:791000001","reason":null,"source":"proactive"}}
+```
+
+- `machine.source`：`"inbound"`（入站合批那条路）或 `"proactive"`（`/say`）；**缺省是 `inbound`**，
+  所以既有入站调用点一行不改也照旧，认不出的值会当场抛。
+- `ledger.jsonl` 的 schema **没变**：来源只由决策账承担；`/say` 的 ledger 行 `key=say-<n>`、`messageId=null`。
+
+## 演练：`drill --say`（G14 组）
+
+```bash
+node channels/onebot/tools/drill.ts --say
+```
+
+自己起一条通道（`--core` 指向一个不可达地址就行——`/say` 不调核），默认不跑（`--batch` 仍是 40 条那套）。
+
+| 断言 | 它在验什么 |
+| --- | --- |
+| G14a | 群 2 泡：2 个 action、账里 2 行 `sent` `retcode=0`、决策 `sent`+`source=proactive`（`msgs=0`）、响应 `ok:true sent:2` |
+| G14a2 | `echo` 仍是 `req-<n>-<i>`、泡序号从 0 递增 |
+| G14b | silent：0 个 action、1 行 `blocked`（`text` 是整段原文）、决策 `silent_mode`+`proactive`、响应 `ok:false` |
+| G14c | 同群连发 `perGroupMax`(6) 次后第 7 次：`ok:false` + `quota_exceeded`、0 个 action、决策末行 `quota_exceeded` |
+| G14d | 群配额已满时私聊 `/say` 仍 `ok:true` 且真发出去（`send_private_msg`） |
+| G14e | 一次给 4 泡（> `maxChunks=3`）→ 只发 1 条默认短句、决策 `replaced_too_long` |
+| G14f | 坏输入（`scene:unknown` / `target` 非数字 / `chunks:[]`）三条都 `400` + `ok:false` |
+| G14g | 非 `/say` 路径 → `404` 且 `message` 固定 |
+
+## 已知边界
+
+1. **M1（没给 `--core`）下 `/say` 返回 `503`**：没有系数、没有账、而且 M1 不许建 `.state`，所以直说不接活。
+2. **没有 WS 连接时 `/say` 发不出去**：`isSocketOpen()` 为假 → `runBatch` 落 `unsent`、决策 `outbound_failed`、
+   配额退回、HTTP 仍是 `200 {ok:false}`——「没人接」是运行时事实，不是服务器错误。
+3. **`/say` 的 `id` 是进程内序号**（`say-1`, `say-2`…）：重启后从 `say-1` 重来，落账时靠时间戳区分。
+4. **演练不要并发跑**：`--batch` / `--say` / `--expect-mode …` 都用同一份 `.state`，
+   并发时决策行的「时间窗归属」会串（实测：两套演练同时跑，G1/G2 会误判）。一次只跑一套。
+5. **合批按会话分开**（已修）：`batch.ts` 的 `opens` / `queues` / `lastArrivals` 都是 `Map<会话键, …>`，
+   会话键就是 `gate.targetOf` 那套（`group:<id>` / `user:<id>`）。两个群同时说话各自成段、各回各的群
+   （drill G15 钉住这条）；`batchId` 仍是全局递增的 `b1,b2,…`。
+   注意：**演练仍然一次只跑一套**——原因不是合批，而是多套演练共用同一份 `.state`，决策行只能按时间窗归属。
