@@ -17,7 +17,7 @@
 // --wait 是「一个观察窗口」的毫秒数：窗口内不早退，才能真的断言「一个 action 都没有」。
 // 发送模式下窗口必须盖住整批节奏（send_at 的首泡到末泡），默认 8000ms 够 [0,1.6,3.2] 这种排布。
 import WebSocket from "ws";
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -454,6 +454,24 @@ const GATE_BAD_ARR = "GATEBADARR";
 const GATE_BAD_NULL = "GATEBADNULL";
 // M7：这条消息让假核回一个很低的 recalled 分（低于 recalledMinScore）——用来验 (c) 门。
 const LOW_RECALL_MARK = "LOWRECALL";
+// M10：换行切泡用的几种回包（换行符是内容，不是排版）。
+const NL1_MARK = "NLONE";
+const NL3_MARK = "NLTHREE";
+const NL5_MARK = "NLFIVE";
+const TRAIL_MARK = "NLTRAIL";
+const BLANK_MARK = "NLBLANK";
+const LONGNL_MARK = "NLLONG";
+
+const replyTextFor = (text: string): string => {
+  if (text.includes(NL5_MARK)) return "一\n二\n三\n四\n五\n六";
+  if (text.includes(NL3_MARK)) return "甲\n乙\n丙";
+  if (text.includes(NL1_MARK)) return "上泡\n下泡";
+  if (text.includes(TRAIL_MARK)) return "只有一行\n";
+  if (text.includes(BLANK_MARK)) return "第一句\n \n第三句";
+  // 单泡超过 512 字（第 2 泡很短）：切完第一泡就超上限 → 走「整批换短句」，仍是 1 泡。
+  if (text.includes(LONGNL_MARK)) return "长".repeat(600) + "\n" + "短";
+  return "在的";
+};
 
 const gateHitSummary = {
   at: "2026-11-06T05:00:00.000Z",
@@ -595,7 +613,7 @@ const startFakeCore = async (): Promise<FakeCore> => {
             ? { ok: true, chunks: [] }
             : text.includes(TWO_MARK)
               ? { ok: true, chunks: [{ text: "第一泡", gap_before: 0, send_at: 0 }, { text: "第二泡", gap_before: 0, send_at: 0 }] }
-              : { ok: true, chunks: [{ text: "在的", gap_before: 0, send_at: 0 }] };
+              : { ok: true, chunks: [{ text: replyTextFor(text), gap_before: 0, send_at: 0 }] };
       // 闸判摘要只在打了标记时挂上去：没标记的回包连 gate 这个键都不该有（那才是「没进闸」）。
       const summary = gateSummaryFor(text);
       // M7：默认让核「记得」这条（recalled 0.9 ≥ 阈值），老用例才会被 (c) 放行；
@@ -659,6 +677,8 @@ const startChannel = async (
   mode: "send" | "silent",
   stateDir: string,
   gatePath?: string,
+  homeDir?: string,
+  prefsPath?: string,
 ): Promise<Channel> => {
   let lastDump = "";
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -681,6 +701,8 @@ const startChannel = async (
         String(port),
         "--state",
         stateDir,
+        ...(homeDir === undefined ? [] : ["--home", homeDir]),
+        ...(prefsPath === undefined ? [] : ["--prefs", prefsPath]),
         // G1–G19 不测 burst 阀：给一份 burstMs=0 的临时词表（系数仍从文件读，路径注入）。
         ...(gatePath === undefined ? [] : ["--gate", gatePath]),
       ],
@@ -1672,6 +1694,155 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         "reason=" + String(stickerRow?.machine?.reason_code));
       add("G21i", "纯图无字 → reason=media_only", imageRow?.machine?.reason_code === "media_only",
         "reason=" + String(imageRow?.machine?.reason_code));
+    }
+
+    // ---- G22：换行 = 换泡（受 chunks_per_reply 上限；超了合回最后一泡） ----
+    {
+      // 演练自己的「家」：<state>/home，绝不写真正的 home/organs。
+      const homeDir = join(config.state, "home");
+      const prefsPath = join(config.state, "prefs.jsonl");
+      mkdirSync(dirname(prefsPath), { recursive: true });
+      writeFileSync(
+        prefsPath,
+        [
+          // 家的卡用 by 记人；演练也用 by（与家同形），但写在 /tmp 下。
+          JSON.stringify({ by: String(SPEAKER_A), kind: "偏好", params: { chunks_per_reply: 3 } }),
+          JSON.stringify({ by: String(SPEAKER_B), kind: "偏好", params: { chunks_per_reply: 9 } }), // 坏卡：9 不在 1–3
+          JSON.stringify({ by: "3100000009", kind: "偏好", params: { chunks_per_reply: 1 } }),
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      await channel.stop();
+      channel = await startChannel(core.url, "send", config.state, undefined, undefined, prefsPath);
+      ackEnabled = true;
+      try {
+        socket.close();
+      } catch {
+        /* 收尾而已 */
+      }
+      socket = await connect(channel.url);
+      say("G22：换行切泡通道 " + channel.url + "（home=" + homeDir + "）");
+
+      const caseOf = async (speaker: number, text: string) => {
+        const group = nextGroup();
+        const since = Date.now();
+        const markAt = mark();
+        const messageId = post(group, speaker, text);
+        const decisions = await waitForTargetDecisionRows(config.decisions, "group:" + group, since, 1, 25000);
+        await sleep(500);
+        return {
+          messageId,
+          rows: rowsFor(readRowsFile(config.ledger), "mid:" + messageId),
+          decision: decisions[decisions.length - 1],
+          actions: actionsSince(markAt).length,
+          texts: actionsSince(markAt).map((frame) => String(frame?.params?.message?.[0]?.data?.text ?? "")),
+        };
+      };
+
+      // ① 1 个换行 → 2 泡
+      const one = await caseOf(SPEAKER_A, "小肥鱼 换行一句 " + NL1_MARK);
+      const oneSent = one.rows.filter((row) => row.kind === "sent");
+      add(
+        "G22a",
+        "1 个换行 → 2 个气泡（2 个 action、账里 2 行 sent index 0/1、决策仍 1 行）",
+        one.actions === 2 && oneSent.length === 2 && oneSent.map((row) => row.index).join(",") === "0,1" &&
+          one.decision !== undefined,
+        "action " + one.actions + " 个，sent " + oneSent.length + " 行 index=[" +
+          oneSent.map((row) => String(row.index)).join(",") + "]",
+      );
+
+      // ② 5 个换行 + chunks_per_reply=3 → 3 泡，拼回去 == 原文
+      const five = await caseOf(SPEAKER_A, "小肥鱼 五行 " + NL5_MARK);
+      const fiveSent = five.rows.filter((row) => row.kind === "sent");
+      const fiveTexts = fiveSent.map((row) => String(row.text ?? ""));
+      add(
+        "G22b",
+        "5 个换行 + chunks_per_reply=3 → 3 泡，按 \\n 拼回去 == 原文；决策 style.merged=chunk_cap",
+        fiveSent.length === 3 &&
+          fiveTexts.join("\n") === "一\n二\n三\n四\n五\n六" &&
+          JSON.stringify(five.decision?.machine?.style) === JSON.stringify({ merged: [{ reason: "chunk_cap" }] }),
+        "sent " + fiveSent.length + " 行，拼回=" + JSON.stringify(fiveTexts.join("\n")) +
+          "，style=" + JSON.stringify(five.decision?.machine?.style),
+      );
+
+      // ③ 只有行尾换行 → 1 泡，且不含行尾换行
+      const trail = await caseOf(SPEAKER_A, "小肥鱼 行尾 " + TRAIL_MARK);
+      const trailSent = trail.rows.filter((row) => row.kind === "sent");
+      add(
+        "G22c",
+        "只有行尾换行 → 1 泡、文本不含行尾换行",
+        trail.actions === 1 && trailSent.length === 1 && String(trailSent[0]?.text ?? "") === "只有一行",
+        "action " + trail.actions + " 个，text=" + JSON.stringify(String(trailSent[0]?.text ?? "")),
+      );
+
+      // ④ 空行不产生气泡
+      const blank = await caseOf(SPEAKER_A, "小肥鱼 空行 " + BLANK_MARK);
+      const blankTexts = blank.texts;
+      add(
+        "G22d",
+        "「第一句\\n \\n第三句」→ 不产生空气泡（每一泡都非空白）",
+        blankTexts.length === 2 && blankTexts.every((text) => text.trim().length > 0),
+        "气泡 " + blankTexts.length + " 个：[" + blankTexts.map((text) => JSON.stringify(text)).join(",") + "]",
+      );
+
+      // ⑤ >512 字且带换行 → 走替换短句，仍是 1 泡
+      const long = await caseOf(SPEAKER_A, "小肥鱼 超长 " + LONGNL_MARK);
+      const longSent = long.rows.filter((row) => row.kind === "sent");
+      add(
+        "G22e",
+        ">512 字且带换行 → replaced_too_long，且仍是 1 泡",
+        long.actions === 1 && longSent.length === 1 && long.decision?.machine?.reason_code === "replaced_too_long",
+        "action " + long.actions + " 个，reason=" + String(long.decision?.machine?.reason_code),
+      );
+
+      // ⑥ 坏卡（9）/ 缺卡 → 上限回落 3
+      const badCard = await caseOf(SPEAKER_B, "小肥鱼 坏卡 " + NL5_MARK);
+      const noCard = await caseOf(SPEAKER_C, "小肥鱼 缺卡 " + NL5_MARK);
+      const badSent = badCard.rows.filter((row) => row.kind === "sent").length;
+      const noSent = noCard.rows.filter((row) => row.kind === "sent").length;
+      const dump = channel.dump();
+      add(
+        "G22f",
+        "坏卡 chunks_per_reply=9 → 回落 3 且打 warn；缺卡 → 回落 3",
+        badSent === 3 && noSent === 3 && dump.includes("偏好卡有") && dump.includes("已跳过"),
+        "坏卡 " + badSent + " 泡、缺卡 " + noSent + " 泡，warn=" + String(dump.includes("偏好卡有")),
+      );
+
+      // ⑦ 子泡间隔 = newlineGapMs
+      const gapRows = oneSent.slice().sort((a, b) => Number(a.index) - Number(b.index));
+      const gap = gapRows.length === 2 ? Number(gapRows[1]?.send_at) - Number(gapRows[0]?.send_at) : Number.NaN;
+      add(
+        "G22g",
+        "子泡间隔 send_at 差 = " + policy.outbound.newlineGapMs / 1000,
+        Math.abs(gap - policy.outbound.newlineGapMs / 1000) < 1e-9,
+        "两泡 send_at 差 = " + String(gap),
+      );
+
+      // ⑧ 按人取卡：cap=1 的那张卡 → 「甲\n乙\n丙」只发 1 泡（合并回最后一泡）
+      const CAP_ONE = 3100000009;
+      const oneBubble = await caseOf(CAP_ONE, "小肥鱼 单泡 " + NL3_MARK);
+      const oneRows = oneBubble.rows.filter((row) => row.kind === "sent");
+      add(
+        "G22h",
+        "cap=1 的卡：三行合成 1 泡，text 就是「甲\\n乙\\n丙」，决策 style.merged=chunk_cap",
+        oneRows.length === 1 &&
+          String(oneRows[0]?.text ?? "") === "甲\n乙\n丙" &&
+          JSON.stringify(oneBubble.decision?.machine?.style) === JSON.stringify({ merged: [{ reason: "chunk_cap" }] }),
+        "sent " + oneRows.length + " 行，text=" + JSON.stringify(String(oneRows[0]?.text ?? "")) +
+          "，style=" + JSON.stringify(oneBubble.decision?.machine?.style),
+      );
+
+      // ⑨ 没卡的 who：回落 maxChunks=3 → 同样三行出 3 泡，style=null
+      const noCard3 = await caseOf(SPEAKER_C, "小肥鱼 三行 " + NL3_MARK);
+      const noCardRows = noCard3.rows.filter((row) => row.kind === "sent");
+      add(
+        "G22i",
+        "没卡的 who：上限回落 3 → 三行出 3 泡，style=null",
+        noCardRows.length === 3 && noCard3.decision?.machine?.style === null,
+        "sent " + noCardRows.length + " 行，style=" + JSON.stringify(noCard3.decision?.machine?.style),
+      );
     }
 
   } finally {

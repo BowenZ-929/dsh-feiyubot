@@ -43,6 +43,8 @@ export type OutboundPolicy = {
   maxChars: number;
   maxSentences: number;
   maxChunks: number;
+  // 换行切出来的子泡之间的间隔（毫秒）。第 i 个子泡 send_at = 父 send_at + i × newlineGapMs/1000。
+  newlineGapMs: number;
   defaultReplies: string[];
 };
 
@@ -148,6 +150,7 @@ export const readPolicy = (raw: unknown, label = "data/policy.json"): Policy => 
       maxChars: count(outbound.maxChars, "outbound.maxChars", label),
       maxSentences: count(outbound.maxSentences, "outbound.maxSentences", label),
       maxChunks: count(outbound.maxChunks, "outbound.maxChunks", label),
+      newlineGapMs: ms(outbound.newlineGapMs, "outbound.newlineGapMs", label),
       defaultReplies: lines(outbound.defaultReplies, "outbound.defaultReplies", label),
     },
     quota: {

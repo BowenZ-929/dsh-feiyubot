@@ -54,8 +54,9 @@ export type DecisionInput = {
   // 注意它和 gates（通道自己的门链）是两回事，两格并存、不许合并。
   gate?: Record<string, unknown> | null;
   // 定向判定的结论：为什么这次回 / 为什么不回。「被门拦下」时 rule=null。
-  // score 是核回的 recalled 最高分（没调核 / 没有 recalled 就是 null）。
   direct?: DecisionDirect | null;
+  // 出站样式（换行切泡 / 因上限合并）：没发生就是 null，**不写空对象**。
+  style?: Record<string, unknown> | null;
   batch: BatchSnapshot;
   gates: GateInput[];
 };
@@ -72,6 +73,7 @@ export type DecisionMachine = {
   source: "inbound" | "proactive";
   gate: Record<string, unknown> | null;
   direct: DecisionDirect;
+  style: Record<string, unknown> | null;
 };
 
 export type DecisionRow = {
@@ -162,6 +164,12 @@ export const makeDecision = (
       : null;
   const direct: DecisionDirect = { rule, ordinal };
 
+  // 出站样式：缺省同样是 null（与 gate 同一口径：没发生就是 null，绝不写空对象）。
+  const style = input.style ?? null;
+  if (style !== null && (typeof style !== "object" || Array.isArray(style))) {
+    throw new RangeError("machine.style 必须是 JSON 对象或 null");
+  }
+
   // 闸判摘要：缺省落到 null（不是 undefined——JSON.stringify 之后账里必须看得见 "gate":null）。
   const gate = input.gate ?? null;
   if (gate !== null && !isPlainObject(gate)) {
@@ -204,6 +212,7 @@ export const makeDecision = (
       source,
       gate,
       direct,
+      style,
     },
   };
 };

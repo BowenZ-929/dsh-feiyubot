@@ -72,6 +72,7 @@ test("决策：每批恰好一行，字段顺序固定", () => {
     "source",
     "gate",
     "direct",
+    "style",
   ]);
   assert.deepEqual(Object.keys(row.machine.batch), ["id", "msgs", "waited_ms", "tier", "at"]);
   assert.equal(row.kind, "decision");

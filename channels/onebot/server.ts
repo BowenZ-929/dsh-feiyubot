@@ -41,6 +41,8 @@ import { QUOTA_RELATIVE_PATH, Quota } from "./quota.ts";
 import { burstBlocked, chitchatSampled, firstLayer, loadGateWords, type DirectRule, type GateWords } from "./direct.ts";
 import { OWN_IDS_RELATIVE_PATH, OwnIds } from "./own-ids.ts";
 import { SEGMENTS_RELATIVE_PATH, SegmentCounter } from "./segments.ts";
+import { splitBubbles } from "./bubbles.ts";
+import { capFor, openPrefsStore, type PrefsStore } from "./prefs.ts";
 
 const HOST = "127.0.0.1";
 const WS_PATH = "/ws";
@@ -75,6 +77,20 @@ const CORE_TIMEOUT = readCoreTimeout(
 // --gate 只给演练用（G1–G19 不测 burst 阀，用一份 burstMs=0 的临时表）；
 // 线上就是 data/gate.json，系数一个都没写进代码（只注入路径）。
 const GATE_PATH = argOf("--gate", join(HERE, "data", "gate.json"));
+// --home <dir>：家的器官目录（与 plugin/api/roots.py 同口径：<仓库>/home/organs）。
+// 通道只**读** <home>/名片盒/prefs.jsonl 里的 chunks_per_reply，一个字节都不写家盘。
+const HOME_DIR = (() => {
+  const raw = argOf("--home", "");
+  if (raw.trim().length === 0) return resolve(HERE, "..", "..", "home", "organs");
+  return isAbsolute(raw) ? raw : resolve(raw);
+})();
+// 家器官的根是 <organ 父>/home（见 plugin/organs/paths.py：organ_dir("home") = home_root()/home）。
+// --prefs 用来显式覆盖（演练指到 /tmp，省得在双 home 里绕）。
+const PREFS_PATH = (() => {
+  const raw = argOf("--prefs", "");
+  if (raw.trim().length > 0) return isAbsolute(raw) ? raw : resolve(raw);
+  return join(HOME_DIR, "home", "名片盒", "prefs.jsonl");
+})();
 
 // --state <dir>：账本 / 决策账 / 配额 / 「她说过的话」四个文件全由它派生。
 // 不传 = 模块同级的 .state（与生产行为完全一致，start.command 不用改）。
@@ -139,6 +155,8 @@ let quota: Quota | null = null;
 let gateWords: GateWords | null = null;
 let ownIds: OwnIds | null = null;
 let segments: SegmentCounter | null = null;
+let prefs: PrefsStore | null = null;
+let prefsWarned: string | null = null;
 if (CORE_URL) {
   try {
     policy = loadPolicy();
@@ -162,6 +180,14 @@ if (CORE_URL) {
     quota = new Quota({ path: QUOTA_PATH, policy, onWarn: (message) => log("warn", message) });
     ownIds = new OwnIds({ path: OWN_PATH, onWarn: (message) => log("warn", message) });
     segments = new SegmentCounter({ path: SEGMENTS_PATH, onWarn: (message) => log("warn", message) });
+    prefs = openPrefsStore(PREFS_PATH);
+    // 回落必须可见：读不到卡就明说「上限回落 maxChunks」，别静默。
+    const startupPrefs = prefs.read();
+    if (startupPrefs.missing) {
+      log("warn", `偏好卡读不到（${PREFS_PATH}）：上限回落 maxChunks=${policy.outbound.maxChunks}`);
+    } else {
+      log("prefs", `偏好卡 ${PREFS_PATH}：${startupPrefs.prefs.size} 张（按 who 折最新）`);
+    }
     log(
       "direct",
       `定向门就绪：定向=@/外号/引用/私聊（不吃额度、不受 burst），闲聊每 ${gateWords.chitchatSampleMod} 段抽 1 段（burstMs=${gateWords.burstMs}）；own=${ownIds.size()} 条`,
@@ -330,7 +356,12 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
   let ordinal: number | null = null;
   const directNow = (): DecisionDirect => ({ rule, ordinal });
 
-  const decide = (extra: GateInput[], reason: string | null = null, gate: Record<string, unknown> | null = null): void => {
+  const decide = (
+    extra: GateInput[],
+    reason: string | null = null,
+    gate: Record<string, unknown> | null = null,
+    style: Record<string, unknown> | null = null,
+  ): void => {
     if (decided) return;
     decided = true;
     const all = [...gates, ...extra];
@@ -343,6 +374,8 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         reason,
         gate,
         direct: directNow(),
+        // 出站样式：因 chunks_per_reply 上限合并时写 {merged:[{reason:"chunk_cap"}]}，否则 null。
+        style,
         batch: {
           id: snapshot.batchId,
           msgs: snapshot.msgs.length,
@@ -499,7 +532,21 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       return;
     }
 
-    const limited = enforceLimits(reply.chunks, snapshot.batchId, policy);
+    // 顺序钉死：先按换行切泡（受该人的 chunks_per_reply 限制），再按上限合并，最后过三道上限。
+    const cap =
+      prefs === null
+        ? policy.outbound.maxChunks
+        : capFor(String(meta.who.id), prefs.read().prefs, policy.outbound.maxChunks);
+    if (prefs !== null) {
+      const prefsNow = prefs.read();
+      if (prefsNow.warn !== null && prefsNow.warn !== prefsWarned) {
+        prefsWarned = prefsNow.warn;
+        log("warn", prefsNow.warn);
+      }
+    }
+    const split = splitBubbles(reply.chunks, { gapSec: policy.outbound.newlineGapMs / 1000, cap });
+    const style = split.merged ? { merged: [{ reason: "chunk_cap" }] } : null;
+    const limited = enforceLimits(split.chunks, snapshot.batchId, policy);
     if (limited.reason === "core_empty") {
       await settle({ kind: "payload", payload: { ok: true, chunks: [] } });
       decide([{ name: "limits", code: "core_empty", hit: true }]);
@@ -518,10 +565,10 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     if (result.batch !== null && result.batch.sent > 0) lastSentAt.set(target, Date.now());
     const gateForRow = result.batch !== null && result.batch.sent > 0 ? gateSummary : null;
     if (limited.reason === "replaced_too_long") {
-      decide([{ name: "limits", code: "replaced_too_long", hit: true }], null, gateForRow);
+      decide([{ name: "limits", code: "replaced_too_long", hit: true }], null, gateForRow, style);
       return;
     }
-    decide([{ name: "limits", code: "core_empty", hit: false }], null, gateForRow);
+    decide([{ name: "limits", code: "core_empty", hit: false }], null, gateForRow, style);
   } catch (error) {
     const message = (error as Error).message;
     log("error", `段 ${snapshot.batchId} 处理异常，本轮收尾：${message}`);
@@ -774,6 +821,8 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
   const gates: GateInput[] = [];
   let charged = false;
   let decidedCode: string | null = null;
+  // style 先声明再赋值：配额拒绝那条路在 split 之前就会 decide（用 const 会踩 TDZ）。
+  let style: Record<string, unknown> | null = null;
 
   const decide = (extra: GateInput[]): string => {
     if (decidedCode !== null) return decidedCode;
@@ -787,6 +836,7 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
         // /say 这条路不调核：没有闸判可抄，也没有定向判据。
         gate: null,
         direct: { rule: null, ordinal: null },
+        style,
         // msgs=0：这一段没有入站消息（别塞 chunks 数——那是「泡」，不是「消息」）。
         batch: { id, msgs: 0, waited_ms: 0, tier: "proactive", at: new Date().toISOString() },
         gates: [...gates, ...extra],
@@ -820,8 +870,14 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
     gates.push({ name: "quota", code: "quota_exceeded", hit: false });
   }
 
+  // /say 没有「人」可言：上限只认 outbound.maxChunks（不读家的偏好卡），但换行照样切泡。
+  const split = splitBubbles(input.chunks, {
+    gapSec: policy.outbound.newlineGapMs / 1000,
+    cap: policy.outbound.maxChunks,
+  });
+  style = split.merged ? { merged: [{ reason: "chunk_cap" }] } : null;
   // 三道上限：越界就整批换成一句短的（sha256 按 id 选，同一批永远同一句）。
-  const limited = enforceLimits(input.chunks, id, policy);
+  const limited = enforceLimits(split.chunks, id, policy);
   const plan = planChunks(limited.chunks, Date.now());
   log("say", `${id} → ${target} chunks=${plan.length} send_at=[${plan.map((entry) => entry.send_at).join(",")}] mode=${gate.mode}`);
 

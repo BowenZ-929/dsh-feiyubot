@@ -20,6 +20,7 @@
     "maxChars": 512,
     "maxSentences": 8,
     "maxChunks": 3,
+    "newlineGapMs": 800,
     "defaultReplies": [
       "嗯，我在。",
       "……我在听。",
