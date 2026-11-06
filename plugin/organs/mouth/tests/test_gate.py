@@ -447,6 +447,116 @@ class ReciteAuditRidesTheGate(unittest.TestCase):
         self.assertIn("没有这一类", str(caught.exception))
 
 
+class RecitedLineIsCutOut(unittest.TestCase):
+    """复述命中之后：只删被审计命中的那一句，不把整泡弃成空串（这一轮改的）。
+
+    一句话的判据：**宁可她少说一句，不许她整句不说**。以前重写改不动、或改完还照搬，整条弃成空串——
+    她沉默了，比念台词更糟。素材与记号全从 data/audit.json 读，这里只验四件事：删哪一句、删完剩下
+    的照发、只剩那一句时才弃（reason 带 recited-only）、删完剩下的正文照样过其余判据。
+    """
+
+    BOOK = load("audit")
+    RECITED = BOOK["recited"]                 # 记号与那句人话都在数据里
+    MARKS = BOOK["sentence_marks"]
+    REPEAT = load("repeat")
+    SOUL = BOOK["setting_kinds"][0]
+    VERDICT = BOOK["verdicts"]["setting"]
+    SETTING = "背着主人偷吃"                   # 魂里那段原文（素材，不是判据）
+    REST = "今天风挺大的"                      # 同一泡里的另一句（素材）
+    BOTH = SETTING + MARKS[0] + REST + MARKS[0]
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def _inject(self, *texts):
+        return [{"kind": self.SOUL, "text": text} for text in (texts or (self.SETTING,))]
+
+    def test_only_the_recited_sentence_is_cut_out(self):
+        """一泡两句 + 重写回原样：出包只剩另一句，两条命中都留着，账上写清删了哪一句。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.BOTH, CLAUSES, _same, sink,
+                          inject=self._inject(), policy=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged, "救回来的那一笔要看得出来")
+        self.assertFalse(verdict.kept_after_rewrite, "留原话就是留一句抄来的话")
+        self.assertEqual(self.REST + self.MARKS[0], verdict.text)
+        self.assertEqual(2, len(verdict.hits), "改前改后两次命中都留着")
+        self.assertEqual(self.VERDICT, verdict.hits[-1].clause_id)
+        self.assertIn(self.VERDICT, seen[0][0])
+        self.assertIn(self.RECITED["status"], seen[0][1])
+        self.assertIn(self.SETTING, seen[0][1], "账上要说清删掉的是哪一句")
+        self.assertIn(self.RECITED["status"], verdict.reason)
+
+    def test_a_bubble_with_only_that_sentence_is_dropped(self):
+        """一泡只一句且念设定：删完没正文可发才弃，reason 带 recited-only（不是「整条判废」）。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.SETTING + self.MARKS[0], CLAUSES, _same, sink,
+                          inject=self._inject(), policy=self.BOOK)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertFalse(verdict.salvaged)
+        self.assertIn(self.RECITED["status"], verdict.reason)
+        self.assertIn(self.RECITED["status"], seen[0][1])
+
+    def test_a_rewrite_that_raises_still_keeps_the_rest(self):
+        """重写抛错（超时那一格）：退化成删那一句，不许整泡消失。"""
+        seen, sink = self._spy()
+
+        def _slow(text):
+            raise TimeoutError("改写超时")
+
+        verdict = enforce(self.BOTH, CLAUSES, _slow, sink,
+                          inject=self._inject(), policy=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertEqual(self.REST + self.MARKS[0], verdict.text)
+        self.assertIn(self.RECITED["status"], seen[0][1])
+
+    def test_without_a_rewriter_it_still_keeps_the_rest(self):
+        """没给重写器：同样删那一句，不再「改不了就弃空」。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.BOTH, CLAUSES, None, sink,
+                          inject=self._inject(), policy=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertEqual(self.REST + self.MARKS[0], verdict.text)
+        self.assertEqual(1, len(seen))
+        self.assertIn(self.SETTING, seen[0][1])
+
+    def test_a_comma_is_not_a_sentence_end(self):
+        """逗号不算句末：删的是含逗号的那一整句，后半截跟着一起走，别的句子一个字不动。"""
+        seen, sink = self._spy()
+        line = self.SETTING + "，" + "你别学" + self.MARKS[0] + self.REST + self.MARKS[0]
+        verdict = enforce(line, CLAUSES, None, sink,
+                          inject=self._inject(), policy=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.REST + self.MARKS[0], verdict.text)
+        self.assertIn("你别学", seen[0][1], "被删掉的是含逗号的那一整句")
+
+    def test_two_recited_sentences_are_cut_one_by_one(self):
+        """删完剩的正文还在照搬：接着删那一句，递归深度由句数封顶（删到没正文可发才弃）。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.BOTH, CLAUSES, None, sink,
+                          inject=self._inject(self.SETTING, self.REST), policy=self.BOOK)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual(1, len(seen), "弃掉的那一次记一笔账")
+        self.assertIn(self.RECITED["status"], seen[0][1])
+        self.assertEqual(2, len(verdict.hits), "两句照搬各留一条命中，弃的时候都在")
+
+    def test_the_rest_of_the_bubble_still_goes_through_the_other_judges(self):
+        """删过不等于放行：剩下的正文撞上内容重复，照旧弃掉，reason 用数据里那句 leftover。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.BOTH, CLAUSES, None, sink, inject=self._inject(),
+                          policy=self.BOOK, recent=[self.REST + self.MARKS[0]],
+                          repeat_table=self.REPEAT)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertIn(self.REPEAT["hit"]["clause_id"], verdict.reason)
+        self.assertIn(self.RECITED["status"], seen[-1][1])
+
+
 class ActionNoteRidesTheGate(unittest.TestCase):
     """动作括注（第三轮 B）接在条款后面：同一条路（改一次还不行就弃），判没判挂在 action_status 上。
 
@@ -891,8 +1001,11 @@ class ASecondHitKeepsTheOriginalLine(unittest.TestCase):
     以前二次命中即弃：她明明改了、也没改成红线，整泡却消失了。规矩是**在最该回答的那一句上沉默，
     比「说话带点毛病」糟得多**——所以 decision 是 pass、text 是进门那句（不是那个没改成的新稿），
     hits 两条都留着，账本记一行「<通道>-after-rewrite」。
-    四关（条款 / 动作括注 / 内容重复 / 复述审计）各验一遍：通道名与记号全从数据读。
+    三关（条款 / 动作括注 / 内容重复）各验一遍：通道名与记号全从数据读。
     放宽的前提是**给了红线表**（下面每一例都传 fatal=FATAL）；没给表的调用方照旧二次命中即弃。
+
+    **复述审计那一关不在这一格里**（这一轮改的）：照搬只长在那一句上，留原话等于留一句抄来的话，
+    所以它二次命中改成「删那一句」（见 RecitedLineIsCutOut 与 ReciteAuditRidesTheGate）。
     """
 
     FATAL = load("fatal")
@@ -901,6 +1014,8 @@ class ASecondHitKeepsTheOriginalLine(unittest.TestCase):
     NOTE = load("action_note")
     AUDIT = load("audit")
     SETTING = "嘴上不认，行动先到：拒绝的话说完，事已经做了"
+    SETTING_HALF = "嘴上不认，行动先到"      # 上面那句的前半截（素材：照搬回来的那一句）
+    REST = "今天风挺大的"                    # 同一泡里的另一句（素材：不是判据）
     FIRST = "主人回来啦，我把碗放桌上了。"
     AGAIN = "主人回来啦，灯我给你留着呢。"
     NOTED = "（尾巴在水里蜷了一下）可爱归可爱，那也不是胖。"
@@ -945,17 +1060,22 @@ class ASecondHitKeepsTheOriginalLine(unittest.TestCase):
         self.assertEqual("ok", verdict.repeat_status)
         self.assertIn(self.MARKS["repeat"], seen[0][1])
 
-    def test_the_recitation_that_survives_the_rewrite(self):
+    def test_the_recitation_that_survives_the_rewrite_is_cut_out(self):
+        """复述二次命中不在「留原话」那一格：只删照搬的那一句，剩下的照发，两条命中都留着。"""
         seen, sink = self._spy()
-        verdict = enforce(self.SETTING, CLAUSES, lambda text: text + "吧", sink,
-                          inject=self._inject(), policy=self.AUDIT, fatal=self.FATAL)
-        self.assertEqual("pass", verdict.decision)
-        self.assertEqual(self.SETTING, verdict.text)
-        self.assertTrue(verdict.kept_after_rewrite)
+        mark = self.AUDIT["sentence_marks"][0]
+        line = self.SETTING_HALF + mark + self.REST + mark
+        verdict = enforce(line, CLAUSES, _same, sink, inject=self._inject(),
+                          policy=self.AUDIT, fatal=self.FATAL)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertTrue(verdict.salvaged)
+        self.assertFalse(verdict.kept_after_rewrite, "留原话就是留一句抄来的话")
+        self.assertEqual(self.REST + mark, verdict.text)
         self.assertEqual(2, len(verdict.hits))
         self.assertIsNotNone(verdict.audit.hit, "审计那节的命中照旧带着")
         self.assertEqual(self.AUDIT["verdicts"]["setting"], verdict.hits[-1].clause_id)
-        self.assertIn(self.MARKS["audit"], seen[0][1])
+        self.assertIn(self.AUDIT["recited"]["status"], seen[0][1])
+        self.assertIn(self.SETTING_HALF, seen[0][1], "账上要说清删掉的是哪一句")
 
     def test_without_a_red_line_table_it_still_keeps_the_line(self):
         """没给红线表也留原话：判不了是不是红线，不等于可以吞掉这句话。

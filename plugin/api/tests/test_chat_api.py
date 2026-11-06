@@ -86,6 +86,8 @@ AUDIT_BOOK = json.loads((MOUTH_DATA / "audit.json").read_text(encoding="utf-8"))
 AUDIT_SKIP = AUDIT_BOOK["skip"]         # 复述审计按他说的放过那一笔：名字、记号、说法全在数据里
 AUDIT_SKIP_CLAUSE = AUDIT_SKIP["clause_id"]
 AUDIT_SKIP_MARK = AUDIT_SKIP["status"]
+# 复述命中之后的第二处置（删那一句）留的记号：账本靠它分出「删句删空」与「整条判废」，也不写死。
+RECITED_MARK = AUDIT_BOOK["recited"]["status"]
 FATAL_BOOK = json.loads((MOUTH_DATA / "fatal.json").read_text(encoding="utf-8"))
 # 认亲那一条的判据也全读数据：称呼表、记忆标记、中性词、稳妥话术、两个名字一个都不写死。
 KIN_BOOK = json.loads((MOUTH_DATA / "kin.json").read_text(encoding="utf-8"))
@@ -563,11 +565,13 @@ class ChatApiTest(unittest.TestCase):
         self.assertIn(AFTER_MARKS["action"], self._drops_rows()[-1]["reason"])
 
     def test_a_recited_soul_card_survives_the_failed_rewrite(self):
-        """验收一：她把魂那张卡上的话原样念了出来，改了一次还在念 → **原话发出**，不再丢空。
+        """验收一：她把魂那张卡上的话原样念了出来，改了一次还在念 → 删掉那一句；删空才弃这一泡。
 
         rewrite.status 是 ok（模型确实改了），但新稿仍撞「复述设定段」——这正是以前会丢掉整泡的
-        那一格。现在 decision 是 pass、chunks / reply 非空、账上一行含 audit-after-rewrite；
-        audit.status 仍是 ok、hit 照旧带着（面板看得见她引了设定）。
+        那一格。现在走的是「删那一句」（gate._strip_recited）：这一泡只有那一句在照搬，删完没正文
+        可发，于是 decision 是 dropped、chunks / reply 都空，账本那一行带 recited-only——**是「只剩
+        那一句」，不是「整条判废」**，两者在账上分得开。audit.status 仍是 ok、hit 照旧带着（面板看
+        得见她引了设定）。
         """
         line = "我嘴上不认，行动先到"
         soul = self.tmp / "soul"
@@ -578,26 +582,27 @@ class ChatApiTest(unittest.TestCase):
                                      _script(line, "我嘴上不认，行动倒是先到了。"), store=store)
         self.assertEqual(200, status)
         gate = payload["gate"]
+        # 新规矩（宁可少说一句，不许整句不说）：这一泡只有那一句在照搬 → 删完没话可说，允许空。
+        # 整泡删空时逐泡读数没有位置（parts 是空的），判据去账上看：clause_id + recited-only。
+        self.assertEqual([], payload["chunks"], "只剩照搬的那一句：删完就该空")
+        self.assertEqual("", payload["reply"])
+        self.assertEqual("dropped", gate["decision"])
         part = gate["parts"][0]
-        self.assertEqual("pass", part["decision"], "二次命中非红线：不许丢掉整泡")
-        self.assertEqual("ok", part["rewrite"]["status"], "模型确实改了（改写这回事没出问题）")
-        self.assertTrue(part["kept_after_rewrite"])
-        self.assertNotEqual([], payload["chunks"], "chunks 不许空")
-        self.assertTrue(payload["reply"], "reply 不许空")
-        self.assertEqual([line], [one["text"] for one in payload["chunks"]], "发的是进门那句原话")
-        self.assertEqual(line, payload["reply"])
-        self.assertFalse(part["audit"]["skipped"], "没要求重复，就没有跳过")
-        self.assertEqual("ok", part["audit"]["status"], "审计真的比过了（这里该是 ok）")
-        self.assertEqual("ok", part["fatal_status"], "红线这一关判过了、不是红线（ok 不是 not-checked）")
-        self.assertIsNone(part["fatal"])
+        self.assertEqual("dropped", part["decision"], "逐泡读数照样在：这一泡被删空了")
+        self.assertFalse(part["kept_after_rewrite"], "这是删句删空，不是「留原话」那一格")
         self.assertEqual("复述设定段", part["audit"]["hit"]["kind"])
         self.assertEqual("魂", part["audit"]["hit"]["seg_kind"])
         self.assertEqual("复述设定段", part["hits"][-1]["clause_id"])
-        self.assertEqual([], gate["blocked"], "这一泡没被弃，blocked 就不该有它")
         rows = self._drops_rows()
-        self.assertEqual(before + 1, len(rows), "留原话也要留一行账")
+        self.assertEqual(before + 1, len(rows), "删句删空也要记一行账")
+        self.assertIn("recited-only", rows[-1]["reason"], "账上要看得出是「删句删空」")
+        self.assertEqual(["复述设定段"], gate["blocked"], "这一泡真被弃了，blocked 里就该有它")
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows), "删空也要记一行账")
         self.assertEqual("复述设定段", rows[-1]["clause_id"])
-        self.assertIn(AFTER_MARKS["audit"], rows[-1]["reason"], "账上要看得出是审计这一关没改掉")
+        self.assertIn(RECITED_MARK, rows[-1]["reason"],
+                      "账上要看得出是「删句删空」（recited-only），不是「整条判废」")
+        self.assertNotIn(AUDIT_SKIP_MARK, rows[-1]["reason"], "没有请求：这一行不许带跳过记号")
 
     # —— 整轮的闸判摘要（gate.summary，这一轮加的） ————————
 
@@ -1358,8 +1363,14 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("pass", payload["gate"]["decision"], "边界话照样过闸")
 
     def test_the_same_private_memory_is_spoken_in_private(self):
-        """验收 2：同一句 + scope=private → 照常说内容，不剔除、不出声、不投事件。"""
-        spoken = "你妈住院那事我记着呢，你放心，不往外说。"
+        """验收 2：同一句 + scope=private → 照常说内容，不剔除、不出声、不投事件。
+
+        这一句把那条记忆连着的 10 个字原样说了出来（超过审计阈值 6），**只因为前面带着引述标记
+        「你上次说」才放行**——记忆原文与「对方原话」现在同一把尺（audit.json 的 quote_kinds）：
+        带标记算转述、不带标记仍按复述拦。所以这条同时钉住两件事：私聊不扣正文，以及那一族真的
+        是「带标记就放」。
+        """
+        spoken = "你上次说，我妈住院那事别到处说，我记着呢。"
         with self._private_memory(), self._topics("住院"):
             status, payload = self._post({"text": self.PRIVATE_ASKED, "scope": self.PRIVATE},
                                          _body(spoken))
@@ -1368,6 +1379,12 @@ class ChatApiTest(unittest.TestCase):
         self.assertIn("住院", payload["reply"], "那条记忆的关键词要能说出来")
         self.assertEqual([], payload["audience_held"], "私聊里不剔除，也没有边界话")
         self.assertEqual(1, len(payload["recalled"]), "私聊里照常召回（这一条仍在 recalled 里）")
+        part = payload["gate"]["parts"][0]
+        self.assertEqual("pass", part["decision"], "带引述标记的引述不判废")
+        self.assertIsNone(part["audit"]["hit"], "带了标记：这一句算转述，不算复述")
+        self.assertGreaterEqual(part["audit"]["lcs_len"], part["audit"]["threshold"],
+                                "这一段确实撞够了阈值——放行是靠标记，不是靠没撞上")
+        self.assertFalse(part["audit"]["skipped"], "没有请求重复，也没有跳过")
         self.assertEqual([], self._refusal_rows(), "没走拒绝就不记账")
 
     def test_a_group_round_that_does_not_ask_holds_it_silently(self):
@@ -1717,11 +1734,13 @@ class ChatApiTest(unittest.TestCase):
         self.assertNotEqual(rows[-2]["reason"], rows[-1]["reason"], "两行各是各的说法")
 
     def test_the_same_recitation_without_a_request_is_judged_but_kept(self):
-        """同一句照搬、对方没有请求（「今天吃啥」）：豁免不许外溢——判据照旧判，但不再丢空。
+        """同一句照搬、对方没有请求（「今天吃啥」）：豁免不许外溢——判据照旧判，只删那一句。
 
-        **这条断言是被新规矩改准的**：以前这里 dropped（上一轮验收要求「同一句仍 dropped」）。
-        规矩改成「二次命中留原话」之后，这一泡是 pass、发的是她那句原话，账上一行
-        audit-after-rewrite；「没有豁免」仍然看得见：audit.skipped 是 false、audit.hit 照旧带着。
+        **这条断言是被新规矩改准的**：以前这里整泡 dropped（上一轮要求「同一句仍 dropped」），
+        再后来是「二次命中留原话」。规矩改成「只删被审计命中的那一句」之后，这一泡是 rewritten：
+        新稿「照搬那句 + 一串数字」，删掉照搬那句，剩下的那串数字照发——**宁可少说一句，不许整句
+        不说**。「没有豁免」仍然看得见：audit.skipped 是 false、audit.hit 照旧带着、账上那一行是
+        recited-only（不是 skipped-by-request 的记号）。
         """
         store = self._soul_store(self.SETTING)
         before = len(self._drops_rows())
@@ -1730,17 +1749,23 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         gate = payload["gate"]
         part = gate["parts"][0]
-        self.assertEqual("pass", part["decision"], "没有豁免，但也不许丢空")
-        self.assertNotEqual([], payload["chunks"], "二次命中非红线：chunks 不许空")
-        self.assertEqual([self.RECITED], [one["text"] for one in payload["chunks"]])
+        self.assertEqual("rewritten", gate["decision"], "删了一句，不是整泡判废")
+        self.assertEqual(["3425635473"], [one["text"] for one in payload["chunks"]],
+                         "只剩那句照搬被删：剩下的正文照发")
+        self.assertEqual("3425635473", payload["reply"])
+        self.assertEqual([], gate["blocked"], "这一泡没被弃，blocked 就不该有它")
+        self.assertEqual(self.RECITED, part["before"])
+        self.assertEqual("3425635473", part["after"], "after 是删完那一句的正文")
         self.assertFalse(part["audit"]["skipped"], "没有请求就不许记成跳过")
+        self.assertEqual("ok", part["audit"]["status"], "审计照旧判过（不是没跑）")
         self.assertIsNotNone(part["audit"]["hit"])
-        self.assertEqual("ok", part["audit"]["status"])
         self.assertEqual(AUDIT_BOOK["verdicts"]["setting"], part["hits"][-1]["clause_id"])
         rows = self._drops_rows()
-        self.assertEqual(before + 1, len(rows))
+        self.assertEqual(before + 1, len(rows), "删了那一句也要留一行账")
         self.assertEqual(AUDIT_BOOK["verdicts"]["setting"], rows[-1]["clause_id"])
-        self.assertIn(AFTER_MARKS["audit"], rows[-1]["reason"])
+        self.assertIn(RECITED_MARK, rows[-1]["reason"],
+                      "账上要看得出是「删句」（recited-only），不是豁免外溢")
+        self.assertNotIn(AUDIT_SKIP_MARK, rows[-1]["reason"], "没有请求：这一行不许带跳过记号")
 
     def test_a_request_that_recites_nothing_records_only_nothing(self):
         """他虽说了「再说一遍」，但这一句本来就没复述也没重复：没有「判废」可放，账一行都不记。"""

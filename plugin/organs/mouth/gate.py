@@ -139,6 +139,17 @@ organs/mouth/quota.py 与 data/quota.json；quota 是调用方给的配额写法
 配额先判，她至少还能把正文留下（验收句原文收在 organs/mouth/quota.py 与 data/quota.json 的说明里，
 闸里一个字都不抄：抄进来就又是一处真源）。
 
+**复述命中之后也是「删那一句」，不是整条弃（这一轮加的）。** 判据一句话：**宁可她少说一句，
+不许她整句不说**。以前审计命中的处置与别的判据一样：重写改不动、或改完还照搬，就整泡弃成空串——
+她沉默了，比念台词更糟。现在改成照 claim 那一关的形状做一条同族分支（_strip_recited）：改过还是照搬、
+或根本改不了（没给重写器 / 抛错 / 改回来是空的），就**只删被审计命中的那一句**，剩下的正文照原样再
+过一遍其余判据（条款 → 配额 → 动作括注 → 重复 → 冒充做过 → 认亲 → 编记忆 → 审计），命中哪条就照旧
+处置；剩下的正文还有一句在照搬就接着删那一句，递归深度由句数封顶。删完只剩空白（这一泡只有那一句）
+才弃，那句人话取自数据里的 reason.recited_only，带着 recited-only 记号——**是「只剩那一句」，不是
+「整条判废」**，账本上要分得开。救回来的那一笔挂在 Verdict.salvaged 上、照既有规矩记 sink
+（reason 里说清删了哪一句）。句界、记号、三句人话全在 data/audit.json，闸里一个句界字符都不写。
+**红线不受这条影响**：踩上红线照旧整句丢，删句救不回一句带手机号的话。
+
 **配额剥行与冒充做过的删句是两条「不丢整句」的路（后者这一轮加的）。** 其它判据第二次命中照旧
 弃掉整句（旧行为一个字节都不变）；配额命中时第二次（以及没给重写器时）改为 quota.strip() 把动作行
 剥掉、正文接着往下判（其余判据照跑），剥完只剩空白才 decision="dropped"。救回来那一句挂在
@@ -175,7 +186,8 @@ from . import fabricate as fabricate_rules  # 参数名就叫 fabricate（调用
 from . import kin as kin_rules               # 参数名就叫 kin（调用方按这个名字传），同上
 from . import quota as quota_rules          # 参数名就叫 quota（调用方按这个名字传），模块用别名进来免得被挡住
 from . import rewrite as rewrite_rules      # 参数名就叫 rewrite（调用方按这个名字传），模块用别名进来免得被挡住
-from .audit import AuditResult, audit as _audit
+from .audit import AuditBroken, AuditResult, audit as _audit
+from .warehouse import load
 
 FATAL_OK = "ok"                     # 红线这一关真的判过了：这一轮给了红线表，判完没踩
 FATAL_HIT = "fatal"                 # 踩上红线了：Verdict.fatal 里带着是哪一类
@@ -313,6 +325,19 @@ class _FatalRules:
     categories: Tuple[_FatalCategory, ...]
 
 
+@dataclass(frozen=True)
+class _RecitedRules:
+    """data/audit.json 里「删那一句」要用的那几样：句界表、归一化那两张表、记号与三句人话。"""
+
+    status: str
+    strip: str
+    blank: str
+    sentence_marks: str
+    strip_reason: str
+    only_reason: str
+    leftover_reason: str
+
+
 def fatal_hit(text: str, table: Optional[Mapping[str, Any]] = None) -> Optional[FatalHit]:
     """看这段字有没有踩红线：踩了给一条证据，没踩返回 None——**不是布尔**（说不出「为什么不能出去」）。
 
@@ -443,11 +468,18 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端。六种结局：
 
     - 没命中：decision="pass"，text 原样发出。
-    - 命中但 rewrite 是 None：decision="dropped"、text=""——改不了就不许发，不许 fail-open。
-    - rewrite 抛错、或改回来是空的：同样 dropped，并把「重写失败」这件事本身写进 reason。
+    - 命中但 rewrite 是 None：decision="dropped"、text=""——改不了就不许发，不许 fail-open
+      （自带兜底的几条判据除外：配额剥行、冒充做过删句、认亲中性化、编记忆换实话，以及这一轮
+      加的复述删句，都不走这条「弃空」）。
+    - rewrite 抛错、或改回来是空的：同样 dropped，并把「重写失败」这件事本身写进 reason
+      （上面那几条自带兜底的判据照样各自走它们自己的路）。
     - 改完不再命中：decision="rewritten"，text 是改写后的那句。
     - **冒充做过命中、改不动或二次仍命中：删掉那一句**（decision="rewritten"、salvaged=True、text 是
       删剩下的正文）；删完只剩空白才 decision="dropped"。
+    - **复述命中、改不动或二次仍命中：删掉被审计命中的那一句**（decision="rewritten"、
+      salvaged=True、text 是删剩下的正文，hits 里两条命中都留着）；删完只剩那一句才
+      decision="dropped"，reason 取自数据的 recited_only（带 recited-only 记号）——**宁可她少说一句，
+      不许她整句不说**。红线不受这条影响：踩上红线照旧整句丢。
     - **改完还命中（且不是红线）：decision="pass"，text 是进门那句原话**，hits 两条都留着，
       kept_after_rewrite=True，sink 记一行 reason 带「<通道>-after-rewrite」的账。为什么不再丢：
       **在最该回答的那一句上沉默，比「说话带点毛病」糟得多**——她改了、也尽力了，这时候把整泡
@@ -471,7 +503,10 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     话」的开关，会把「她说了、但没人听懂」变成新的哑法；拒绝那三句（organs/mouth/refusal.py）就是
     这么被吞掉的——调用侧现在把同一份 fatal 表也透给它。
 
-    复述审计接在条款后面，走同一条路：审计拦下的那一条也当成一次命中，改一次还不行就弃。
+    复述审计接在条款后面，走同一条路：审计拦下的那一条也当成一次命中。**它的第二处置与别的判据不同**：
+    改一次还照搬、或根本改不了（没给重写器 / 抛错 / 改回来是空的），就只删掉被审计命中的那一句、把
+    剩下的正文接着往下判（见 _strip_recited）——整条弃掉等于她沉默了，比念台词更糟。只有删完没正文
+    可发（这一泡只有那一句）才 decision="dropped"，reason 用数据里的 recited_only。
     返回值里的 audit 是这一轮审计的读数（audit.AuditResult）：status 为 "ok" 才算真的比过，
     为 "audit-unavailable" 表示没拿到注入原文、判不了——**这时决策照常按条款走，不弃这句**，
     但状态如实带出来，api 层照实透出（缺料不是清白，也不是拦）。
@@ -596,10 +631,13 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                     **dict(base, fatal_status=FATAL_HIT)), sink)
         again_repeated, again_skipped = _dedup(bodies, recent, repeat_table, wanted)
         again_seen = _audit(bodies, inject, policy, requested=wanted)
+        again_seen_hit = _from_audit(again_seen)
         again_kinned, again_evidence = _kin(bodies, known, kin)
         again_invented, again_fact = _fabricated(bodies, recalled, fabricate)
         after = _first(_scan(prepared, bodies), _noted(bodies, action), again_repeated,
-                       again_kinned, again_invented, _from_audit(again_seen))
+                       again_kinned, again_invented, again_seen_hit)
+        if again_seen_hit is not None and after is again_seen_hit:
+            return _strip_recited(bodies, list(hits) + [after])   # 剥出来的正文还在照搬：删那一句
         if after is not None and after is again_invented:
             return _confess(list(hits) + [after], again_fact)   # 剥出来的正文还在编：换成实话
         if after is not None and after is again_kinned:
@@ -648,12 +686,13 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                     **dict(base, fatal_status=FATAL_HIT)), sink)
         again_repeated, again_skipped = _dedup(rest, recent, repeat_table, wanted)
         again_seen = _audit(rest, inject, policy, requested=wanted)
+        again_seen_hit = _from_audit(again_seen)
         again_claimed = _claimed(rest, actions, claim)
         again_kinned, again_evidence = _kin(rest, known, kin)
         again_invented, again_fact = _fabricated(rest, recalled, fabricate)
         after = _first(_scan(prepared, rest), _quota(rest, quota), _noted(rest, action),
                        again_repeated, again_claimed, again_kinned, again_invented,
-                       _from_audit(again_seen))
+                       again_seen_hit)
         if after is None:
             if sink is not None:
                 sink(hits[-1].clause_id, kept)
@@ -666,9 +705,73 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             return _strip_claim(rest, list(hits) + [after])     # 剩下的正文还有一句冒充：接着删
         if again_kinned is not None and after is again_kinned:
             return _neutralize_kin(rest, list(hits) + [after], again_evidence)
+        if again_seen_hit is not None and after is again_seen_hit:
+            return _strip_recited(rest, list(hits) + [after])   # 删剩的正文还在照搬：接着删那一句
         return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
                                 reason=claim_rules.leftover_reason(after.clause_id, after.matched,
                                                                    claim),
+                                **base), sink)
+
+    def _strip_recited(source: str, hits: List[Hit]) -> Verdict:
+        """复述命中之后：只删被审计命中的那一句，剩下的话接着往下判；删完只剩空白才弃整条。
+
+        为什么删句而不是整条丢：照搬长在那一句里——别的话还是她要说的话，为一句复述把整条吞掉，
+        等于她沉默了，比念台词更糟。一句判据：**宁可少说一句，不许整句不说**。这一支与冒充做过的
+        删句同族（都是「救人」的分支：救回来的那一笔挂在 Verdict.salvaged 上、都记一笔账），差别
+        只在削什么：那一关削的是「说她做过」的那一句，这一支削的是审计命中的那一句——删哪一句由
+        命中决定，句界取自 audit.json 的 sentence_marks（逗号不算句末）。
+
+        **删过不等于放行**：剩下的正文要照原样再过一遍其余判据（条款 → 配额 → 动作括注 → 重复 →
+        冒充做过 → 认亲 → 编记忆 → 审计），命中哪一条就照旧处置；剩下的正文里还有一句在照搬，就接着
+        删那一句——递归的深度由句数封顶，删一句少一句。删完只剩空白（这一泡只有那一句）时没有正文
+        可发，照样弃掉，那句人话取自数据里的 recited_only（带 recited-only 记号）：**是「只剩那一句」，
+        不是「整条判废」**，账本上要分得开。
+
+        那一句取不出来（正文里找不出命中的那几个字）也弃掉：拿不准删没删干净，就不许把一句复述当成
+        「处理过了」发出去——这时那句人话用审计自己那条原因，如实说「弃掉不发」，不再另编一句。
+        """
+        rules = _recited_rules(policy)
+        rest, removed = _cut_recited(source, hits[-1], rules)
+        if not removed:
+            return _dropped(Verdict(text="", decision="dropped", hits=list(hits),
+                                    reason=hits[-1].reason, **base), sink)
+        if not rest.strip():
+            return _dropped(Verdict(text="", decision="dropped", hits=list(hits),
+                                    reason=rules.only_reason.format(removed=removed), **base), sink)
+        kept = rules.strip_reason.format(removed=removed, clause_id=hits[-1].clause_id,
+                                         matched=hits[-1].matched)
+        dead_rest = _fatal(rest, fatal)          # 删掉一句复述也救不回一句带手机号的话
+        if dead_rest is not None:
+            return _dropped(Verdict(text="", decision="dropped",
+                                    hits=list(hits) + [_from_fatal(dead_rest)],
+                                    reason=dead_rest.reason, fatal=dead_rest,
+                                    **dict(base, fatal_status=FATAL_HIT)), sink)
+        again_repeated, again_skipped = _dedup(rest, recent, repeat_table, wanted)
+        again_seen = _audit(rest, inject, policy, requested=wanted)
+        again_seen_hit = _from_audit(again_seen)
+        again_claimed = _claimed(rest, actions, claim)
+        again_kinned, again_evidence = _kin(rest, known, kin)
+        again_invented, again_fact = _fabricated(rest, recalled, fabricate)
+        after = _first(_scan(prepared, rest), _quota(rest, quota), _noted(rest, action),
+                       again_repeated, again_claimed, again_kinned, again_invented,
+                       again_seen_hit)
+        if after is None:
+            if sink is not None:
+                sink(hits[-1].clause_id, kept)
+            _note(sink, _skip_rows(again_skipped, again_seen))
+            return Verdict(text=rest, decision="rewritten", hits=list(hits), reason=kept,
+                           salvaged=True, **base)
+        if after is again_invented:
+            return _confess(list(hits) + [after], again_fact)   # 删剩的正文还在编：换成实话
+        if again_claimed is not None and after is again_claimed:
+            return _strip_claim(rest, list(hits) + [after])     # 剩下的正文还有一句冒充：接着删
+        if again_kinned is not None and after is again_kinned:
+            return _neutralize_kin(rest, list(hits) + [after], again_evidence)
+        if again_seen_hit is not None and after is again_seen_hit:
+            return _strip_recited(rest, list(hits) + [after])   # 剩下的正文还有一句照搬：接着删
+        return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
+                                reason=rules.leftover_reason.format(clause_id=after.clause_id,
+                                                                   matched=after.matched),
                                 **base), sink)
 
     def _confess(hits: List[Hit], fact: Any) -> Verdict:
@@ -730,12 +833,13 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                     **dict(base, fatal_status=FATAL_HIT)), sink)
         again_repeated, again_skipped = _dedup(rest, recent, repeat_table, wanted)
         again_seen = _audit(rest, inject, policy, requested=wanted)
+        again_seen_hit = _from_audit(again_seen)
         again_claimed = _claimed(rest, actions, claim)
         again_kinned, again_evidence = _kin(rest, known, kin)
         again_invented, again_fact = _fabricated(rest, recalled, fabricate)
         after = _first(_scan(prepared, rest), _quota(rest, quota), _noted(rest, action),
                        again_repeated, again_claimed, again_kinned, again_invented,
-                       _from_audit(again_seen))
+                       again_seen_hit)
         if after is None:
             if sink is not None:
                 sink(hits[-1].clause_id, kept)
@@ -748,12 +852,15 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             return _strip_claim(rest, list(hits) + [after])     # 换过的正文还有一句冒充：接着删
         if again_kinned is not None and after is again_kinned:
             return _neutralize_kin(rest, list(hits) + [after], again_evidence)
+        if again_seen_hit is not None and after is again_seen_hit:
+            return _strip_recited(rest, list(hits) + [after])   # 换过的正文还在照搬：删那一句
         return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
                                 reason=kin_rules.leftover_reason(after.clause_id, after.matched,
                                                                  kin),
                                 **base), sink)
 
-    first = _first(found, quoted, noted, repeated, claimed, kinned, invented, _from_audit(seen))
+    audit_hit = _from_audit(seen)          # 复述那一关的命中：删句那一支按它认（identity 比较）
+    first = _first(found, quoted, noted, repeated, claimed, kinned, invented, audit_hit)
     if first is None:
         reason = "没命中任何条款，这句照发。"
         if _has_action(action):
@@ -781,6 +888,8 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             return _confess([first], invented_fact)        # 编记忆自带兜底：没有重写器也换成实话
         if first is quoted:
             return _salvage(body, [first])                 # 配额自带兜底：没有重写器也剥
+        if first is audit_hit:
+            return _strip_recited(body, [first])           # 复述自带兜底：没有重写器也删那一句
         if keep_unrewritten:
             return _kept(body, first, rewrite_rules.no_rewriter_why(), sink, base)
         return _dropped(Verdict(text="", decision="dropped", hits=[first],
@@ -795,6 +904,8 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             return _neutralize_kin(body, [first], kin_evidence)   # 改不动一处认亲：中性化，不留原话
         if first is invented:
             return _confess([first], invented_fact)        # 改不动一段编出来的过去：换成实话
+        if first is audit_hit:
+            return _strip_recited(body, [first])           # 重写失败也删那一句，不许整泡消失
         if keep_unrewritten:
             if first is quoted:
                 return _salvage(body, [first])             # 配额命中：剥掉动作行比留原话强
@@ -811,6 +922,8 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             return _neutralize_kin(body, [first], kin_evidence)   # 改回来是空的：中性化
         if first is invented:
             return _confess([first], invented_fact)        # 改回来是空的：换成实话
+        if first is audit_hit:
+            return _strip_recited(body, [first])           # 改回来是空的等于改不了：删那一句
         if keep_unrewritten:
             if first is quoted:
                 return _salvage(body, [first])
@@ -850,6 +963,8 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
         return _neutralize_kin(rewritten, [first, second], again_evidence)   # 改完还在认亲：中性化
     if requoted is not None and second is requoted:
         return _salvage(rewritten, [first, second])        # 配额第二次命中：剥行兜底，不丢整句
+    if again_hit is not None and second is again_hit:
+        return _strip_recited(rewritten, [first, second])  # 改完还照搬：删那一句，不丢整条
     # 二次命中且不是红线：留进门那句原话，记一行 <通道>-after-rewrite 的账（不再丢空）。
     # **这一格不看调用方给没给红线表**：没给表只说明「判不了是不是红线」，不说明可以吞掉这句话，
     # 所以账行里如实写上「这一轮没拿到红线表」，话照原样发出（见 rewrite.after_rewrite_reason）。
@@ -900,6 +1015,106 @@ def _from_audit(result: Optional[AuditResult]) -> Optional[Hit]:
         return None
     one = result.hit
     return Hit(clause_id=one.kind, kind=one.seg_kind, matched=one.matched, reason=one.reason)
+
+
+def _recited_rules(policy: Optional[Mapping[str, Any]] = None) -> _RecitedRules:
+    """把审计数据里「删那一句」那几样读出来；policy 为 None 就现读仓库里的默认表。
+
+    为什么闸要自己读一次这份数据：删句要用的句界表与那句人话只有这里才有，而 enforce 手上的
+    policy 也可能就是 None（调用方不传、用默认表的时候）。**不补默认值**：缺节缺键一律抛
+    AuditBroken（与 audit.py 同一个口径），数据里没有的句界不在代码里写一个字符。
+    硬要求：句界表非空；三句人话里都必须带着数据里那个记号（recited.status）——账本与面板靠它
+    认出「这一笔是删句救回来的」，记号与说法不许各走各的。
+    """
+    book = policy if policy is not None else load("audit")
+    try:
+        recited = book["recited"]
+        reasons = book["reason"]
+        status = recited["status"]
+        marks = book["sentence_marks"]
+        strip = book["strip"]
+        blank = book["blank"]
+        strip_reason = reasons["recited_strip"]
+        only_reason = reasons["recited_only"]
+        leftover_reason = reasons["recited_leftover"]
+    except (KeyError, TypeError):
+        raise AuditBroken("数据", "缺少删那一句要用的项（recited.status、sentence_marks、strip、"
+                                  "blank 与 reason.recited_* 三句人话）。") from None
+    words = (("recited.status", status), ("reason.recited_strip", strip_reason),
+             ("reason.recited_only", only_reason),
+             ("reason.recited_leftover", leftover_reason))
+    for name, value in words:
+        if not isinstance(value, str) or not value.strip():
+            raise AuditBroken("数据", "的 %r 必须是一句非空字符串。" % name)
+    for name, value in (("sentence_marks", marks), ("strip", strip), ("blank", blank)):
+        if not isinstance(value, str) or not value:
+            raise AuditBroken("数据", "的 %r 必须是一串非空字符（表里的字符逐个用）。" % name)
+    for name, line in (("reason.recited_strip", strip_reason),
+                       ("reason.recited_only", only_reason),
+                       ("reason.recited_leftover", leftover_reason)):
+        if status not in line:
+            raise AuditBroken("数据", "里 %s 没有带上 recited.status（%r）：账本与面板靠这个记号"
+                                      "认出「这一笔是删句救回来的」，说法与记号不许各走各的。"
+                              % (name, status))
+    return _RecitedRules(status=status, strip=strip, blank=blank, sentence_marks=marks,
+                         strip_reason=strip_reason, only_reason=only_reason,
+                         leftover_reason=leftover_reason)
+
+
+def _normalized_positions(body: str, strip: str, blank: str) -> Tuple[str, List[int]]:
+    """按审计那张标点表与空白表归一化，同时留下位置表：归一化后第 i 个字原来是原文的哪一个字。
+
+    审计的 matched 是**归一化之后**的字，删句却要落在原文坐标上——没有这张表，标点一多就会
+    删错句（把前一句的尾巴连同后一句的头一起切掉）。
+    """
+    drop = set(strip) | set(blank)
+    kept: List[str] = []
+    spots: List[int] = []
+    for index, char in enumerate(body):
+        if char in drop:
+            continue
+        kept.append(char)
+        spots.append(index)
+    return "".join(kept), spots
+
+
+def _sentence_spans(body: str, marks: str) -> List[Tuple[int, int, int]]:
+    """按数据里的句界表分句：每句给（起, 句末, 标点之后）三个位置，位置连续才删得准。
+
+    与 claim.py 的分句同一个形状（那份句界表在它自己的数据里）：标点本身不算进句子，删句时要连
+    它一起删，否则删完会剩一个孤零零的句号。末句后面没有句末标点时，三个位置都落在文末。
+    """
+    chars = "".join(dict.fromkeys(marks))
+    pattern = re.compile("[%s]" % "".join(re.escape(ch) for ch in chars))
+    out: List[Tuple[int, int, int]] = []
+    start = 0
+    for found in pattern.finditer(body):
+        out.append((start, found.start(), found.end()))
+        start = found.end()
+    out.append((start, len(body), len(body)))
+    return out
+
+
+def _cut_recited(text: str, hit: Hit, rules: _RecitedRules) -> Tuple[str, str]:
+    """只删被审计命中的那一句，返回（剩下的正文, 被删掉的那一句）；定位不到就原样返回、removed 是空串。
+
+    先在归一化后的正文里找 hit.matched（审计给的是归一化之后的字），再用位置表映射回原文坐标，
+    然后按数据里的句界表分句、只删含这一起点的那一句连同它自己的句末标点：**逗号不算句末**，
+    一句话里夹着逗号时后半截跟着一起留下。命中若跨了两句（归一化把标点去掉，它们粘成了一句），
+    这里只删起点那一句，剩下的半截还会再撞上，由调用方接着删下一句——一次只删一句。
+    """
+    body = _text_of(text)
+    if not hit.matched:
+        return body, ""
+    norm, spots = _normalized_positions(body, rules.strip, rules.blank)
+    at = norm.find(hit.matched)
+    if at < 0:
+        return body, ""
+    start = spots[at]
+    for head, tail, mark_end in _sentence_spans(body, rules.sentence_marks):
+        if head <= start <= tail:
+            return (body[:head] + body[mark_end:]).strip(), body[head:tail].strip()
+    return body, ""
 
 
 def _noted(text: str, action: Any) -> Optional[Hit]:

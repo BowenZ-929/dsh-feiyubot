@@ -21,7 +21,8 @@ THRESHOLD = DATA["threshold"]
 WINDOW = DATA["window"]
 SOUL = DATA["setting_kinds"][0]           # 设定类第一类就是魂（顺序也写在数据里）
 MEMORY = DATA["setting_kinds"][2]         # 记忆原文：拿来验「设定类一律拦」
-QUOTE = DATA["quote_kind"]
+QUOTES = DATA["quote_kinds"]
+QUOTE = QUOTES[0]          # 老断言只用第一类（对方原话）；记忆原文是第二类（它本来就是他说的，可引述）
 PLAIN = DATA["plain_kind"]
 VERDICT_SETTING = DATA["verdicts"]["setting"]
 VERDICT_QUOTE = DATA["verdicts"]["quote_unmarked"]
@@ -199,6 +200,22 @@ class ThresholdBoundary(unittest.TestCase):
         self.assertLess(len(said), THRESHOLD)
         self.assertIsNone(recitation.audit(said, [{"kind": MEMORY, "text": said}]).hit)
 
+    def test_one_short_never_becomes_a_hit_so_nothing_is_rewritten(self):
+        """第 5 条边界：差一个字（阈值 6、连着 5 个）时 lcs_len 就是 5、hit 是 None。
+
+        没有命中，就没有「命中」这一件事交给闸的重写器——所以这一格一次 rewrite 都不会调，
+        与「改重写不动」那一格处置正相反（那才删那一句、只剩一句才弃）。阈值为什么是 6：
+        data/audit.json 的 threshold_note。
+        """
+        drop = set(DATA["strip"]) | set(DATA["blank"])
+        said = "".join(ch for ch in SOUL_LINE if ch not in drop)[:THRESHOLD - 1]
+        self.assertEqual(THRESHOLD - 1, len(said))
+        result = recitation.audit(said, [{"kind": SOUL, "text": said + "你别学"}])
+        self.assertEqual(STATUS_OK, result.status)
+        self.assertEqual(THRESHOLD - 1, result.lcs_len)
+        self.assertIsNone(result.hit)
+        self.assertEqual(THRESHOLD, result.threshold)
+
 
 class DataIsTheSourceOfTruth(unittest.TestCase):
     """判据全部来自数据：改一个数，行为跟着变；数据缺键当场响。"""
@@ -222,7 +239,9 @@ class DataIsTheSourceOfTruth(unittest.TestCase):
         self.assertIn("threshold", str(caught.exception))
 
     def test_quote_kind_cannot_be_a_setting_kind(self):
-        both = dict(DATA, quote_kind=DATA["setting_kinds"][0])
+        # 一类段只能归一边：把某个设定类塞进「可引述」那一族，数据自洽校验必须当场炸。
+        overlap = DATA["setting_kinds"][0]
+        both = dict(DATA, quote_kinds=list(DATA["quote_kinds"]) + [overlap])
         with self.assertRaises(AuditBroken) as caught:
             recitation.audit(SOUL_LINE, [{"kind": SOUL, "text": SOUL_LINE}], both)
         self.assertIn("setting_kinds", str(caught.exception))
@@ -292,6 +311,30 @@ class AskedToReciteIsMarkedNotJudged(unittest.TestCase):
             self.assertNotIn(marker, source)
         self.assertNotIn(SKIP_CLAUSE, source)      # 记账的名字也不许进代码
         self.assertNotIn(SKIP_REASON, source)      # 那句人话同样只在数据里
+
+
+class TheCutOutSentenceDataIsWhole(unittest.TestCase):
+    """删那一句要用的项都在数据里，而且自洽：句界表非空、三句人话都带同一个记号。
+
+    闸（gate.py 的 _strip_recited）读的是同一份数据。缺一格就是「删不动」或「认不出这一笔」
+    ——两件事都不许悄悄发生，所以这里当场验，别等线上才发现账本上少一个记号。
+    """
+
+    def test_sentence_marks_are_a_non_empty_table(self):
+        marks = DATA["sentence_marks"]
+        self.assertIsInstance(marks, str)
+        self.assertTrue(marks)
+
+    def test_every_cut_out_reason_carries_the_mark(self):
+        mark = DATA["recited"]["status"]
+        for key in ("recited_strip", "recited_only", "recited_leftover"):
+            with self.subTest(key=key):
+                self.assertIn(mark, DATA["reason"][key])
+
+    def test_the_cut_out_reasons_say_what_was_removed(self):
+        """账本要读得出删了哪一句：删句与只剩一句那两句人话都带着那个位置。"""
+        self.assertIn("{removed}", DATA["reason"]["recited_strip"])
+        self.assertIn("{removed}", DATA["reason"]["recited_only"])
 
 
 class AuditStaysClean(unittest.TestCase):

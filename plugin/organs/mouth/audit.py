@@ -11,6 +11,16 @@
 （阈值写在数据里，默认 6）。**阈值为什么是 6**：中文 4 个字太短——「我知道了」「好的呀」这类
 常用串一撞就上，阈值 4 等于把客气话判成复述；6 个字既能抓住一整截原文，又不会误杀日常口语。
 
+**边界这一格（连着 5 个字）为什么不走重写**：判据是「连着 6 个字及以上才算复述」，阈值写在数据里
+（threshold，默认 6）。5 个字最长只连着 5 个，length < threshold 就跳过这一段，读数仍是 status="ok"、
+hit 是 None——**没有命中，就没有「命中」这一件事交给闸的重写器**，所以闸那一边一次 rewrite 都不会调，
+不是「调了但改不动」。这一格与「改不动」长得像，处置却是相反的：改不动才删那一句、只剩一句才弃；
+没命中就一个字不改照发（老规矩，见 gate.enforce）。核那边若看到「5 个字也走了重写」，只能出自别处：
+那边传进来的 policy 里 threshold 不是 6，或者根本没走这条判据——**这一条是推断，没有在本仓库复现**：
+本仓库的数据里 threshold 就是 6（data/audit.json 的 threshold 与 threshold_note），audit() 里就一句
+`if length < rules.threshold: continue`，5 个字必然被它跳过，没有任何一条路能把它送到重写器上。要坐实
+核那边的原因，得看那边调用 enforce 时传的 policy 是哪一份。
+
 **两类分开，不许一锅端**（两个清单都在数据里）：
 
 - 注入段的 kind 属于「设定类」（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句）→ 撞上阈值就拦，
@@ -129,7 +139,7 @@ class _Rules:
     window: int
     strip: str
     blank: str
-    quote_kind: str
+    quote_kinds: Tuple[str, ...]
     setting_kinds: Tuple[str, ...]
     plain_kind: str
     markers: Tuple[str, ...]
@@ -180,7 +190,7 @@ def audit(text: str, inject: Any = None,
         if length < rules.threshold:
             continue
         matched = body[end - length:end]
-        if segment.kind == rules.quote_kind:
+        if segment.kind in rules.quote_kinds:
             marker = _marker(body, end - length, rules.window, rules.markers)
             if marker:
                 if marked is None:
@@ -237,16 +247,17 @@ def _rules(policy: Optional[Mapping[str, Any]] = None) -> _Rules:
     window = _at_least_zero(table, "window")
     strip = _chars(table, "strip")
     blank = _chars(table, "blank")
-    quote_kind = _word(table, "quote_kind")
+    quote_kinds = _words(table, "quote_kinds")
     setting = _words(table, "setting_kinds")
     plain = _word(table, "plain_kind")
     markers = _words(table, "quote_markers")
     verdicts = _mapping(table, "verdicts")
     verdict_setting = _word(verdicts, "setting")
     verdict_quote = _word(verdicts, "quote_unmarked")
-    if quote_kind in setting:
-        raise AuditBroken("数据", "里 %r 同时出现在 setting_kinds 与 quote_kind 中："
-                                 "一类段只能归一边。" % quote_kind)
+    for quote_kind in quote_kinds:
+        if quote_kind in setting:
+            raise AuditBroken("数据", "里 %r 同时出现在 setting_kinds 与 quote_kinds 中："
+                                     "一类段只能归一边。" % quote_kind)
     if plain not in setting:
         raise AuditBroken("数据", "里的 plain_kind %r 不在 setting_kinds 中：纯字符串一律"
                                  "按设定类从严，它必须是一个设定类。" % plain)
@@ -259,7 +270,7 @@ def _rules(policy: Optional[Mapping[str, Any]] = None) -> _Rules:
         raise AuditBroken("数据", "里 skip.reason 没有带上 skip.status（%r）：账本靠这个记号认出"
                                   "「这一句为什么没判废」，说法与记号不许各走各的。" % skip_status)
     return _Rules(threshold=threshold, window=window, strip=strip, blank=blank,
-                  quote_kind=quote_kind, setting_kinds=setting, plain_kind=plain,
+                  quote_kinds=quote_kinds, setting_kinds=setting, plain_kind=plain,
                   markers=markers, verdict_setting=verdict_setting,
                   verdict_quote=verdict_quote, reasons=reasons, skip_clause_id=skip_clause_id,
                   skip_status=skip_status, skip_reason=skip_reason)
@@ -277,7 +288,7 @@ def _segments(inject: Any, rules: _Rules) -> List[_Seg]:
     if not isinstance(inject, (list, tuple)):
         raise AuditBroken("inject", "只能是 [{\"kind\": ..., \"text\": ...}] 这样的清单、"
                                     "或一段纯字符串，读到的是 %s。" % type(inject).__name__)
-    known = rules.setting_kinds + (rules.quote_kind,)
+    known = rules.setting_kinds + rules.quote_kinds
     out: List[_Seg] = []
     for index, raw in enumerate(list(inject)):
         where = "第 %d 段" % (index + 1)
