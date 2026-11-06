@@ -41,7 +41,9 @@ class HealthzTest(unittest.TestCase):
         for method in ("POST", "PUT", "DELETE"):
             status, payload = api.handle(method, "/healthz", {}, store=None)
             self.assertEqual(status, 405, "%s /healthz 必须 405" % method)
-            self.assertIn("只收 GET", payload["message"])
+            # 钉行为，不钉那句话怎么说的：405 + ok:false + 这条路由在表里就是只读的 GET
+            self.assertIs(payload["ok"], False)
+            self.assertEqual("GET", api.ROUTES["/healthz"])
 
     def test_dirty_only_counts_code_and_docs(self):
         """dirty 只反映代码与文档树：参考资料目录里改 rtf 不该把脏灯点亮。"""
@@ -90,9 +92,15 @@ class HealthzTest(unittest.TestCase):
             report = version.report()
         finally:
             version.GIT_HEAD = original
+        # 钉行为，不钉文案：dirty 是布尔、stale 仍是 False（提交没变），
+        # 顺带把 dirty_other 的数也检查一遍（它就是「另有 N 个非代码文件」那个计数）。
         self.assertIsInstance(report["dirty"], bool)
+        self.assertIsInstance(report["dirty_other"], int)
+        self.assertGreaterEqual(report["dirty_other"], 0)
         self.assertIs(report["stale"], False, report["advice"])
-        self.assertIn("重启", report["advice"])
+        self.assertEqual(report["git_head"], report["git_head_now"],
+                         "提交没变却报了 stale")
+        self.assertTrue(str(report["advice"]).strip(), "advice 是空的：人看不到任何提示")
 
     def test_stale_flips_when_the_commit_changes(self):
         """HEAD 与启动时不同，才是真的「在跑旧代码」。"""
@@ -101,7 +109,9 @@ class HealthzTest(unittest.TestCase):
             version.GIT_HEAD = "deadbee"
             report = version.report()
             self.assertIs(report["stale"], True)
-            self.assertIn("重启核", report["advice"])
+            # 钉行为：stale 为真 ⇔ 启动时的 head 与此刻不同；advice 非空即可，措辞不归测试管
+            self.assertNotEqual(report["git_head"], report["git_head_now"])
+            self.assertTrue(str(report["advice"]).strip(), "advice 是空的：人看不到任何提示")
         finally:
             version.GIT_HEAD = original
 
@@ -125,7 +135,9 @@ class FooterShowsVersion(unittest.TestCase):
             self.assertRegex(text, BUILD_RE, "%s 没有页脚 build 节点" % page)
             self.assertIn('call("GET", "/healthz")', text, "%s 的页脚没有去读 /healthz" % page)
             self.assertIn("stale", text, "%s 的页脚分不出进程新旧" % page)
-            self.assertIn("进程旧了", text, "%s 没有「进程旧了」的红字分支" % page)
+            # 钉分支，不钉那句中文：stale 为真时走红字那一支（读字段 + 挂 bad 样式）
+            self.assertIn("if (d.stale)", text, "%s 的页脚没有按 stale 字段分支" % page)
+            self.assertIn('"build bad"', text, "%s 的页脚没有陈旧那一支的红字样式" % page)
             self.assertIn("dirty", text, "%s 的页脚没有把 dirty 单独读出来" % page)
 
     def test_brain_page_is_really_gone(self):
