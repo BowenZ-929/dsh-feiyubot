@@ -544,8 +544,19 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         log("warn", prefsNow.warn);
       }
     }
-    const split = splitBubbles(reply.chunks, { gapSec: policy.outbound.newlineGapMs / 1000, cap });
-    const style = split.merged ? { merged: [{ reason: "chunk_cap" }] } : null;
+    const split = splitBubbles(reply.chunks, {
+      gapSec: policy.outbound.newlineGapMs / 1000,
+      cap,
+      maxChars: policy.outbound.maxCharsPerBubble,
+      sentenceMarks: policy.outbound.bubbleSentenceMarks,
+      clauseMarks: policy.outbound.bubbleClauseMarks,
+      tailParticles: policy.outbound.bubbleTailParticles,
+    });
+    // style 两格都可缺：发生超长切分写 split、因上限合并写 merged；都没有就是 null（不写空对象）。
+    const styleValue: Record<string, unknown> = {};
+    if (split.splits.length > 0) styleValue.split = split.splits;
+    if (split.merged) styleValue.merged = [{ reason: "chunk_cap" }];
+    const style = Object.keys(styleValue).length > 0 ? styleValue : null;
     const limited = enforceLimits(split.chunks, snapshot.batchId, policy);
     if (limited.reason === "core_empty") {
       await settle({ kind: "payload", payload: { ok: true, chunks: [] } });
@@ -874,8 +885,15 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
   const split = splitBubbles(input.chunks, {
     gapSec: policy.outbound.newlineGapMs / 1000,
     cap: policy.outbound.maxChunks,
+    maxChars: policy.outbound.maxCharsPerBubble,
+    sentenceMarks: policy.outbound.bubbleSentenceMarks,
+    clauseMarks: policy.outbound.bubbleClauseMarks,
+    tailParticles: policy.outbound.bubbleTailParticles,
   });
-  style = split.merged ? { merged: [{ reason: "chunk_cap" }] } : null;
+  const styleValue: Record<string, unknown> = {};
+  if (split.splits.length > 0) styleValue.split = split.splits;
+  if (split.merged) styleValue.merged = [{ reason: "chunk_cap" }];
+  style = Object.keys(styleValue).length > 0 ? styleValue : null;
   // 三道上限：越界就整批换成一句短的（sha256 按 id 选，同一批永远同一句）。
   const limited = enforceLimits(split.chunks, id, policy);
   const plan = planChunks(limited.chunks, Date.now());

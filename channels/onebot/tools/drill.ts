@@ -457,6 +457,11 @@ const LOW_RECALL_MARK = "LOWRECALL";
 // M10：换行切泡用的几种回包（换行符是内容，不是排版）。
 const NL1_MARK = "NLONE";
 const NL3_MARK = "NLTHREE";
+const G23_SENT = "G23SENT";
+const G23_NOPUNCT = "G23NOPUNCT";
+const G23_COMMA = "G23COMMA";
+const G23_PARTICLE = "G23PARTICLE";
+const G23_LONGNOPUNCT = "G23LONGNOPUNCT";
 const NL5_MARK = "NLFIVE";
 const TRAIL_MARK = "NLTRAIL";
 const BLANK_MARK = "NLBLANK";
@@ -465,6 +470,12 @@ const LONGNL_MARK = "NLLONG";
 const replyTextFor = (text: string): string => {
   if (text.includes(NL5_MARK)) return "一\n二\n三\n四\n五\n六";
   if (text.includes(NL3_MARK)) return "甲\n乙\n丙";
+  // M11：单泡 60 字上限的几种形状
+  if (text.includes(G23_SENT)) return "甲".repeat(49) + "。" + "乙".repeat(49) + "！" + "丙".repeat(49) + "？";
+  if (text.includes(G23_NOPUNCT)) return "字".repeat(90);
+  if (text.includes(G23_COMMA)) return "字".repeat(40) + "，" + "词".repeat(39);
+  if (text.includes(G23_PARTICLE)) return "甲".repeat(40) + "，啊" + "乙".repeat(10) + "，" + "丙".repeat(10);
+  if (text.includes(G23_LONGNOPUNCT)) return "字".repeat(150);
   if (text.includes(NL1_MARK)) return "上泡\n下泡";
   if (text.includes(TRAIL_MARK)) return "只有一行\n";
   if (text.includes(BLANK_MARK)) return "第一句\n \n第三句";
@@ -1842,6 +1853,83 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         "没卡的 who：上限回落 3 → 三行出 3 泡，style=null",
         noCardRows.length === 3 && noCard3.decision?.machine?.style === null,
         "sent " + noCardRows.length + " 行，style=" + JSON.stringify(noCard3.decision?.machine?.style),
+      );
+
+      // ---- G23：单泡 60 字上限（只在标点处切，宁可长不许断半句） ----
+      const g23 = async (speaker: number, text: string) => {
+        const group = nextGroup();
+        const since = Date.now();
+        const messageId = post(group, speaker, text);
+        const decisions = await waitForTargetDecisionRows(config.decisions, "group:" + group, since, 1, 25000);
+        await sleep(500);
+        return {
+          rows: rowsFor(readRowsFile(config.ledger), "mid:" + messageId).filter((row) => row.kind === "sent"),
+          decision: decisions[decisions.length - 1],
+        };
+      };
+      const joinRaw = (rows: LedgerRow[]): string => rows.map((row) => String(row.text ?? "")).join("");
+      const lens = (rows: LedgerRow[]): number[] => rows.map((row) => Array.from(String(row.text ?? "")).length);
+
+      // ① 150 字、三个句末标点 → 3 泡，每泡 ≤ 60，拼回 == 原文
+      const s1 = await g23(SPEAKER_A, "小肥鱼 三段 " + G23_SENT);
+      const s1Text = "甲".repeat(49) + "。" + "乙".repeat(49) + "！" + "丙".repeat(49) + "？";
+      const s1Style = s1.decision?.machine?.style as Record<string, any> | null | undefined;
+      add(
+        "G23a",
+        "150 字三个句号 → 3 泡、每泡 ≤ " + policy.outbound.maxCharsPerBubble + "、拼回 == 原文",
+        s1.rows.length === 3 &&
+          lens(s1.rows).every((n) => n <= policy.outbound.maxCharsPerBubble) &&
+          joinRaw(s1.rows) === s1Text &&
+          s1Style?.split?.[0]?.reason === "bubble_len",
+        "sent " + s1.rows.length + " 行 lens=[" + lens(s1.rows).join(",") + "] split=" + JSON.stringify(s1Style?.split),
+      );
+
+      // ② 90 字无标点 → 不切（1 泡），style=null
+      const s2 = await g23(SPEAKER_A, "小肥鱼 无标点 " + G23_NOPUNCT);
+      add(
+        "G23b",
+        "90 字无任何标点 → 不切（1 泡）、style=null",
+        s2.rows.length === 1 && String(s2.rows[0]?.text ?? "") === "字".repeat(90) && (s2.decision?.machine?.style ?? null) === null,
+        "sent " + s2.rows.length + " 行 len=" + lens(s2.rows).join(",") + " style=" + JSON.stringify(s2.decision?.machine?.style),
+      );
+
+      // ③ 80 字只有一个逗号 → 2 泡
+      const s3 = await g23(SPEAKER_A, "小肥鱼 一个逗号 " + G23_COMMA);
+      const s3Text = "字".repeat(40) + "，" + "词".repeat(39);
+      add(
+        "G23c",
+        "80 字只有一个逗号 → 2 泡、拼回 == 原文",
+        s3.rows.length === 2 && joinRaw(s3.rows) === s3Text,
+        "sent " + s3.rows.length + " 行 lens=[" + lens(s3.rows).join(",") + "]",
+      );
+
+      // ④ 语气词保护：逗号右边是「啊」→ 不许在那儿切
+      const s4 = await g23(SPEAKER_A, "小肥鱼 语气词 " + G23_PARTICLE);
+      const s4Text = "甲".repeat(40) + "，啊" + "乙".repeat(10) + "，" + "丙".repeat(10);
+      add(
+        "G23d",
+        "切点右边是「啊」→ 不在那儿切（「啊」仍留在前一泡）",
+        s4.rows.length === 2 && String(s4.rows[0]?.text ?? "").includes("啊") && joinRaw(s4.rows) === s4Text,
+        "sent " + s4.rows.length + " 行，第一泡=" + JSON.stringify(String(s4.rows[0]?.text ?? "").slice(-6)),
+      );
+
+      // ⑤ 切出 3 泡但 chunks_per_reply=1 → 合回 1 泡，style 同时有 split 与 merged
+      const s5 = await g23(3100000009, "小肥鱼 合并 " + G23_SENT);
+      const s5Style = s5.decision?.machine?.style as Record<string, any> | null | undefined;
+      add(
+        "G23e",
+        "切出 3 泡但 chunks_per_reply=1 → 合回 1 泡、拼回 == 原文、style 同时有 split 与 merged",
+        s5.rows.length === 1 && joinRaw(s5.rows) === s1Text && s5Style?.merged?.[0]?.reason === "chunk_cap" && Array.isArray(s5Style?.split),
+        "sent " + s5.rows.length + " 行 len=" + lens(s5.rows).join(",") + " style=" + JSON.stringify(s5Style),
+      );
+
+      // ⑥ 150 字无任何标点 → 不切（1 泡），style=null
+      const s6 = await g23(SPEAKER_A, "小肥鱼 长句 " + G23_LONGNOPUNCT);
+      add(
+        "G23f",
+        "150 字、既无句末标点也无逗号 → 不切（1 泡）、style=null",
+        s6.rows.length === 1 && String(s6.rows[0]?.text ?? "") === "字".repeat(150) && (s6.decision?.machine?.style ?? null) === null,
+        "sent " + s6.rows.length + " 行 len=" + lens(s6.rows).join(","),
       );
     }
 

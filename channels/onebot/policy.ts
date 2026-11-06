@@ -45,6 +45,12 @@ export type OutboundPolicy = {
   maxChunks: number;
   // 换行切出来的子泡之间的间隔（毫秒）。第 i 个子泡 send_at = 父 send_at + i × newlineGapMs/1000。
   newlineGapMs: number;
+  // 一个气泡最多几个字。超了只在句末标点处切，再不行退到逗号，再不行就不切（宁可长，不许断半句）。
+  maxCharsPerBubble: number;
+  bubbleSentenceMarks: string[];
+  bubbleClauseMarks: string[];
+  // 语气词保护：切点右边以这些词开头时不切（把切点往前挪）。
+  bubbleTailParticles: string[];
   defaultReplies: string[];
 };
 
@@ -151,6 +157,10 @@ export const readPolicy = (raw: unknown, label = "data/policy.json"): Policy => 
       maxSentences: count(outbound.maxSentences, "outbound.maxSentences", label),
       maxChunks: count(outbound.maxChunks, "outbound.maxChunks", label),
       newlineGapMs: ms(outbound.newlineGapMs, "outbound.newlineGapMs", label),
+      maxCharsPerBubble: count(outbound.maxCharsPerBubble, "outbound.maxCharsPerBubble", label),
+      bubbleSentenceMarks: lines(outbound.bubbleSentenceMarks, "outbound.bubbleSentenceMarks", label),
+      bubbleClauseMarks: lines(outbound.bubbleClauseMarks, "outbound.bubbleClauseMarks", label),
+      bubbleTailParticles: lines(outbound.bubbleTailParticles, "outbound.bubbleTailParticles", label),
       defaultReplies: lines(outbound.defaultReplies, "outbound.defaultReplies", label),
     },
     quota: {

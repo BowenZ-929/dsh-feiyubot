@@ -1,65 +1,153 @@
-// 换行 = 换泡。纯函数：不碰网络/时钟/文件。
+// 气泡切分：换行 = 换泡；一个气泡太长就只在标点处切（宁可长，不许断半句）。
+// 纯函数：不碰网络/时钟/文件。
 //
-// 判据（人拍，钉死）：
-//   1. 一泡文本里有换行 → 按换行切开，各成一泡，各自带 send_at；
-//   2. 切出来的泡仍受既有三道上限约束（那是 compose.ts 的事，这里只管切）；
-//   3. 切出来是空串 / 纯空白 / 纯标点 → 不为它产生气泡（把那个换行去掉）；
-//   4. 只有行尾一个换行 → 只发一泡，去掉行尾换行；
-//   5. 泡数上限（chunks_per_reply）管住**最终发出去几个气泡**：超了就把后面的内容
-//      合回最后一泡，一个字符都不许丢（合并时用 \n 拼回去）。
+// 顺序钉死（不许跳级）：
+//   ① 按 \n 切（换行=换泡）；
+//   ② 泡内超 maxCharsPerBubble → 只在句末标点处切；
+//   ③ 没有句末标点 → 只在逗号/顿号/分号处切；
+//   ④ 连逗号都没有 → 不切；
+//   ⑤ 切完拼回去必须逐字节等于原文。
+// 每个 piece 带 sep（piece 之前被移除的那段原文）：换行切来的 sep="\n"，标点切来的 sep=""（标点留在左段末尾）。
+// reconstruct = pieces.map(p => p.sep + p.text).join("") —— 合并回最后一泡时也按各自的 sep 还原，绝不统一用 "\n"。
 import type { Chunk } from "./outbox.ts";
 
-export type SplitOptions = { gapSec: number; cap: number };
-export type SplitResult = { chunks: Chunk[]; merged: boolean };
+export type BubblePolicy = {
+  // 子泡之间的 send_at 步长（秒）。
+  gapSec: number;
+  // 最多几个气泡（chunks_per_reply，缺卡回落 maxChunks）。
+  cap: number;
+  // 单泡字数上限。
+  maxChars: number;
+  sentenceMarks: string[];
+  clauseMarks: string[];
+  tailParticles: string[];
+};
 
-// 空 / 纯空白 / 纯标点：这种行不该占一个气泡。
-// 只看标点（P*）与空白——emoji 之类算内容，不吞。
+export type BubbleSplit = { reason: "bubble_len"; len: number; into: number[] };
+export type SplitResult = { chunks: Chunk[]; merged: boolean; splits: BubbleSplit[] };
+
+type Piece = { text: string; sep: string };
+
+// 空 / 纯空白 / 纯标点：这种行不该占一个气泡。只看标点（P*）与空白——emoji 之类算内容，不吞。
 const isBlankLike = (text: string): boolean => {
   if (text.trim().length === 0) return true;
   return /^[\s\p{P}]+$/u.test(text);
 };
 
-export const splitBubbles = (chunks: Chunk[], options: SplitOptions): SplitResult => {
-  const cap = Number.isFinite(options.cap) && options.cap >= 1 ? Math.floor(options.cap) : 1;
-  const gapSec = Number.isFinite(options.gapSec) && options.gapSec > 0 ? options.gapSec : 0;
+const charLen = (text: string): number => Array.from(text).length;
+
+// 在这一堆标点里找「可以切」的最靠后位置：左段不能超长、右段非空、右段不能以语气词开头。
+const lastCut = (text: string, marks: string[], particles: string[], maxChars: number): number => {
+  let cut = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    if (!marks.includes(text[index])) continue;
+    const left = text.slice(0, index + 1);
+    const right = text.slice(index + 1);
+    if (right.length === 0) break;
+    if (charLen(left) > maxChars) break;
+    // 语气词保护：右段以语气词开头就不在这一刀切（继续往后找更后面的候选，或保留更早的候选）。
+    if (particles.some((particle) => particle.length > 0 && right.startsWith(particle))) continue;
+    cut = index + 1;
+  }
+  return cut;
+};
+
+const splitLong = (text: string, marks: string[], particles: string[], maxChars: number): string[] => {
+  const pieces: string[] = [];
+  let rest = text;
+  while (charLen(rest) > maxChars) {
+    const cut = lastCut(rest, marks, particles, maxChars);
+    if (cut <= 0) break; // ④ 没有可用切点 → 不切
+    pieces.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  pieces.push(rest);
+  return pieces;
+};
+
+export const splitBubbles = (chunks: Chunk[], policy: BubblePolicy): SplitResult => {
+  const cap = Number.isFinite(policy.cap) && policy.cap >= 1 ? Math.floor(policy.cap) : 1;
+  const gapSec = Number.isFinite(policy.gapSec) && policy.gapSec > 0 ? policy.gapSec : 0;
+  const maxChars = Number.isFinite(policy.maxChars) && policy.maxChars >= 1 ? Math.floor(policy.maxChars) : 1;
+  const splits: BubbleSplit[] = [];
   const out: Chunk[] = [];
   let merged = false;
 
   for (const chunk of chunks) {
-    // 只按 \n 切；\r 属于原文本内容，不擅自吞掉。
-    const lines = chunk.text.split("\n").filter((line) => !isBlankLike(line));
-    const parts = lines.length > 0 ? lines : [""];
-
-    if (parts.length <= 1) {
-      // 没有换行（或切完只剩一泡，比如只有行尾换行）：原样一泡。
-      out.push({ text: parts[0], gap_before: chunk.gap_before, send_at: chunk.send_at });
-      continue;
-    }
-
-    if (parts.length > cap) {
-      merged = true;
-      // 前 cap-1 泡各自出去，剩下的用 \n 拼回最后一泡：不截断、不少一个字符。
-      const head = parts.slice(0, cap - 1);
-      const tail = parts.slice(cap - 1).join("\n");
-      for (let index = 0; index < head.length; index += 1) {
-        out.push({
-          text: head[index],
-          gap_before: index === 0 ? chunk.gap_before : 0,
-          send_at: chunk.send_at + index * gapSec,
-        });
-      }
-      out.push({ text: tail, gap_before: 0, send_at: chunk.send_at + (cap - 1) * gapSec });
-      continue;
-    }
-
-    for (let index = 0; index < parts.length; index += 1) {
+    // 带图的一泡是原子的：不按换行/标点再切——切碎等于让图落在半句话旁边。
+    // text 为空的只有图的泡也必须留下：这里直接产出，绕开下面「全空的不占泡」那一步。
+    // image 原样透传（file/summary 一个字节都不改），顺序、gap_before、send_at 的算法与纯文字泡一致。
+    if (chunk.image !== undefined) {
       out.push({
-        text: parts[index],
+        text: chunk.text,
+        image: chunk.image,
+        gap_before: chunk.gap_before,
+        send_at: chunk.send_at,
+      });
+      continue;
+    }
+
+    // ① 换行切泡（sep 记下每段前面被移除的换行）
+    const lines = chunk.text.split("\n");
+    let pieces: Piece[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (index > 0 && isBlankLike(line)) continue; // ③（M10 口径）空/纯空白/纯标点不产泡
+      if (index === 0 && isBlankLike(line) && lines.length === 1) {
+        pieces = [{ text: "", sep: "" }];
+        break;
+      }
+      pieces.push({ text: line, sep: index === 0 ? "" : "\n" });
+    }
+    if (pieces.length === 0) pieces = [{ text: "", sep: "" }];
+
+    // ②③ 泡内超长切（标点留在左段末尾，sep="")
+    const expanded: Piece[] = [];
+    for (const piece of pieces) {
+      if (charLen(piece.text) <= maxChars) {
+        expanded.push(piece);
+        continue;
+      }
+      let parts = splitLong(piece.text, policy.sentenceMarks, policy.tailParticles, maxChars);
+      if (parts.length === 1) {
+        // 句末标点切不动（或根本没有）→ 退到逗号/顿号/分号
+        parts = splitLong(piece.text, policy.clauseMarks, policy.tailParticles, maxChars);
+      }
+      if (parts.length > 1) {
+        splits.push({ reason: "bubble_len", len: charLen(piece.text), into: parts.map((part) => charLen(part)) });
+      }
+      parts.forEach((part, index) => {
+        expanded.push({ text: part, sep: index === 0 ? piece.sep : "" });
+      });
+    }
+
+    // 上限合并：超了就把后面的合回最后一泡（按各自 sep 还原，禁截断）
+    if (expanded.length > cap) {
+      merged = true;
+      // 前面 cap-1 段原样保留；第 cap-1 段起全部合回最后一泡。
+      // 合并时按每段的 sep 还原（换行来的 sep="\n"、标点来的 sep=""），绝不统一用 "\n"。
+      const kept = expanded.slice(0, cap - 1);
+      const tail = expanded[cap - 1];
+      const restText = expanded
+        .slice(cap)
+        .map((piece) => piece.sep + piece.text)
+        .join("");
+      const mergedPiece: Piece = { text: tail.text + restText, sep: tail.sep };
+      expanded.length = 0;
+      for (const piece of kept) expanded.push(piece);
+      expanded.push(mergedPiece);
+    }
+
+    for (let index = 0; index < expanded.length; index += 1) {
+      const piece = expanded[index];
+      if (piece.text.length === 0 && piece.sep.length === 0) continue; // 全空的不占泡
+      out.push({
+        text: piece.text,
         gap_before: index === 0 ? chunk.gap_before : 0,
         send_at: chunk.send_at + index * gapSec,
       });
     }
   }
 
-  return { chunks: out, merged };
+  return { chunks: out, merged, splits };
 };

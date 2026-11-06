@@ -21,6 +21,10 @@
     "maxSentences": 8,
     "maxChunks": 3,
     "newlineGapMs": 800,
+    "maxCharsPerBubble": 60,
+    "bubbleSentenceMarks": ["。", "！", "？", "…", "；"],
+    "bubbleClauseMarks": ["，", "、", "；", ","],
+    "bubbleTailParticles": ["啊", "吧", "呢", "嘛", "呀", "哦", "啦", "咯", "喽", "呗", "噢"],
     "defaultReplies": [
       "嗯，我在。",
       "……我在听。",
