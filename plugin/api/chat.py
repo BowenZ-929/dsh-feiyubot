@@ -95,6 +95,15 @@ assembly.json 的 scene.lines）、落脑时写给那一轮的两条记忆、回
 audience=私密 的条目打上 retellable=False，recalled[] 里原样透出）。成功体因此多一节
 scene{value}。**不猜**：缺省也是 unknown——猜成私聊，就是把私事在群里说出去了。
 
+**段往核里传（这一轮加的）：body 多一个可选「segment」**——刚刚这一小段谁说了哪几句，
+两种形状都收（list of {speaker, text}，或 list of [speaker, text]），归一化成 [(谁, 说了什么)]
+后原样交给 conversation.answer(segment=...)，装配里多一段「这一小段」（标题 / 上限在
+assembly.json 的 sections.segment）。它**不写进 recent**：段是刚刚这一小段、recent 是更早的
+12 轮，两份输入不重叠，同一条消息不会既当段又当 recent。没给这个字段就是 None——私聊与老调用
+一字不改。形状坏了（不是 list / 元素既不是对象也不是二元组 / speaker 空）当场 400 并点名，
+不兜底：悄悄当成空段，等于让她以为这一段没人说话。只给段、没给 text 时，这一问取段里最后
+那一条（他刚说的那句）。
+
 **顺序钉死：冷却 → audience 边界 → 闸 → 长度。** 冷却排在所有人前面，是因为它早于装配——那一轮
 压根没有 `recalled`，本就没有边界话可说；也因为「这个话题已经拒过」比「这条记忆是私密」更靠前：
 让边界话抢在冷却之前，就是把一次已经记过的拒绝再说一遍、再投一遍。audience 边界排在闸之前，是
@@ -153,6 +162,7 @@ CHAT_ROUTES = {"/chat": "POST"}
 
 LOGGER_NAME = "qqagent.chat"
 MISSING_TEXT = "POST /chat 要给 text（一句话）"
+SEGMENT_BROKEN = "POST /chat 的 segment 收不了：%s"   # 段形状坏：400，并把她认不出的那一条点名
 STORE_MISSING = "魂未载入：说话前先起核"
 BRAIN_MISSING = "脑未载入：没有记忆就不开口"
 
@@ -220,6 +230,9 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     它只决定「这是哪儿说话」——装配里写哪一句、落脑写哪一栏、回想时脑要不要把私密条目打上
     retellable=False。**非法值不 400**（落成 unknown，不猜成 private），与上面那一格各读各的。
 
+    body 里还可以给一个 segment（刚刚这一小段，两种形状都收）：归一化后交给 answer(segment=...)，
+    进「这一小段」那一节；形状坏了当场 400。没给就是 None（私聊与老调用一字不改）。
+
     成功之后先过闸：拿 answer() 装配进去的那几段原文（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句 /
     对方原话）与装配体逐泡过一遍闸，结果就地落回 payload（chunks / reply / gate）。闸坏了不 fail-open：
     判据读不动就整轮弃掉，并在 gate 里如实说为什么。
@@ -228,7 +241,13 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     **全仓唯一的投递点就在这一处**。判据坏了（拒绝数据读不动）不改这一轮的成功：她那句话已经
     说出口了，写一行 WARNING、并在 refusal 那一节里如实说这次没判成、没投心。
     """
+    segment, broken = _segment_state(body)
+    if broken:
+        return 400, {"ok": False, "message": broken}
     text = _text(body)
+    # 只给了段、没给 text：这一问就是段里最后那一条（他刚说的那句），不另外编一句。
+    if text is None and segment:
+        text = segment[-1][1]
     if text is None:
         return 400, {"ok": False, "message": MISSING_TEXT}
     # 场景（可选，缺省值是数据里那个）：只决定「私密记忆这一轮能不能被引用」，非法值当场 400 并点名。
@@ -249,7 +268,7 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     if cooled["cooling"]:
         return 200, _cooled_payload(cooled, text, store, history, _who(body))
     try:
-        payload = conversation.answer(text, who=_who(body), scene=place,
+        payload = conversation.answer(text, who=_who(body), scene=place, segment=segment,
                                       store=store, brain=brain)
     except LLMError as exc:
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
@@ -1335,6 +1354,21 @@ def _text(body: Any) -> Optional[str]:
     if not isinstance(raw, str) or not raw.strip():
         return None
     return raw.strip()
+
+
+def _segment_state(body: Any) -> Tuple[Optional[List[Tuple[str, str]]], Optional[str]]:
+    """读 body 里的段：归一化过就交回去，形状坏了交回一句点名的人话（由 dispatch 翻成 400）。
+
+    认的两种形状与判据全在 organs/mind/conversation.py 的 normalize_segment（api 层不另写一份）：
+    这一层只把 ValueError 翻成一句话。没给这个字段就是 (None, None)——私聊与老调用一字不改。
+    """
+    raw = body.get("segment") if isinstance(body, Mapping) else None
+    if raw is None:
+        return None, None
+    try:
+        return conversation.normalize_segment(raw), None
+    except ValueError as exc:
+        return None, SEGMENT_BROKEN % exc
 
 
 def _who(body: Any) -> str:

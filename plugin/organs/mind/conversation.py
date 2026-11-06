@@ -3,7 +3,7 @@
 这是**全仓唯一的装配点**：QQ 通道将来直接调 answer()，不再自己拼第二遍。装配的规矩
 一个数都不写在本文件里，全在 organs/mind/data/assembly.json：
 
-  order      各段拼装的先后（soul / anchors / recent / banned / action / memory / heart / mouth / scene）
+  order      各段拼装的先后（soul / anchors / recent / segment / banned / action / memory / heart / mouth / scene）
   sections   {key: {"label": 段落标题, "cap": 字数上限}}
   prompt     system / user 两段模板（占位符见下）
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
@@ -12,6 +12,8 @@
   action     {"pool": 部位池, "rule": 写法规矩, "quota": 配额}：动作给池子，但配额说了算
   anchors    {"label", "cap", "room", "name"}：锚句从家·哪一间房的哪一张卡读
   scene      场合：group / private / unknown 各一句，按归一化后的场景取一句进提示词
+  segment    notice：只有「群聊 + 这一段里至少两个人说话」才把 group 那一句接在段尾
+             （私聊 / 单人 / unknown 一律不接）。段的标题与上限在 sections.segment 里
 读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先（存在才读），否则读
 出厂 organs/mind/data/assembly.json。
 
@@ -65,6 +67,11 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           缺省 / 空白 / 非法一律 unknown——**不猜成私聊**，猜错就是把私事说出去了）从
           assembly.json 的 scene.lines 取一句，本文件一个字的文案都不写。order 里排在最后：
           说给谁、说什么都定了，最后交代在哪儿说。
+  segment 这一段刚刚的发言（answer(segment=...) 归一化后的 [(谁, 说了什么)]），每行
+          「谁：说了什么」；段空着就写一句实话（NO_SEGMENT），不许留白。**段与 recent 是两份
+          输入，谁也不许顶替谁**：段是刚刚这一小段，recent 是更早的那 12 轮，同一条消息不会既
+          当段又当 recent——recent 的写入在说完之后，段从不回写进 recent。段尾那句「几个人在
+          说话」只在这一轮是群聊、且段里至少两个人说话时才接（assembly.json 的 segment.notice）。
 
 坏卡不是崩溃：mood 照读，effective_state 抛 CardError 就降级成只要 mood 那一块——
 与 api/heart.py 的既有口径同一条（面板能显示「拒载」，这一轮照旧说得出话）。
@@ -133,6 +140,9 @@ COPY_AGAIN = "改了一次仍与台词卡「%s」的例句连着重合 %d 字（
 SEED_SEP = "|"                            # 节奏的种子：who 与时刻拼起来，同一轮两次调用得到同一组间隔
 POOL_SEP = "／"                            # 动作池进提示词时部位之间的分隔（全角斜杠，与标点同一套）
 BANNED_EMPTY = "最近几轮没有可禁用的动作行与开场。"   # 一条都抽不出来时的实话（空白会被她读成「随便用」）
+NO_SEGMENT = "这一段没有别的发言"          # 段空着 / 没给时这一节写这句实话（不许留白）
+SEGMENT_LINE = "%s：%s"                    # 段里一行的样子：谁 + 说了什么（没有项目符号，与 recent 一眼分开）
+SEGMENT_KEYS = ("speaker", "text")         # 段里一条记录的两个键（两种形状：对象，或二元组）
 SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可以更小，不许更大（这节只有一句「在哪儿说」）
 
 
@@ -241,6 +251,7 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         "action": action_conf,
         "anchors": _check_anchors(data.get("anchors"), where),
         "scene": _check_scene(data.get("scene"), where),
+        "segment": _check_segment(data.get("segment"), where, "segment" in checked),
     }
 
 
@@ -459,10 +470,70 @@ def _check_scene(spec: Any, where: str) -> Dict[str, Any]:
     return {"lines": clean}
 
 
+def _check_segment(spec: Any, where: str, wanted: bool) -> Optional[Dict[str, Any]]:
+    """「这一小段」那一格：order 里有 segment 就要给 notice（三个场景各一句，人能改）。
+
+    私聊 / unknown 两句允许是空串（那两态本来就不加这句话），group 那一句不许空——空了等于
+    群聊多人时也不给那句话，而数据上看起来「配过了」。没配 segment 却把它留在 order 里同样当场报：
+    缺一句就补一份默认话，那是数据之外的第二处真源。
+    """
+    if spec is None:
+        if wanted:
+            raise ValueError("order 里有 segment，装配说明却缺 segment（notice 三句话）：%s" % where)
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError("segment 要一份对象（notice：group / private / unknown 各一句）：%s" % where)
+    notice = spec.get("notice")
+    if not isinstance(notice, dict):
+        raise ValueError("segment.notice 要一份 {场景: 一句话} 的表：%s" % where)
+    clean: Dict[str, str] = {}
+    for name in brain_model.SCENE_TYPES:
+        text = notice.get(name)
+        if not isinstance(text, str):
+            raise ValueError("segment.notice.%s 要一句话（私聊 / unknown 可以是空串）：%s"
+                             % (name, where))
+        clean[name] = text.strip()
+    if wanted and not clean[brain_model.SCENE_GROUP]:
+        raise ValueError("segment.notice.group 要一句非空的话（群里多人那一条）：%s" % where)
+    return {"notice": clean}
+
+
+def normalize_segment(segment: Any) -> Optional[List[Tuple[str, str]]]:
+    """把 segment 归一成 [(谁, 说了什么)]；没给（None）就是 None。
+
+    收两种形状（通道与页面各写各的，服务端认这两种，别的一律不猜）：
+      [{"speaker": "阿黄", "text": "我妈住院了"}, ...]   对象
+      [["阿黄", "我妈住院了"], ...]                      二元组
+    坏形状当场 ValueError，不兜底：不是 list、元素既不是对象也不是二元组、speaker 空、
+    text 不是字或全空白——这几种都是**调用方写错了**，悄悄当空段就等于让她以为这一段没人说话。
+    归一化是幂等的（交回来的 [(谁, 什么)] 再进来还是它自己），api 层归一过一遍、这里再判一遍。
+    """
+    if segment is None:
+        return None
+    if isinstance(segment, (str, bytes, Mapping)) or not isinstance(segment, (list, tuple)):
+        raise ValueError("segment 要一份列表（每一条是 {speaker, text} 或 [speaker, text]）：%r"
+                         % (segment,))
+    rows: List[Tuple[str, str]] = []
+    for index, one in enumerate(segment, 1):
+        if isinstance(one, Mapping):
+            speaker, said = one.get(SEGMENT_KEYS[0]), one.get(SEGMENT_KEYS[1])
+        elif isinstance(one, (list, tuple)) and len(one) == 2:
+            speaker, said = one[0], one[1]
+        else:
+            raise ValueError("segment 第 %d 条既不是对象也不是二元组：%r" % (index, one))
+        if not isinstance(speaker, str) or not speaker.strip():
+            raise ValueError("segment 第 %d 条没有 speaker（谁说的）：%r" % (index, one))
+        if not isinstance(said, str) or not said.strip():
+            raise ValueError("segment 第 %d 条没有 text（说了什么）：%r" % (index, one))
+        rows.append((speaker.strip(), said.strip()))
+    return rows
+
+
 # —— 唯一入口 ————————————————————————————————————
 
 
 def answer(text: str, who: str = "", *, scene: Optional[str] = None,
+           segment: Optional[Any] = None,
            store: Any = None, brain: Any = None,
            heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
            now: Optional[str] = None,
@@ -483,6 +554,10 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     装配加一段「场合」（文本来自 assembly.json 的 scene.lines）、落脑时写进那一条的 scene 栏、
     回想时交给脑（group 才把 audience=私密 的条目打上 retellable=False）。位置写在 order 里
     （出厂数据排在最后：说给谁、说什么都定了，最后交代在哪儿说）。
+    segment：刚刚这一小段的发言（list of {"speaker","text"} 或 list of [speaker, text]；
+    没给就是 None——私聊与老调用一字不改）。它**只**进「这一小段」那一节，不写进 recent：
+    recent 是更早的那几轮，段是眼下这一小段，两份输入谁都不顶替谁（同一条消息不许既当段又当
+    recent）。形状不对当场 ValueError，不兜底也不猜。
 
     返回（键名对外冻结，pages/chat.html 照它渲染）：
       ok / reply / chunks[{text,gap_before,send_at}] / scene{value} /
@@ -513,6 +588,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     said = str(text or "").strip()
     if not said:
         raise ValueError("text 不能为空：没有一句话就没有这一轮")
+    # 段先归一化：形状不对就在动任何器官之前当场报（不兜底，也不把它悄悄当空段）。
+    rows = normalize_segment(segment) or []
     conf = _check_assembly(assembly, "传入的 assembly") if assembly is not None else load_assembly()
     at = now if isinstance(now, str) and now else brain_model.now_iso()
     # 场合先归一化：后面三处（装配 / 落脑 / 回想）都只认这一个值，不各自再判一遍。
@@ -575,6 +652,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     reply_rule = "\n".join([conf["reply"]["instruction"]] + list(rules))
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
+                "segment": _segment_text(rows, conf, where),
                 "banned": banned_text, "action": action_text,
                 "memory": memory_text, "heart": heart_text, "mouth": mouth_text,
                 "person": person_text, "scene": _scene_text(conf, where)}
@@ -700,6 +778,46 @@ def _recent_text(turns: List[Mapping[str, Any]], note: str,
         return note[:cap]
     head = body if len(body) <= room else body[:room]
     return head + "\n" + note
+
+
+def _segment_text(rows: List[Tuple[str, str]], conf: Mapping[str, Any],
+                  scene: str) -> str:
+    """「这一小段」这一段进提示词的样子：一行一个人说的一句，段空着就写一句实话。
+
+    每行「谁：说了什么」（没有项目符号：与 recent 那一节的「- 谁：什么」一眼分开）。
+    段空着 / 没给就写 NO_SEGMENT——这一节不许留白：空白会被读成「这一段没人说话」，
+    而「没给段」是另一回事，得让她看得见。
+
+    段尾那句「几个人在说话」（segment.notice）只在这一轮是群聊、且段里至少两个人说话时接，
+    先给它留位置再截正文（真话被 cap 锯掉就等于没装进去）。
+    """
+    body = "\n".join(SEGMENT_LINE % (who, said) for who, said in rows) or NO_SEGMENT
+    notice = _segment_notice(rows, conf, scene)
+    if not notice:
+        return body
+    spec = conf["sections"].get("segment")
+    if not isinstance(spec, Mapping):
+        return body + "\n" + notice
+    room = spec["cap"] - len(notice) - 1
+    if room <= 0:
+        return notice[:spec["cap"]]
+    head = body if len(body) <= room else body[:room]
+    return head + "\n" + notice
+
+
+def _segment_notice(rows: List[Tuple[str, str]], conf: Mapping[str, Any],
+                    scene: str) -> str:
+    """段尾那句话：只有「群聊 + 这一段里至少两个人说话」才给，其余一律空串。
+
+    两个条件缺一不可：私聊里没有「他们互相说」，单人段也没有——那两态加这一句，等于告诉她
+    有人在跟她对话，或有人在互相说话，都是编出来的场面。说话者按**不同的 speaker** 算。
+    """
+    spec = conf.get("segment")
+    if not isinstance(spec, Mapping) or scene != brain_model.SCENE_GROUP:
+        return ""
+    if len({who for who, _said in rows}) < 2:
+        return ""
+    return str(spec["notice"].get(brain_model.SCENE_GROUP) or "")
 
 
 def _her_names(store: Any) -> set:

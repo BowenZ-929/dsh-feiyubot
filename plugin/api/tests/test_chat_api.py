@@ -230,7 +230,7 @@ class ChatApiTest(unittest.TestCase):
     # —— 成功体 ————————————————————————————————
 
     def test_success_body_is_the_contract(self):
-        self.brain.ingest(who="主人", text=MEMORY_TEXT)
+        self.brain.ingest(who="3425635473", text=MEMORY_TEXT)
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
@@ -297,7 +297,7 @@ class ChatApiTest(unittest.TestCase):
                       "动作池那一节没进提示词")
 
     def test_recalled_carries_real_evidence_from_brain(self):
-        entry = self.brain.ingest(who="主人", text=MEMORY_TEXT)
+        entry = self.brain.ingest(who="3425635473", text=MEMORY_TEXT)
         status, payload = self._send()
         self.assertEqual(200, status)
         self.assertTrue(payload["recalled"], "一句带「医院」的话该想起那条记忆")
@@ -393,7 +393,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(1, len(first["chunks"]))
         before = len(self._drops_rows())
         status, second = self._post({"text": "我回来了"},
-                                    _script(self.HER_LINE, self.HER_LINE + "主人"))
+                                    _script(self.HER_LINE, self.HER_LINE + "3425635473"))
         self.assertEqual(200, status)
         gate = second["gate"]
         part = gate["parts"][0]
@@ -579,7 +579,7 @@ class ChatApiTest(unittest.TestCase):
         走的是装配那边现成的算法（repeat.count_with_actions 数最近 quota.window 轮），
         这里只负责造一轮历史，不另算一遍配额。
         """
-        recent.append({"ts": "2025-01-15T14:00:00+08:00", "who": "主人",
+        recent.append({"ts": "2025-01-15T14:00:00+08:00", "who": "3425635473",
                        "said": "你刚才那个样子", "reply": "（耳尖动了动）"})
 
     def test_quota_forbid_strips_the_action_line_and_keeps_the_body(self):
@@ -878,7 +878,7 @@ class ChatApiTest(unittest.TestCase):
         **audience 的生产者不在本轮**：mind 的 _recall 现在只搬固定那几栏，出口要认的那一栏
         因此得靠这个假 _recall 打上（验收里允许的两条路之一）。
         """
-        self.brain.ingest(who="主人", text=text)
+        self.brain.ingest(who="3425635473", text=text)
         real = conversation._recall
 
         def tagged(brain, said, who, scene=None):
@@ -888,7 +888,7 @@ class ChatApiTest(unittest.TestCase):
             if not any(row.get("text") == text for row in rows):
                 rows.append({"id": "私密-被试", "text": text, "display_text": text,
                              "source": "longterm", "source_type": "亲历",
-                             "evidence_key": "被试", "score": 1.0, "who": "主人",
+                             "evidence_key": "被试", "score": 1.0, "who": "3425635473",
                              "note_display": "", self.PRIVATE_FIELD: self.PRIVATE_VALUE})
             return rows, memory_text
 
@@ -1101,7 +1101,7 @@ class ChatApiTest(unittest.TestCase):
 
     def test_fifteen_rounds_show_the_omitted_notice_over_http(self):
         for index in range(15):
-            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % (index % 10), "who": "主人",
+            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % (index % 10), "who": "3425635473",
                            "said": "第%d句" % index, "reply": "第%d答" % index})
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
@@ -1118,7 +1118,7 @@ class ChatApiTest(unittest.TestCase):
 
     def test_five_rounds_carry_no_notice(self):
         for index in range(5):
-            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % index, "who": "主人",
+            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % index, "who": "3425635473",
                            "said": "第%d句" % index, "reply": "第%d答" % index})
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
         self.assertEqual(200, status)
@@ -1128,7 +1128,7 @@ class ChatApiTest(unittest.TestCase):
 
     def test_a_round_the_ledger_missed_is_backfilled_over_http(self):
         """脑里今日记了、最近几轮没落的一条：装配前补进来，回包里说清补了几条。"""
-        self.brain.ingest(who="主人", text="我上周把片子落在诊室了")   # 今日在役，账上没有
+        self.brain.ingest(who="3425635473", text="我上周把片子落在诊室了")   # 今日在役，账上没有
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
@@ -1213,7 +1213,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         before = len(self._drops_rows())
         status, payload = self._post({"text": "今天吃啥"},
-                                     _script(self.HER_LINE, self.HER_LINE + "主人"))
+                                     _script(self.HER_LINE, self.HER_LINE + "3425635473"))
         self.assertEqual(200, status)
         gate = payload["gate"]
         part = gate["parts"][0]
@@ -1302,7 +1302,7 @@ class ChatApiTest(unittest.TestCase):
         store = self._soul_store(self.SETTING)
         before = len(self._drops_rows())
         status, payload = self._post({"text": "今天吃啥"},
-                                     _script(self.RECITED, self.RECITED + "主人"), store=store)
+                                     _script(self.RECITED, self.RECITED + "3425635473"), store=store)
         self.assertEqual(200, status)
         gate = payload["gate"]
         part = gate["parts"][0]
@@ -1593,17 +1593,17 @@ class ChatApiTest(unittest.TestCase):
         """第一轮「以后叫我老李」：当场换 + 投脑一条亲历记忆 + 记进会话账；第二轮不要求也还在。"""
         book = self._fresh_book()
         table = mouth_address.load_table()
-        status, first = self._post({"text": "以后叫我老李", "who": "主人"}, _body(LONG_REPLY))
+        status, first = self._post({"text": "以后叫我老李", "who": "3425635473"}, _body(LONG_REPLY))
         self.assertEqual(200, status)
         self.assertEqual({"who", "address", "source"}, set(first["addressed"]))
-        self.assertEqual("主人", first["addressed"]["who"])
+        self.assertEqual("3425635473", first["addressed"]["who"])
         self.assertEqual("老李", first["addressed"]["address"])
         self.assertEqual(table["source"]["rename"], first["addressed"]["source"])
-        self.assertEqual({"主人": "老李"}, book.snapshot(), "会话账上没记下这一笔")
-        self.assertTrue(self._has_text(mouth_address.rename_memory("主人", "老李")["text"]),
+        self.assertEqual({"3425635473": "老李"}, book.snapshot(), "会话账上没记下这一笔")
+        self.assertTrue(self._has_text(mouth_address.rename_memory("3425635473", "老李")["text"]),
                         "那条亲历记忆没投进脑")
 
-        status, second = self._post({"text": "今天有点累", "who": "主人"},
+        status, second = self._post({"text": "今天有点累", "who": "3425635473"},
                                     _body("那就早点睡，我把灯关了。"))
         self.assertEqual(200, status)
         self.assertEqual("老李", second["addressed"]["address"], "没重新要求，叫法也该还在")
@@ -1613,9 +1613,9 @@ class ChatApiTest(unittest.TestCase):
         """换一个进程（新建一本账）：会话覆盖没了，回到人名录档位——「只活这个会话」。"""
         self._fresh_book()
         table = mouth_address.load_table()
-        self._post({"text": "以后叫我老李", "who": "主人"}, _body(LONG_REPLY))
+        self._post({"text": "以后叫我老李", "who": "3425635473"}, _body(LONG_REPLY))
         self._fresh_book()
-        status, again = self._post({"text": "今天有点累", "who": "主人"},
+        status, again = self._post({"text": "今天有点累", "who": "3425635473"},
                                    _body("那就早点睡，我把灯关了。"))
         self.assertEqual(200, status)
         self.assertEqual(table["source"]["directory"], again["addressed"]["source"])
@@ -1626,12 +1626,12 @@ class ChatApiTest(unittest.TestCase):
         book = self._fresh_book()
         table = mouth_address.load_table()
         banned = table["self_guard"]["words"][0]
-        status, payload = self._post({"text": "以后叫我" + banned, "who": "主人"}, _body(LONG_REPLY))
+        status, payload = self._post({"text": "以后叫我" + banned, "who": "3425635473"}, _body(LONG_REPLY))
         self.assertEqual(200, status)
         self.assertEqual(table["fallback"]["address"], payload["addressed"]["address"])
         self.assertEqual(table["source"]["fallback"], payload["addressed"]["source"])
         self.assertEqual({}, book.snapshot(), "被拦下的叫法不许记进会话账")
-        self.assertFalse(self._has_text(mouth_address.rename_memory("主人", banned)["text"]),
+        self.assertFalse(self._has_text(mouth_address.rename_memory("3425635473", banned)["text"]),
                          "被拦下的叫法不许投给脑")
 
     # —— 借阅读数：这一轮借了家里哪几份词条、各用掉几条（本轮加的）————
@@ -1790,7 +1790,7 @@ class ChatApiTest(unittest.TestCase):
         """
         status, _ = self._post({"text": "今天吃啥"}, _body(LONG_REPLY))
         self.assertEqual(200, status)
-        self.brain.ingest(who="主人", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
+        self.brain.ingest(who="3425635473", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
         status, payload = self._post({"text": QUESTION, "scene": brain_model.SCENE_GROUP},
                                      _body(LONG_REPLY))
         self.assertEqual(200, status)
@@ -1801,13 +1801,104 @@ class ChatApiTest(unittest.TestCase):
         brain = BrainStore(self.tmp / "brain-private")
         status, _ = self._post({"text": "今天吃啥"}, _body(LONG_REPLY), brain=brain)
         self.assertEqual(200, status)
-        brain.ingest(who="主人", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
+        brain.ingest(who="3425635473", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
         status, payload = self._post({"text": QUESTION, "scene": brain_model.SCENE_PRIVATE},
                                      _body(LONG_REPLY), brain=brain)
         self.assertEqual(200, status)
         row = next(one for one in payload["recalled"] if one["text"] == MEMORY_TEXT)
         self.assertTrue(row["retellable"], "私聊里这一条该是可复述的")
         self.assertNotIn("retell_note", row, "私聊里不该有「不可复述」那条理由")
+
+    # —— 这一小段：段从 body 进来，装配多一节，且不混进 recent ————————————
+
+    def _segment_body(self, system: str) -> str:
+        """提示词里「这一小段」那一节的正文档（标题从数据里现读）。"""
+        label = conversation.load_assembly()["sections"]["segment"]["label"]
+        return _section(system, label).strip("\n")
+
+    def test_segment_reaches_the_assembly_section_in_order(self):
+        """body 的 segment（两种形状都收）→ 提示词那节逐行出现、顺序不变，sections 里有 segment。"""
+        rows = [{"speaker": "234567890", "text": "我妈住院了"},
+                {"speaker": "234567890", "text": "明天要做手术"},
+                {"speaker": "123456789", "text": "我陪你去吧"}]
+        capture = []
+        status, payload = self._post({"text": QUESTION, "segment": rows},
+                                     _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        system = capture[0]["messages"][0]["content"]
+        self.assertEqual(["阿黄：我妈住院了", "阿黄：明天要做手术", "小明：我陪你去吧"],
+                         self._segment_body(system).splitlines(), "段没按顺序逐行进提示词")
+        keys = [row["key"] for row in payload["assembly"]["sections"]]
+        self.assertIn("segment", keys, "回包的 assembly.sections 里没有 segment")
+
+        # 二元组那种形状走同一条路（归一化只有一份，在 conversation.normalize_segment）
+        capture = []
+        status, _ = self._post({"text": QUESTION, "segment": [["234567890", "我妈住院了"],
+                                                              ["123456789", "我陪你去吧"]]},
+                               _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual("阿黄：我妈住院了\n小明：我陪你去吧",
+                         self._segment_body(capture[0]["messages"][0]["content"]).strip("\n"))
+
+    def test_segment_notice_only_in_a_group_with_two_speakers(self):
+        """群聊双人才接那句话；私聊 / unknown / 单人段一律不加。"""
+        notice = conversation.load_assembly()["segment"]["notice"][brain_model.SCENE_GROUP]
+        two = [["234567890", "我妈住院了"], ["123456789", "我陪你去吧"]]
+        one = [["234567890", "我妈住院了"], ["234567890", "明天要做手术"]]
+        cases = [(brain_model.SCENE_GROUP, two, True), (brain_model.SCENE_GROUP, one, False),
+                 (brain_model.SCENE_PRIVATE, two, False),
+                 (brain_model.SCENE_UNKNOWN, two, False)]
+        for scene, rows, wanted in cases:
+            with self.subTest(scene=scene, wanted=wanted):
+                capture = []
+                status, _ = self._post({"text": QUESTION, "scene": scene, "segment": rows},
+                                       _body(LONG_REPLY, capture))
+                self.assertEqual(200, status)
+                body = self._segment_body(capture[0]["messages"][0]["content"])
+                if wanted:
+                    self.assertIn(notice, body, "群聊双人段没接那句话")
+                else:
+                    self.assertNotIn(notice, body, "这一态不该加那句话")
+
+    def test_text_falls_back_to_the_last_segment_line(self):
+        """只给段、没给 text：这一问就是段里最后那一条（不另外编一句）。"""
+        rows = [["234567890", "我妈住院了"], ["123456789", "我陪你去吧"]]
+        capture = []
+        status, _ = self._post({"segment": rows}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual("我陪你去吧", capture[0]["messages"][1]["content"],
+                         "没给 text 时这一问该取段里最后那一条")
+
+    def test_segment_does_not_leak_into_the_continuity_ledger(self):
+        """段只进提示词那一节，不写进 recent：这一轮落账的只有他这一句，段不计轮。"""
+        rows = [["234567890", "我妈住院了"], ["123456789", "我陪你去吧"]]
+        capture = []
+        status, payload = self._post({"text": QUESTION, "segment": rows},
+                                     _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual(0, payload["continuity"]["turns_loaded"], "段被当成更早的轮记进 recent 了")
+        rows_on_disk = recent.load(root=Path(os.environ["QQAGENT_HOME"]) / "mind")["turns"]
+        self.assertEqual([QUESTION], [row["said"] for row in rows_on_disk],
+                         "recent 那份账上多了段里的行")
+
+    def test_bad_segment_shape_is_400_and_calls_no_model(self):
+        """形状坏 → 400 并点名；一个模型请求都不发（不兜底成空段）。"""
+        bad = ["阿黄：我妈住院了",
+               {"speaker": "234567890", "text": "我妈住院了"},
+               [["234567890"]],
+               [{"speaker": "234567890"}],
+               [["", "我妈住院了"]],
+               [["234567890", 42]]]
+        for case in bad:
+            with self.subTest(segment=case):
+                capture = []
+                status, payload = self._post({"text": QUESTION, "segment": case},
+                                             _body(LONG_REPLY, capture))
+                self.assertEqual(400, status, "坏形状没回 400：%r" % (case,))
+                self.assertFalse(payload["ok"])
+                self.assertIn(chat.SEGMENT_BROKEN.split("%s")[0], payload["message"])
+                self.assertEqual([], capture, "坏形状也发了模型请求")
+
 
 if __name__ == "__main__":
     unittest.main()

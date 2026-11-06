@@ -1785,5 +1785,140 @@ class ConversationAnswerTest(unittest.TestCase):
         caps = [row["cap"] for row in got["assembly"]["sections"] if row["key"] == "scene"]
         self.assertEqual([conversation.SCENE_CAP_MAX], caps)
 
+    # —— 18) 这一小段：段是刚刚这一小段，recent 是更早的那 12 轮 ————————————————
+
+    def _segment_body(self, system: str) -> str:
+        """提示词里「这一小段」那一节的正文档（标题从数据里现读，不写死）。"""
+        label = conversation.load_assembly()["sections"]["segment"]["label"]
+        return _section(system, label).strip("\n")
+
+    def test_segment_lines_reach_the_prompt_in_order(self):
+        """段三行（同一个人）→ 那节逐行出现、顺序不变；返回体 assembly.sections 里有 segment。"""
+        rows = [{"speaker": "阿黄", "text": "我妈住院了"},
+                {"speaker": "阿黄", "text": "明天要做手术"},
+                {"speaker": "阿黄", "text": "我不太敢一个人去"}]
+        capture = []
+        got = self._answer(captured=capture, segment=rows)
+        system = capture[0]["messages"][0]["content"]
+        self.assertEqual(["阿黄：我妈住院了", "阿黄：明天要做手术", "阿黄：我不太敢一个人去"],
+                         self._segment_body(system).splitlines(), "段的行没按原顺序逐行进提示词")
+        keys = [row["key"] for row in got["assembly"]["sections"]]
+        self.assertIn("segment", keys, "返回体的 assembly.sections 里没有 segment 这一节")
+        order = conversation.load_assembly()["order"]
+        self.assertLess(order.index("recent"), order.index("segment"), "段没排在 recent 之后")
+
+    def test_both_segment_shapes_normalize_the_same(self):
+        """两种形状（对象 / 二元组）归一成同一份 [(谁, 说了什么)]；没给就是 None。"""
+        pairs = [("阿黄", "我妈住院了"), ("小明", "我陪你去吧")]
+        self.assertEqual(pairs, conversation.normalize_segment([["阿黄", "我妈住院了"],
+                                                               ["小明", "我陪你去吧"]]))
+        self.assertEqual(pairs, conversation.normalize_segment([{"speaker": "阿黄", "text": "我妈住院了"},
+                                                               {"speaker": "小明", "text": "我陪你去吧"}]))
+        self.assertEqual(pairs, conversation.normalize_segment(pairs), "归一化不幂等")
+        self.assertIsNone(conversation.normalize_segment(None), "没给段该是 None")
+
+    def test_empty_segment_writes_an_honest_line(self):
+        """段空着 / 没给就写一句实话：这一节不许留白。"""
+        for case in (None, []):
+            with self.subTest(segment=case):
+                capture = []
+                self._answer(captured=capture, segment=case)
+                body = self._segment_body(capture[0]["messages"][0]["content"])
+                self.assertEqual(conversation.NO_SEGMENT, body, "段空着时那一节留白了")
+
+    def test_group_notice_only_for_a_group_segment_with_two_speakers(self):
+        """群聊且段里 ≥2 人才接 group 那句（接在段尾）；私聊 / 单人 / unknown 一律不加。"""
+        notice = conversation.load_assembly()["segment"]["notice"][brain_model.SCENE_GROUP]
+        two = [["阿黄", "我妈住院了"], ["小明", "我陪你去吧"]]
+        one = [["阿黄", "我妈住院了"], ["阿黄", "明天要做手术"]]
+        cases = [(brain_model.SCENE_GROUP, two, True), (brain_model.SCENE_GROUP, one, False),
+                 (brain_model.SCENE_PRIVATE, two, False),
+                 (brain_model.SCENE_UNKNOWN, two, False)]
+        for scene, rows, wanted in cases:
+            with self.subTest(scene=scene, wanted=wanted):
+                capture = []
+                self._answer(captured=capture, scene=scene, segment=rows)
+                body = self._segment_body(capture[0]["messages"][0]["content"])
+                if wanted:
+                    self.assertIn(notice, body, "群聊双人段没接那句话")
+                    self.assertTrue(body.endswith(notice), "那句话没接在段尾")
+                else:
+                    self.assertNotIn(notice, body, "这一态不该加那句话")
+
+    def test_segment_notice_text_comes_from_the_data(self):
+        """那句话的文案在 assembly.json 里：换一份内存里的装配，提示词跟着变。"""
+        conf = conversation.load_assembly()
+        conf["segment"]["notice"][brain_model.SCENE_GROUP] = "他们在聊，你可以先听着。"
+        capture = []
+        self._answer(assembly=conf, scene=brain_model.SCENE_GROUP, captured=capture,
+                     segment=[["阿黄", "我妈住院了"], ["小明", "我陪你去吧"]])
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn("他们在聊，你可以先听着。", system, "那句话是代码里写死的，不跟着数据走")
+        self.assertNotIn(conversation.load_assembly()["segment"]["notice"][brain_model.SCENE_GROUP],
+                         system, "出厂那句还在：两份文案同时进了提示词")
+
+    def test_segment_section_name_and_cap_come_from_the_data(self):
+        """标题与上限同样来自数据：改标题、压到 12 字，装配立刻跟着变。"""
+        conf = conversation.load_assembly()
+        conf["sections"]["segment"]["label"] = "刚才那几个"
+        conf["sections"]["segment"]["cap"] = 12
+        capture = []
+        got = self._answer(assembly=conf, captured=capture,
+                           segment=[["阿黄", "我妈住院了"], ["小明", "我陪你去吧"]])
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn("[刚才那几个]", system, "段那节的标题是代码里写死的")
+        row = [item for item in got["assembly"]["sections"] if item["key"] == "segment"][0]
+        self.assertEqual(12, row["cap"])
+        self.assertEqual(12, row["chars"], "上限改了，段那节没跟着截断")
+
+    def test_segment_notice_survives_the_section_cap(self):
+        """段正文顶到 cap 时，段尾那句话必须还在（先给 notice 留位置，再截正文）。"""
+        conf = conversation.load_assembly()
+        notice = conf["segment"]["notice"][brain_model.SCENE_GROUP]
+        conf["sections"]["segment"]["cap"] = len(notice) + 3
+        capture = []
+        got = self._answer(assembly=conf, scene=brain_model.SCENE_GROUP, captured=capture,
+                           segment=[["阿黄", "前" * 60], ["小明", "后" * 60]])
+        system = capture[0]["messages"][0]["content"]
+        body = self._segment_body(system)
+        self.assertTrue(body.endswith(notice), "正文顶到 cap 时那句话被一起锯掉了：%r" % (body,))
+        row = [item for item in got["assembly"]["sections"] if item["key"] == "segment"][0]
+        self.assertEqual(row["cap"], row["chars"], "这一节本该顶到 cap")
+
+    def test_segment_and_recent_do_not_mix(self):
+        """3 轮 recent + 3 行段：recent 那节只有那 3 轮（6 行），段那节只有那 3 行。"""
+        root = self._history(3, "recent_segment")
+        rows = [["阿黄", "我妈住院了"], ["小明", "我陪你去吧"], ["阿黄", "谢谢你"]]
+        capture = []
+        self._answer(captured=capture, recent_root=root, segment=rows)
+        system = capture[0]["messages"][0]["content"]
+        recent_body = _section(system, "最近几轮").strip("\n")
+        segment_body = self._segment_body(system)
+        self.assertEqual(6, len(recent_body.splitlines()), "3 轮 recent 该是 6 行（一问一答）")
+        self.assertEqual(["阿黄：我妈住院了", "小明：我陪你去吧", "阿黄：谢谢你"],
+                         segment_body.splitlines(), "段那节的行数或内容不对")
+        for index in range(3):
+            self.assertIn("第%d句" % index, recent_body, "recent 那少了一轮")
+            self.assertNotIn("第%d句" % index, segment_body, "更早的轮混进了段那节")
+        for line in segment_body.splitlines():
+            self.assertNotIn(line, recent_body, "段里的一行跑进了 recent 那节：%r" % (line,))
+
+    def test_bad_segment_shape_raises(self):
+        """形状坏就当场 ValueError（不兜底）：不是 list / 元素不对 / speaker 空 / text 空。"""
+        bad = ["阿黄：我妈住院了",
+               {"speaker": "阿黄", "text": "我妈住院了"},
+               [["阿黄"]],
+               [["阿黄", "我妈住院了", "多一条"]],
+               [[1, "我妈住院了"]],
+               [["", "我妈住院了"]],
+               [{"speaker": "阿黄"}],
+               [{"speaker": "阿黄", "text": "   "}],
+               [["阿黄", 42]]]
+        for case in bad:
+            with self.subTest(segment=case):
+                with self.assertRaises(ValueError):
+                    self._answer(segment=case)
+
+
 if __name__ == "__main__":
     unittest.main()
