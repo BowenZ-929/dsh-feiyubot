@@ -3,14 +3,16 @@
 只做「路径与字节」——不判许可（permit 判）、不做动作（actions 做）。手不认识心与脑，
 所以本文件不 import 它们，时间的算法自己写一遍（口径照抄心：本地时区、秒精度、带偏移）。
 
-两个目录各只有一个算法，不许在别处再拼一次：
+三个目录各只有一个算法，不许在别处再拼一次：
 - 手的实盘 `organ_dir("hand")`（= <实盘器官根>/hand），手账与 limits.json 落这里；
+- 画出来的图 `<手实盘>/draw`（见 `draw_dir`），只落手自己的盘、再登记进家；
 - 家的实盘 `organ_dir("home")`（= 同一个父目录下的 home），任务卡落那里。
 显式传进来的 root 是**手自己那个目录**，家按兄弟目录换算——同一个 root 喂两边，
 盘的落点就不会分叉。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -21,8 +23,15 @@ from organs import paths
 
 LEDGER_NAME = "ledger.jsonl"
 LIMITS_NAME = "limits.json"
+DRAW_NAME = "draw"
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+#: 落图时一次读多少字节：图可能不小，不整份进内存两遍。
+READ_CHUNK = 1 << 16
+#: 落图的名字取指纹前这么多位：够区分，也不至于把文件名撑爆。
+LAND_NAME_CHARS = 16
+#: 猜不出格式时的后缀：宁可当 png，也不落一个没后缀的文件让下游去猜。
+DEFAULT_IMAGE_EXT = ".png"
 
 
 def hand_root(root=None) -> Path:
@@ -166,3 +175,48 @@ def read_json(path: Path) -> Optional[Dict[str, Any]]:
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+# ---- 图：读一份已有的字节、把一张画好的图落到自己的盘 ----------------------
+
+
+def draw_dir(root=None) -> Path:
+    """画出来的图落这里：<手实盘>/draw。图的落点只有这一个算法。"""
+    return hand_root(root) / DRAW_NAME
+
+
+def read_blob(path: Any) -> bytes:
+    """整份读回字节（图这一类不按文本读）。文件不在就抛：缺件由调用方判成缺件。"""
+    return Path(path).read_bytes()
+
+
+def sha256_file(path: Any) -> str:
+    """一份文件的 sha256（边读边算）。**路径与字节的判断都不在这里**，这里只管指纹。"""
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        for chunk in iter(lambda: handle.read(READ_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def land_draw(data: Any, *, root=None, ext: str = DEFAULT_IMAGE_EXT) -> Path:
+    """把画好的字节落到 <手实盘>/draw/<sha256 前 16 位><ext>，返回落点。
+
+    名字由**内容**决定（同一张图落两次得同名，不会越落越多），不拿响应里的 url 或文件名
+    拼路径——名字是从外面来的，路径拼法只长在这一处。空字节不落：半成品与占位图不进盘，
+    「产物型动作只认产物」这条（docs/modules/hand.md §2 hand-paint）在这里兑现。
+    """
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise ValueError("没有字节可落：图是空的")
+    suffix = ext.lower() if isinstance(ext, str) and ext.startswith(".") else DEFAULT_IMAGE_EXT
+    target = draw_dir(root) / (hashlib.sha256(bytes(data)).hexdigest()[:LAND_NAME_CHARS] + suffix)
+    ensure_dir(target.parent)
+    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(bytes(data))
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.chmod(str(target), FILE_MODE)
+    except OSError:
+        pass
+    return target

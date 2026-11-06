@@ -1,12 +1,16 @@
-"""两个动作 + 一个只读查询：把「记下一件事」做成能断言的回执。
+"""四个动作 + 一个只读查询：把「做成一件事」做成能断言的回执。
 
-统一信封（下一波的 api 与面板就按这个读）：
+统一信封（api 与面板就按这个读，**八键与三态冻结**）：
     {"state": "done"|"refused"|"failed", "action", "code", "say", "who",
      "card_id": str|None, "detail": {...}, "ledger_id": str|None}
 
 码表冻结：refused ∈ {ACTION_NOT_ALLOWED, GRANT_REQUIRED, QUOTA_EXCEEDED, MISSING_DUE}；
-failed ∈ {HOME_WRITE_FAILED, LEDGER_WRITE_FAILED}；成功 code="OK"。
+failed ∈ {HOME_WRITE_FAILED, LEDGER_WRITE_FAILED,
+          IMAGE_NOT_FOUND, DRAW_UNAVAILABLE, DRAW_FAILED,
+          CHANNEL_UNREACHABLE, SEND_FAILED, CHANNEL_BLOCKED}；成功 code="OK"。
 **「她拒绝」不许写成 failed**——拒绝是她的判断，失败是系统没办成，两件事面板要分得开。
+**「没发出去」也不许写成 done**：发图与画图都只认通道的 ok && sent>0，人话里带通道给的数与理由码，
+手自己从不声明「发过了」。
 
 动作流（每个动作都一样的三步）：
     1. permit.check：三层闸，不过就拒（拒绝也记进手账，好让面板看得见被拦了什么）；
@@ -20,13 +24,16 @@ failed ∈ {HOME_WRITE_FAILED, LEDGER_WRITE_FAILED}；成功 code="OK"。
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from organs.home import access as home_access
 from organs.home import cards as home_cards
+from organs.home import residents as home_residents
 from organs.home import store as home_store
 
-from . import ledger, permit, quota, store, timelang
+from . import assets, channel, ledger, permit, quota, store, timelang
+from . import draw as draw_client
 
 #: 手替她动家：家的口径里 organ 不过白名单门（那是给 agent 的），但仍过路径形状与日额度。
 ROLE = "organ"
@@ -244,6 +251,320 @@ def complete_task(*, who: str, card_id: Any, now: Any = None, root=None) -> Dict
                 card_id=str(card.get("card_id") or "") or None,
                 detail={"card": _card_brief(card), "done_count": count}),
         who=who, now=now, root=root)
+
+
+# ---- 图：发出去（send_image）与画一张（draw） ----------------------------
+# 两个动作共用同一套：三层闸 → 先落 reserved 再动手 → 结果行写不进就改判 failed。
+# 不一样的只有「图从哪来」：一个从家·仓库取指针，一个去外服要一张、落自己的盘、再登记进仓库。
+
+IMAGE_NOT_FOUND_SAY = "图没找着"
+DRAW_UNAVAILABLE_SAY = "这个我画不出来"
+DRAW_FAILED_SAY = "画是画了，但一张能用的都没有，我没落盘"
+DRAW_LAND_FAILED_SAY = "画是画了，但没落到我的盘上，这次不算做成"
+DRAW_REGISTER_FAILED_SAY = "画出来了、也落盘了，但没登记进仓库，这次不算做成"
+SEND_BOTH_SAY = "给了一个路径又给了一个名字：二选一，我不替你挑"
+SEND_NEITHER_SAY = "既没给图在哪、也没给它在仓库里叫什么：说一个我才知道发哪张"
+TARGET_SAY = "发给谁得是群号或 QQ 号（数字）"
+SCENE_SAY = "场景只认 group（群）或 private（私聊）"
+
+#: 结果行额外记的账目。账的 FIELDS 不加第九格：这几格并进 params，账仍是「一行一动作」。
+SEND_ACCOUNTING: Tuple[str, ...] = ("scene", "target", "path", "sha256", "channel_id", "sent",
+                                    "reason_code")
+DRAW_ACCOUNTING: Tuple[str, ...] = ("scene", "target", "path", "sha256", "marked", "source",
+                                    "channel_id", "sent", "reason_code", "landed", "card_id")
+
+
+def _accounting(params: Dict[str, Any], detail: Dict[str, Any],
+                keys: Tuple[str, ...]) -> Dict[str, Any]:
+    """把这次的账目并进结果行的 params：账是索引，但也得能指着这一笔说清。"""
+    merged = dict(params)
+    for key in keys:
+        merged[key] = detail.get(key)
+    return merged
+
+
+def _send_tail(outcome: Dict[str, Any]) -> str:
+    """一句人话，把**通道自己的数**摆出来——手不替它说「发过了」，也不替它编理由。"""
+    if outcome.get("local"):
+        # 本地闸拦下的：通道什么都没收到，别把话说成「通道不认」。
+        return "我这边就没发出去（%s），通道什么都没收到" % (outcome.get("error") or "参数没过闸")
+    code = outcome.get("code")
+    if code == channel.CHANNEL_BLOCKED:
+        return "通道没发（sent=0），它给的理由码是 %s" % (outcome.get("reason_code") or "（没给）")
+    if code == channel.CHANNEL_UNREACHABLE:
+        return "通道没连上（%s），所以没有发出去" % (outcome.get("error") or "没说原因")
+    return "通道回的东西不对劲（%s），我没把它算成发出去" % (outcome.get("error") or "没说原因")
+
+
+def _send_done_say(outcome: Dict[str, Any]) -> str:
+    """done 的人话必须带通道给的 sent 与理由码：少了这两个数，就等于这些话是手自己说的。"""
+    return "通道说发出去了：sent=%d、理由码 %s、id %s" % (
+        int(outcome.get("sent") or 0), outcome.get("reason_code") or "（没给）",
+        outcome.get("channel_id") or "（没给）")
+
+
+def _send_origin(outcome: Dict[str, Any]) -> str:
+    """失败时记的原始码：通道拦下就用**它自己的** reason_code，其余用网络层说的话。"""
+    if outcome.get("code") == channel.CHANNEL_BLOCKED:
+        return str(outcome.get("reason_code") or "")
+    return str(outcome.get("error") or outcome.get("code") or "")
+
+
+def _bad_argument(say: str, origin: str) -> Dict[str, Any]:
+    return {"ok": False, "code": "BAD_ARGUMENT", "say": say, "origin": origin, "path": None}
+
+
+def _not_found(why: str, origin: str, path: Any = None) -> Dict[str, Any]:
+    """「图没找着」是固定的那句话，后面接一句**具体**是哪一种找不到。"""
+    return {"ok": False, "code": "IMAGE_NOT_FOUND", "say": "%s——%s" % (IMAGE_NOT_FOUND_SAY, why),
+            "origin": origin, "path": None if path is None else str(path)}
+
+
+def _channel_scene(scene: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """场景收口 → (给通道的值, 问题)。通道只认 group／private，别的值它一律 400。"""
+    text = "" if scene is None else str(scene).strip()
+    if text in channel.SCENES:
+        return text, None
+    return None, _bad_argument("%s——收到 %r" % (SCENE_SAY, scene), "BAD_SCENE")
+
+
+def _channel_target(target: Any) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """发给谁收口 → (正整数, 问题)。**在本地就归一，不发给通道再让它报错。**
+
+    本来就是 int 的过；纯数字串（"100000001"）转成 int——真通道要求 JSON 里是数字，
+    字符串会被它 400（实测）。空、0、负数、带小数点、中文，一律 BAD_ARGUMENT。
+    """
+    value: Optional[int] = None
+    if isinstance(target, bool):
+        value = None
+    elif isinstance(target, int):
+        value = target
+    else:
+        text = "" if target is None else str(target).strip()
+        try:
+            value = int(text) if text.isdigit() else None
+        except ValueError:          # 全角／上标数字之类：isdigit 为真但 int() 不认
+            value = None
+    if value is None or value <= 0:
+        return None, _bad_argument("%s——收到 %r（例：100000001）" % (TARGET_SAY, target),
+                                   "BAD_TARGET")
+    return value, None
+
+
+def _channel_fields(scene: Any, target: Any,
+                    ) -> Tuple[Optional[str], Optional[int], Optional[Dict[str, Any]]]:
+    """两个都验一遍：哪个不对说哪个（先场景，后发给谁）。"""
+    scene_value, scene_problem = _channel_scene(scene)
+    target_value, target_problem = _channel_target(target)
+    return scene_value, target_value, (scene_problem or target_problem)
+
+
+def _fields_failed(*, who: str, action: str, params: Dict[str, Any], now: Any, root,
+                   started: float, ledger_id: str, problem: Dict[str, Any],
+                   scene: Any, target: Any) -> Dict[str, Any]:
+    """场景／发给谁不过闸：**一次网络都不发**，账上记一条 failed（stage 说清卡在哪一段）。"""
+    return _settle(who=who, action=action, params=params, now=now, root=root, started=started,
+                   ledger_id=ledger_id, state="failed", code=str(problem["code"]),
+                   say=str(problem["say"]), origin=str(problem["origin"]),
+                   detail={"stage": "channel_fields", "reason": problem["origin"],
+                           "scene": scene, "target": target})
+
+
+def _resolve_image(*, path: Any, name: Any, root) -> Dict[str, Any]:
+    """图从哪来：给绝对路径，或给家·仓库里的名字——**二选一，不自作主张**。
+
+    从仓库取时**只取指针**（路径与指纹），图的本体一个字节都不复制。
+    """
+    given_text = "" if path is None else str(path).strip()
+    named = "" if name is None else str(name).strip()
+    if given_text and named:
+        return _bad_argument(SEND_BOTH_SAY, "BOTH_PATH_AND_NAME")
+    if not given_text and not named:
+        return _bad_argument(SEND_NEITHER_SAY, "NEITHER_PATH_NOR_NAME")
+
+    if named:
+        try:
+            found = assets.find_asset(name=str(name), root=root)
+        except (home_cards.CardError, home_store.StoreError, OSError) as exc:
+            origin = _origin_of(exc)
+            return _not_found("仓库没读出来（%s），图也就没找着" % origin, origin)
+        if not found["found"]:
+            return _not_found("仓库里没有叫「%s」的素材卡或借阅条" % named, str(found["reason"]))
+        if not found["exists"]:
+            return _not_found("仓库里那张「%s」记的路径不在了：%s"
+                              % (named, found["path"]), str(found["reason"]), found["path"])
+        return {"ok": True, "code": "OK", "path": found["path"], "sha256": found["sha256"],
+                "name": named, "card_id": found["card_id"], "kind": found["kind"],
+                "bytes": found["bytes"], "source": "仓库"}
+
+    given = Path(given_text)
+    if not given.is_absolute():
+        return _bad_argument("path 要给绝对路径（收到 %r）：相对路径我不敢替你猜是哪个目录"
+                             % given_text, "PATH_NOT_ABSOLUTE")
+    if not given.is_file():
+        return _not_found("这个路径上没有文件：%s" % given_text, "PATH_MISSING", given_text)
+    try:
+        digest = store.sha256_file(given)
+    except OSError as exc:
+        origin = _origin_of(exc)
+        return _not_found("这个文件读不出来：%s（%s）" % (given_text, origin), origin, given_text)
+    return {"ok": True, "code": "OK", "path": str(given), "sha256": digest,
+            "name": given.name, "card_id": None, "kind": None, "source": "路径",
+            "bytes": given.stat().st_size}
+
+
+def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any = None,
+               now: Any = None, root=None) -> Dict[str, Any]:
+    """把一张图交给通道发出去：图从家·仓库取（只取指针），或直接给绝对路径。
+
+    **手自己绝不声明「发过了」**：只有通道回 `ok == true` 且 `sent > 0` 才记 done，
+    人话里带通道给的 sent 与理由码；sent=0、连不上、回的东西不对劲，一律 failed。
+    """
+    started = time.monotonic()
+    params: Dict[str, Any] = {"scene": scene, "target": target, "path": path, "name": name}
+    permitted = permit.check("send_image", who=who, now=now, root=root)
+    if not permitted["allowed"]:
+        return _refuse(who=who, action="send_image", params=params, now=now, root=root,
+                       started=started, code=str(permitted["code"]), say=permitted["say"],
+                       detail=permitted["detail"])
+
+    ledger_id, failure = _begin(who=who, action="send_image", params=params, now=now,
+                                root=root, started=started)
+    if failure is not None:
+        return failure
+
+    scene_value, target_value, problem = _channel_fields(scene, target)
+    if problem is not None:
+        return _fields_failed(who=who, action="send_image", params=params, now=now, root=root,
+                              started=started, ledger_id=ledger_id, problem=problem,
+                              scene=scene, target=target)
+
+    resolved = _resolve_image(path=path, name=name, root=root)
+    if not resolved["ok"]:
+        return _settle(who=who, action="send_image", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code=str(resolved["code"]), say=str(resolved["say"]),
+                       origin=str(resolved["origin"]),
+                       detail={"stage": "resolve", "reason": resolved["origin"],
+                               "path": resolved.get("path"), "name": name})
+
+    outcome = channel.say_image(scene=scene_value, target=target_value, path=resolved["path"],
+                                name=resolved["name"])
+    detail: Dict[str, Any] = {"scene": scene_value, "target": target_value,
+                              "path": resolved["path"],
+                              "sha256": resolved["sha256"],
+                              "channel_id": outcome.get("channel_id"),
+                              "sent": outcome.get("sent"),
+                              "reason_code": outcome.get("reason_code"),
+                              "source": resolved["source"],
+                              "source_card_id": resolved["card_id"],
+                              "channel_url": outcome.get("url"),
+                              "http": outcome.get("http"), "error": outcome.get("error")}
+    params = _accounting(params, detail, SEND_ACCOUNTING)
+
+    if outcome["code"] == channel.OK:
+        return _attach_quota(
+            _settle(who=who, action="send_image", params=params, now=now, root=root,
+                    started=started, ledger_id=ledger_id, state="done", code="OK",
+                    say="%s（这张：%s）" % (_send_done_say(outcome), resolved["name"]),
+                    detail=detail),
+            who=who, now=now, root=root)
+    return _settle(who=who, action="send_image", params=params, now=now, root=root,
+                   started=started, ledger_id=ledger_id, state="failed",
+                   code=str(outcome["code"]), say="没发出去：%s" % _send_tail(outcome),
+                   origin=_send_origin(outcome), detail=detail)
+
+
+def draw(*, who: str, description: Any, scene: Any, target: Any, now: Any = None,
+         root=None) -> Dict[str, Any]:
+    """画一张图：外服给字节 → 落到自己的盘（经 store）→ 登记进家·仓库（只记指针）→ 发出去。
+
+    发送与 send_image 是**同一条通道、同一条判据**（`ok && sent > 0` 才算 done）。
+    发送失败时图已经落了盘、仓库也有卡了：账上记 `landed=true`，
+    人话要说清「画出来了、但没发出去」——不装作没画过，也不装作发过了。
+    """
+    started = time.monotonic()
+    params: Dict[str, Any] = {"description": description, "scene": scene, "target": target}
+    permitted = permit.check("draw", who=who, now=now, root=root)
+    if not permitted["allowed"]:
+        return _refuse(who=who, action="draw", params=params, now=now, root=root,
+                       started=started, code=str(permitted["code"]), say=permitted["say"],
+                       detail=permitted["detail"])
+
+    ledger_id, failure = _begin(who=who, action="draw", params=params, now=now, root=root,
+                                started=started)
+    if failure is not None:
+        return failure
+
+    scene_value, target_value, problem = _channel_fields(scene, target)
+    if problem is not None:
+        # 场景／发给谁不成立就**连画都不画**：画了也发不出去，白落一张图、白占一次额度。
+        return _fields_failed(who=who, action="draw", params=params, now=now, root=root,
+                              started=started, ledger_id=ledger_id, problem=problem,
+                              scene=scene, target=target)
+
+    got = draw_client.painting(description=description)
+    if got["code"] != draw_client.OK:
+        say = (DRAW_UNAVAILABLE_SAY if got["code"] == draw_client.DRAW_UNAVAILABLE
+               else DRAW_FAILED_SAY)
+        return _settle(who=who, action="draw", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code=str(got["code"]), say=say, origin=str(got["origin"]),
+                       detail={"stage": "generate", "reason": got["origin"],
+                               "error": got.get("error"), "url": got.get("url"),
+                               "landed": False, "marked": got.get("marked")})
+
+    try:
+        landed = store.land_draw(got["data"], root=root, ext=got["ext"])
+        digest = store.sha256_file(landed)
+    except (OSError, ValueError) as exc:
+        origin = _origin_of(exc)
+        return _settle(who=who, action="draw", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code=draw_client.DRAW_FAILED, say=DRAW_LAND_FAILED_SAY, origin=origin,
+                       detail={"stage": "land", "error": origin, "landed": False,
+                               "marked": got["marked"], "ext": got["ext"]})
+
+    marked = got["marked"] is True
+    note = "来源=draw; marked=%s" % ("true" if marked else "false")
+    try:
+        registered = home_residents.register_asset(root=store.home_root(root), by="hand",
+                                                   path=str(landed), note=note)
+        card = dict(registered.get("card") or {})
+    except _HOME_ERRORS as exc:
+        origin = _origin_of(exc)
+        return _settle(who=who, action="draw", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code="HOME_WRITE_FAILED", say=DRAW_REGISTER_FAILED_SAY, origin=origin,
+                       detail={"stage": "register", "home": origin, "landed": True,
+                               "path": str(landed), "sha256": digest, "marked": marked})
+
+    card_id = str(card.get("card_id") or "") or None
+    outcome = channel.say_image(scene=scene_value, target=target_value, path=str(landed),
+                                name=str(card.get("name") or landed.name))
+    detail = {"scene": scene_value, "target": target_value, "path": str(landed), "sha256": digest,
+              "marked": marked, "source": got["source"], "card_id": card_id,
+              "channel_id": outcome.get("channel_id"), "sent": outcome.get("sent"),
+              "reason_code": outcome.get("reason_code"), "landed": True,
+              "channel_url": outcome.get("url"), "http": outcome.get("http"),
+              "error": outcome.get("error"), "note": note}
+    params = _accounting(params, detail, DRAW_ACCOUNTING)
+
+    if outcome["code"] == channel.OK:
+        say = "画好了，也发出去了：%s" % _send_done_say(outcome)
+        if marked:
+            say += "（回来的这张带标记，账上如实记着 marked=true）"
+        return _attach_quota(
+            _settle(who=who, action="draw", params=params, now=now, root=root,
+                    started=started, ledger_id=ledger_id, state="done", code="OK", say=say,
+                    card_id=card_id, detail=dict(detail, card=_card_brief(card))),
+            who=who, now=now, root=root)
+    return _settle(who=who, action="draw", params=params, now=now, root=root,
+                   started=started, ledger_id=ledger_id, state="failed",
+                   code=str(outcome["code"]),
+                   say="画出来了、但没发出去：%s" % _send_tail(outcome),
+                   origin=_send_origin(outcome), card_id=card_id,
+                   detail=dict(detail, card=_card_brief(card)))
 
 
 def due(now: Any = None, root=None) -> list:

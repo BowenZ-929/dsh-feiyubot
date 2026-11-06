@@ -17,6 +17,7 @@ import { LEDGER_RELATIVE_PATH, Ledger, dedupKey, dedupNote, readMode, sceneOf, t
 import {
   ACK_TIMEOUT_MS,
   planChunks,
+  parseChunkParts,
   readCoreTimeout,
   parseCoreResponse,
   runBatch,
@@ -37,8 +38,9 @@ import {
   type GateInput,
 } from "./decide.ts";
 import { QUOTA_RELATIVE_PATH, Quota } from "./quota.ts";
-import { burstBlocked, firstLayer, loadGateWords, readRecalledTopScore, recalledPass, secondLayer, type GateWords } from "./direct.ts";
+import { burstBlocked, chitchatSampled, firstLayer, loadGateWords, type DirectRule, type GateWords } from "./direct.ts";
 import { OWN_IDS_RELATIVE_PATH, OwnIds } from "./own-ids.ts";
+import { SEGMENTS_RELATIVE_PATH, SegmentCounter } from "./segments.ts";
 
 const HOST = "127.0.0.1";
 const WS_PATH = "/ws";
@@ -91,6 +93,8 @@ const LEDGER_PATH = join(STATE_DIR, "ledger.jsonl");
 const DECISIONS_PATH = join(STATE_DIR, "decisions.jsonl");
 const QUOTA_PATH = join(STATE_DIR, "quota.json");
 const OWN_PATH = join(STATE_DIR, "own.json");
+// 段序号也得跟着 --state 走：演练在 /tmp/ch-drill 下，生产在 .state 下。
+const SEGMENTS_PATH = join(STATE_DIR, "segments.json");
 
 const describeWho = (event: ParsedEvent): string => {
   const parts = [String(event.who.id)];
@@ -134,6 +138,7 @@ let decisions: DecisionLog | null = null;
 let quota: Quota | null = null;
 let gateWords: GateWords | null = null;
 let ownIds: OwnIds | null = null;
+let segments: SegmentCounter | null = null;
 if (CORE_URL) {
   try {
     policy = loadPolicy();
@@ -156,9 +161,10 @@ if (CORE_URL) {
     decisions = new DecisionLog({ path: DECISIONS_PATH, policy, onWarn: (message) => log("warn", message) });
     quota = new Quota({ path: QUOTA_PATH, policy, onWarn: (message) => log("warn", message) });
     ownIds = new OwnIds({ path: OWN_PATH, onWarn: (message) => log("warn", message) });
+    segments = new SegmentCounter({ path: SEGMENTS_PATH, onWarn: (message) => log("warn", message) });
     log(
       "direct",
-      `定向门就绪：burstMs=${gateWords.burstMs} recalledMinScore=${gateWords.recalledMinScore}（占位值，未经校准） own=${ownIds.size()} 条`,
+      `定向门就绪：定向=@/外号/引用/私聊（不吃额度、不受 burst），闲聊每 ${gateWords.chitchatSampleMod} 段抽 1 段（burstMs=${gateWords.burstMs}）；own=${ownIds.size()} 条`,
     );
   }
 }
@@ -297,10 +303,13 @@ const onDeadline = (key: string): void => {
 
 // 每段一次核调用。这一段里所有「为什么没发」的结论都收成恰好一行决策账。
 //
-// 管线顺序（M7 钉死）：
-//   mode → 第一层布尔链 → 第二层(a)(b) → burst 阀 → 配额(charge) → 调核 → 第二层(c) → 未定向则 refund → 上限 → 出站 → 决策账
+// M9 管线（钉死）：
+//   mode → 第一层（命令 > 定向 > 纯表情/纯图）
+//     · 定向（私聊/@/外号/引用）→ 不 charge、不看 burst → 调核 → 三道上限 → 发
+//     · 闲聊 → 段序号 +1 → 没抽到就 chitchat_skipped（**一次核都不调**）
+//              → 抽到 → burst → 调核 → 三道上限 → 发
 const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<void> => {
-  if (policy === null || decisions === null || quota === null || gateWords === null || ownIds === null) return;
+  if (policy === null || decisions === null || gateWords === null || ownIds === null || segments === null) return;
   const id = ++requestSeq;
   const started = Date.now();
   const elapsed = (): string => `${Date.now() - started}ms`;
@@ -316,11 +325,10 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
 
   const gates: GateInput[] = [];
   let decided = false;
-  let charged = false;
-  // 定向结论：rule=谁判进来的（null=没有判据），score=核回的 recalled 最高分（没调核就没有）。
+  // 定向结论：rule 说清哪条判据（拦下时 null），ordinal 是群段序号（私聊 null）。
   let rule: string | null = null;
-  let score: number | null = null;
-  const directNow = (): DecisionDirect => ({ rule, score });
+  let ordinal: number | null = null;
+  const directNow = (): DecisionDirect => ({ rule, ordinal });
 
   const decide = (extra: GateInput[], reason: string | null = null, gate: Record<string, unknown> | null = null): void => {
     if (decided) return;
@@ -348,12 +356,6 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       log("error", `段 ${snapshot.batchId} 决策账没写成：${(error as Error).message}`);
     }
   };
-  const refund = (why: string): void => {
-    if (!charged) return;
-    charged = false;
-    quota.refund(target, Date.now());
-    log("quota", `段 ${snapshot.batchId} target=${target} 没出手（${why}），退回这一次配额`);
-  };
 
   try {
     log(
@@ -365,8 +367,10 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     const isSend = gate.mode === "send";
     gates.push({ name: "mode", code: "silent_mode", hit: !isSend });
 
-    // ② 第一层布尔链：命令 > 定向（私聊/@/引用她）> 纯表情/纯图。
-    //    判词只看原话（不带「昵称(id)：」前缀）：名里带个「你」不该被当成叫她。
+    // ② 段序号：该群每收到一段就 +1（定向段也计入）；私聊不计数。
+    if (scene === "group") ordinal = segments.next(target);
+
+    // ③ 第一层：命令 > 定向（私聊/@/引用她/外号）> 纯表情/纯图 > 其余算闲聊。
     const judgeText = meta.texts.join("");
     const first = firstLayer(
       {
@@ -385,48 +389,37 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       decide([]);
       return;
     }
+
     if (first.kind === "directed") {
+      // 定向 = 一定回：不吃额度、不受 burst 约束。
       rule = first.rule;
       gates.push({ name: "direct", code: "sent", hit: false });
-      log("direct", `段 ${snapshot.batchId} 定向：${rule}`);
+      log("direct", `段 ${snapshot.batchId} 定向：${rule}（ordinal=${String(ordinal)}）`);
     } else {
-      // ③ 第二层 (a)(b)：便宜判，不用调核。没中就先记下「还没定向」，等 (c)。
-      const second = secondLayer(judgeText, gateWords);
-      if (second !== null) {
-        rule = second.rule;
-        gates.push({ name: "direct", code: "sent", hit: false });
-        log("direct", `段 ${snapshot.batchId} 定向（便宜判）：${rule}`);
-      }
-    }
-
-    // ④ burst 阀：刚说过就别连发。窗口按会话各算，silent 永远不会命中（没发过）。
-    const lastSent = lastSentAt.get(target) ?? null;
-    if (burstBlocked(lastSent, Date.now(), gateWords.burstMs)) {
-      gates.push({ name: "burst", code: "burst_guard", hit: true });
-      log("burst", `段 ${snapshot.batchId} target=${target} 距上次发出 ${Date.now() - (lastSent ?? 0)}ms < ${gateWords.burstMs}ms，压掉`);
-      decide([]);
-      return;
-    }
-    gates.push({ name: "burst", code: "burst_guard", hit: false });
-
-    // ⑤ 配额：调核之前扣（配额满了连核都不调）。silent 不扣。
-    if (isSend) {
-      const charge = quota.charge(target, Date.now(), snapshot.mentioned);
-      if (!charge.ok) {
-        gates.push({ name: "quota", code: "quota_exceeded", hit: true });
-        log("quota", `段 ${snapshot.batchId} target=${target} 配额用尽（used=${charge.used}），本轮不调核、不发`);
+      // 闲聊：确定性抽样。没抽到就**一次核都不调**——这是本轮省钱的实质。
+      rule = "chitchat";
+      if (ordinal === null || !chitchatSampled(ordinal, gateWords)) {
+        gates.push({ name: "direct", code: "chitchat_skipped", hit: true });
+        log(
+          "direct",
+          `段 ${snapshot.batchId} 闲聊没抽到（ordinal=${String(ordinal)} % ${gateWords.chitchatSampleMod} ≠ 0），不调核、不发`,
+        );
         decide([]);
         return;
       }
-      charged = true;
-      gates.push({ name: "quota", code: "quota_exceeded", hit: false });
-      if (charge.overridden) {
-        gates.push({ name: "mention", code: "sent", hit: false });
-        log("quota", `段 ${snapshot.batchId} target=${target} 配额已满（used=${charge.used}），被 @ 突破，照回`);
+      gates.push({ name: "direct", code: "sent", hit: false });
+      log("direct", `段 ${snapshot.batchId} 闲聊抽到（ordinal=${String(ordinal)}），接着过 burst`);
+      // 只有闲聊要过 burst；定向不看它。
+      if (burstBlocked(lastSentAt.get(target) ?? null, Date.now(), gateWords.burstMs)) {
+        gates.push({ name: "burst", code: "burst_guard", hit: true });
+        log("burst", `段 ${snapshot.batchId} target=${target} 距上次发出不足 ${gateWords.burstMs}ms，压掉`);
+        decide([]);
+        return;
       }
+      gates.push({ name: "burst", code: "burst_guard", hit: false });
     }
 
-    // ⑥ 送核（(a)(b) 已定向的也要调：这一调用同时就是生成回复的那一次，不额外多调）。
+    // ④ 送核（定向与抽到的闲聊都要调，且这一次同时是生成回复的那次）。
     const rendered = renderSegment(snapshot);
     log(`req#${id}`, `② 交给核 POST ${CORE_URL}${CORE_PATH}（${snapshot.msgs.length} 行，${elapsed()}）`);
 
@@ -464,31 +457,9 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         : { kind: "unreachable", message: failure.message };
     }
 
-    // 闸判摘要只从原始回包取（chunks/text 两路都能读到它）。
     const gateSummary = attempt.kind === "payload" ? readGateSummary(attempt.payload) : null;
-    // ⑦ 第二层 (c)：核记得的东西里最高分 ≥ 阈值才算「值得搭话」。
-    const topScore = attempt.kind === "payload" ? readRecalledTopScore(attempt.payload) : null;
-    if (rule === null) {
-      if (recalledPass(topScore, gateWords.recalledMinScore)) {
-        rule = "recalled";
-        score = topScore;
-        gates.push({ name: "direct", code: "sent", hit: false });
-        log("direct", `段 ${snapshot.batchId} 定向（recalled）：top=${String(topScore)} ≥ ${gateWords.recalledMinScore}`);
-      } else {
-        // 没定向：这一轮本来就不该回。核已经调过了（那一次调用同时是生成回复的那次），配额退回去。
-        score = topScore;
-        refund("没定向");
-        gates.push({ name: "direct", code: "no_mention", hit: true });
-        log("direct", `段 ${snapshot.batchId} 没定向（recalled top=${String(topScore)} < ${gateWords.recalledMinScore}），不发`);
-        decide([]);
-        return;
-      }
-    } else if (rule === "question+person" || rule === "nickname") {
-      // 便宜判进来的：顺手把她这次 recalled 的最高分记上，以后靠它校准阈值。
-      score = topScore;
-    }
 
-    // ⑧ 收尾一律走 settleRound：error / empty / silent / blocked 的文案一个字不新写。
+    // ⑤ 收尾一律走 settleRound：error / empty / silent / blocked 的文案一个字不新写。
     const settle = async (value: CoreAttempt): Promise<Awaited<ReturnType<typeof settleRound>>> =>
       settleRound({
         mode: gate.mode,
@@ -511,7 +482,6 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
 
     if (attempt.kind !== "payload") {
       await settle(attempt);
-      refund("核出错");
       decide([{ name: "core", code: "core_error", hit: true }]);
       return;
     }
@@ -519,41 +489,33 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     const reply = parseCoreResponse(attempt.payload);
     if (!reply.ok) {
       await settle({ kind: "unreadable", reason: reply.reason });
-      refund("响应认不出");
       decide([{ name: "core", code: "core_error", hit: true }]);
       return;
     }
 
     if (reply.silent !== undefined) {
       await settle(attempt);
-      refund("她这轮不想说");
       decide([{ name: "core", code: "core_empty", hit: true }], reply.silent.reason);
       return;
     }
 
-    // ⑨ 三道上限：整批越界就整批换成一句短的。
     const limited = enforceLimits(reply.chunks, snapshot.batchId, policy);
     if (limited.reason === "core_empty") {
       await settle({ kind: "payload", payload: { ok: true, chunks: [] } });
-      refund("她这轮没说");
       decide([{ name: "limits", code: "core_empty", hit: true }]);
       return;
     }
 
     const result = await settle({ kind: "payload", payload: { ok: true, chunks: limited.chunks } });
     if (result.kind === "empty") {
-      refund("全是空白泡");
       decide([{ name: "limits", code: "core_empty", hit: true }]);
       return;
     }
-    // 只有门开着（send）才谈得上「出站全败」：silent 下 sent=0 是门挡的，由 mode 那道门说明。
+    // 只有门开着（send）才谈得上「出站全败」：silent 下 sent=0 是门挡的。
     if (result.batch !== null && result.batch.sent === 0 && gate.mode === "send") {
-      refund(`sent=0，stopped=${result.batch.stopped ?? "—"}`);
       gates.push({ name: "outbound", code: "outbound_failed", hit: true });
     }
-    // 真发出去了才更新「上一次真正发出」：burst 阀看的是这个时刻。
     if (result.batch !== null && result.batch.sent > 0) lastSentAt.set(target, Date.now());
-    // 只有真的发出去（sent ≥ 1）才算「这一轮拿到了核的闸判并走完了」。
     const gateForRow = result.batch !== null && result.batch.sent > 0 ? gateSummary : null;
     if (limited.reason === "replaced_too_long") {
       decide([{ name: "limits", code: "replaced_too_long", hit: true }], null, gateForRow);
@@ -774,13 +736,10 @@ const parseSayBody = (raw: unknown): { ok: true; value: SayInput } | { ok: false
   const chunks: Chunk[] = [];
   for (let index = 0; index < rawChunks.length; index += 1) {
     const item: unknown = rawChunks[index];
-    if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      return { ok: false, message: `chunks[${index}] 必须是对象` };
-    }
-    const text = (item as Record<string, unknown>).text;
-    if (typeof text !== "string" || text.length === 0) {
-      return { ok: false, message: `chunks[${index}].text 必须是非空字符串` };
-    }
+    // 泡本身（对象 / text / image）的判据与核的回包共用 outbox 里的那一份，别在这里长出第二套。
+    // rejectEmpty=true：/say 的空泡当场 400（调用方写错了），别等到分泡时被无声丢掉。
+    const parts = parseChunkParts(item, `chunks[${index}]`, true);
+    if (!parts.ok) return { ok: false, message: parts.message };
     const rawSendAt = (item as Record<string, unknown>).send_at;
     let sendAt = 0;
     if (rawSendAt !== undefined) {
@@ -789,7 +748,12 @@ const parseSayBody = (raw: unknown): { ok: true; value: SayInput } | { ok: false
       }
       sendAt = rawSendAt;
     }
-    chunks.push({ text, gap_before: 0, send_at: sendAt });
+    chunks.push({
+      text: parts.value.text,
+      ...(parts.value.image === undefined ? {} : { image: parts.value.image }),
+      gap_before: 0,
+      send_at: sendAt,
+    });
   }
   return { ok: true, value: { scene, target, chunks } };
 };
@@ -822,7 +786,7 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
         reason: null,
         // /say 这条路不调核：没有闸判可抄，也没有定向判据。
         gate: null,
-        direct: { rule: null, score: null },
+        direct: { rule: null, ordinal: null },
         // msgs=0：这一段没有入站消息（别塞 chunks 数——那是「泡」，不是「消息」）。
         batch: { id, msgs: 0, waited_ms: 0, tier: "proactive", at: new Date().toISOString() },
         gates: [...gates, ...extra],

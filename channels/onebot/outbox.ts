@@ -3,10 +3,15 @@
 import type { Where } from "./parse.ts";
 import type { LedgerRowInput, Mode, Scene } from "./gate.ts";
 
-export type Chunk = { text: string; gap_before: number; send_at: number };
+// 一条泡里可以带一张图：file 只认 file:// 开头的绝对路径；summary 是可读替身
+// （协议端不显示图时，至少有人能读的那句话），所以它有长度上限。
+export type ChunkImage = { file: string; summary?: string };
+
+// text 与 image 至少一个有内容：只有图的泡同样是一个泡，不能在分泡时被当成空泡丢掉。
+export type Chunk = { text: string; image?: ChunkImage; gap_before: number; send_at: number };
 
 // sendAt 是本批起点（performance.now() 基准）加上 send_at 秒后的绝对目标时刻。
-export type PlanEntry = { index: number; text: string; send_at: number; sendAt: number };
+export type PlanEntry = { index: number; text: string; image?: ChunkImage; send_at: number; sendAt: number };
 
 // 协议端不回话时最多等这么久：等太久会把后面几泡全拖晚，等太短会把还在路上的应答误判成不确定。
 export const ACK_TIMEOUT_MS = 10_000;
@@ -49,6 +54,61 @@ const asText = (value: unknown): string | undefined =>
 const asSeconds = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
 
+// summary 的长度上限：替身是给人读的一句话，不是第二段正文。
+export const IMAGE_SUMMARY_MAX = 80;
+
+export type ChunkParts = { text: string; image?: ChunkImage };
+
+// 一条泡的字段判据只有这一份：核的回包（parseCoreResponse）与 /say 的请求体（parseSayBody）都走这里，
+// 两条入口的规则才不会慢慢长成两套。label 由调用方给（如 "chunks[0]"），错误文案才说得清是第几个泡的哪个字段。
+// rejectEmpty 只对「两条都空」这一档有意义，且只给 /say 打开：调用方写错了当场 400，越早知道越好；
+// 核的回包不开——核偶尔回一个空白泡，那是「她这轮没说」（empty 行），不是「响应认不出」（error 行），
+// 这条既有判据一个字都不动。
+export const parseChunkParts = (
+  raw: unknown,
+  label: string,
+  rejectEmpty = false,
+): { ok: true; value: ChunkParts } | { ok: false; message: string } => {
+  if (!isRecord(raw)) return { ok: false, message: `${label} 必须是对象` };
+  const text = raw.text;
+  if (text !== undefined && typeof text !== "string") {
+    return { ok: false, message: `${label}.text 必须是字符串（拿到 ${JSON.stringify(text)}）` };
+  }
+  const image = raw.image;
+  if (image === undefined) {
+    const value: ChunkParts = { text: text ?? "" };
+    if (rejectEmpty && value.text.trim().length === 0) {
+      return { ok: false, message: `${label} 里 text 与 image 至少要有一个（两个都空）` };
+    }
+    return { ok: true, value };
+  }
+  if (!isRecord(image)) return { ok: false, message: `${label}.image 必须是对象` };
+  const file = image.file;
+  if (typeof file !== "string" || !file.startsWith("file://") || file.length <= "file://".length) {
+    return {
+      ok: false,
+      message: `${label}.image.file 必须是 file:// 开头的绝对路径（拿到 ${JSON.stringify(file)}）`,
+    };
+  }
+  const summary = image.summary;
+  if (summary !== undefined) {
+    if (typeof summary !== "string") {
+      return { ok: false, message: `${label}.image.summary 必须是字符串（拿到 ${JSON.stringify(summary)}）` };
+    }
+    // 按码点算，和上限那套口径一致：一个 emoji 也是一个字。
+    const length = Array.from(summary).length;
+    if (length > IMAGE_SUMMARY_MAX) {
+      return { ok: false, message: `${label}.image.summary 最多 ${IMAGE_SUMMARY_MAX} 个字符（拿到 ${length} 个）` };
+    }
+  }
+  return {
+    ok: true,
+    value: summary === undefined
+      ? { text: text ?? "", image: { file } }
+      : { text: text ?? "", image: { file, summary } },
+  };
+};
+
 // 核的响应按固定顺序认：chunks 优先于 text，两者都认不出就是本轮不发（绝不猜着发）。
 export const parseCoreResponse = (payload: unknown): CoreReply => {
   if (!isRecord(payload)) return { ok: false, reason: "响应不是 JSON 对象" };
@@ -66,13 +126,18 @@ export const parseCoreResponse = (payload: unknown): CoreReply => {
     const chunks: Chunk[] = [];
     for (let i = 0; i < payload.chunks.length; i += 1) {
       const item = payload.chunks[i];
-      if (!isRecord(item)) return { ok: false, reason: `chunks[${i}] 不是对象` };
-      if (typeof item.text !== "string") return { ok: false, reason: `chunks[${i}].text 不是字符串` };
-      chunks.push({
-        text: item.text,
-        gap_before: asSeconds(item.gap_before),
-        send_at: asSeconds(item.send_at),
-      });
+      // 核也能给她看图：text / image 的判据与 /say 共用同一份。
+      const parts = parseChunkParts(item, `chunks[${i}]`);
+      if (!parts.ok) return { ok: false, reason: parts.message };
+      const record = item as Record<string, unknown>;
+      const chunk: Chunk = {
+        text: parts.value.text,
+        gap_before: asSeconds(record.gap_before),
+        send_at: asSeconds(record.send_at),
+      };
+      // 没给 image 就不塞这个键：账与日志里的形状不许因为「有没有图」多一个空洞的 null。
+      if (parts.value.image !== undefined) chunk.image = parts.value.image;
+      chunks.push(chunk);
     }
     return { ok: true, chunks };
   }
@@ -81,16 +146,19 @@ export const parseCoreResponse = (payload: unknown): CoreReply => {
   return { ok: false, reason: "既没有 chunks 数组也没有 text 字符串" };
 };
 
-// 空白泡不占位：真发出去只会让协议端报空消息，还白占一个泡序号。
+// 空泡不占位（无 text 且无 image）：真发出去只会让协议端报空消息，还白占一个泡序号。
+// 只有图的泡不空——它必须留下，否则「核给她看了张图」会在分泡这一步被无声吃掉。
 // 序号在建计划时才分配，所以丢掉空泡不会在 echo 里留洞。
 export const planChunks = (chunks: Chunk[], origin: number): PlanEntry[] => {
   const plan: PlanEntry[] = [];
   for (const chunk of chunks) {
-    if (chunk.text.trim().length === 0) continue;
+    const image = chunk.image;
+    if (chunk.text.trim().length === 0 && image === undefined) continue;
     const send_at = asSeconds(chunk.send_at);
     plan.push({
       index: plan.length,
       text: chunk.text,
+      ...(image === undefined ? {} : { image }),
       send_at,
       // 负的 send_at 视为「早就该发了」：不补发、不排队，发的那一刻就是现在。
       sendAt: origin + Math.max(0, send_at) * 1000,
@@ -101,8 +169,22 @@ export const planChunks = (chunks: Chunk[], origin: number): PlanEntry[] => {
 
 export const echoFor = (requestSeq: number, index: number): string => `req-${requestSeq}-${index}`;
 
-export const buildAction = (where: Where, text: string, echo: string): Record<string, unknown> => {
-  const message = [{ type: "text", data: { text } }];
+export const buildAction = (
+  where: Where,
+  text: string,
+  echo: string,
+  image?: ChunkImage,
+): Record<string, unknown> => {
+  // 一条泡里两者都有时 text 在前、image 在后；只有图时不发空 text 段（协议端会当空消息报错）。
+  // action 名、echo、where 的选择一律不动：加图不改投递方式。
+  const message: Array<Record<string, unknown>> = [];
+  if (image === undefined || text.trim().length > 0) message.push({ type: "text", data: { text } });
+  if (image !== undefined) {
+    message.push({
+      type: "image",
+      data: image.summary === undefined ? { file: image.file } : { file: image.file, summary: image.summary },
+    });
+  }
   if (where.scene === "group") {
     return { action: "send_group_msg", params: { group_id: where.groupId, message }, echo };
   }
@@ -158,11 +240,13 @@ export const runBatch = async (input: BatchInput): Promise<BatchResult> => {
   // 门挡住的那一路：计划照算、账照记，只是绝不落到 socket 上。
   if (mode !== "send") {
     const whole = plan.map((entry) => entry.text).join("");
+    // 只有图的泡在 text 里是空串：不补一句 image=N，账上就看不出它被挡住的是什么。
+    const images = plan.filter((entry) => entry.image !== undefined).length;
     row({
       kind: "blocked",
       text: whole,
       send_at: null,
-      note: `chunks=${total} send_at=[${plan.map((entry) => entry.send_at).join(",")}]`,
+      note: `chunks=${total} send_at=[${plan.map((entry) => entry.send_at).join(",")}]${images === 0 ? "" : ` image=${images}`}`,
     });
     input.log("blocked", `mode=silent，想发但被门挡住 chunks=${total}：${clip(whole, 200)}`);
     return { sent: 0, stopped: "blocked" };
@@ -203,10 +287,10 @@ export const runBatch = async (input: BatchInput): Promise<BatchResult> => {
     const echo = echoFor(input.requestSeq, entry.index);
     input.log(
       "chunk",
-      `#${entry.index}/${total} echo=${echo} text=${JSON.stringify(entry.text).slice(0, 60)}`,
+      `#${entry.index}/${total} echo=${echo} text=${JSON.stringify(entry.text).slice(0, 60)}${entry.image === undefined ? "" : ` image=${JSON.stringify(entry.image.file).slice(0, 60)}`}`,
     );
     try {
-      input.send(JSON.stringify(buildAction(input.where, entry.text, echo)));
+      input.send(JSON.stringify(buildAction(input.where, entry.text, echo, entry.image)));
     } catch (error) {
       const reason = `send 抛错：${(error as Error).message}`;
       row({ kind: "failed", index: entry.index, text: entry.text, send_at: entry.send_at, note: reason });

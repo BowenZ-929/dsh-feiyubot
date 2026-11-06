@@ -161,6 +161,14 @@ export const buildEvent = (fixture: Record<string, unknown>, opts: EventOptions)
   event.time = opts.time;
   event.message_id = opts.messageId;
   event.message_seq = opts.messageId;
+  // M9：群消息里「没定向的」默认不回（闲聊只按 1/10 抽样）。A–F 验的是去重/分泡/ack，
+  // 不该被抽样噪声影响，所以给事件加一个「@ 她」的段——定向 = 一定回。
+  if (opts.scene === "group" && Array.isArray(event.message)) {
+    const selfId = Number(event.self_id);
+    if (Number.isInteger(selfId)) {
+      event.message = [{ type: "at", data: { qq: String(selfId) } }, ...event.message];
+    }
+  }
   if (opts.scene === "group") {
     event.message_type = "group";
     event.group_id = opts.groupId;
@@ -785,7 +793,12 @@ const runBatchSuite = async (config: Config): Promise<void> => {
   // 给它们一份 burstMs=0 的临时词表（系数仍从文件读，只注入路径）。G20 用真的 data/gate.json。
   const realGate = loadGateWords();
   const fastGatePath = resolve(tmpdir(), `onebot-gate-fast-${process.pid}.json`);
-  writeFileSync(fastGatePath, `${JSON.stringify({ ...realGate, burstMs: 0 })}\n`, "utf8");
+  // 老用例（G1–G19）测的不是这道抽样阀：临时词表里把抽样改成人人都中（mod 1），burst 也关掉。
+  writeFileSync(
+    fastGatePath,
+    `${JSON.stringify({ ...realGate, burstMs: 0, chitchatSampleMod: 1 })}\n`,
+    "utf8",
+  );
   let channel = await startChannel(core.url, "send", config.state, fastGatePath);
   say("G 组：假核 " + core.url + "，通道 " + channel.url + "（mode=send）");
   ackEnabled = true;
@@ -1340,96 +1353,6 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
     }
 
-    // ---- G8：同群连发超过配额上限 → 第 N+1 段不出手、quota_exceeded ----
-    {
-      const groupId = nextGroup();
-      const caseStart = Date.now();
-      const start = mark();
-      const segments = perGroupMax + 1;
-      for (let index = 0; index < segments; index += 1) {
-        post(groupId, SPEAKER_A, "配额" + (index + 1) + "-a");
-        await sleep(120);
-        post(groupId, SPEAKER_B, "配额" + (index + 1) + "-b");
-        await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, index + 1, 8000);
-        await sleep(150);
-      }
-      await sleep(500);
-      const actions = actionsSince(start);
-      const hits = hitsOf(groupId);
-      const rows = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart);
-      add(
-        "G8a",
-        "前 " + perGroupMax + " 段各回一条，第 " + segments + " 段不出手",
-        actions.length === perGroupMax && rows.length >= segments,
-        "action " + actions.length + " 个，决策 " + rows.length + " 行",
-      );
-      add(
-        "G8b",
-        "决策账最后一行 quota_exceeded",
-        rows[rows.length - 1]?.machine?.reason_code === "quota_exceeded",
-        "reason_code=" + String(rows[rows.length - 1]?.machine?.reason_code) + " human=" + JSON.stringify(String(rows[rows.length - 1]?.human ?? "")),
-      );
-      add("G8c", "第 " + segments + " 段没调核（调核次数 = " + perGroupMax + "）", hits.length === perGroupMax, "调核 " + hits.length + " 次");
-    }
-
-    // ---- G11：refund——主动沉默/空回不占配额；对照组 6 次真出手后第 7 次被挡 ----
-    {
-      const groupId = nextGroup();
-      const caseStart = Date.now();
-      // 每段 A+B（换人档 500ms 就到期），6 段主动沉默：refund 之后配额该一直是 0 条。
-      for (let index = 0; index < 6; index += 1) {
-        post(groupId, SPEAKER_A, "沉默" + (index + 1) + "-a " + SILENT_MARK);
-        await sleep(100);
-        post(groupId, SPEAKER_B, "沉默" + (index + 1) + "-b");
-        await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, index + 1, 8000);
-        await sleep(120);
-      }
-      const afterSilent = quotaStamps(config.state, groupId);
-      add("G11a", "6 段 send:false 之后该群配额仍是 0 条（refund 生效）", afterSilent.length === 0, "配额 " + afterSilent.length + " 条");
-
-      // 第 7 段正常回包：配额没被白占，必须真的出手。
-      const startSeventh = mark();
-      post(groupId, SPEAKER_A, "第七段该说话了-a");
-      await sleep(100);
-      post(groupId, SPEAKER_B, "第七段该说话了-b");
-      await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 7, 8000);
-      await sleep(400);
-      const seventhActions = actionsSince(startSeventh).length;
-      const afterSeventh = quotaStamps(config.state, groupId);
-      add(
-        "G11b",
-        "第 7 段真的出手（配额只被它自己占了一次）",
-        seventhActions === 1 && afterSeventh.length === 1,
-        "action " + seventhActions + " 个，配额 " + afterSeventh.length + " 条",
-      );
-
-      // 对照组：这一群接着连打 5 段正常回包（累计 6 次），第 7 次必须被配额挡住。
-      let want = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart).length;
-      for (let index = 0; index < 5; index += 1) {
-        post(groupId, SPEAKER_A, "对照" + (index + 1) + "-a");
-        await sleep(100);
-        post(groupId, SPEAKER_B, "对照" + (index + 1) + "-b");
-        want += 1;
-        await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, want, 8000);
-        await sleep(120);
-      }
-      const beforeRefusal = mark();
-      post(groupId, SPEAKER_A, "超额这一段-a");
-      await sleep(100);
-      post(groupId, SPEAKER_B, "超额这一段-b");
-      want += 1;
-      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, want, 8000);
-      await sleep(400);
-      const refusedActions = actionsSince(beforeRefusal).length;
-      const lastRow = rows[rows.length - 1];
-      add(
-        "G11c",
-        "对照组：6 次真出手之后第 7 次 quota_exceeded 且不出手",
-        refusedActions === 0 && lastRow?.machine?.reason_code === "quota_exceeded",
-        "action " + refusedActions + " 个，末行 " + String(lastRow?.machine?.reason_code) + "，配额 " + quotaStamps(config.state, groupId).length + " 条",
-      );
-    }
-
     // ---- G15：两个群交替说话 → 各自成段、各自回复（会话隔离） ----
     {
       const groupA = nextGroup();
@@ -1506,7 +1429,12 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const outboundFail = mine.filter((row) => row.kind === "uncertain" || row.kind === "failed" || row.kind === "unsent");
       const decision = rows[rows.length - 1];
       const stamps = quotaStamps(config.state, groupId);
-      add("G13a", "出站全败（sent=0）后该群配额仍是 0 条（退还生效）", stamps.length === 0, "配额 " + stamps.length + " 条");
+      add(
+        "G13a",
+        "出站全败（sent=0）也不写配额（M9：inbound 全程不 charge）",
+        stamps.length === 0,
+        "配额 " + stamps.length + " 条",
+      );
       add(
         "G13b",
         "ledger 里有 uncertain/failed/unsent 行（真的走到出站又失败了）",
@@ -1538,8 +1466,8 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const controlActions = actionsSince(controlMark).length;
       add(
         "G13d",
-        "对照组：正常 ack 的那段配额 1 条（出手过就不退）",
-        controlActions === 1 && quotaStamps(config.state, controlGroup).length === 1,
+        "对照组：正常 ack 的那段照常发出一条，且同样不写配额",
+        controlActions === 1 && quotaStamps(config.state, controlGroup).length === 0,
         "action " + controlActions + " 个，配额 " + quotaStamps(config.state, controlGroup).length + " 条",
       );
     }
@@ -1609,7 +1537,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         "reason_code=" + String(lastRow?.machine?.reason_code) + " 配额 " + stamps.length + " 条",
       );
     }
-    // ---- G20：定向门（第一层 / 第二层 / 两道阀），用**真实** data/gate.json（burstMs=5000） ----
+    // ---- G21：M9 两档判据（定向一定回 / 闲聊每 10 段抽 1 段），用真实 data/gate.json ----
     {
       await channel.stop();
       channel = await startChannel(core.url, "send", config.state);
@@ -1621,8 +1549,8 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       }
       socket = await connect(channel.url);
       say(
-        "G20：默认词表通道 " + channel.url + "（burstMs=" + realGate.burstMs +
-          "，recalledMinScore=" + realGate.recalledMinScore + " 占位）",
+        "G21：默认词表通道 " + channel.url + "（chitchatSampleMod=" + realGate.chitchatSampleMod +
+          "，burstMs=" + realGate.burstMs + "）",
       );
 
       const groupId = nextGroup();
@@ -1631,65 +1559,94 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const start = mark();
       let sendWall: number | null = null;
       const rowsSoFar = (): DecisionRow[] => decisionRowsForTarget(config.decisions, tgt, caseStart);
-      const postAndWait = async (text: string, opts: { mention?: boolean } = {}): Promise<DecisionRow | undefined> => {
+      const postAndWait = async (text: string, mention = false): Promise<DecisionRow | undefined> => {
         const want = rowsSoFar().length + 1;
-        post(groupId, SPEAKER_A, text, opts.mention ?? false);
+        post(groupId, SPEAKER_A, text, mention);
         const rows = await waitForTargetDecisionRows(config.decisions, tgt, caseStart, want, 25000);
         const row = rows[rows.length - 1];
         if (row?.machine?.decided === "sent") sendWall = Date.now();
         return row;
       };
-      const clearBurst = async (): Promise<void> => {
-        while (sendWall !== null && Date.now() - sendWall < realGate.burstMs - 1500) await sleep(100);
+      const waitOutsideBurst = async (): Promise<void> => {
+        while (sendWall !== null && Date.now() - sendWall < realGate.burstMs + 1200) await sleep(100);
       };
 
-      // 10 条：@×2（第 2 条紧跟上一次发出 → 被 burst 压掉）、点名问×2、无定向闲聊×5、外号×1
-      await postAndWait("叫她一声", { mention: true }); // 1 @ → 定向放行、发出
-      await postAndWait("又叫一声", { mention: true }); // 2 @ → 落在 5s 内 → burst_guard
-      await postAndWait("今天天气不错 " + LOW_RECALL_MARK); // 3 闲聊 → no_mention
-      await postAndWait("路边的猫好多 " + LOW_RECALL_MARK); // 4 闲聊 → no_mention
-      await clearBurst();
-      await postAndWait("你在忙吗"); // 5 点名问（吗 + 你）→ 定向放行、发出
-      await postAndWait("中午吃面 " + LOW_RECALL_MARK); // 6 闲聊 → no_mention
-      await clearBurst();
-      await postAndWait("你们几点下班？"); // 7 点名问 → 定向放行、发出
-      await postAndWait("地铁好挤 " + LOW_RECALL_MARK); // 8 闲聊 → no_mention
-      await clearBurst();
-      await postAndWait("小肥鱼今天好安静"); // 9 外号 → 定向放行、发出
-      await postAndWait("我先去开会 " + LOW_RECALL_MARK); // 10 闲聊 → no_mention
+      const plan = new Map<number, "at" | "nickname" | "chitchat">();
+      for (const at of [1, 15, 29]) plan.set(at, "at");
+      for (const nick of [5, 25]) plan.set(nick, "nickname");
+      for (let index = 1; index <= 30; index += 1) if (!plan.has(index)) plan.set(index, "chitchat");
+
+      for (let ordinal = 1; ordinal <= 30; ordinal += 1) {
+        const kind = plan.get(ordinal)!;
+        if (kind === "chitchat" && ordinal % realGate.chitchatSampleMod === 0) await waitOutsideBurst();
+        if (kind === "at") await postAndWait("叫她一声 " + ordinal, true);
+        else if (kind === "nickname") await postAndWait("小肥鱼在吗 " + ordinal);
+        else await postAndWait("闲聊第 " + ordinal + " 句");
+      }
       await sleep(600);
 
       const rows = rowsSoFar();
-      const actions = actionsSince(start);
       const directed = rows.filter((row) =>
-        ["at", "question+person", "nickname"].includes(String(row.machine?.direct?.rule)),
+        ["at", "nickname", "quote", "private"].includes(String(row.machine?.direct?.rule)),
       );
-      const bursts = rows.filter((row) => row.machine?.reason_code === "burst_guard");
-      const noMention = rows.filter((row) => row.machine?.reason_code === "no_mention");
+      const chitchatSent = rows.filter(
+        (row) => row.machine?.direct?.rule === "chitchat" && row.machine?.decided === "sent",
+      );
+      const skipped = rows.filter((row) => row.machine?.reason_code === "chitchat_skipped");
+      const coreCalls = hitsOf(groupId).length;
       add(
-        "G20a",
-        "定向层放行 5 条（2 @ + 2 点名问 + 1 外号）",
-        rows.length === 10 && directed.length === 5,
-        "决策 " + rows.length + " 行，定向 " + directed.length + " 条：[" +
-          rows.map((row) => String(row.machine?.direct?.rule)).join(",") + "]",
+        "G21a",
+        "定向 5 条（3 @ + 2 外号）全部发出",
+        rows.length === 30 && directed.length === 5 && directed.every((row) => row.machine?.decided === "sent"),
+        "30 段、定向 " + directed.length + " 条（" +
+          directed.map((row) => String(row.machine?.direct?.rule)).join(",") + "）",
       );
       add(
-        "G20b",
-        "burst 阀压掉 1 条（账上 reason=burst_guard）",
-        bursts.length === 1,
-        "burst=" + bursts.length + " 条，reason 序列=[" + rows.map((row) => String(row.machine?.reason_code)).join(",") + "]",
+        "G21b",
+        "闲聊发出 2–3 条，且 ordinal 是 " + realGate.chitchatSampleMod + " 的倍数",
+        chitchatSent.length >= 2 &&
+          chitchatSent.length <= 3 &&
+          chitchatSent.every((row) => Number(row.machine?.direct?.ordinal) % realGate.chitchatSampleMod === 0),
+        "发出 " + chitchatSent.length + " 条，ordinal=[" +
+          chitchatSent.map((row) => String(row.machine?.direct?.ordinal)).join(",") + "]",
       );
-      add("G20c", "实际发出 4 条（4 个 action 帧）", actions.length === 4, "收到 " + actions.length + " 个 action 帧");
       add(
-        "G20d",
-        "5 条无定向闲聊全部 no_mention（direct.rule=null、score=0.2）",
-        noMention.length === 5 &&
-          noMention.every((row) => row.machine?.direct?.rule === null && row.machine?.direct?.score === 0.2),
-        "no_mention=" + noMention.length + " 行，scores=[" +
-          noMention.map((row) => String(row.machine?.direct?.score)).join(",") + "]",
+        "G21c",
+        "其余闲聊各一行 chitchat_skipped（人话「没回：闲聊，没抽到」）",
+        skipped.length === 25 - chitchatSent.length && skipped.every((row) => row.human === "没回：闲聊，没抽到"),
+        "chitchat_skipped=" + skipped.length + " 行（应有 " + (25 - chitchatSent.length) + " 行）",
+      );
+      add(
+        "G21d",
+        "被抽掉的闲聊一次核都没调（核调用 = 5 定向 + 抽中的闲聊）",
+        coreCalls === 5 + chitchatSent.length,
+        "调核 " + coreCalls + " 次（应为 " + (5 + chitchatSent.length) + "）",
+      );
+      const stamps = quotaStamps(config.state, groupId);
+      add("G21e", "inbound 不写配额（该群在 quota.json 里没有条目）", stamps.length === 0, "配额 " + stamps.length + " 条");
+
+      // 定向不受 burst：先用 /say 真发一条（刷新「上一次真正发出」），紧接着投一条 @ 她。
+      // 这一段的决策时刻落在 burst 窗口内——如果是闲聊就会被压掉，但定向照发。
+      const burstStart = Date.now();
+      const burstMark = mark();
+      const warmRes = await postJson("http://127.0.0.1:" + channel.port + "/say", {
+        scene: "group",
+        target: groupId,
+        chunks: [{ text: "先发一条垫着" }],
+      });
+      post(groupId, SPEAKER_A, "紧接着叫她", true);
+      const burstRows = await waitForTargetDecisionRows(config.decisions, tgt, burstStart, 2, 30000);
+      await sleep(400);
+      const burstInbound = burstRows.filter((row) => row.machine?.source === "inbound").pop();
+      const burstActions = actionsSince(burstMark).length;
+      add(
+        "G21f",
+        "定向不受 burst：刚发过一条，紧随的 @ 她仍然发出（闲聊在这个窗口里会被压）",
+        warmRes.json?.ok === true && burstInbound?.machine?.decided === "sent" && burstActions === 2,
+        "预热 /say ok=" + String(warmRes.json?.ok) + "，@ 那条 reason=" + String(burstInbound?.machine?.reason_code) +
+          "，action " + burstActions + " 个",
       );
 
-      // 三条单点：命令 / 纯表情 / 纯图无字（各用一条独立消息、各自的群）
       const decisionOf = async (message: Array<Record<string, unknown>>): Promise<DecisionRow | undefined> => {
         const group = nextGroup();
         const since = Date.now();
@@ -1703,41 +1660,18 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         });
         (event as Record<string, any>).message = message;
         socket.send(JSON.stringify(event));
-        const rows = await waitForTargetDecisionRows(config.decisions, "group:" + group, since, 1, 20000);
-        return rows[rows.length - 1];
+        const list = await waitForTargetDecisionRows(config.decisions, "group:" + group, since, 1, 20000);
+        return list[list.length - 1];
       };
       const commandRow = await decisionOf([{ type: "text", data: { text: "/help" } }]);
       const stickerRow = await decisionOf([{ type: "face", data: { id: "14" } }]);
       const imageRow = await decisionOf([{ type: "image", data: { file: "a.jpg" } }]);
-      add("G20e", "命令（/ 开头）→ reason=command", commandRow?.machine?.reason_code === "command",
-        "reason=" + String(commandRow?.machine?.reason_code) + " human=" + JSON.stringify(String(commandRow?.human ?? "")));
-      add("G20f", "纯表情 → reason=sticker", stickerRow?.machine?.reason_code === "sticker",
-        "reason=" + String(stickerRow?.machine?.reason_code) + " human=" + JSON.stringify(String(stickerRow?.human ?? "")));
-      add("G20g", "纯图无字 → reason=media_only", imageRow?.machine?.reason_code === "media_only",
-        "reason=" + String(imageRow?.machine?.reason_code) + " human=" + JSON.stringify(String(imageRow?.human ?? "")));
-
-      // @ 不是通行证：先把这一群打满 6 次（用 /say，它同样计额度），第 7 条是 @ 她 → 仍被配额拦
-      const quotaGroup = nextGroup();
-      const sayUrl = "http://127.0.0.1:" + channel.port + "/say";
-      const filled: boolean[] = [];
-      for (let index = 0; index < policy.quota.perGroupMax; index += 1) {
-        const res = await postJson(sayUrl, { scene: "group", target: quotaGroup, chunks: [{ text: "打满 " + (index + 1) }] });
-        filled.push(res.json?.ok === true);
-      }
-      // 等出于 burst 窗口：我们要验的是配额，不是这道阀。
-      await sleep(realGate.burstMs + 600);
-      const quotaStart = Date.now();
-      post(quotaGroup, SPEAKER_A, "叫她一声再问一句", true);
-      const quotaRows = await waitForTargetDecisionRows(config.decisions, "group:" + quotaGroup, quotaStart, 1, 25000);
-      const quotaRow = quotaRows[quotaRows.length - 1];
-      add(
-        "G20h",
-        "@ 达到配额上限后仍被挡：第 " + (policy.quota.perGroupMax + 1) + " 条是 @ 她 → quota_exceeded",
-        filled.length === policy.quota.perGroupMax && filled.every(Boolean) && quotaRow?.machine?.reason_code === "quota_exceeded",
-        "前 " + policy.quota.perGroupMax + " 次 ok=" + JSON.stringify(filled) +
-          " 第 " + (policy.quota.perGroupMax + 1) + " 条 reason=" + String(quotaRow?.machine?.reason_code) +
-          " direct.rule=" + String(quotaRow?.machine?.direct?.rule),
-      );
+      add("G21g", "命令（/ 开头）→ reason=command", commandRow?.machine?.reason_code === "command",
+        "reason=" + String(commandRow?.machine?.reason_code));
+      add("G21h", "纯表情 → reason=sticker", stickerRow?.machine?.reason_code === "sticker",
+        "reason=" + String(stickerRow?.machine?.reason_code));
+      add("G21i", "纯图无字 → reason=media_only", imageRow?.machine?.reason_code === "media_only",
+        "reason=" + String(imageRow?.machine?.reason_code));
     }
 
   } finally {

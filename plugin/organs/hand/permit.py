@@ -6,9 +6,14 @@
 每一层都对着一个拒绝码：`ACTION_NOT_ALLOWED` / `GRANT_REQUIRED` / `QUOTA_EXCEEDED`。
 回执分两层：`say` 说人话（含**缺哪一条**），`code` 给面板与状态机断言。
 
-风险档只有三值：无害 / 可撤销 / 不可逆。本轮两个动作都是「可撤销」（家的流水只增，
-完成一笔也能看出来是第几次），所以都免授权；但闸得在——第一个不可逆动作来时不用现加。
-表里没有的动作按**最坏档**算（不可逆），fail closed：漏一条就等于没有。
+风险档只有三值：无害 / 可撤销 / 不可逆。本轮四个动作都是「可撤销」（家的流水只增，
+完成一笔也能看出来是第几次；图发出去可撤回；画只落本地的盘），所以都免授权；但闸得在——
+第一个不可逆动作来时不用现加。表里没有的动作按**最坏档**算（不可逆），fail closed：
+漏一条就等于没有。
+
+两个新动作为什么是「可撤销」（判据，不是措辞）：`send_image` 的消息可撤回、且通道那边
+有自己的门与配额，本器官不为它再立一道一次性授权；`draw` 只在本地生成一张图、落点在自己的
+盘上，删掉就没了。「可撤销」不等于「随便做」：额度那一层照旧，账照旧只增。
 """
 from __future__ import annotations
 
@@ -24,8 +29,9 @@ IRREVERSIBLE = "不可逆"
 #: 表里没有的动作按最坏档算。
 DEFAULT_RISK = IRREVERSIBLE
 
-#: 本轮只有这两个动作，且都可撤销。
-ACTION_RISK: Dict[str, str] = {"add_task": REVERSIBLE, "complete_task": REVERSIBLE}
+#: 本轮四个动作，且都可撤销（两个新动作不另立一次性授权：本轮没有 grant 存储）。
+ACTION_RISK: Dict[str, str] = {"add_task": REVERSIBLE, "complete_task": REVERSIBLE,
+                               "send_image": REVERSIBLE, "draw": REVERSIBLE}
 
 #: 三层，顺序就是判定顺序。
 GATES = ("whitelist", "grant", "quota")
@@ -36,7 +42,7 @@ def risk_of(action: Any) -> str:
 
 
 def needs_grant(action: Any) -> bool:
-    """风险档是「不可逆」就要一次性授权。本轮两个动作都免授权。"""
+    """风险档是「不可逆」就要一次性授权。本轮四个动作都免授权。"""
     return risk_of(action) == IRREVERSIBLE
 
 
@@ -52,7 +58,7 @@ def check(action: Any, *, who: str, now: Any = None, root=None) -> Dict[str, Any
     detail: Dict[str, Any] = {"action": action, "who": who, "risk": risk_of(action),
                               "passed": []}
 
-    # 第 1 条：白名单。只有两个具名动作，不认「最接近的那一个」。
+    # 第 1 条：白名单。只有四个具名动作，不认「最接近的那一个」。
     if not whitelist.allowed(action):
         return _deny("ACTION_NOT_ALLOWED",
                      "「%s」不在手能做的事里（只有 %s）——缺第 1 条：白名单"

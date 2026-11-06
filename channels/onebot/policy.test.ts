@@ -37,11 +37,11 @@ test("落盘系数：合批/出站/配额/决策四段的每个数字都对得�
     "outbound_failed",
     "core_empty",
     "replaced_too_long",
-    "no_mention",
     "command",
     "sticker",
     "media_only",
     "burst_guard",
+    "chitchat_skipped",
   ]);
 });
 

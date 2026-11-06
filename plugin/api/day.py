@@ -215,6 +215,19 @@ def unconnected_routes() -> List[str]:
 # ---- 十三条路由 -----------------------------------------------------------
 
 
+def run_tick(now: Any = None, *, root: Any = None, brain: Any = None,
+             heart_root: Any = None, home_root: Any = None,
+             break_step: Optional[int] = None) -> Dict[str, Any]:
+    """一次 tick 的唯一实现：HTTP 的 /day/tick 与 devserver 的节律线程都从这里走。
+
+    now 不给就是"现在"（线程永远不传 now，只有验收与测试才指名时刻）；
+    三个根与 break_step 原样交给 rhythm.tick，这里不替器官做任何判断。
+    抽这一层只有一个理由：端点与线程共用同一份，世上没有第二套 tick。
+    """
+    return rhythm_mod.tick(now, root=root, brain=brain, heart_root=heart_root,
+                           home_root=home_root, break_step=break_step)
+
+
 def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
     """/day/tick：手工 tick 一次（幂等；支持 ?now=）。
 
@@ -223,11 +236,12 @@ def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Res
     试满次数仍失败的进 never_ran 栏——返回体的 night 段里 executed / retried /
     never_ran 三个列表都摆出来，任何"没跑成"的路都看得见。
     ?break_step=N 只给验收用（与 night.run 的同名参数同义）。
+    实现只有 run_tick 那一份，这里只负责从查询串里取参数。
     """
     roots = _roots(params)
-    payload = rhythm_mod.tick(_now(params), root=roots["root"], brain=brain,
-                              heart_root=roots["heart_root"],
-                              break_step=_break_step(params, body))
+    payload = run_tick(_now(params), root=roots["root"], brain=brain,
+                       heart_root=roots["heart_root"],
+                       break_step=_break_step(params, body))
     return 200, payload
 
 

@@ -11,8 +11,9 @@ from . import helpers
 
 
 class WhitelistTest(unittest.TestCase):
-    def test_exactly_two_named_actions(self):
-        self.assertEqual(whitelist.ACTIONS, ("add_task", "complete_task"))
+    def test_exactly_four_named_actions_in_the_frozen_order(self):
+        self.assertEqual(whitelist.ACTIONS,
+                         ("add_task", "complete_task", "send_image", "draw"))
 
     def test_generic_capabilities_are_not_on_the_list(self):
         for name in ("write_file", "read_file", "run", "shell", "exec", "delete", "register"):
@@ -30,8 +31,11 @@ class PermitTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = helpers.make_root(self._tmp.name)
 
-    def test_both_actions_are_reversible_and_need_no_grant(self):
-        self.assertEqual(permit.ACTION_RISK, {"add_task": "可撤销", "complete_task": "可撤销"})
+    def test_every_action_is_reversible_and_needs_no_grant(self):
+        # 两个新动作也走「可撤销」：发图可撤回、画只落本地的盘；本轮不另立一次性授权。
+        self.assertEqual(permit.ACTION_RISK,
+                         {"add_task": "可撤销", "complete_task": "可撤销",
+                          "send_image": "可撤销", "draw": "可撤销"})
         for name in whitelist.ACTIONS:
             self.assertFalse(permit.needs_grant(name), name)
 

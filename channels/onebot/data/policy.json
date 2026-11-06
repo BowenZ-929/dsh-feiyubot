@@ -40,11 +40,11 @@
       "outbound_failed",
       "core_empty",
       "replaced_too_long",
-      "no_mention",
       "command",
       "sticker",
       "media_only",
-      "burst_guard"
+      "burst_guard",
+      "chitchat_skipped"
     ]
   }
 }

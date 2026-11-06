@@ -23,11 +23,11 @@ const policy = {
       "outbound_failed",
       "core_empty",
       "replaced_too_long",
-      "no_mention",
       "command",
       "sticker",
       "media_only",
       "burst_guard",
+      "chitchat_skipped",
     ],
   },
 };
@@ -44,7 +44,7 @@ const input = (over: Partial<DecisionInput> = {}): DecisionInput => ({
   mentioned: false,
   target: "group:700000001",
   batch: batch("b1"),
-  gates: [gate("silent", "silent_mode", false), gate("mention", "no_mention", false)],
+  gates: [gate("silent", "silent_mode", false), gate("direct", "chitchat_skipped", false)],
   ...over,
 });
 
@@ -110,7 +110,7 @@ test("决策：九种结局的人话与 decided 都对应得上", () => {
     },
     {
       name: "quota_exceeded",
-      input: input({ gates: [gate("mention", "no_mention", false), gate("quota", "quota_exceeded", true)] }),
+      input: input({ gates: [gate("direct", "chitchat_skipped", false), gate("quota", "quota_exceeded", true)] }),
       code: "quota_exceeded",
       human: "没回：这个群这个小时说得够多了",
       decided: "silent",
@@ -138,10 +138,10 @@ test("决策：九种结局的人话与 decided 都对应得上", () => {
       decided: "silent",
     },
     {
-      name: "no_mention",
-      input: input({ gates: [gate("silent", "silent_mode", false), gate("mention", "no_mention", true)] }),
-      code: "no_mention",
-      human: "没回：没人叫我",
+      name: "chitchat_skipped",
+      input: input({ gates: [gate("silent", "silent_mode", false), gate("direct", "chitchat_skipped", true)] }),
+      code: "chitchat_skipped",
+      human: "没回：闲聊，没抽到",
       decided: "silent",
     },
   ];
@@ -165,7 +165,7 @@ test("决策：gates 记下所有判过的门（name+hit），顺序即判定顺
     input({
       gates: [
         gate("silent", "silent_mode", false),
-        gate("mention", "no_mention", false),
+        gate("direct", "chitchat_skipped", false),
         gate("quota", "quota_exceeded", true),
         gate("core", "core_empty", false),
       ],
@@ -175,7 +175,7 @@ test("决策：gates 记下所有判过的门（name+hit），顺序即判定顺
   );
   assert.deepEqual(row.machine.gates, [
     { name: "silent", hit: false },
-    { name: "mention", hit: false },
+    { name: "direct", hit: false },
     { name: "quota", hit: true },
     { name: "core", hit: false },
   ]);
@@ -231,7 +231,7 @@ test("决策：machine.gate 缺省是 null（账里必须看得见 \"gate\":null
   // gates（通道门链）与 gate（核的闸判）是两格，互不覆盖
   assert.deepEqual(withGate.machine.gates, [
     { name: "silent", hit: false },
-    { name: "mention", hit: false },
+    { name: "direct", hit: false },
   ]);
 
   assert.throws(
@@ -240,24 +240,24 @@ test("决策：machine.gate 缺省是 null（账里必须看得见 \"gate\":null
   );
 });
 
-test("决策：machine.direct 缺省是「没判据」，给了就原样进账", () => {
+test("决策：machine.direct 是 {rule, ordinal}，缺省是「没判据」", () => {
   const plain = makeDecision(input(), "t", policy.decide.reasonCodes);
-  assert.deepEqual(plain.machine.direct, { rule: null, score: null });
+  assert.deepEqual(plain.machine.direct, { rule: null, ordinal: null });
 
-  const directed = makeDecision(input({ direct: { rule: "recalled", score: 0.82 } }), "t", policy.decide.reasonCodes);
-  assert.deepEqual(directed.machine.direct, { rule: "recalled", score: 0.82 });
+  const directed = makeDecision(input({ direct: { rule: "at", ordinal: 10 } }), "t", policy.decide.reasonCodes);
+  assert.deepEqual(directed.machine.direct, { rule: "at", ordinal: 10 });
 
-  // 拦下时 rule=null，但 score 若已调核就照记（以后靠它校准阈值）
-  const blocked = makeDecision(input({ direct: { rule: null, score: 0.2 } }), "t", policy.decide.reasonCodes);
-  assert.deepEqual(blocked.machine.direct, { rule: null, score: 0.2 });
+  // 拦下时 rule=null，ordinal 照记（群段序号对排障有用）
+  const blocked = makeDecision(input({ direct: { rule: null, ordinal: 7 } }), "t", policy.decide.reasonCodes);
+  assert.deepEqual(blocked.machine.direct, { rule: null, ordinal: 7 });
 
   // 垃圾值一律收敛成 null，绝不把字符串/对象写进账
   const janky = makeDecision(
-    input({ direct: { rule: 42 as unknown as string, score: "0.9" as unknown as number } }),
+    input({ direct: { rule: 42 as unknown as string, ordinal: "10" as unknown as number } }),
     "t",
     policy.decide.reasonCodes,
   );
-  assert.deepEqual(janky.machine.direct, { rule: null, score: null });
+  assert.deepEqual(janky.machine.direct, { rule: null, ordinal: null });
 });
 
 test("决策：source 必须显式区分入站与主动开口，缺省是 inbound", () => {

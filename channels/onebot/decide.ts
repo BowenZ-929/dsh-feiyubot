@@ -34,7 +34,9 @@ export type BatchSnapshot = {
 export type GateInput = { name: string; code: string; hit: boolean };
 
 // 定向结论：条名说清是哪一条判据把它放进来的（或根本没有）。
-export type DecisionDirect = { rule: string | null; score: number | null };
+// 定向结论：rule 说清是哪条判据（at/nickname/quote/private/chitchat，拦下时 null），
+// ordinal 是这条消息所在群的段序号（私聊为 null）。
+export type DecisionDirect = { rule: string | null; ordinal: number | null };
 export type GateRecord = { name: string; hit: boolean };
 
 export type DecisionInput = {
@@ -95,7 +97,7 @@ const HUMAN_SILENT: Record<string, string> = {
   // ack 超时 / 连接断开时我们并不知道对方收没收到：措辞必须是「没确认」，不是「没发」，更不是「核坏了」。
   // 与「远端不确认就改判 uncertain、永不自动重发」同源。
   outbound_failed: "没回：发出去了但没确认（协议端没回执）",
-  no_mention: "没回：没人叫我",
+  chitchat_skipped: "没回：闲聊，没抽到",
   replaced_too_long: "回了：本来太长，换成一句短的",
 };
 
@@ -148,15 +150,17 @@ export const makeDecision = (
   if (source !== "inbound" && source !== "proactive") {
     throw new RangeError(`machine.source 只认 inbound / proactive，拿到 ${JSON.stringify(input.source)}`);
   }
-  // 定向结论：缺省是「没判据」（rule=null、score=null），绝不空着不写。
-  const rawDirect = input.direct ?? { rule: null, score: null };
+  // 定向结论：缺省是「没判据」（rule=null、ordinal=null），绝不空着不写。
+  const rawDirect = input.direct ?? { rule: null, ordinal: null };
   if (typeof rawDirect !== "object" || rawDirect === null || Array.isArray(rawDirect)) {
-    throw new RangeError("machine.direct 必须是 {rule, score} 对象");
+    throw new RangeError("machine.direct 必须是 {rule, ordinal} 对象");
   }
   const rule = typeof rawDirect.rule === "string" && rawDirect.rule.length > 0 ? rawDirect.rule : null;
-  const score =
-    typeof rawDirect.score === "number" && Number.isFinite(rawDirect.score) ? rawDirect.score : null;
-  const direct: DecisionDirect = { rule, score };
+  const ordinal =
+    typeof rawDirect.ordinal === "number" && Number.isFinite(rawDirect.ordinal) && Number.isInteger(rawDirect.ordinal)
+      ? rawDirect.ordinal
+      : null;
+  const direct: DecisionDirect = { rule, ordinal };
 
   // 闸判摘要：缺省落到 null（不是 undefined——JSON.stringify 之后账里必须看得见 "gate":null）。
   const gate = input.gate ?? null;

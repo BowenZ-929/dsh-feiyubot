@@ -110,11 +110,12 @@ class SnapshotTest(HandApiTest):
         status, payload = self.get("/hand", who=WHO, now=NOW, root=self.root)
         self.assertEqual(200, status)
         self.assertTrue(payload["ok"])
-        self.assertEqual(["add_task", "complete_task"], payload["actions"])
-        self.assertEqual({"add_task", "complete_task"}, set(payload["risk"]))
+        self.assertEqual(["add_task", "complete_task", "send_image", "draw"], payload["actions"])
+        self.assertEqual({"add_task", "complete_task", "send_image", "draw"}, set(payload["risk"]))
         for level in payload["risk"].values():
             self.assertIn(level, hand_permit.RISK_LEVELS)
-        self.assertEqual({"add_task": False, "complete_task": False}, payload["needs_grant"])
+        self.assertEqual({"add_task": False, "complete_task": False,
+                          "send_image": False, "draw": False}, payload["needs_grant"])
         self.assertEqual(WHO, payload["who"])
         self.assertEqual({"limit": LIMIT, "used": 2, "remaining": LIMIT - 2,
                           "source": "live"}, payload["quota"])

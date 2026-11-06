@@ -1618,20 +1618,28 @@ def _inject(asked: str, payload: Mapping[str, Any], store: Any,
 
 
 def _kinds(table: Mapping[str, Any]) -> Dict[str, str]:
-    """六个 kind 的原词全部取自 data/audit.json：五类设定段按数据里的顺序，对方原话取 quote_kind。
+    """六个 kind 的原词全部取自 data/audit.json：两张表各按数据里的顺序读出来，代码不另造名字。
 
-    五类设定段在审计那边是同一档（照搬一律拦），所以这里的顺序只决定报出来的来源段叫什么；
-    数量不对就当场抛（改数据改坏了要响，不许在这儿补一个默认名——那就是第二处真源）。
+    两张表在审计那边不是同一档，所以这里也分开认：
+      setting_kinds —— 魂 / 锚句 / 心档位词 / 规矩句：照搬一律拦（顺序只决定报出来的来源段叫什么）；
+      quote_kinds   —— 对方原话 / 记忆原文：带引述标记放行、不带标记仍拦。**记忆原文归哪一族由
+                       数据说了算**，这里只按数据给的顺序把它认出来——先是他真正说过的话（入站那
+                       句），后是从记忆里翻出来的原话（recalled 里的正文），这个顺序写在
+                       audit.json 的 quote_kinds_note 里。
+    数量对不上就当场抛（改数据改坏了要响，不许在这儿补一个默认名——那就是第二处真源）。
     """
     setting = table.get("setting_kinds")
-    quote = table.get("quote_kind")
-    if not isinstance(setting, (list, tuple)) or len(setting) != 5:
-        raise ValueError("audit.json 的 setting_kinds 要是五类设定段，读到 %r" % (setting,))
-    if not isinstance(quote, str) or not quote.strip():
-        raise ValueError("audit.json 的 quote_kind 要是一个非空字符串，读到 %r" % (quote,))
-    soul, anchor, memory, heart, rule = setting
+    quotes = table.get("quote_kinds")
+    if not isinstance(setting, (list, tuple)) or len(setting) != 4:
+        raise ValueError("audit.json 的 setting_kinds 要按顺序给出四类设定段"
+                         "（魂 / 锚句 / 心档位词 / 规矩句），读到 %r" % (setting,))
+    if not isinstance(quotes, (list, tuple)) or len(quotes) != 2:
+        raise ValueError("audit.json 的 quote_kinds 要按顺序给出两类可引述段"
+                         "（对方原话 / 记忆原文），读到 %r" % (quotes,))
+    soul, anchor, heart, rule = setting
+    quote, memory = quotes
     return {"soul": str(soul), "anchor": str(anchor), "memory": str(memory),
-            "heart": str(heart), "rule": str(rule), "quote": quote.strip()}
+            "heart": str(heart), "rule": str(rule), "quote": str(quote)}
 
 
 def _soul_text(store: Any) -> str:
