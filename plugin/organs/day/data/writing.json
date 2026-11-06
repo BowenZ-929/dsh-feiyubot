@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "note": "夜第三、四步（日记 / 梦）的全部参数：字数、素材上限、落点、命名、温度档、提示词、回滚点。代码里一个字数都不写——改这篇就等于改这一夜的写法。 提示词里报 prompt_range（收窄一点），落卡硬判据仍是 word_range。",
+  "word_range": {
+    "min": 80,
+    "max": 150
+  },
+  "material": {
+    "limit": 3,
+    "empty": "（今天没有记下别的事）",
+    "skip_source_types": [
+      "日记",
+      "梦"
+    ]
+  },
+  "drawer": {
+    "room": "抽屉",
+    "index_name": "index.jsonl",
+    "role": "agent",
+    "by": "她",
+    "list_limit": 200
+  },
+  "rollback": {
+    "dir": "rollback",
+    "room_template": "drawer-index-{day}-{step}.jsonl",
+    "shelf_template": "drawer-index-{day}-{step}-{shelf}.jsonl"
+  },
+  "entries": {
+    "日记": {
+      "step": "home_diary",
+      "kind": "日记",
+      "name_template": "{kind}-{date}",
+      "temperature_tier": "factual",
+      "brain_source_type": "日记",
+      "brain_who_template": "她自己·{kind}",
+      "index_template": "日记 {date}：家·{room} 里那张《{name}》是她今晚写的，正文只在抽屉一份，脑里只有这一行索引。",
+      "system_prompt": "你在写自己今天的日记，只写今天，只写真的。只能写今天真的发生过的事：素材里没有的人、没说过的对话、没去过的地方，一句都不许添。写成一小段连贯的话，不要分点、不要标题、不要写日期。全篇 {min_chars}–{max_chars} 字：落笔前先把素材里值得写的几件事都想好，写的时候心里数着字，没到 {min_chars} 字就接着往下写，到 {max_chars} 字就收住；不到 {min_chars} 字、多于 {max_chars} 字都算没写成。",
+      "user_template": "今天：{date}\n今晚的心情：{mood}\n今天记下的事：\n{memories}\n今天真做过的事：\n{schedule}\n\n（这一篇 {min_chars}–{max_chars} 字）",
+      "extra_params": {},
+      "prompt_range": {
+        "min": 110,
+        "max": 140
+      }
+    },
+    "梦": {
+      "step": "home_dream",
+      "kind": "梦",
+      "name_template": "{kind}-{date}",
+      "temperature_tier": "default",
+      "brain_source_type": "梦",
+      "brain_who_template": "她自己·{kind}",
+      "index_template": "梦 {date}：家·{room} 里那张《{name}》是她这一夜做的梦，正文只在抽屉一份，脑里只有这一行索引。",
+      "system_prompt": "你在写自己昨晚做的梦。梦可以重组、可以荒诞、顺序可以乱，但不许凭空造人物与事件：梦里出现的人和事，都得能从素材里认出来。写成一小段连贯的话，不要分点、不要标题。全篇 {min_chars}–{max_chars} 字：心里数着字，没到 {min_chars} 字就接着写，到 {max_chars} 字就收住；不到 {min_chars} 字、多于 {max_chars} 字都算没写成。",
+      "user_template": "这一夜是：{date}\n今晚的心情：{mood}\n睡前记下的事：\n{memories}\n这一天真做过的事：\n{schedule}\n\n（这一篇 {min_chars}–{max_chars} 字）",
+      "extra_params": {
+        "dream_of": "{date}"
+      },
+      "prompt_range": {
+        "min": 110,
+        "max": 140
+      }
+    }
+  }
+}

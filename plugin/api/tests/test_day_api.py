@@ -17,6 +17,7 @@ from api import api
 from api.day import DAY_ROUTES, unconnected_routes
 from organs.brain import BrainStore
 from organs.day import model, plan
+from organs.day.tests.helpers import offline_night, seed_today
 
 NOW = "2026-11-05T09:30:00"
 # 本波只做壳的两条线：未接入的路由一定出自这两个模块（落地后 unconnected_routes() 会变空）
@@ -36,6 +37,11 @@ class DayApiTest(unittest.TestCase):
         self.heart = self.root / "heart"
         self.heart.mkdir()
         self.brain = BrainStore(self.root / "brain")
+        # 夜在 03:31 跑那一条（换日点 04:00 前，算前一天）：素材要落在那一夜里
+        seed_today(self.brain, at("2026-11-05T03:31:00"))
+        # 第三、四步会真写抽屉、真调核：把家的根换到临时目录，把核换成假的
+        # （这两层进程内直接调 night.run，没有 mind 注入点，只能 patch）
+        self.home = offline_night(self)
 
     def _query(self, **params: Any) -> str:
         pairs = {key: value for key, value in params.items() if value is not None}
@@ -114,8 +120,8 @@ class DayApiTest(unittest.TestCase):
         status, payload = self._call("POST", "/day/night",
                                      query={"now": at(NOW), "heart_root": str(self.heart)})
         self.assertEqual(200, status)
-        self.assertEqual(["brain_compact", "brain_decay", "home_diary", "heart_settle"],
-                         list(payload["steps"]))
+        self.assertEqual(["brain_compact", "brain_decay", "home_diary", "home_dream",
+                          "heart_settle"], list(payload["steps"]))
         self.assertEqual(1, payload["written"])
         status, tail = self._call("GET", "/day/log", query={"limit": 5})
         self.assertEqual(200, status)
@@ -129,7 +135,7 @@ class DayApiTest(unittest.TestCase):
                                             "heart_root": str(self.heart)})
         self.assertEqual(200, status)
         self.assertEqual(1, len(payload["night"]["executed"]))
-        self.assertEqual({"ok": 2, "stubbed": 2},
+        self.assertEqual({"ok": 4, "stubbed": 1},
                          payload["night"]["executed"][0]["summary"]["statuses"])
         status, plan_payload = self._call("GET", "/day/plan")
         self.assertEqual(1, len(plan_payload["consumed"]))

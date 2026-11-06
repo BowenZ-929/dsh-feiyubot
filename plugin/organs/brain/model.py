@@ -64,10 +64,14 @@ PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知")
 
 # 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天；迁移 = 旧家摘要搬进来——
 # 那是**她当时的理解**，不是她的亲眼所见：quote 一栏为空、正文落在 note，两条都不作证词。
+# 日记 / 梦 = 她晚上在家·抽屉里写的那两张，脑里只留**一行索引**（指向家里那张卡），
+# 正文不进脑：两类的 evidence_key 都留空，回想时不当证据用（梦尤其不作证词）。
 SOURCE_LIVED = "亲历"
 SOURCE_SCHEDULED = "日程模拟"
 SOURCE_MIGRATED = "迁移"
-SOURCE_TYPES = (SOURCE_LIVED, SOURCE_SCHEDULED, SOURCE_MIGRATED)
+SOURCE_DIARY = "日记"
+SOURCE_DREAM = "梦"
+SOURCE_TYPES = (SOURCE_LIVED, SOURCE_SCHEDULED, SOURCE_MIGRATED, SOURCE_DIARY, SOURCE_DREAM)
 
 # 出口判断用（不参与召回）：scene = 这条发生在哪；audience = 这话能对谁说
 SCENE_GROUP = "group"

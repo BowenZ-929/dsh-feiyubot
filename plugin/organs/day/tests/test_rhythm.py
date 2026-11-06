@@ -6,11 +6,12 @@ import unittest
 from typing import Any
 
 from organs.day import night, plan, rhythm
-from organs.day.tests.helpers import at, brain, candidates, temp_root
+from organs.day.tests.helpers import (at, brain, candidates, offline_night, seed_today,
+                                     temp_root)
 
 
 def night_adapter_steps():
-    """夜的四步名单只有一处定义（night.STEPS），测试不另抄一份。"""
+    """夜的五步名单只有一处定义（night.STEPS），测试不另抄一份。"""
     return night.STEPS
 
 NOW = "2026-11-05T09:30:00"
@@ -123,6 +124,8 @@ class NightLoopTest(unittest.TestCase):
         self.root = temp_root(self)
         self.heart = temp_root(self)
         self.brain = brain(self.root)
+        seed_today(self.brain, at("2026-11-05T03:31:00"))
+        self.home = offline_night(self)
         self.addCleanup(rhythm.stop, 2.0)
 
     def _tick(self, now: str = "2026-11-05T03:31:00"):
@@ -137,7 +140,7 @@ class NightLoopTest(unittest.TestCase):
         self.assertEqual(1, len(first["night"]["executed"]))
         executed = first["night"]["executed"][0]
         self.assertTrue(executed["ok"])
-        self.assertEqual({"ok": 2, "stubbed": 2}, executed["summary"]["statuses"])
+        self.assertEqual({"ok": 4, "stubbed": 1}, executed["summary"]["statuses"])
         self.assertEqual([], executed["summary"]["failed"])
         self.assertEqual(1, len(self._log_lines()))
         listing = plan.listing(self.root)
@@ -149,7 +152,7 @@ class NightLoopTest(unittest.TestCase):
         # 账是一份会落盘的表，键按字典序存；四步的顺序由 night_log 那一行守着
         self.assertEqual(set(night_adapter_steps()),
                          set(row["result"]["steps"]))
-        self.assertEqual({"ok": 2, "stubbed": 2}, row["result"]["statuses"])
+        self.assertEqual({"ok": 4, "stubbed": 1}, row["result"]["statuses"])
 
     def test_same_now_twice_does_not_run_the_night_again(self):
         self._tick()
@@ -190,14 +193,17 @@ class NightLoopTest(unittest.TestCase):
         self.assertEqual(1, len(payload["night"]["retried"]))
         retried = payload["night"]["retried"][0]
         self.assertFalse(retried["ok"])
-        self.assertEqual(["brain_compact"], retried["failed_steps"])
+        self.assertEqual(["brain_compact", "home_diary", "home_dream"],
+                         retried["failed_steps"], "没有脑就留不了一行索引：日记与梦都不写半份")
         self.assertEqual(0, retried["attempt"])
         self.assertEqual(1, retried["next_attempt"])
         listing = plan.listing(self.root)
         self.assertEqual([], listing["consumed"])
         self.assertEqual(1, len(listing["pending"]))
         self.assertEqual(0, listing["pending"][0]["night"]["attempts"])
-        self.assertEqual(["brain_compact"], listing["pending"][0]["night"]["failed_steps"])
+        self.assertEqual(["brain_compact", "home_diary", "home_dream"],
+                         listing["pending"][0]["night"]["failed_steps"],
+                         "没有脑就留不了一行索引：日记与梦都不写半份")
 
 
 class NightRetryTest(unittest.TestCase):
@@ -211,6 +217,8 @@ class NightRetryTest(unittest.TestCase):
         self.root = temp_root(self)
         self.heart = temp_root(self)
         self.brain = brain(self.root)
+        seed_today(self.brain, at("2026-11-05T03:31:00"))
+        self.home = offline_night(self)
         self.addCleanup(rhythm.stop, 2.0)
 
     SCHEDULE = ("2026-11-05T03:31:00", "2026-11-05T03:32:00",
@@ -238,12 +246,12 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(0, row["night"]["attempts"], "首跑失败：用掉 0 次重试")
         self.assertEqual(["brain_decay"], row["night"]["failed_steps"])
         self.assertEqual({"brain_compact": "ok", "brain_decay": "failed",
-                          "home_diary": "stubbed", "heart_settle": "ok"},
+                          "home_diary": "ok", "home_dream": "ok", "heart_settle": "ok"},
                          {name: item["status"] for name, item in row["night"]["steps"].items()})
         lines = self._lines()
         self.assertEqual(1, len(lines), "一次尝试一行夜日志")
         self.assertEqual(0, lines[0]["attempt"])
-        self.assertEqual(list(night.STEPS), lines[0]["retried_steps"], "首跑四步都跑")
+        self.assertEqual(list(night.STEPS), lines[0]["retried_steps"], "首跑五步都跑")
         self.assertEqual(["brain_decay"], lines[0]["failed"])
         self.assertNotIn("event", lines[0], "跑过的那一行不是审计行")
 
@@ -280,7 +288,7 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(1, lines[1]["attempt"])
         self.assertEqual(["brain_decay"], lines[1]["retried_steps"], "只重跑失败的那一步")
         self.assertEqual(["brain_decay"], lines[1]["failed"])
-        for name in ("brain_compact", "home_diary", "heart_settle"):
+        for name in ("brain_compact", "home_diary", "home_dream", "heart_settle"):
             self.assertEqual(first[name], lines[1]["steps"][name],
                              "%s 沿用上一次的结果，不重跑也不重写" % name)
         self.assertEqual(first["brain_compact"]["detail"],
@@ -288,15 +296,15 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(at("2026-11-05T03:37:00"), row["night"]["next_retry_at"],
                          "第二次失败后等 5 分钟（累加）")
 
-    def test_two_attempts_then_success_consumes_with_all_four_steps(self):
+    def test_two_attempts_then_success_consumes_with_all_five_steps(self):
         self._tick()
-        payload = self._tick(now=self.SCHEDULE[1], break_step=None)   # 第二次治好，四步全成
+        payload = self._tick(now=self.SCHEDULE[1], break_step=None)   # 第二次治好，五步全成
         self.assertEqual(1, len(payload["night"]["executed"]))
         listing = plan.listing(self.root)
         self.assertEqual([], listing["pending"])
         self.assertEqual(1, len(listing["consumed"]))
         self.assertEqual(set(night.STEPS), set(listing["consumed"][0]["result"]["steps"]))
-        self.assertEqual({"ok": 2, "stubbed": 2},
+        self.assertEqual({"ok": 4, "stubbed": 1},
                          listing["consumed"][0]["result"]["statuses"])
 
     def test_four_attempts_then_never_ran_with_one_audit_line(self):

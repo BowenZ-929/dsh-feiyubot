@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import pack as pack_mod
 from .model import (ALPHA_DEFAULT, BETA_DEFAULT, SIDE_OTHER,
-                    SOURCE_LIVED, SOURCE_MIGRATED, SOURCE_SCHEDULED,
+                    SOURCE_LIVED, SOURCE_MIGRATED, SOURCE_SCHEDULED, SOURCE_TYPES,
                     pack_limits)
 
 TIME_TODAY = ("今天", "刚才", "刚刚", "这会儿")
@@ -65,7 +65,7 @@ def _route(query: str) -> str:
 
 def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
     source_type = entry.get("source_type") or SOURCE_LIVED
-    if source_type not in (SOURCE_LIVED, SOURCE_SCHEDULED, SOURCE_MIGRATED):
+    if source_type not in SOURCE_TYPES:
         source_type = SOURCE_LIVED   # 读取侧兜底；写入侧 _normalize_row 会直接报错
     beta = entry.get("beta", BETA_DEFAULT)
     testimony = source_type == SOURCE_LIVED and beta >= 0   # 证词只认 quote（原话）

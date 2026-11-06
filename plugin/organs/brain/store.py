@@ -731,6 +731,10 @@ class BrainStore:
             who = "人"   # 来源不明：记忆照记，who 记成占位符"人"，但人名录不建卡
         if not text:
             return _reject("text 不能为空")
+        if source_type not in SOURCE_TYPES:
+            # 不认识的来源**直接拒**：猜成亲历等于把一条没有出处的话变成证词（且没法回查）
+            return _reject("source_type 不在合法取值里：%r；只收 %s"
+                           % (source_type, " / ".join(SOURCE_TYPES)))
         self._today, archived = self._ensure_today(ts)
         entries = self._today.setdefault("entries", [])
         merged = False
@@ -762,7 +766,7 @@ class BrainStore:
                 "quote": text,            # 原话逐字；note 是她的理解，可为空
                 "count": 1,
                 "status": STATUS_ACTIVE,   # 状态位和行同时落盘
-                "source_type": source_type if source_type in (SOURCE_LIVED, SOURCE_SCHEDULED) else SOURCE_LIVED,
+                "source_type": source_type,
                 "alpha": alpha,
                 "beta": beta,
                 "note": note or "",

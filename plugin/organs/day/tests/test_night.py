@@ -1,10 +1,11 @@
-"""night：四步固定顺序、一步失败继续下一步、每次跑完落一行日志。"""
+"""night：五步固定顺序、一步失败继续下一步、每次跑完落一行日志。"""
 from __future__ import annotations
 
 import unittest
 
 from organs.day import night
-from organs.day.tests.helpers import at, brain, log_lines, temp_root
+from organs.day.tests.helpers import (at, brain, fake_mind, log_lines, make_home,
+                                     seed_today, temp_root)
 
 NOW = "2026-11-06T05:00:00"
 
@@ -15,17 +16,25 @@ class NightRunTest(unittest.TestCase):
         self.heart = self.root / "heart"
         self.heart.mkdir()
         self.brain = brain(self.root)
+        seed_today(self.brain, at(NOW))
+        self.home = make_home(self)
+        self.mind = fake_mind()
 
     def _run(self, **kwargs):
-        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart}
+        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
+                  "home_root": self.home, "mind": self.mind}
         params.update(kwargs)
         return night.run(at(NOW), **params)
 
-    def test_four_steps_in_fixed_order_with_expected_statuses(self):
+    def _drawer(self):
+        from organs.day.tests.helpers import drawer_cards
+        return drawer_cards(self.root, self.home)
+
+    def test_five_steps_in_fixed_order_with_expected_statuses(self):
         payload = self._run()
-        self.assertEqual(list(night.STEPS), list(payload["steps"]), "四步顺序是契约，不许重排")
+        self.assertEqual(list(night.STEPS), list(payload["steps"]), "五步顺序是契约，不许重排")
         self.assertEqual({"brain_compact": "ok", "brain_decay": "stubbed",
-                          "home_diary": "stubbed", "heart_settle": "ok"},
+                          "home_diary": "ok", "home_dream": "ok", "heart_settle": "ok"},
                          {name: row["status"] for name, row in payload["steps"].items()})
         self.assertEqual([], payload["failed"])
         self.assertTrue(payload["ok"])
@@ -37,10 +46,9 @@ class NightRunTest(unittest.TestCase):
         self.assertIn(at(NOW)[:10], detail)
         self.assertIsInstance(payload["steps"]["brain_compact"]["proposals"], int)
 
-    def test_stubs_say_why_they_are_empty(self):
+    def test_stub_says_why_it_is_empty(self):
         payload = self._run()
         self.assertIn("_settle_retention", payload["steps"]["brain_decay"]["detail"])
-        self.assertIn("home/rooms.py:34", payload["steps"]["home_diary"]["detail"])
 
     def test_heart_settle_reports_value_and_tier(self):
         payload = self._run()
@@ -53,8 +61,8 @@ class NightRunTest(unittest.TestCase):
         payload = self._run(break_step=2)
         self.assertEqual("failed", payload["steps"]["brain_decay"]["status"])
         self.assertIn("RuntimeError", payload["steps"]["brain_decay"]["detail"])
-        self.assertEqual("stubbed", payload["steps"]["home_diary"]["status"])
-        self.assertEqual("ok", payload["steps"]["heart_settle"]["status"], "第 4 步必须仍然跑完")
+        self.assertEqual("ok", payload["steps"]["home_diary"]["status"], "第 3 步必须仍然跑完")
+        self.assertEqual("ok", payload["steps"]["heart_settle"]["status"], "第 5 步必须仍然跑完")
         self.assertEqual(["brain_decay"], payload["failed"])
         self.assertFalse(payload["ok"])
         line = log_lines(self.root)[-1]
@@ -64,7 +72,12 @@ class NightRunTest(unittest.TestCase):
         payload = self._run(brain=None)
         self.assertEqual("failed", payload["steps"]["brain_compact"]["status"])
         self.assertIn("脑未载入", payload["steps"]["brain_compact"]["detail"])
+        self.assertEqual("failed", payload["steps"]["home_diary"]["status"],
+                         "没有脑就留不了一行索引：日记这一步不写半份")
+        self.assertIn("脑未载入", payload["steps"]["home_diary"]["detail"])
         self.assertEqual("ok", payload["steps"]["heart_settle"]["status"])
+        self.assertEqual([], [card for card in self._drawer() if card["kind"] == "日记"],
+                         "脑缺失时抽屉里不该冒出日记")
 
     def test_heart_root_failure_does_not_stop_the_log(self):
         payload = self._run(heart_root=self.root / "no-such-dir" / ".." / "nope")
@@ -79,6 +92,10 @@ class NightRunTest(unittest.TestCase):
         self._run()
         again = self._run()
         self.assertTrue(again["steps"]["brain_compact"]["rerun"])
+        self.assertTrue(again["steps"]["home_diary"]["rerun"], "一天一张：第二次只回既有那张")
+        self.assertTrue(again["steps"]["home_dream"]["rerun"])
+        self.assertEqual(["日记", "梦"], sorted(card["kind"] for card in self._drawer()),
+                         "同一天重跑不写第二张")
 
 
 class NightRetryScopeTest(unittest.TestCase):
@@ -89,9 +106,13 @@ class NightRetryScopeTest(unittest.TestCase):
         self.heart = self.root / "heart"
         self.heart.mkdir()
         self.brain = brain(self.root)
+        seed_today(self.brain, at(NOW))
+        self.home = make_home(self)
+        self.mind = fake_mind()
 
     def _run(self, **kwargs):
-        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart}
+        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
+                  "home_root": self.home, "mind": self.mind}
         params.update(kwargs)
         return night.run(at(NOW), **params)
 
@@ -99,10 +120,10 @@ class NightRetryScopeTest(unittest.TestCase):
         first = self._run(break_step=2)
         second = self._run(break_step=2, only=["brain_decay"], carry=first["steps"],
                            attempt=1)
-        self.assertEqual(list(night.STEPS), list(second["steps"]), "四步名单与顺序不变")
+        self.assertEqual(list(night.STEPS), list(second["steps"]), "五步名单与顺序不变")
         self.assertEqual(["brain_decay"], second["retried_steps"])
         self.assertEqual(1, second["attempt"])
-        for name in ("brain_compact", "home_diary", "heart_settle"):
+        for name in ("brain_compact", "home_diary", "home_dream", "heart_settle"):
             self.assertEqual(first["steps"][name], second["steps"][name],
                              "%s 不重跑：结果原样沿用" % name)
         self.assertEqual("failed", second["steps"]["brain_decay"]["status"])
@@ -147,9 +168,13 @@ class NightBackoffTest(unittest.TestCase):
         self.heart = self.root / "heart"
         self.heart.mkdir()
         self.brain = brain(self.root)
+        seed_today(self.brain, at(NOW))
+        self.home = make_home(self)
+        self.mind = fake_mind()
 
     def _run(self, **kwargs):
         params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
+                  "home_root": self.home, "mind": self.mind,
                   "backoff_minutes": [1, 5, 15], "max_retries": 3}
         params.update(kwargs)
         return night.run(at(NOW), **params)
@@ -198,9 +223,13 @@ class NightLogTest(unittest.TestCase):
         self.heart = self.root / "heart"
         self.heart.mkdir()
         self.brain = brain(self.root)
+        seed_today(self.brain, at(NOW))
+        self.home = make_home(self)
+        self.mind = fake_mind()
 
     def _run(self, **kwargs):
-        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart}
+        params = {"root": self.root, "brain": self.brain, "heart_root": self.heart,
+                  "home_root": self.home, "mind": self.mind}
         params.update(kwargs)
         return night.run(at(NOW), **params)
 
