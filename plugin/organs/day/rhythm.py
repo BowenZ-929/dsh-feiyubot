@@ -37,6 +37,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import paths
 from . import model, night, plan, proactive
 
 STATE_FILE = "rhythm.json"
@@ -254,11 +255,14 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
 
 def tick(now_ts: Any = None, *, root: Any = None,
          config: Optional[Dict[str, Any]] = None, brain: Any = None,
-         heart_root: Any = None, break_step: Optional[int] = None) -> Dict[str, Any]:
+         heart_root: Any = None, home_root: Any = None,
+         break_step: Optional[int] = None) -> Dict[str, Any]:
     """一次 tick：排当天（幂等）→ 数到点 → 夜与主动开口各自结账 → 再动念一次 → 算下一次 → 换日记账。
 
     "到夜按固定顺序调四步"就是这一条路：tick 自己排、自己执行、自己下账。
-    brain / heart_root 是注入给 night.run 的那两个根（缺省由各器官走自己的默认根）。
+    brain / heart_root 是注入给 night.run 的那两个根；home_root 只给主动开口那条
+    pending_task 由头读卡用（家的 task_room）。三个根缺省都由各器官走自己的默认根——
+    home_root 与 heart_root 同一个派生规矩：给了 root 就按 <root>/home 派生。
     break_step 与 night.run 的同名参数同义，**只给验收用**（让第 N 步当场抛错，
     看失败的那次是不是留 pending、下一 tick 是不是只重跑那一步）。
     """
@@ -268,6 +272,9 @@ def tick(now_ts: Any = None, *, root: Any = None,
     # 动念要读心的念头与读数——忘了传心根就去读真实的心，测试会悄悄碰到实盘数据。
     if heart_root is None and root is not None:
         heart_root = Path(root) / "heart"
+    # 同一个规矩派生家的根：谁忘了传，卡也只会落在这棵临时树下，绝不落到真实的家。
+    if home_root is None:
+        home_root = Path(root) / "home" if root is not None else paths.organ_dir("home")
     day = model.day_key(at)
     state = load_state(root)
     rolled = bool(state["day"]) and state["day"] != day
@@ -295,7 +302,7 @@ def tick(now_ts: Any = None, *, root: Any = None,
     considered: Dict[str, Any] = {}
     try:
         considered = proactive.consider(at, root=root, brain=brain, heart_root=heart_root,
-                                        limits=cfg, idle_only=True)
+                                        home_root=home_root, limits=cfg, idle_only=True)
     except Exception as exc:  # noqa: BLE001 - 动念是旁支，坏了要报出来而不是静默吞掉
         message = "proactive: %s: %s" % (type(exc).__name__, exc)
         considered = {"ok": False, "error": message}

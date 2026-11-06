@@ -5,10 +5,18 @@
   "plan_delay_minutes": 5,
   "base_priority": 50,
   "reason_priority": {
+    "pending_task": 70,
     "thought": 60,
     "unfinished": 50,
     "unscheduled": 40
   },
+  "due_soon_minutes": 10,
+  "overdue_grace_minutes": 120,
+  "task_room": "工作台",
+  "task_when_format": "%H:%M",
+  "task_because": "{when} 要交的那件事：{name}",
+  "task_rule": "这条由头来自一张卡：标题是「{name}」，时间是 {when}。只能用给定的标题与时间，不许添加卡上没有的事。",
+  "task_log_dedupe_skipped": true,
   "lately_talked_hours": 24,
   "lately_talked_downgrade": 20,
   "ask": {
@@ -19,10 +27,11 @@
     "chunks_key": "chunks",
     "strip_fences": true,
     "system": "你是{who}身边那个人。你想主动找{who}说句话。语气档：{tone}（空着就是没有特别要求）。说人话，一到两段，别客套，别解释你为什么突然来。",
-    "user": "你想开口的由头（真事，不许编）：{because}\n这一刻你要是并不想说，就给 send=false。要说就给 1-{max_chunks} 段短句。\n只回一个 JSON：{\"send\": true, \"chunks\": [\"第一段\", \"第二段\"]}"
+    "user": "你想开口的由头（真事，不许编）：{because}\n{rule}这一刻你要是并不想说，就给 send=false。要说就给 1-{max_chunks} 段短句。\n只回一个 JSON：{\"send\": true, \"chunks\": [\"第一段\", \"第二段\"]}"
   },
-  "note": "日子线·主动开口的参数与提示词全在这份文件里（改文件即生效，不用重启）：owner 是没人可找时的退路；because_chars 是动念账里「由头」取真话前几个字；plan_delay_minutes 是动念到计划到点之间隔几分钟；base_priority / reason_priority 是计划行上的 priority；lately_talked_hours / lately_talked_downgrade 是「对方最近这么久内主动找过她 → priority 减这么多」的降权口径。per_reason_daily_cap 是「每个理由码一天最多动念几次」——同一个由头一天只用几次，超了记 quota（账上 scope=reason，能看出被哪条额度挡的），0 表示这条由头这一版不用。unscheduled_window 是 unscheduled 这条由头成立的时间窗（本地时区整点、左闭右开、from>to 表示跨零点）：「今天还没定下要做什么」是个常驻条件，只在上午成立才像话，窗外它不算由头——否则等于每天固定时间硬灌。ask 一整块是交给核的东西：system / user 两个模板（占位符 {who} {because} {tone} {max_chunks} 由日子线填）、temperature、max_chunks、chunk_join、send_key / chunks_key、strip_fences。核只回 JSON，解析不出就是 error_kind=parse，不猜、不重试。",
+  "note": "日子线·主动开口的参数与提示词全在这份文件里（改文件即生效，不用重启）：owner 是没人可找时的退路；because_chars 是动念账里「由头」取真话前几个字；plan_delay_minutes 是动念到计划到点之间隔几分钟；base_priority / reason_priority 是计划行上的 priority；lately_talked_hours / lately_talked_downgrade 是「对方最近这么久内主动找过她 → priority 减这么多」的降权口径。per_reason_daily_cap 是「每个理由码一天最多动念几次」——同一个由头一天只用几次，超了记 quota（账上 scope=reason，能看出被哪条额度挡的），0 表示这条由头这一版不用。unscheduled_window 是 unscheduled 这条由头成立的时间窗（本地时区整点、左闭右开、from>to 表示跨零点）：「今天还没定下要做什么」是个常驻条件，只在上午成立才像话，窗外它不算由头——否则等于每天固定时间硬灌。due_soon_minutes / overdue_grace_minutes 是 pending_task 那条由头的两条窗口（分钟）：多久之内要到的算「快到了」，过期多久之内还值得提一句——过了宽限就不提了。task_room 是任务卡待的那间房（家的房间名，默认工作台）；任务卡就是一张 kind=物件 的卡，params.task=true、params.due 是 ISO 时刻，完成＝progress 到 100（或者卡被拿走）。task_because 是那句 because 的拼接模板（占位符 {when} 是 due 的本地时刻、{name} 是卡上的标题）：这句**只能用卡上这两样拼**，别的一个字都不许加，所以它不走 because_chars 的截断。task_when_format 是那个时刻的写法（strftime，默认 %H:%M）。task_rule 是交给核时写进提示词的那条规矩（占位符同上）：只能用给定的标题与时间，不许添加卡上没有的事——核回来的话里既没有标题、也没回显那个时刻，就判 error_kind=offtask，不发。task_log_dedupe_skipped 管 task 账里 skipped 那一行的去重：默认 true＝同日同卡同因只留一行，再遇上只把那一行的 at 与 count 就地更新（count 是「这一天因同一原因被判过几次」）；改成 false 就逐条追加。planned / held / quota 永远一次一行、不合并——那些是「她想开口」的真记录。每条任务最多提醒几次（默认 1 次，数的是 task 账里这张卡的 planned/held 行，不是「今天」）在 limits.json 的 proactive.task_remind_per_card。ask 一整块是交给核的东西：system / user 两个模板（占位符 {who} {because} {tone} {rule} {max_chunks} 由日子线填）、temperature、max_chunks、chunk_join、send_key / chunks_key、strip_fences。核只回 JSON，解析不出就是 error_kind=parse，不猜、不重试。",
   "per_reason_daily_cap": {
+    "pending_task": 3,
     "thought": 3,
     "unfinished": 3,
     "unscheduled": 1

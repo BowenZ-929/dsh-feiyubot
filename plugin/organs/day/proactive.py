@@ -2,13 +2,19 @@
 
 判据（先写在这里，别处不许再判一次）：
 
-1. **「想开口」的判定与理由码只在本文件这一处算**。三个驱动源各一个理由码：
+1. **「想开口」的判定与理由码只在本文件这一处算**。四个驱动源各一个理由码：
+   - `pending_task`：家的 task_room（默认「工作台」）里有一张**任务卡快到点了**——
+     `params.task` 为真、`params.due` 能读成时刻、没完成（`progress < 100`；被拿走的卡
+     默认查询就看不见）、当天没提醒过，且 due 在 due_soon_minutes 内、或过期不超过
+     overdue_grace_minutes。**快到点的事比"她想说"更硬**，所以它排 REASON_ORDER 第一位。
+     那句 because **只能由卡上的标题与 due 的本地时刻拼出来**（模板在两个数据文件里），
+     不走 because_chars 的截断：逐字来自卡上，才有"不编"可言。
    - `thought`：心的念头非空（heart.pending.open_thoughts）；
    - `unfinished`：脑的 today 里**最后一手是别人说的、她当天没接上**的那条；
    - `unscheduled`：今天还没定下要做什么（日程日志里没有当天的条目），
      **并且此刻在 unscheduled_window 里**（proactive.json，默认 9–12 点）：
      那是个常驻条件，窗外它不算由头——否则等于每天固定时间硬灌。
-   三个同时成立时按 REASON_ORDER 取第一个：**一次动念只排一条计划**，理由要能说清是哪个。
+   几个同时成立时按 REASON_ORDER 取第一个：**一次动念只排一条计划**，理由要能说清是哪个。
 2. **两条额度，超了都记 `quota`、都不排计划**，靠账上的 `quota.scope` 分清是哪一条：
    - 谁：limits.json 的 proactive.per_who_daily_cap——"同一个人一天别被她想太多次"；
    - 哪个由头：proactive.json 的 per_reason_daily_cap——"同一个由头一天只用几次"
@@ -38,6 +44,23 @@
     plan_id / plan_blocked / delivery_id / error_kind / error / muted_until / streak
     action ∈ planned / held / quota / muted / blocked / declined / empty / error / sent / cold
     stage ∈ consider（动念那一刻）/ due（计划到点再判）/ outcome（结算回执）
+    reason_code=pending_task 的那几行另带 card_id / task_due（由头是卡上的事，账要能追回那张卡）。
+
+task 账（proactive_task_log.jsonl，一行一次**评估**）：
+    {"at", "card_id", "name", "due", "progress", "action", "reason", "reminded_count"}
+    action ∈ planned / held / quota / skipped
+    skipped 那一行另带 count，并且**同日同卡同因只留一行**（proactive.json 的
+    task_log_dedupe_skipped，默认开）：再遇上只就地改 at 与 count——一个 60 秒的 tick
+    乘一张挂着的卡就是一天上千行噪声，而那些行不计任何额度，纯粹把账翻得更难看清。
+    planned / held / quota 一次一行，永不合并：那是"她想开口"的真记录。
+    reminded_count 是**这一行之前**这张卡已经提醒过几次（所以 planned 那一行常常是 0，
+    下一条才是 1：它是判额度用的那个数，不是"这一次算完之后的数"）。
+    **读过的每一张卡都留一行**（没到期 / 已提醒 / 已完成 / 没有任务标记 也是 skipped）：
+    否则"为什么没提醒"就查不出来。但这行**不计入由头额度**——额度只算 planned / held，
+    与动念账同一条尺子（_reasons_today 只数动念账，这本账只数"这张卡提醒过几次"）。
+    每条任务最多提醒 per-card 几次的口径在 limits.json 的 proactive.task_remind_per_card
+    （默认 1），数的是 task 账里这张卡的 planned / held 行，**不是"今天"**：一张卡一辈子
+    只骚扰人一次。
 
 时间一律可注入 now_ts；root 是日子线自己的根，heart_root 是心的根（两个不许混）。
 """
@@ -63,15 +86,18 @@ from . import model, plan, proactive_ask
 KIND = "proactive"
 CONFIG_FILE = "proactive.json"
 LOG_FILE = "proactive_log.jsonl"
+TASK_LOG_FILE = "proactive_task_log.jsonl"
 VERSION = 1
 
-#: 三个驱动源的理由码（闭合集合：不许长出第四个）。
+#: 四个驱动源的理由码（闭合集合：不许再长出第五个）。
+REASON_PENDING_TASK = "pending_task"
 REASON_THOUGHT = "thought"
 REASON_UNFINISHED = "unfinished"
 REASON_UNSCHEDULED = "unscheduled"
-REASONS = (REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED)
-#: 三个都成立时取谁：一次动念只排一条计划，理由要能说清是哪个。
-REASON_ORDER = (REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED)
+REASONS = (REASON_PENDING_TASK, REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED)
+#: 几个都成立时取谁：一次动念只排一条计划，理由要能说清是哪个。
+#: pending_task 排第一——快到点的事比"她想说"更硬。
+REASON_ORDER = (REASON_PENDING_TASK, REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED)
 
 ACT_PLANNED = "planned"
 ACT_HELD = "held"
@@ -83,8 +109,14 @@ ACT_EMPTY = "empty"
 ACT_ERROR = "error"
 ACT_SENT = "sent"
 ACT_COLD = "cold"
+#: task 账上的"这一轮没提醒"（没到期 / 已提醒 / 已完成 / 没有任务标记）：只这本账有这个动作。
+ACT_SKIPPED = "skipped"
 ACTIONS = (ACT_PLANNED, ACT_HELD, ACT_QUOTA, ACT_MUTED, ACT_BLOCKED,
            ACT_DECLINED, ACT_EMPTY, ACT_ERROR, ACT_SENT, ACT_COLD)
+
+#: 核回来的东西与卡上的事对不上（既没提标题、也没提那个时刻）：自己长出来的一类错，
+#: 与"核打挂了"（error_kind 是 LLMError.kind）和"回执解析不出"（parse）分开记。
+ERR_OFFTASK = "offtask"
 
 STAGE_CONSIDER = "consider"
 STAGE_DUE = "due"
@@ -101,20 +133,37 @@ DEFAULTS: Dict[str, Any] = {
     "because_chars": 40,
     "plan_delay_minutes": 5,
     "base_priority": 50,
-    "reason_priority": {REASON_THOUGHT: 60, REASON_UNFINISHED: 50, REASON_UNSCHEDULED: 40},
+    "reason_priority": {REASON_PENDING_TASK: 70, REASON_THOUGHT: 60,
+                        REASON_UNFINISHED: 50, REASON_UNSCHEDULED: 40},
     "lately_talked_hours": 24,
     "lately_talked_downgrade": 20,
     # 每个理由码一天最多动念几次：不是每个人，是每个"由头"——同一个由头一天只用一次
     # （unscheduled 默认 1：那是"今天还没定下做什么"，定下来之前问一次就够了）。
-    "per_reason_daily_cap": {REASON_THOUGHT: 3, REASON_UNFINISHED: 3, REASON_UNSCHEDULED: 1},
+    "per_reason_daily_cap": {REASON_PENDING_TASK: 3, REASON_THOUGHT: 3,
+                             REASON_UNFINISHED: 3, REASON_UNSCHEDULED: 1},
     # unscheduled 这条由头只在上午成立：它描述的是"今天还没定下来做什么"，
     # 一个常驻条件不该整天成立（否则等于每天固定时间硬灌三条，那就不是由头了）。
     # 本地时区的整点，左闭右开；from > to 表示跨零点。
     "unscheduled_window": {"from": 9, "to": 12},
+    # pending_task 这一条由头：多久之内要到的算"快到了"、过期多久之内还值得提一句，
+    # 任务是哪间房里的、那句 because 怎么拼、交给核时那条"不许编"的规矩长什么样。
+    "due_soon_minutes": 10,
+    "overdue_grace_minutes": 120,
+    "task_room": "工作台",
+    "task_when_format": "%H:%M",
+    "task_because": "{when} 要交的那件事：{name}",
+    "task_rule": "这条由头来自一张卡：标题是「{name}」，时间是 {when}。"
+                 "只能用给定的标题与时间，不许添加卡上没有的事。",
+    # skipped 行同日同卡同因只留一行（就地更新 at 与 count）：一个 60 秒的 tick
+    # 乘一张挂着的卡就是一天上千行噪声，而那些行不计任何额度。planned / held /
+    # quota 不合并——那些是"她想开口"的真记录，一次一行。
+    "task_log_dedupe_skipped": True,
 }
 #: 每人每天上限的兜底：真源是 limits.json 的 proactive.per_who_daily_cap
 #: （与 plan 的闸门同一份配置文件），代码里只留这一份兜底。
 DEFAULT_PER_WHO_DAILY_CAP = 3
+#: 每条任务卡最多提醒几次的兜底：真源是 limits.json 的 proactive.task_remind_per_card。
+DEFAULT_TASK_REMIND_PER_CARD = 1
 #: overview 默认给账尾几行。
 LOG_SHOWN = 20
 
@@ -145,7 +194,8 @@ def load_config(root: Any = None, config: Optional[Dict[str, Any]] = None) -> Di
         if isinstance(loaded, dict):
             values.update(loaded)
     for name in ("because_chars", "plan_delay_minutes", "base_priority",
-                 "lately_talked_hours", "lately_talked_downgrade"):
+                 "lately_talked_hours", "lately_talked_downgrade",
+                 "due_soon_minutes", "overdue_grace_minutes"):
         try:
             values[name] = float(values[name])
         except (TypeError, ValueError):
@@ -197,6 +247,62 @@ def in_unscheduled_window(now_ts: Any, config: Optional[Dict[str, Any]] = None) 
     return hour >= start or hour < end
 
 
+def task_window(config: Optional[Dict[str, Any]] = None) -> Tuple[float, float]:
+    """提醒的两条窗口（分钟）：多久之内要到的算"快到了" / 过期多久之内还值得提一句。"""
+    cfg = config or load_config()
+    soon = _num(cfg.get("due_soon_minutes"), DEFAULTS["due_soon_minutes"])
+    grace = _num(cfg.get("overdue_grace_minutes"), DEFAULTS["overdue_grace_minutes"])
+    return max(0.0, soon), max(0.0, grace)
+
+
+def task_room_of(config: Optional[Dict[str, Any]] = None) -> str:
+    """任务卡放在哪间房里（proactive.json 的 task_room）：不是写死的房名。"""
+    cfg = config or load_config()
+    name = str(cfg.get("task_room") or "").strip()
+    return name or str(DEFAULTS["task_room"])
+
+
+def task_template(config: Optional[Dict[str, Any]], key: str) -> str:
+    """proactive.json 里的那句模板（because / when_format / rule）；坏值退回兜底。"""
+    cfg = config or load_config()
+    value = cfg.get(key)
+    if isinstance(value, str) and value.strip():
+        return value
+    return str(DEFAULTS.get(key) or "")
+
+
+def task_remind_cap(root: Any = None, limits: Optional[Dict[str, Any]] = None) -> int:
+    """每张任务卡最多提醒几次：limits.json 的 proactive.task_remind_per_card。
+
+    与 per_who_cap 同一套摆法（顶层 proactive 那一节，kinds.proactive 里写同一个键也认）。
+    0 是合法值——等于"这条由头这一版不用"，不是无限。
+    """
+    cfg = limits if isinstance(limits, dict) and limits else model.load_limits(root)
+    section = cfg.get(KIND) if isinstance(cfg.get(KIND), dict) else {}
+    kinds = cfg.get("kinds") if isinstance(cfg.get("kinds"), dict) else {}
+    entry = kinds.get(KIND) if isinstance(kinds.get(KIND), dict) else {}
+    for source in (section, entry):
+        if "task_remind_per_card" not in source:
+            continue
+        try:
+            return max(0, int(source["task_remind_per_card"]))
+        except (TypeError, ValueError):
+            break
+    return DEFAULT_TASK_REMIND_PER_CARD
+
+
+def task_dedupe(config: Optional[Dict[str, Any]] = None) -> bool:
+    """skipped 行要不要去重（proactive.json 的 task_log_dedupe_skipped，默认 true）。
+
+    缺这一项就是 true：默认那头是不撑爆账本的那一头。写了 false 才逐条落。
+    """
+    cfg = config or load_config()
+    value = cfg.get("task_log_dedupe_skipped", DEFAULTS["task_log_dedupe_skipped"])
+    if isinstance(value, bool):
+        return value
+    return _truthy(value)
+
+
 def per_who_cap(root: Any = None, limits: Optional[Dict[str, Any]] = None) -> int:
     """同一个 who 一天最多几条主动开口计划：limits.json 的 proactive.per_who_daily_cap。
 
@@ -220,6 +326,15 @@ def per_who_cap(root: Any = None, limits: Optional[Dict[str, Any]] = None) -> in
 def log_path(root: Any = None) -> Path:
     """动念账：日子线数据根下的 proactive_log.jsonl（一行一次动念）。"""
     return model.day_root(root) / LOG_FILE
+
+
+def task_log_path(root: Any = None) -> Path:
+    """task 账：日子线数据根下的 proactive_task_log.jsonl（一行一次**评估**）。
+
+    单开一本账，不往动念账里掺：动念账数的是"由头被用掉几次"（额度就读它），
+    这本数的是"这张卡提醒过几次"——两把尺子混在一本就再也数不清了。
+    """
+    return model.day_root(root) / TASK_LOG_FILE
 
 
 def _now(now_ts: Any = None) -> str:
@@ -253,7 +368,79 @@ def _clip(text: Any, chars: Any) -> str:
 
 def append_log(root: Any, row: Dict[str, Any]) -> Path:
     """追加一行动念账：先写同目录临时件再 append 整行，崩了不会留半行。"""
-    target = log_path(root)
+    return _append_line(log_path(root), row)
+
+
+def append_task_log(root: Any, row: Dict[str, Any],
+                    config: Optional[Dict[str, Any]] = None) -> Path:
+    """写一行 task 账：与动念账同一套 append（崩了不留半行）。
+
+    唯一的例外是 skipped 那一行：同日同卡同因只留一行，**就地**把 at 与 count 改掉
+    （去重开关在 proactive.json 的 task_log_dedupe_skipped，默认开）。
+    planned / held / quota 一次一行，永远不合并——那是"她想开口"的真记录。
+    """
+    target = task_log_path(root)
+    if str(row.get("action") or "") == ACT_SKIPPED and task_dedupe(config):
+        if _merge_task_row(target, row):
+            return target
+    return _append_line(target, row)
+
+
+def _merge_task_row(target: Path, row: Dict[str, Any]) -> bool:
+    """同日同卡同因的 skipped 行就地更新；合并掉了回 True（不追加新行）。
+
+    键是 (day, card_id, action, reason)：换一天、换一张卡、换一个原因就是另一件事，
+    该新起一行。合并只改 at（最近一次判的时刻）与 count（这一天因同一原因判过几次），
+    其余字段不动——那行说的还是同一句话。
+    """
+    rows = _read_lines(target)
+    if not rows:
+        return False
+    try:
+        day = model.day_key(str(row.get("at") or ""))
+    except ValueError:
+        return False
+    card_id = str(row.get("card_id") or "")
+    reason = str(row.get("reason") or "")
+    for index in range(len(rows) - 1, -1, -1):
+        existing = rows[index]
+        if str(existing.get("action") or "") != ACT_SKIPPED:
+            continue
+        if str(existing.get("card_id") or "") != card_id:
+            continue
+        if str(existing.get("reason") or "") != reason:
+            continue
+        try:
+            if model.day_key(str(existing.get("at") or "")) != day:
+                continue
+        except ValueError:
+            continue
+        existing["at"] = str(row.get("at") or existing.get("at") or "")
+        existing["count"] = int(existing.get("count") or 1) + 1
+        _rewrite_lines(target, rows)
+        return True
+    return False
+
+
+def _rewrite_lines(target: Path, rows: List[Dict[str, Any]]) -> None:
+    """整本重写（同目录临时件 + os.replace）：只给"就地把一行改掉"用，坏不到原文。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(".%s.tmp-%d-%s" % (target.name, os.getpid(), secrets.token_hex(4)))
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _append_line(target: Path, row: Dict[str, Any]) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(row, ensure_ascii=False, sort_keys=True)
     tmp = target.with_name(".%s.tmp-%d-%s" % (target.name, os.getpid(), secrets.token_hex(4)))
@@ -274,7 +461,15 @@ def append_log(root: Any, row: Dict[str, Any]) -> Path:
 
 def log_lines(root: Any = None) -> List[Dict[str, Any]]:
     """动念账的每一行（坏行原样跳过，不因为一行坏了读不了整份）。"""
-    target = log_path(root)
+    return _read_lines(log_path(root))
+
+
+def task_log_lines(root: Any = None) -> List[Dict[str, Any]]:
+    """task 账的每一行（坏行同样原样跳过：一行坏了不该让整本读不出来）。"""
+    return _read_lines(task_log_path(root))
+
+
+def _read_lines(target: Path) -> List[Dict[str, Any]]:
     if not target.exists():
         return []
     rows: List[Dict[str, Any]] = []
@@ -297,7 +492,15 @@ def log_lines(root: Any = None) -> List[Dict[str, Any]]:
 
 def log_tail(root: Any = None, limit: int = LOG_SHOWN) -> List[Dict[str, Any]]:
     """账尾几行（GET /day/proactive 用）；limit <= 0 就是全部。"""
-    rows = log_lines(root)
+    return _tail(log_lines(root), limit)
+
+
+def task_log_tail(root: Any = None, limit: int = LOG_SHOWN) -> List[Dict[str, Any]]:
+    """task 账的尾几行。"""
+    return _tail(task_log_lines(root), limit)
+
+
+def _tail(rows: List[Dict[str, Any]], limit: Any) -> List[Dict[str, Any]]:
     try:
         count = int(limit)
     except (TypeError, ValueError):
@@ -384,6 +587,238 @@ def _lately_talked(who: str, at: str, *, brain: Any = None,
             "hours": hours, "last_at": last_at}
 
 
+# ---- 任务卡（家的工作台上那张快到点的卡 → pending_task 这条由头） -----------
+
+
+def _truthy(value: Any) -> bool:
+    """params.task 为真：JSON 的 true / 1 / "true" / "1" / "yes" 都认，别的一概不算。
+
+    不按 Python 的真假判：那样 "false" 这种非空串也会被当成"是任务"，
+    于是拿一句假话去提醒人。
+    """
+    if value is True or value == 1:
+        return True
+    return isinstance(value, str) and value.strip().lower() in ("1", "true", "yes")
+
+
+def _render(template: Any, fields: Mapping[str, Any]) -> str:
+    """占位符逐个替换（不认 str.format：这些模板里本来就带着别的花括号）。"""
+    text = str(template if template is not None else "")
+    for key, value in fields.items():
+        text = text.replace("{%s}" % key, str(value))
+    return text
+
+
+def task_when(due: Any, config: Optional[Dict[str, Any]] = None) -> str:
+    """due 的**本地**时刻（格式取 proactive.json 的 task_when_format，默认 %H:%M）。
+
+    走 model.iso 这一步是为了归一到本地时区：卡上写的是 +00:00，人看到的也得是墙上那个钟点。
+    """
+    try:
+        stamp = model.parse_ts(model.iso(due))
+    except ValueError:
+        return ""
+    return stamp.strftime(task_template(config, "task_when_format"))
+
+
+def task_because(item: Mapping[str, Any], config: Optional[Dict[str, Any]] = None) -> str:
+    """那句 because：只用卡上的标题与 due 的本地时刻，别的一个字都不加。
+
+    刻意不走 because_chars 的截断：这句话要能逐字对回卡上那两样东西，
+    截一半就成了"我替她改写了那张卡"。
+    """
+    return _render(task_template(config, "task_because"),
+                   {"when": str(item.get("when") or ""), "name": str(item.get("name") or "")})
+
+
+def _task_cards(home_root: Any, room: str) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+    """读那间房（只读）：卡是折叠后的（进度已贴回卡上，被拿走的默认不出现）。
+
+    读不出来（房名不在十间里、家未载入、盘坏了）就回一句原因：这条由头这一轮不成立，
+    既不抛崩 tick，也不许凭空编一张卡出来。
+    """
+    if home_root is None:
+        return None, "家未载入（没有 home_root）：这一轮不判任务卡"
+    from organs.home import cards as home_cards
+    try:
+        listing = home_cards.list_room(root=home_root, room=room)
+    except Exception as exc:  # noqa: BLE001 - 卡片读不出来不该让动念整条断掉
+        return None, "读不了「%s」：%s: %s" % (room, type(exc).__name__, exc)
+    return list(listing.get("items") or []), ""
+
+
+def _card_progress(card: Mapping[str, Any]) -> Optional[int]:
+    """卡上的进度（fold 贴回来的那个数）；没有就是 None——"没进度"不等于 0。"""
+    value = card.get("progress")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _task_credit(root: Any, at: str) -> Tuple[Dict[str, int], set]:
+    """task 账里每张卡已经提醒过几次（planned / held 才算），以及今天提醒过的那几张。
+
+    只数这两类动作：skipped 是"评估过但没提醒"，把它算进额度就等于"看一眼用掉一次"。
+    """
+    day = model.day_key(at)
+    counts: Dict[str, int] = {}
+    today: set = set()
+    for row in task_log_lines(root):
+        if str(row.get("action") or "") not in (ACT_PLANNED, ACT_HELD):
+            continue
+        card_id = str(row.get("card_id") or "")
+        if not card_id:
+            continue
+        counts[card_id] = counts.get(card_id, 0) + 1
+        try:
+            if model.day_key(str(row.get("at") or "")) == day:
+                today.add(card_id)
+        except ValueError:
+            continue
+    return counts, today
+
+
+def _task_row(at: str, item: Mapping[str, Any], action: str, reason: str) -> Dict[str, Any]:
+    """一行 task 账：那八个键一个不多一个不少（账的形状定了就别再漂）。
+
+    skipped 那一行另带 count（这一天因为同一原因被判过几次）：同日同卡同因再遇上
+    只把 count 加一，不追加新行——"为什么没提醒"仍然查得到，账也不会被 tick 撑爆。
+    """
+    row: Dict[str, Any] = {"at": at, "card_id": str(item.get("card_id") or ""),
+                           "name": str(item.get("name") or ""),
+                           "due": str(item.get("due") or ""),
+                           "progress": item.get("progress"),
+                           "action": str(action or ACT_SKIPPED),
+                           "reason": str(reason or ""),
+                           "reminded_count": int(item.get("reminded_count") or 0)}
+    if row["action"] == ACT_SKIPPED:
+        row["count"] = 1
+    return row
+
+
+def pending_task(now_ts: Any = None, *, root: Any = None, home_root: Any = None,
+                 config: Optional[Dict[str, Any]] = None,
+                 limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """此刻有没有一张"快到点了"的任务卡。**只读**：不落账、不排计划。
+
+    判据全在这一个函数里（别处不许再判一遍）：卡在 task_room 里、params.task 为真、
+    params.due 能读成时刻、没完成（progress < 100；被拿走的卡默认查询就看不见）、
+    当天没提醒过，且 due 在 due_soon_minutes 内或过期不超过 overdue_grace_minutes。
+    同一轮只取**due 最早**的一张：一次动念只排一条计划。
+
+    返回 {"ok", "at", "room", "error", "window", "cards": [每一张的评估], "fired": 这一轮那张}：
+    cards 里每一张都带 action（skipped / quota，候选留空）与 reason，由 consider 落进 task 账——
+    "为什么没提醒"要查得出来。over_cap 的那张仍然进 fired 候选：它要能记一行 quota，
+    但如果还有一张没超额的，就让那张先说（别被一张已经提过的卡一直堵住）。
+    """
+    at = _now(now_ts)
+    cfg = config or load_config(root)
+    room = task_room_of(cfg)
+    soon, grace = task_window(cfg)
+    cap = task_remind_cap(root, limits)
+    items, error = _task_cards(home_root, room)
+    out: Dict[str, Any] = {"ok": not error, "at": at, "room": room, "error": error,
+                           "window": {"due_soon_minutes": soon,
+                                      "overdue_grace_minutes": grace, "remind_cap": cap},
+                           "cards": [], "fired": None}
+    if error:
+        return out
+
+    counts, today = _task_credit(root, at)
+    now = model.parse_ts(at)
+    ready: List[Tuple[Any, Dict[str, Any]]] = []
+    held: List[Tuple[Any, Dict[str, Any]]] = []
+    for card in items:
+        if not isinstance(card, dict):
+            continue
+        card_id = str(card.get("card_id") or "")
+        params = card.get("params") if isinstance(card.get("params"), dict) else {}
+        due_raw = str(params.get("due") or "")
+        item: Dict[str, Any] = {"card_id": card_id, "name": str(card.get("name") or ""),
+                                "due": due_raw, "when": "",
+                                "progress": _card_progress(card),
+                                "reminded_count": int(counts.get(card_id, 0)),
+                                "action": "", "reason": "", "over_cap": False}
+        out["cards"].append(item)
+
+        if not _truthy(params.get("task")):
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "这张卡上没有任务标记（params.task 不为真）"
+            continue
+        try:
+            due = model.parse_ts(due_raw)
+        except ValueError:
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "params.due 不是合法时刻：%r" % (due_raw,)
+            continue
+        item["when"] = task_when(due_raw, cfg)
+        progress = item["progress"]
+        if progress is not None and progress >= 100:
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "这张卡已经完成（progress=%d）" % progress
+            continue
+        if card_id and card_id in today:
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "今天已经提醒过这张卡（%d 次）" % item["reminded_count"]
+            continue
+        early = (due - now).total_seconds() / 60.0
+        # 两句 reason 里**不放会随时间漂的数字**（还有几分钟 / 过期几分钟）：那几句是
+        # skipped 行的去重键，放进去就变成"每 tick 一个原因"，账还是会被撑爆。
+        # 差了多少分钟从这一行的 at 与 due 一减就有；count 记的是"判过几次"。
+        if early > soon:
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "还没到提醒的时候（窗口 %d 分钟）" % round(soon)
+            continue
+        if early < -grace:
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "已经过期超过宽限（宽限 %d 分钟，不再提）" % round(grace)
+            continue
+        item["over_cap"] = item["reminded_count"] >= cap
+        (held if item["over_cap"] else ready).append((due, item))
+
+    if ready or held:
+        ready.sort(key=lambda pair: pair[0])
+        held.sort(key=lambda pair: pair[0])
+        fired = (ready or held)[0][1]
+        out["fired"] = fired
+        for _due, item in ready + held:
+            if item is fired:
+                continue
+            item["action"] = ACT_SKIPPED
+            item["reason"] = "这一轮只提一张（先提 due 最早的那张：%s）" % fired["name"]
+        if fired["over_cap"]:
+            fired["action"] = ACT_QUOTA
+            fired["reason"] = ("这张卡已经提醒过 %d 次（上限 %d）"
+                               % (fired["reminded_count"], cap))
+    return out
+
+
+def _flush_task_log(root: Any, at: str, task: Mapping[str, Any], action: str = "",
+                    reason: str = "",
+                    config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """把这一轮的评估落进 task 账：读过的每张卡一行，被选中的那张按这一轮的判决写。
+
+    action 空就是"这一轮根本没轮到它"（比如没有由头 / 已经有一条待说的计划）：
+    那也落一行，记成 skipped 并写明原因——否则"为什么没提醒"就查不出来。
+    """
+    rows: List[Dict[str, Any]] = []
+    chosen = task.get("fired")
+    for item in task.get("cards") or []:
+        if item is chosen:
+            continue
+        rows.append(_task_row(at, item, str(item.get("action") or ACT_SKIPPED),
+                              str(item.get("reason") or "")))
+    if isinstance(chosen, Mapping):
+        rows.append(_task_row(at, chosen, str(action or ACT_SKIPPED),
+                              str(reason or chosen.get("reason") or "")))
+    for row in rows:
+        append_task_log(root, row, config=config)
+    return rows
+
+
 # ---- 三个驱动源 -----------------------------------------------------------
 
 
@@ -416,17 +851,37 @@ def _scheduled_today(root: Any, at: str) -> bool:
 
 
 def sources(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
-            brain: Any = None, config: Optional[Dict[str, Any]] = None
-            ) -> List[Dict[str, Any]]:
+            brain: Any = None, home_root: Any = None,
+            config: Optional[Dict[str, Any]] = None,
+            task: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """此刻有哪些"想开口"的由头（按 REASON_ORDER 排），每个带理由码与一句真话。
 
-    这是**唯一**一处判"她想不想开口"的地方：三块读数各自只有一条判据，
+    这是**唯一**一处判"她想不想开口"的地方：四块读数各自只有一条判据，
     别处（节律、HTTP 层）不许再判一遍。
+
+    task 是已经算好的 pending_task 评估（见 pending_task()）：传进来只是别读两遍卡，
+    判定仍然只在那一个函数里——"两张口径"就是这么长出来的。
     """
     cfg = config or load_config(root)
     at = _now(now_ts)
     chars = cfg.get("because_chars")
     found: Dict[str, Dict[str, Any]] = {}
+
+    if task is None:
+        task = pending_task(at, root=root, home_root=home_root, config=cfg)
+    chosen = task.get("fired")
+    if isinstance(chosen, Mapping):
+        found[REASON_PENDING_TASK] = {
+            "reason_code": REASON_PENDING_TASK,
+            # 只用卡上的标题与时刻，且不截断：这句要能逐字对回那张卡
+            "because": task_because(chosen, cfg),
+            "thought_id": "", "who": "",
+            "task": {"card_id": str(chosen.get("card_id") or ""),
+                     "name": str(chosen.get("name") or ""),
+                     "due": str(chosen.get("due") or ""),
+                     "when": str(chosen.get("when") or ""),
+                     "reminded_count": int(chosen.get("reminded_count") or 0)},
+            "over_cap": bool(chosen.get("over_cap"))}
 
     thoughts = heart_pending.open_thoughts(root=heart_root, now=at)
     if thoughts:
@@ -613,8 +1068,32 @@ def _row(at: str, stage: str, reason_code: str, who: str, because: str, priority
 # ---- 动念（唯一一次判定 + 落一行账） ---------------------------------------
 
 
+def _task_verdict(action: str, quota: Mapping[str, Any], muted: Mapping[str, Any],
+                  code: str, blocked: str) -> Tuple[str, str]:
+    """这一轮的判决怎么落到 task 账上（那本账只认 planned / held / quota / skipped）。
+
+    muted / blocked 记 skipped：任务卡本身一点问题没有，是这一刻不该说——账上要能分清
+    "这张卡不提醒了"和"这一轮没轮到它"。
+    """
+    if action == ACT_PLANNED:
+        return ACT_PLANNED, ""
+    if action == ACT_HELD:
+        return ACT_HELD, "判 SILENT（%s）：计划照生，不调核、不发送" % code
+    if action == ACT_QUOTA:
+        if str(quota.get("scope") or "") == "card":
+            return ACT_QUOTA, ("这张卡已经提醒过 %s 次（上限 %s）"
+                              % (quota.get("used"), quota.get("cap")))
+        return ACT_QUOTA, "被额度挡下（scope=%s）" % (quota.get("scope") or "")
+    if action == ACT_MUTED:
+        return ACT_SKIPPED, "静音中（到 %s）：这一轮不开口" % (muted.get("muted_until") or "")
+    if action == ACT_BLOCKED:
+        return ACT_SKIPPED, "计划闸门拦下了这一条（%s）" % (blocked or "")
+    return ACT_SKIPPED, "这一轮没有开口（%s）" % action
+
+
 def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
-             brain: Any = None, config: Optional[Dict[str, Any]] = None,
+             brain: Any = None, home_root: Any = None,
+             config: Optional[Dict[str, Any]] = None,
              limits: Optional[Dict[str, Any]] = None, idle_only: bool = False
              ) -> Dict[str, Any]:
     """手工/事件驱动地评估一次"她想不想开口"：最多落一行账、最多排一条计划。
@@ -622,16 +1101,25 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
     次序钉死（先静音、再额度、再 engage）：安静一会儿优先于她想说，额度优先于她自己
     以为的"现在正好"。判 SILENT 照旧生成计划，只是标 held——人要看得出
     "她想说，但因为夜里/双低没说"。
+
+    home_root 只给 pending_task 那条由头读卡用（家：task_room 里的卡）；task 账另记一行
+    一次评估，连"没提醒"也记——两本账各数各的，别混。
     """
     at = _now(now_ts)
     cfg = config or load_config(root)
-    fired = sources(at, root=root, heart_root=heart_root, brain=brain, config=cfg)
+    task = pending_task(at, root=root, home_root=home_root, config=cfg, limits=limits)
+    fired = sources(at, root=root, heart_root=heart_root, brain=brain,
+                    home_root=home_root, config=cfg, task=task)
     if not fired:
+        _flush_task_log(root, at, task, config=cfg)
         return {"ok": True, "at": at, "fired": False, "skipped": "no-source",
-                "sources": [], "row": None, "plan": None}
+                "sources": [], "row": None, "plan": None, "pending_task": task}
     if idle_only and _pending_proactive(root) is not None:
+        _flush_task_log(root, at, task, ACT_SKIPPED, "已经有一条待说的计划，这一轮不叠",
+                        config=cfg)
         return {"ok": True, "at": at, "fired": False, "skipped": "pending-plan",
-                "sources": [item["reason_code"] for item in fired], "row": None, "plan": None}
+                "sources": [item["reason_code"] for item in fired], "row": None,
+                "plan": None, "pending_task": task}
 
     top = fired[0]
     picked = pick_who(at, root=root, brain=brain, config=cfg)
@@ -648,14 +1136,21 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
     reason_cap = per_reason_cap(cfg, top["reason_code"])
     reason_used = _reasons_today(top["reason_code"], at, root)
 
-    # 次序：静音 > 两条额度（谁 / 哪个由头）> engage 的硬门 > 排计划。
-    # 两条额度都叫 quota，靠 scope 分开——"被哪条额度挡的"要能在账上读出来。
+    # 次序：静音 > 三条额度（谁 / 哪张卡 / 哪个由头）> engage 的硬门 > 排计划。
+    # 三条额度都叫 quota，靠 scope 分开——"被哪条额度挡的"要能在账上读出来。
+    card = top.get("task") if isinstance(top.get("task"), dict) else {}
     quota: Dict[str, Any] = {}
     if muted.get("muted") is True:
         action = ACT_MUTED
     elif used >= cap:
         action = ACT_QUOTA
         quota = {"scope": "who", "used": used, "cap": cap}
+    elif top["reason_code"] == REASON_PENDING_TASK and top.get("over_cap"):
+        # 每条任务最多提醒几次：数的是 task 账里这张卡的 planned / held 行（limits.json）。
+        action = ACT_QUOTA
+        quota = {"scope": "card", "card_id": str(card.get("card_id") or ""),
+                 "used": int(card.get("reminded_count") or 0),
+                 "cap": task_remind_cap(root, limits)}
     elif reason_used >= reason_cap:
         action = ACT_QUOTA
         quota = {"scope": "reason", "reason_code": top["reason_code"],
@@ -668,11 +1163,17 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
     planned: Optional[Dict[str, Any]] = None
     blocked = ""
     if action in (ACT_PLANNED, ACT_HELD):
-        out = plan.add([{"kind": KIND, "at": _plan_at(at, cfg), "note": top["because"],
-                         "priority": after, "who": who, "held": action == ACT_HELD,
-                         "held_reason": code if action == ACT_HELD else "",
-                         "reason_code": top["reason_code"],
-                         "thought_id": top.get("thought_id") or ""}],
+        candidate: Dict[str, Any] = {"kind": KIND, "at": _plan_at(at, cfg),
+                                     "note": top["because"],
+                                     "priority": after, "who": who,
+                                     "held": action == ACT_HELD,
+                                     "held_reason": code if action == ACT_HELD else "",
+                                     "reason_code": top["reason_code"],
+                                     "thought_id": top.get("thought_id") or ""}
+        if card:
+            # 到点执行时要能判"回执里说的事还是不是卡上那件"：标题与时刻随计划落账。
+            candidate["task"] = dict(card)
+        out = plan.add([candidate],
                        root=root, now_ts=at, config=limits or model.load_limits(root))
         if out["added"]:
             planned = out["added"][0]
@@ -688,8 +1189,12 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                plan_id=(planned or {}).get("id", ""), plan_blocked=blocked,
                muted_until=muted.get("muted_until") if muted.get("muted") else "",
                streak=muted.get("streak") if muted.get("muted") else "",
+               card_id=str(card.get("card_id") or ""),
+               task_due=str(card.get("due") or ""),
                quota=quota)
     append_log(root, row)
+    _flush_task_log(root, at, task, *_task_verdict(action, quota, muted, code, blocked),
+                    config=cfg)
     return {"ok": True, "at": at, "fired": True, "sources": [item["reason_code"] for item in fired],
             "reason_code": top["reason_code"], "action": action,
             "who": who, "who_source": picked["source"],
@@ -756,8 +1261,14 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
         return {"ok": True, "id": pid, "at": at, "action": ACT_HELD, "reason": code,
                 "sent": False, "row": ledger}
 
-    ctx = {"who": who, "because": because, "tone": str(row.get("tone") or ""),
-           "now": at, "root": root}
+    task = row.get("task") if isinstance(row.get("task"), dict) else {}
+    ctx: Dict[str, Any] = {"who": who, "because": because,
+                           "tone": str(row.get("tone") or ""), "now": at, "root": root}
+    if task:
+        # 交这一段的是任务卡：提示词里要写明只能用卡上那两样，不许添加卡上没有的事。
+        ctx["rule"] = _render(task_template(cfg, "task_rule"),
+                              {"name": str(task.get("name") or ""),
+                               "when": str(task.get("when") or "")})
     outcome = proactive_ask.ask(ctx, complete=complete, config=cfg, env=env,
                                transport=transport)
 
@@ -790,6 +1301,19 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
         return {"ok": True, "id": pid, "at": at, "action": ACT_EMPTY, "sent": False,
                 "row": ledger}
 
+    if reason_code == REASON_PENDING_TASK:
+        # 提醒里说的事必须来自卡上：既没提标题、也没回显那个时刻，就是核自己在编。
+        offtask = _offtask(row, outcome)
+        if offtask:
+            _consume(row, at, root, {"action": ACT_ERROR, "error_kind": ERR_OFFTASK,
+                                     "error": offtask, "sent": False})
+            ledger = _row(at, STAGE_DUE, reason_code, who, because, priority, engage_read,
+                          ACT_ERROR, plan_id=pid, error_kind=ERR_OFFTASK, error=offtask,
+                          card_id=str(task.get("card_id") or ""))
+            append_log(root, ledger)
+            return {"ok": False, "id": pid, "at": at, "action": ACT_ERROR,
+                    "error_kind": ERR_OFFTASK, "error": offtask, "sent": False, "row": ledger}
+
     from .delivery import intake as delivery_intake
     queued = delivery_intake(text, to=who, now_ts=at, root=root)
     if not queued.get("ok"):
@@ -815,6 +1339,23 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
     append_log(root, ledger)
     return {"ok": True, "id": pid, "at": at, "action": ACT_SENT, "sent": True,
             "delivery_id": item, "pending": sent, "row": ledger}
+
+
+def _offtask(row: Mapping[str, Any], outcome: Mapping[str, Any]) -> str:
+    """回执里说的事还在不在卡上；不在就回一句原因（空串＝对得上）。
+
+    判据写死：**提醒里说的事必须来自卡上**——chunks 里连卡上的标题都没有、
+    也不回显那个时刻，那就是核自己编了一件别的事，宁可这一轮不发。
+    """
+    task = row.get("task") if isinstance(row.get("task"), dict) else {}
+    name = str(task.get("name") or "")
+    when = str(task.get("when") or "")
+    blob = "\n".join(str(chunk) for chunk in (outcome.get("chunks") or []))
+    if name and name in blob:
+        return ""
+    if when and when in blob:
+        return ""
+    return "回执里既没有卡上的标题 %r，也没有那个时刻 %r" % (name, when)
 
 
 def settle_due(due_rows: List[Dict[str, Any]], now_ts: Any = None, *, root: Any = None,
@@ -896,8 +1437,25 @@ def settle(result: Any, now_ts: Any = None, *, who: str = "", root: Any = None,
 # ---- 读数（面板 / GET /day/proactive） -------------------------------------
 
 
+def _pending_task_view(task: Mapping[str, Any]) -> Dict[str, Any]:
+    """overview 里那一条：房名 + 两条窗口 + 每张卡的评估（不带卡的正文与 params）。"""
+    return {"ok": bool(task.get("ok")), "room": str(task.get("room") or ""),
+            "error": str(task.get("error") or ""), "window": task.get("window") or {},
+            "fired": str((task.get("fired") or {}).get("card_id") or ""),
+            "cards": [{"card_id": str(item.get("card_id") or ""),
+                       "name": str(item.get("name") or ""),
+                       "due": str(item.get("due") or ""),
+                       "when": str(item.get("when") or ""),
+                       "progress": item.get("progress"),
+                       "action": str(item.get("action") or ""),
+                       "reason": str(item.get("reason") or ""),
+                       "reminded_count": int(item.get("reminded_count") or 0)}
+                      for item in (task.get("cards") or [])]}
+
+
 def overview(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
-             brain: Any = None, config: Optional[Dict[str, Any]] = None,
+             brain: Any = None, home_root: Any = None,
+             config: Optional[Dict[str, Any]] = None,
              limits: Optional[Dict[str, Any]] = None, limit: int = LOG_SHOWN
              ) -> Dict[str, Any]:
     """账尾 + 此刻的读数：给谁、降权前后各是多少、额度用了几条、静音与 streak。只读不写盘。
@@ -936,6 +1494,11 @@ def overview(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                       "reasons": reasons},
             "unscheduled_window": list(unscheduled_window(cfg)),
             "in_unscheduled_window": in_unscheduled_window(at, cfg),
+            # 第四类由头此刻的读数：哪间房、两条窗口、房间里有几张任务卡、哪张快到了。
+            # 只读：这里**不落 task 账**（GET 不该写盘），所以也不能调 _flush_task_log。
+            "pending_task": _pending_task_view(pending_task(at, root=root,
+                                                           home_root=home_root,
+                                                           config=cfg, limits=limits)),
             "muted": muted, "streak": muted.get("streak"),
             "muted_until": muted.get("muted_until"),
             "pending_plan": pending, "counts": tally, "log": rows}

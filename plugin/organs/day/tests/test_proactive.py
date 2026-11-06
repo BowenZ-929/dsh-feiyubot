@@ -145,8 +145,11 @@ class SourcesTest(ProactiveCase):
         self.heard("晚上有空吗")
         fired = proactive.sources(at(NOW), root=self.root, heart_root=self.heart,
                                   brain=self.brain)
-        self.assertEqual(list(proactive.REASON_ORDER[:3]),
+        # pending_task 只在真有快到点的任务卡时才成立（这里家是空的），所以是后三条
+        self.assertEqual(list(proactive.REASON_ORDER[1:]),
                          [row["reason_code"] for row in fired])
+        self.assertEqual("pending_task", proactive.REASON_ORDER[0],
+                         "快到点的事比她想说更硬：它排第一")
 
 
 class ConsiderTest(ProactiveCase):
@@ -634,6 +637,349 @@ class OverviewTest(ProactiveCase):
         self.assertFalse(out["muted"]["muted"])
         self.assertEqual(0, out["streak"])
         self.assertEqual({"planned": 1}, out["counts"])
+
+
+# ---- 第四类由头：pending_task（家的工作台上那张快到点的任务卡） -----------------
+
+
+def home_at(root: Path) -> Path:
+    """临时家：十间建好 + access.json（工作台可写），且就在 <root>/home 那一棵树下。
+
+    放在这个位置是为了让 rhythm.tick 自己按 <root>/home 派生——测试不替它传 home_root，
+    派生这一条也就被走到了。
+    """
+    from organs.home import rooms
+    home = Path(root) / "home"
+    for name in rooms.ROOM_NAMES:
+        (home / name).mkdir(parents=True, exist_ok=True)
+    (home / "access.json").write_text(
+        json.dumps({"version": 1, "writable": ["玄关", "工作台", "仓库"]}, ensure_ascii=False),
+        encoding="utf-8")
+    return home
+
+
+class PendingTaskCase(unittest.TestCase):
+    """造一张任务卡，走 tick 那条 60 秒的路：由头 → 额度 → engage → 计划。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root(self)
+        self.heart = heart_root(self.root)
+        self.brain = BrainStore(Path(self.root) / "brain")
+        self.home = home_at(self.root)
+        schedule_a_day(self.root)      # 把"今天还没定下做什么"关掉：只测任务卡这一条
+
+    def card(self, name: str = "整理抽屉", due: str = "2026-11-05T10:40:00",
+             task: Any = True, room: str = "工作台",
+             due_raw: Any = None, **params: Any) -> str:
+        """放一张任务卡进工作台：kind=物件、params.task / params.due（真源就是这两个字段）。
+
+        due_raw 是"卡上写着一个不是时刻的值"那种造数据（越界保护要测的就是它）。
+        """
+        from organs.home import cards
+        body = {"task": task, "due": at(due) if due_raw is None else due_raw}
+        body.update(params)
+        out = cards.append_cards(root=self.home, role="agent", by="agent", cards=[
+            {"kind": "物件", "room": room, "name": name, "note": "", "params": body}])
+        return out["cards"][0]["card_id"]
+
+    def tick(self, now: str = NOW, **kw: Any):
+        from organs.day import rhythm
+        return rhythm.tick(at(now), root=self.root, brain=self.brain,
+                           heart_root=self.heart, **kw)
+
+    def considered(self, now: str = NOW, **kw: Any):
+        return proactive.consider(at(now), root=self.root, heart_root=self.heart,
+                                  brain=self.brain, home_root=self.home, **kw)
+
+    def proactive_plans(self) -> list:
+        return [row for row in plan.load(self.root)["pending"] if row["kind"] == "proactive"]
+
+    def card_params(self) -> dict:
+        """卡上的 name / params 原文（给"because 逐字来自卡"那一条做对照）。"""
+        from organs.home import cards
+        item = cards.list_room(root=self.home, room="工作台")["items"][0]
+        return {"name": item["name"], "params": item["params"]}
+
+
+class PendingTaskConsiderTest(PendingTaskCase):
+    """due 在 10 分钟后 → 生成 pending_task 计划；夜里 → held；同一张卡不提醒两次。"""
+
+    def test_a_card_due_in_ten_minutes_becomes_a_pending_task_plan(self):
+        card_id = self.card()
+        payload = self.tick()
+        considered = payload["proactive_consider"]
+        self.assertEqual(proactive.REASON_PENDING_TASK, considered["reason_code"])
+        self.assertEqual("planned", considered["action"], considered)
+
+        rows = self.proactive_plans()
+        self.assertEqual(1, len(rows), "计划出现")
+        row = rows[0]
+        self.assertEqual("pending_task", row["reason_code"])
+        self.assertEqual(card_id, row["task"]["card_id"], "计划上带着那张卡")
+        self.assertEqual(70, row["priority"], "reason_priority 默认 70（快到点的事更硬）")
+
+        # because 只用卡上的标题与 due 的本地时刻拼出来：逐字对得上
+        card = self.card_params()
+        self.assertEqual("整理抽屉", card["name"])
+        self.assertEqual(at("2026-11-05T10:40:00"), card["params"]["due"])
+        self.assertEqual("10:40 要交的那件事：整理抽屉", row["note"])
+        self.assertIn(card["name"], row["note"])
+        self.assertIn("10:40", row["note"])
+
+        ledger = proactive.log_tail(self.root, 1)[0]
+        self.assertEqual("pending_task", ledger["reason_code"])
+        self.assertEqual("planned", ledger["action"])
+        self.assertEqual(row["note"], ledger["because"], "动念账与计划上那句是同一句")
+        self.assertEqual(card_id, ledger["card_id"])
+
+        task_row = proactive.task_log_tail(self.root, 1)[0]
+        self.assertEqual("planned", task_row["action"])
+        self.assertEqual(card_id, task_row["card_id"])
+        self.assertEqual("整理抽屉", task_row["name"])
+        self.assertEqual(at("2026-11-05T10:40:00"), task_row["due"])
+        self.assertEqual(0, task_row["reminded_count"], "这一行之前没提醒过（这一次之后才记 1）")
+
+    def test_the_reason_comes_from_both_data_files(self):
+        self.card(due="2026-11-05T10:40:00")
+        (Path(self.root) / "proactive.json").write_text(json.dumps(
+            {"task_because": "【{when}】{name}", "task_when_format": "%H点%M分"},
+            ensure_ascii=False), encoding="utf-8")
+        out = self.considered()
+        self.assertTrue(out["fired"], out)
+        self.assertEqual("【10点40分】整理抽屉", out["because"], "拼接模板与时时刻刻法都从配置来")
+
+    def test_three_in_the_morning_plans_but_never_speaks(self):
+        self.card(due="2026-11-05T03:10:00")
+        payload = self.tick(now="2026-11-05T03:00:00")
+        considered = payload["proactive_consider"]
+        self.assertEqual(proactive.REASON_PENDING_TASK, considered["reason_code"])
+        self.assertEqual("held", considered["action"], considered)
+        self.assertEqual(heart_model.STATE_SILENT, considered["engage"]["state"])
+        self.assertEqual(heart_model.REASON_NIGHT, considered["engage"]["reason"])
+        row = self.proactive_plans()[0]
+        self.assertTrue(row["held"], "计划照生，标 held")
+        self.assertEqual(heart_model.REASON_NIGHT, row["held_reason"])
+        self.assertEqual([], delivery.load(self.root)["items"], "夜里不发送：待说队列空")
+        self.assertEqual("held", proactive.task_log_tail(self.root, 1)[0]["action"])
+
+    def test_the_same_card_is_never_reminded_twice(self):
+        self.card()
+        first = self.tick()
+        self.assertEqual("planned", first["proactive_consider"]["action"])
+        second = self.tick(now="2026-11-05T10:31:00")
+        self.assertFalse(second["proactive_consider"]["fired"], second["proactive_consider"])
+        self.assertEqual(1, len(self.proactive_plans()), "第二条计划没有出现")
+
+        rows = proactive.task_log_lines(self.root)
+        self.assertEqual(2, len(rows))
+        self.assertEqual("planned", rows[0]["action"])
+        self.assertEqual("skipped", rows[1]["action"])
+        self.assertIn("今天已经提醒过这张卡", rows[1]["reason"])
+        self.assertEqual(1, rows[1]["reminded_count"])
+
+        # 再 consider 一次（不走 tick）：照样不排第二条
+        again = self.considered(now="2026-11-05T10:32:00")
+        self.assertFalse(again["fired"], again)
+
+    def reminded_yesterday(self, card_id: str) -> None:
+        """在 task 账里记一行"昨天提醒过这张卡"：跨天的额度就是这么数出来的。"""
+        proactive.append_task_log(self.root, {
+            "at": at("2026-11-04T10:30:00"), "card_id": card_id, "name": "整理抽屉",
+            "due": at("2026-11-04T10:40:00"), "progress": 0, "action": "planned",
+            "reason": "", "reminded_count": 0})
+
+    def test_a_card_already_reminded_costs_quota_across_days(self):
+        card_id = self.card()
+        self.reminded_yesterday(card_id)
+        out = self.considered()
+        self.assertEqual("quota", out["action"], out)
+        self.assertEqual("card", out["quota"]["blocked_by"]["scope"])
+        self.assertEqual(1, out["quota"]["blocked_by"]["cap"], "默认每条卡只提醒一次")
+        self.assertEqual(card_id, out["quota"]["blocked_by"]["card_id"])
+        self.assertEqual([], self.proactive_plans(), "超了额度就不排计划")
+        self.assertEqual("quota", proactive.task_log_tail(self.root, 1)[0]["action"])
+
+    def test_the_per_card_cap_comes_from_limits(self):
+        card_id = self.card()
+        self.reminded_yesterday(card_id)
+        (Path(self.root) / "limits.json").write_text(json.dumps(
+            {"proactive": {"task_remind_per_card": 2}}, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(2, proactive.task_remind_cap(self.root), "这个数只许从 limits.json 来")
+        out = self.considered()
+        self.assertEqual("planned", out["action"], "上限 2：第二次仍然可以提醒")
+
+
+class PendingTaskSkipTest(PendingTaskCase):
+    """没该提醒的那几种：都是一行 skipped，且都不抛崩 tick。"""
+
+    def test_a_finished_card_is_skipped(self):
+        from organs.home import cards
+        card_id = self.card()
+        cards.set_progress(root=self.home, role="agent", by="agent", room="工作台",
+                           card_id=card_id, progress=100, reason="做完了")
+        payload = self.tick()
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["proactive_consider"]["fired"])
+        row = proactive.task_log_tail(self.root, 1)[0]
+        self.assertEqual("skipped", row["action"])
+        self.assertIn("已经完成", row["reason"])
+        self.assertEqual(100, row["progress"])
+
+    def test_a_consumed_card_is_gone_from_the_room(self):
+        from organs.home import cards
+        card_id = self.card()
+        cards.consume(root=self.home, role="agent", by="agent", room="工作台",
+                      card_id=card_id, reason="收走")
+        payload = self.tick()
+        self.assertFalse(payload["proactive_consider"]["fired"])
+        self.assertEqual([], proactive.task_log_lines(self.root), "看不见的卡连一行都没有")
+
+    def test_a_card_that_is_not_due_yet_is_skipped(self):
+        self.card(due="2026-11-05T18:00:00")
+        payload = self.tick()
+        self.assertFalse(payload["proactive_consider"]["fired"])
+        row = proactive.task_log_tail(self.root, 1)[0]
+        self.assertEqual("skipped", row["action"])
+        self.assertIn("还没到提醒的时候", row["reason"])
+
+    def test_a_card_overdue_past_the_grace_is_skipped(self):
+        self.card(due="2026-11-05T06:00:00")
+        payload = self.tick()
+        self.assertFalse(payload["proactive_consider"]["fired"])
+        self.assertIn("已经过期", proactive.task_log_tail(self.root, 1)[0]["reason"])
+
+    def test_a_card_overdue_inside_the_grace_still_fires(self):
+        self.card(due="2026-11-05T09:30:00")     # 过期 60 分钟，宽限 120 分钟
+        payload = self.tick()
+        self.assertEqual(proactive.REASON_PENDING_TASK,
+                         payload["proactive_consider"]["reason_code"])
+
+    def test_the_same_skip_is_one_line_with_a_count(self):
+        self.card(due="2026-11-05T18:00:00")
+        for minute in range(5):
+            self.tick(now="2026-11-05T10:3%d:00" % minute)
+        rows = proactive.task_log_lines(self.root)
+        self.assertEqual(1, len(rows), "同日同卡同因只留一行")
+        self.assertEqual(5, rows[0]["count"], "这一天因同一原因被判过 5 次")
+        self.assertEqual(at("2026-11-05T10:34:00"), rows[0]["at"], "at 就地更新到最近一次")
+        self.assertIn("还没到提醒的时候", rows[0]["reason"], "为什么没提醒仍然查得到")
+        self.assertEqual(0, len(self.proactive_plans()), "skipped 行不计额度、也不排计划")
+
+    def test_the_dedupe_switch_comes_from_the_config(self):
+        self.card(due="2026-11-05T18:00:00")
+        (Path(self.root) / "proactive.json").write_text(
+            json.dumps({"task_log_dedupe_skipped": False}, ensure_ascii=False),
+            encoding="utf-8")
+        for minute in range(5):
+            self.tick(now="2026-11-05T10:3%d:00" % minute)
+        rows = proactive.task_log_lines(self.root)
+        self.assertEqual(5, len(rows), "关掉去重就逐条落")
+        self.assertEqual([1] * 5, [row["count"] for row in rows])
+
+    def test_a_different_day_or_reason_is_a_new_line(self):
+        self.card(due="2026-11-05T18:00:00")
+        self.tick(now="2026-11-05T10:30:00")
+        self.assertEqual(1, len(proactive.task_log_lines(self.root)))
+        (Path(self.root) / "schedule_log.jsonl").write_text(
+            json.dumps({"day": "2026-11-06"}, ensure_ascii=False) + chr(10), encoding="utf-8")
+        self.tick(now="2026-11-06T09:00:00")
+        rows = proactive.task_log_lines(self.root)
+        self.assertEqual(2, len(rows), "换一天就是另一件事，该新起一行")
+
+    def test_planned_rows_are_never_merged(self):
+        row = {"at": at("2026-11-05T10:30:00"), "card_id": "工作台-1", "name": "整理抽屉",
+               "due": at("2026-11-05T10:40:00"), "progress": 0, "action": "planned",
+               "reason": "", "reminded_count": 0}
+        proactive.append_task_log(self.root, dict(row))
+        proactive.append_task_log(self.root, dict(row))
+        rows = proactive.task_log_lines(self.root)
+        self.assertEqual(2, len(rows), "planned 一次一行，任何配置下都不合并")
+        self.assertNotIn("count", rows[0])
+
+    def test_a_broken_due_is_skipped_with_a_reason(self):
+        self.card(due_raw="明天吧")
+        payload = self.tick()
+        self.assertTrue(payload["ok"], "坏值不许崩掉 tick")
+        self.assertFalse(payload["proactive_consider"]["fired"])
+        row = proactive.task_log_tail(self.root, 1)[0]
+        self.assertEqual("skipped", row["action"])
+        self.assertIn("params.due 不是合法时刻", row["reason"])
+
+    def test_a_card_without_the_task_flag_is_skipped(self):
+        self.card(task=False)
+        payload = self.tick()
+        self.assertFalse(payload["proactive_consider"]["fired"])
+        self.assertIn("没有任务标记", proactive.task_log_tail(self.root, 1)[0]["reason"])
+
+    def test_a_wrong_room_is_reported_and_never_crashes_the_tick(self):
+        self.card()
+        (Path(self.root) / "proactive.json").write_text(
+            json.dumps({"task_room": "杂物间"}, ensure_ascii=False), encoding="utf-8")
+        payload = self.tick()
+        self.assertTrue(payload["ok"], "房名不对也不许崩掉 tick")
+        view = payload["proactive_consider"]["pending_task"]
+        self.assertFalse(view["ok"])
+        self.assertIn("读不了", view["error"])
+        self.assertEqual([], self.proactive_plans())
+
+        seen = proactive.overview(at(NOW), root=self.root, heart_root=self.heart,
+                                  brain=self.brain, home_root=self.home)
+        self.assertFalse(seen["pending_task"]["ok"])
+        self.assertEqual("杂物间", seen["pending_task"]["room"])
+
+
+class PendingTaskDueTest(PendingTaskCase):
+    """到点执行：提示词里写明"只能用卡上的标题与时间"，回执对不上就 offtask。"""
+
+    def _planned(self) -> dict:
+        self.card()
+        self.tick()
+        return self.proactive_plans()[0]
+
+    def test_the_prompt_says_only_the_card_may_be_used(self):
+        self._planned()
+        prompts = []
+
+        def complete(messages, **kwargs):
+            prompts.append(messages)
+            return json.dumps({"send": True, "chunks": ["10:40 那件事别忘了：整理抽屉"]},
+                              ensure_ascii=False)
+
+        row = self._planned()
+        out = proactive.run_due(row, at("2026-11-05T10:45:00"), root=self.root,
+                                heart_root=self.heart, brain=self.brain,
+                                complete=complete)
+        self.assertEqual("sent", out["action"], out)
+        body = prompts[0][1]["content"]
+        self.assertIn("整理抽屉", body)
+        self.assertIn("10:40", body)
+        self.assertIn("不许添加卡上没有的事", body, "规矩要进提示词")
+        items = delivery.load(self.root)["items"]
+        self.assertEqual(1, len(items), "先落盘再记账")
+
+    def test_a_reply_about_something_else_is_offtask_and_not_sent(self):
+        row = self._planned()
+        out = proactive.run_due(row, at("2026-11-05T10:45:00"), root=self.root,
+                                heart_root=self.heart, brain=self.brain,
+                                complete=lambda messages, **kw: json.dumps(
+                                    {"send": True, "chunks": ["窗外的风好大"]},
+                                    ensure_ascii=False))
+        self.assertEqual("error", out["action"], out)
+        self.assertEqual("offtask", out["error_kind"])
+        self.assertEqual([], delivery.load(self.root)["items"], "不发")
+        self.assertEqual([], self.proactive_plans(), "consume，不重试")
+        ledger = proactive.log_tail(self.root, 1)[0]
+        self.assertEqual("error", ledger["action"])
+        self.assertEqual("offtask", ledger["error_kind"])
+
+    def test_a_reply_that_echoes_the_hour_alone_is_enough(self):
+        row = self._planned()
+        out = proactive.run_due(row, at("2026-11-05T10:45:00"), root=self.root,
+                                heart_root=self.heart, brain=self.brain,
+                                complete=lambda messages, **kw: json.dumps(
+                                    {"send": True, "chunks": ["10:40 那件别忘了"]},
+                                    ensure_ascii=False))
+        self.assertEqual("sent", out["action"], out)
 
 
 if __name__ == "__main__":

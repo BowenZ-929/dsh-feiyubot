@@ -33,7 +33,7 @@ DEFAULTS: Dict[str, Any] = {
     "chunks_key": CHUNKS_KEY,
     "strip_fences": True,
     "system": "你是{who}身边那个人。你想主动找{who}说句话。语气档：{tone}。说人话，一到两段。",
-    "user": "你想开口的由头（真事，不许编）：{because}。\n不想说就 send=false；"
+    "user": "你想开口的由头（真事，不许编）：{because}\n{rule}不想说就 send=false；"
             "要说就给 1-{max_chunks} 段短句。\n只回一个 JSON：{\"send\": true, \"chunks\": []}",
 }
 
@@ -83,6 +83,9 @@ def build_messages(ctx: Mapping[str, Any],
         # tone 这一轮先留空（语气档归嘴/soul，日子线还没有那个读数），占位符照样替换
         "tone": str(ctx.get("tone") or ""),
         "because": str(ctx.get("because") or ""),
+        # rule：只对 pending_task 那条由头有内容（"只能用给定的标题与时间"），其余理由码是空串。
+        # 空串在模板里就是一段空白：别的由头不该读到一句任务卡的规矩。
+        "rule": str(ctx.get("rule") or ""),
         "max_chunks": int(cfg.get("max_chunks") or 0) or DEFAULTS["max_chunks"],
         "send_key": _key(cfg, "send_key", SEND_KEY),
         "chunks_key": _key(cfg, "chunks_key", CHUNKS_KEY),
@@ -178,7 +181,8 @@ def ask(ctx: Mapping[str, Any], *, complete: Optional[Callable[..., str]] = None
         transport: Optional[Callable[..., Any]] = None) -> Dict[str, Any]:
     """问一次核：「现在你想不想说，想说什么」。
 
-    ctx：{who, because, tone}（tone 这一轮允许空）；root / now 不进提示词，本文件不读盘。
+    ctx：{who, because, tone, rule}（tone / rule 这一轮允许空；rule 只有 pending_task 那条由头
+    才会填，内容是"只能用卡上的标题与时间"）；root / now 不进提示词，本文件不读盘。
     complete / config / env / transport：一律可注入（测试一个真网络请求都不发；
     生产时全不传，核自己去读 data/llm.json 与 .env）。
     返回：
