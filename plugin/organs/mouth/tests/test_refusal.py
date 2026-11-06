@@ -48,6 +48,14 @@ PUNCT = load("policy")["visible"]["strip"]      # 去标点借现成那张可见
 # 软转向那一节的判据（词表与理由都在数据里：测试里一个阈值、一个理由模板都不写死）
 SOFT = BOOK["soft"]
 
+# 两态那一节：名字与两句「没出门」的说法都在数据里，测试里一个字都不写死。
+# 调用方交给 record 的是**来由的名字**（OUTBOUND / SWALLOWED），整句说法由 record 从数据里取。
+STATES = BOOK["states"]
+OUTBOUND = refusal.SUPPRESSED_OUTBOUND            # 来由一：门说这一轮不发
+SWALLOWED = refusal.SUPPRESSED_SWALLOWED          # 来由二：门说发、八股闸把这一泡吞了
+OUTBOUND_WHY = STATES["suppressed_why"][OUTBOUND]
+SWALLOWED_WHY = STATES["suppressed_why"][SWALLOWED]
+
 # 她真说过的那段：开头垫话 + 转移 + 反问，一个正面回答的字都没有
 SOFT_ANSWER = ("……这个啊。鱼在海里游着游着，有些同伴就游远了，不算丢下……"
                "行了行了，我又不是不能自己待着。倒是你，怎么突然问这个。")
@@ -275,12 +283,16 @@ class Ledger(unittest.TestCase):
                              [BOOK["shapes"][shape]["why"] for shape in SHAPES])
 
     def test_row_says_whether_it_was_sent(self):
+        """两行：出门那一行 sent/state 说出门了，没出门那行另记 why 与那一轮的 reason/level。"""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "refuse.jsonl")
             with_sink = refusal.record(path, refusal.event("topic", "有理由", NOW, table=BOOK), True)
-            without = refusal.record(path, refusal.event("topic", "有理由", NOW, table=BOOK), False)
+            without = refusal.record(path, refusal.event("topic", "有理由", NOW, table=BOOK), False,
+                                     why=OUTBOUND, reason="双低", level="engage")
             self.assertTrue(with_sink["sent"])
             self.assertFalse(without["sent"])
+            self.assertEqual(STATES[refusal.STATE_SENT], with_sink["state"])
+            self.assertEqual(STATES[refusal.STATE_UNSENT], without["state"])
             self.assertEqual(len(Path(path).read_text(encoding="utf-8").splitlines()), 2)
 
     def test_record_refuses_a_row_without_shape(self):
@@ -295,6 +307,123 @@ class Ledger(unittest.TestCase):
             self.assertEqual(refusal.path_of(None), Path(tempfile.gettempdir()) / "tracedir" / refusal.LEDGER_NAME)
         self.assertEqual(refusal.path_of("/tmp/one.jsonl"), Path("/tmp/one.jsonl"))
         self.assertEqual(refusal.path_of("/tmp/dir"), Path("/tmp/dir") / refusal.LEDGER_NAME)
+
+
+class TwoStatesOfTheLedger(unittest.TestCase):
+    """账本一行两态：话出门了（起冷却）/ 话没出门（不起冷却）——名字与说法全在数据里。
+
+    为什么两态：「她拒了但没说出来，对方根本不知道；算冷却已用等于白白烧掉一次拒绝」。
+    所以 sent=False 那一行必须说得清「为什么没说出去」，而且两种来由（门说不发 / 门说发而闸
+    吞了）各一句、不许混。
+    """
+
+    def _row(self, path: str, sent, **kw) -> dict:
+        """记一行（事件现造）：sent 与那几格由调用方给，这里只管「记一次、读回来」。"""
+        return refusal.record(path, refusal.event("topic", "有理由", NOW, table=BOOK), sent, **kw)
+
+    def test_delivered_row_carries_the_sent_state(self):
+        """sent=True：state 取数据里「出门」那个名字，why 一个字都不动，也不多记 reason/level。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            row = self._row(path, True, shape=refusal.KIND_HARD)
+            self.assertEqual(STATES[refusal.STATE_SENT], row["state"])
+            self.assertEqual("有理由", row["why"])          # 出门那一条 why 一个字都不动
+            self.assertEqual(("ts", "shape", "full_name", "why", "sent", "state"), tuple(row))
+            self.assertEqual(row, json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def test_suppressed_row_carries_the_unsent_state_and_the_round(self):
+        """sent=False：state 取「没出门」那个名字，why 换成数据里那句，reason/level 一并落账。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            row = self._row(path, False, shape=refusal.KIND_HARD, why=OUTBOUND,
+                            reason="双低", level="engage")
+            self.assertEqual(STATES[refusal.STATE_UNSENT], row["state"])
+            self.assertEqual(OUTBOUND_WHY, row["why"])
+            self.assertEqual(("双低", "engage"), (row["reason"], row["level"]))
+            for name in ("ts", "shape", "full_name", "why"):
+                self.assertTrue(row.get(name), "没出门那一行缺 %s" % name)
+            self.assertEqual(row, json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def test_the_two_whys_of_not_going_out_are_different(self):
+        """门说不发 / 门说发而闸吞了：两句说法不同，而且都点得出这是哪一态。"""
+        self.assertNotEqual(OUTBOUND_WHY, SWALLOWED_WHY)
+        for line in (OUTBOUND_WHY, SWALLOWED_WHY):
+            self.assertIn(STATES[refusal.STATE_UNSENT], line)
+
+    def test_swallowed_row_says_a_different_why(self):
+        """换一种来由就换一句话：复查时一眼分得清「她不想说」与「她自己把话拦了」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            row = self._row(path, False, why=SWALLOWED)
+            self.assertEqual(SWALLOWED_WHY, row["why"])
+            self.assertNotEqual(OUTBOUND_WHY, row["why"])
+
+    def test_the_flag_must_be_a_bool(self):
+        """1 / "true" / None / 0 一律当场抛并指名 sent，且一个字节都不落盘（不许猜成发了）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            for bad in (1, 0, "true", "false", None):
+                with self.subTest(sent=bad):
+                    with self.assertRaises(RefusalBroken) as caught:
+                        self._row(path, bad)
+                    self.assertIn("sent", str(caught.exception))
+            self.assertFalse(Path(path).exists(), "坏输入也写了账")
+
+    def test_unsent_without_a_why_raises(self):
+        """sent=false 缺 why：抛并指名——两种来由必须分得开，不许含糊记一行。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            for blank in (None, "", "   "):
+                with self.subTest(why=blank):
+                    with self.assertRaises(RefusalBroken) as caught:
+                        self._row(path, False, why=blank)
+                    self.assertIn("why", str(caught.exception))
+
+    def test_unsent_refuses_a_made_up_why(self):
+        """自己编一句「没出门」的理由：抛（说法只有数据里那两句）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            with self.assertRaises(RefusalBroken) as caught:
+                self._row(path, False, why="我自己编的一句")
+            self.assertIn("states", str(caught.exception))
+
+    def test_unsent_still_needs_the_four_fields(self):
+        """没出门那一行照样要四样齐：ts / shape / full_name / why，缺一条就抛。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            event = refusal.event("topic", "有理由", NOW, table=BOOK)
+            for name in ("ts", "shape", "full_name", "why"):
+                with self.subTest(missing=name):
+                    broken = dict(event)
+                    broken.pop(name)
+                    with self.assertRaises(ValueError):
+                        refusal.record(path, broken, False, why=OUTBOUND)
+
+    def test_the_state_names_come_from_the_data(self):
+        """改数据即改账：把两态的名字换掉，record 记的就是新名字——代码里没有这两个字面量。"""
+        book = _copy_book()
+        book["states"][refusal.STATE_SENT] = "出门-改过"
+        book["states"][refusal.STATE_UNSENT] = "没出门-改过"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "refuse.jsonl")
+            with mock.patch.object(refusal, "load", lambda name, **kw: book):
+                sent = refusal.record(path, refusal.event("topic", "有理由", NOW, table=book), True)
+                unsent = refusal.record(path, refusal.event("topic", "有理由", NOW, table=book),
+                                        False, why=SWALLOWED)
+            self.assertEqual("出门-改过", sent["state"])
+            self.assertEqual("没出门-改过", unsent["state"])
+
+    def test_the_module_keeps_the_unsent_state_word_out(self):
+        """账本上的名字只在数据里：没出门那一态的值在 refusal.py 里一次都不出现。"""
+        self.assertNotIn(STATES[refusal.STATE_UNSENT], SOURCE)
+
+    def test_a_missing_states_section_raises(self):
+        """数据里没有 states 节：抛并指名那一节（缺键不补默认名字）。"""
+        book = _copy_book()
+        del book["states"]
+        with self.assertRaises(RefusalBroken) as caught:
+            refusal.state_of(True, book)
+        self.assertIn("states", str(caught.exception))
 
 
 class DataIsBrokenLoudly(unittest.TestCase):
@@ -618,6 +747,56 @@ class FatalStatusRidesAlong(unittest.TestCase):
         self.assertEqual("not-checked", soft.fatal_status, "软转向不过闸：这一关真没跑")
         self.assertIsNone(soft.fatal)
         self.assertTrue(soft.refused)
+
+
+class TheAudienceBoundaryLine(unittest.TestCase):
+    """第 7 条：私密记忆的边界话也住在 refusal.json 里，也守同一套说话的规矩。
+
+    这一节与 shapes 那三句各走各路（shapes 管「她不接这一句怎么说」，audience 管「什么话不该在
+    群里往外讲」），但既然是她要说的那句话，就跟那三句一样：长度、破折号、禁用词、过闸，一条都不
+    能少——说法归数据，规矩也归数据，代码里一个字都不写。
+    """
+
+    AUD = BOOK["audience"]
+
+    def _lines(self) -> list:
+        return [self.AUD["say"], self.AUD["blur"]]
+
+    def test_the_section_is_complete(self):
+        """say / blur / reason / why / mark / event_shape / 两张表全在：缺一个这层用法就塌了。"""
+        for name in ("field", "private_value", "say", "blur", "reason", "why",
+                     "mark", "event_shape", "scope_message"):
+            self.assertTrue(str(self.AUD.get(name) or "").strip(), name)
+            self.assertIsInstance(self.AUD[name], str, name)
+        self.assertIsInstance(self.AUD["scopes"], dict)
+        self.assertIsInstance(self.AUD["criteria"], dict)
+        for name in ("overlap_min", "gram_n", "gram_cover", "excerpt_chars"):
+            self.assertIsInstance(self.AUD["criteria"][name], (int, float), name)
+
+    def test_the_boundary_lines_keep_the_same_rules(self):
+        """两句备用说法都守 style_rules：不长短出界、不带破折号、不出现禁用词。"""
+        for said in self._lines():
+            self.assertEqual([dash for dash in RULES["dashes"] if dash in said], [], said)
+            self.assertEqual([word for word in RULES["banned_words"] if word in said], [], said)
+            body = "".join(ch for ch in said if ch not in PUNCT)
+            self.assertGreaterEqual(len(body), RULES["say_len_min"], said)
+            self.assertLessEqual(len(body), RULES["say_len_max"], said)
+
+    def test_the_boundary_line_passes_the_whole_gate(self):
+        self.assertIsNone(check(self.AUD["say"], CLAUSES))
+
+    def test_the_event_shape_is_one_the_data_knows(self):
+        """event_shape 指向数据里真有的那个形状：装出来的事件 full_name 就是它，why 带记号。"""
+        why = self.AUD["why"].format(mark=self.AUD["mark"])
+        found = refusal.event(self.AUD["event_shape"], why, NOW, table=BOOK)
+        self.assertEqual(self.AUD["event_shape"], found["full_name"])
+        self.assertIn(found["shape"], SHAPES, "形状名也必须是数据里那一节")
+        self.assertIn(self.AUD["mark"], found["why"], "账本那一行要带这个记号")
+
+    def test_the_two_lines_are_different(self):
+        """边界话与模糊化那两句不是同一句：留备用文案才有意义（实现里只用 say）。"""
+        self.assertNotEqual(self.AUD["say"], self.AUD["blur"])
+
 
 
 if __name__ == "__main__":

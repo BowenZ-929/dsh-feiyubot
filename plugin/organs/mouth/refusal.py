@@ -30,6 +30,14 @@ data/fatal.json 的 not_refusal_note——**这句不是拒绝，是不许发**�
 「投过没投过」本地也看得见：record 往 refuse.jsonl 追一行（ts / shape / full_name / why，外加
 sent）。路径口径与 drops 一致：参数 > 环境变量 MOUTH_TRACE_DIR > 包内 trace/。
 
+**账本一行两态：「拒了」与「说出去了」不是一件事。** 她拒了、但这句被出站闸或八股闸拦下、一个字
+都没出去，对方根本不知道；这时候把这次拒绝算成「冷却已用」，等于白白烧掉一次拒绝。所以 record
+那一行多一列 state，两态的名字都取自 data/refusal.json 的 states 节（本文件一个字都不写）：
+话真出去了就记「出门」那个名字，调用方据此起话题冷却；没出去就记「没出门」那个名字，另记 why
+（**没出门的两种来由各一句说法**：门说这一轮不发 / 门说发而八股闸把这一泡吞了——两种必须分得
+开，复查时才分得清「她不想说」与「她自己把话拦了」）与那一轮的 reason / level，调用方据此
+**不起**冷却。sent 必须是布尔，1 / "true" / None 一律当场抛并指名：不许默认成发了。
+
 **软转向也是拒绝。** 她不一定说「这个话题先不聊」——更常见的是那句「……这个啊。鱼在海里游着游着，
 有些同伴就游远了……行了行了，我又不是不能自己待着。倒是你，怎么突然问这个」：开头一句垫话，把话
 转开或者反问回来，一个正面回答的字都没有。这是拒绝的第四种样子：soft。判据都在
@@ -66,7 +74,8 @@ from .gate import enforce as gate_enforce
 from .warehouse import load
 
 __all__ = ["RefusalBroken", "RefusalVerdict", "SoftVerdict", "enforce", "event", "say",
-           "path_of", "record", "soft_scan", "soft_shape", "topic_in"]
+           "path_of", "record", "soft_scan", "soft_shape", "state_of", "suppressed_why",
+           "topic_in", "SUPPRESSED_OUTBOUND", "SUPPRESSED_SWALLOWED"]
 
 NOT_REFUSAL_KEY = "not_refusal_note"   # 红线表里那句人话：「不是拒绝，是不许发」
 
@@ -91,6 +100,17 @@ SOFT_LISTS: Tuple[str, ...] = ("openers", "redirect_markers",
 SOFT_WORDS: Tuple[str, ...] = ("event_shape", "why", "gate")   # 软转向必须有的三句话
 SOFT_TRIM_KEY = "trim"                                  # 开头要先去掉的标点与空白（省略号常垫在前面）
 SOFT_REASONS: Tuple[str, ...] = ("soft", "unavailable", "answered", "plain")   # 四句人话理由
+
+STATES_KEY = "states"                                   # 数据里两态那一节（名字与说法都在那儿）
+STATE_SENT = "delivered"                                # 那一节里「话出门了」那一格的键
+STATE_UNSENT = "suppressed"                             # 那一节里「话没出门」那一格的键
+STATE_WHY_KEY = "suppressed_why"                        # 没出门的两种来由各一句说法
+STATE_NOTE_KEY = "note"                                 # 为什么两态要分开（一句人话）
+SUPPRESSED_OUTBOUND = "outbound"                        # 来由一：门说这一轮不发（send=false）
+SUPPRESSED_SWALLOWED = "swallowed"                      # 来由二：门说发，八股闸把这一泡吞了
+STATE_FIELDS: Tuple[str, ...] = (STATE_SENT, STATE_UNSENT)                    # 两态的名字
+SUPPRESSED_CAUSES: Tuple[str, ...] = (SUPPRESSED_OUTBOUND, SUPPRESSED_SWALLOWED)   # 两种来由
+ROW_FIELDS: Tuple[str, ...] = ("ts", "shape", "full_name", "why")   # 账本一行必须有的四样
 
 RefuseSink = Callable[[Dict[str, Any]], None]           # 投给心：收一条事件 dict
 DropSink = Callable[[str, str], None]                   # 弃言账本：收（条款 id，人话原因）
@@ -359,24 +379,78 @@ def path_of(path: Optional[Any] = None) -> Path:
     return target / LEDGER_NAME
 
 
+def state_of(sent: Any, table: Optional[Mapping[str, Any]] = None) -> str:
+    """这一行是哪一态：取数据里 states 那一节的名字（代码里不留这两个字符串）。
+
+    **sent 必须是布尔**（isinstance(sent, bool)）：1 / "true" / None 一律当场抛并指名，
+    不替调用方猜一个默认值——猜成「发了」的下场是：她根本没说出来，账上却记成发出去了，
+    还顺手烧掉一次话题冷却（对方压根不知道她拒过）。
+
+    两态就是两件事：话出门了（调用方据此起冷却）与话没出门（一律不起冷却）。
+    """
+    book = table if isinstance(table, Mapping) else load("refusal")
+    if not isinstance(sent, bool):
+        raise RefusalBroken("的 sent 不是布尔（读到的是 %r）：这一行是「说出去过」还是「被她自己"
+                            "拦下」，判不了——不许默认成发了，也不许拿闸的结果顶替" % (sent,))
+    return str(_states_cfg(book)[STATE_SENT if sent else STATE_UNSENT])
+
+
+def suppressed_why(cause: Any, table: Optional[Mapping[str, Any]] = None) -> str:
+    """「话没出门」那一句说法：两种来由各一句（数据在 states.suppressed_why），认不得就抛。
+
+    cause 认 SUPPRESSED_OUTBOUND（门说这一轮不发）与 SUPPRESSED_SWALLOWED（门说发、八股闸把
+    这一泡吞了）。两种来由必须分得开：一个是她不想说，一个是她自己把话拦了，复查时要认得出。
+    这两句话一个字都不写在这里，改措辞改数据。
+    """
+    book = table if isinstance(table, Mapping) else load("refusal")
+    words = _states_cfg(book)[STATE_WHY_KEY]
+    wanted = cause.strip() if isinstance(cause, str) else ""
+    if wanted not in words:
+        raise RefusalBroken("的 %s.%s 里没有 %r 这一种来由（只认 %s）：没出门的两句说法都在数据里"
+                            % (STATES_KEY, STATE_WHY_KEY, cause, "、".join(sorted(words))))
+    return str(words[wanted])
+
+
 def record(path: Optional[Any], event: Mapping[str, Any], sent: bool,
-           shape: Optional[str] = None) -> Dict[str, Any]:
-    """往拒绝账本追一行：event 原样照抄，另加 sent（这次投给心了吗）；shape 给了就改成那个。
+           shape: Optional[str] = None, why: Optional[str] = None,
+           reason: Optional[Any] = None, level: Optional[Any] = None) -> Dict[str, Any]:
+    """往拒绝账本追一行：event 原样照抄，另加 sent 与 state（这一句到底出没出门）；shape 给了就改成那个。
 
     时间不在这里取：event 里的 ts 由调用方给。写不进去就照实抛——账本记不上是失败，
-    不是「今天没拒过」。sent 落进这一行，所以「投过没投过」翻账本就能看见，不必猜。
+    不是「今天没拒过」。sent 与 state 都落进这一行，所以「出去了没」翻账本就能看见，不必猜。
+
+    **两态（名字与说法都取自 data/refusal.json 的 states 节，本文件一个字都不写）**：
+
+    - sent=True  → state 记「话出门了」那个名字：对方听到了，调用方据此起话题冷却；
+    - sent=False → state 记「话没出门」那个名字：被她自己拦下、对方根本没听到，
+      **不起冷却**（算冷却已用等于白白烧掉一次拒绝）。这一行必须带 ts / shape / full_name /
+      why 四样（缺一条就抛），另把那一轮的 reason / level 一并落账——「为什么没说出去」
+      要能复查。why 只认两种来由的名字（SUPPRESSED_OUTBOUND＝门说这一轮不发 /
+      SUPPRESSED_SWALLOWED＝门说发而八股闸把这一泡吞了），整句说法由这里从 states 节取：
+      两种必须分得开，认不得的（包括整句、空串、None）当场抛。
 
     shape 是**形状大类**（hard / soft），与事件里那个具体短名（topic / mood / nobody）不是一回事：
     事件形状归心（心只认那三个理由），账本这一列要的是「这次是硬拒绝还是软转向」。不给就沿用事件
     里那个短名，旧行格式因此一个字都没变；给了空串则抛——半空的一列比没有更难查。
     """
+    book = load("refusal")
     row = dict(event)
-    for name in ("ts", "shape", "full_name", "why"):
+    state = state_of(sent, book)               # sent 不是布尔在这里当场抛（不许默认成发了）
+    for name in ROW_FIELDS:
         value = row.get(name)
         if not isinstance(value, str) or not value.strip():
             raise ValueError("拒绝账本这一行缺 %r（读到的 %r）：账本记不清是哪一次拒、为什么拒，"
                              "这一行写了也没用" % (name, value))
-    row["sent"] = bool(sent)
+    row["sent"] = sent
+    row["state"] = state
+    if not sent:
+        if not isinstance(why, str) or not why.strip():
+            raise RefusalBroken("的账本行 sent=false 却没说 why（读到的是 %r）：没出门的两种来由"
+                                "（门说不发 / 门说发而闸吞了）必须分得开，说法在 %s.%s"
+                                % (why, STATES_KEY, STATE_WHY_KEY))
+        row["why"] = suppressed_why(why.strip(), book)   # 只收两种来由的名字，整句从数据里取
+        row["reason"] = reason
+        row["level"] = level
     if shape is not None:
         label = shape.strip() if isinstance(shape, str) else ""
         if not label:
@@ -433,6 +507,32 @@ def _reason_cfg(book: Mapping[str, Any]) -> Mapping[str, Any]:
         value = part.get(name)
         if not isinstance(value, str) or not value.strip():
             raise RefusalBroken("的 %s 节缺 %r（缺键不补默认值）" % (REASON_KEY, name))
+    return part
+
+
+def _states_cfg(book: Mapping[str, Any]) -> Mapping[str, Any]:
+    """取两态那一节：两个名字、两句「没出门」的说法、一句 note，缺一个就抛并指名。
+
+    键名只是查表的口（delivered / suppressed），**值才是账本上写的那个名字**——值只活在数据里，
+    代码里一个字都没有，所以改口径（比如把「没出门」改叫别的）改数据就生效，一处都不用动。
+    """
+    part = book.get(STATES_KEY) if isinstance(book, Mapping) else None
+    if not isinstance(part, Mapping):
+        raise RefusalBroken("的数据里没有一节可用的 %r（两态的名字与说法都在那儿）" % STATES_KEY)
+    for name in tuple(STATE_FIELDS) + (STATE_NOTE_KEY,):
+        value = part.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise RefusalBroken("的 %s 节缺 %r，或它不是一句非空字符串（缺键不补默认值）"
+                                % (STATES_KEY, name))
+    words = part.get(STATE_WHY_KEY)
+    if not isinstance(words, Mapping):
+        raise RefusalBroken("的 %s 节缺 %r，或它不是一份键值表（缺键不补默认值）"
+                            % (STATES_KEY, STATE_WHY_KEY))
+    for name in SUPPRESSED_CAUSES:
+        value = words.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise RefusalBroken("的 %s.%s 缺 %r 那一句说法（缺键不补默认说法）"
+                                % (STATES_KEY, STATE_WHY_KEY, name))
     return part
 
 

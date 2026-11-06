@@ -92,6 +92,8 @@ AFTER_MARKS = json.loads((MOUTH_DATA / "rewrite.json").read_text(
 # 私密记忆那一节的判据全在数据里：栏名、取值、两个场景值、边界话、事件形状、记号、摘要截几个字
 AUDIENCE = json.loads((MOUTH_DATA / "refusal.json").read_text(
     encoding="utf-8"))["audience"]
+# 账本两态那一节（名字与两句「没出门」的说法）：测试里一个字都不写死
+STATES = json.loads((MOUTH_DATA / "refusal.json").read_text(encoding="utf-8"))["states"]
 
 
 def _section(text: str, label: str) -> str:
@@ -113,12 +115,19 @@ ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 #: 一个确定在白天的时刻（夜里窗口按这个串自己的小时判，跑在哪个时区都同一个结论）：
 #: 出站闸那两道硬门里夜里排在前面，要真造出 SILENT 就得避开它。
 DAYTIME = "2026-11-06T12:00:00+00:00"
+#: 一个确定在夜里的时刻（夜里窗口是 NIGHT_START_H=23 到 NIGHT_END_H=8）：
+#: 主动那一轮在这里会被心判「不说」，被动那一轮只判「少说」。
+NIGHTTIME = "2026-11-06T03:00:00+00:00"
+#: 她自己开口那一轮的由头（素材，不是判据）：proactive 的必填入参。
+SEED = "今天想问问他吃饭了没有"
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate", "audit",
                  # 核·识别这一轮的读数（本轮加的）：五键冻结，/chat 原样透出、不重组。
                  "event",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
                  "guard", "memory", "addressed", "borrow", "refusal", "audience_held",
+                 # 这一轮是谁起的头 + 由头原样（本轮加的）：被动两格也在，形状不随状态变。
+                 "mode", "seed",
                  # 嘴这一格（本轮加的）：四个旋钮落到这一轮的实话，页面可读。
                  "tone",
                  # 出站闸那四格（门只回答发不发）：send / reason / level 是门的答案，
@@ -779,8 +788,9 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("soft", section["shape"])
         self.assertIn("软转向", section["verdict_reason"])
         delivered = section["delivered"]
-        self.assertEqual({"delivered", "topic", "until", "remaining_min", "reason"},
+        self.assertEqual({"delivered", "state", "topic", "until", "remaining_min", "reason"},
                          set(delivered))
+        self.assertEqual(STATES[mouth_refusal.STATE_SENT], delivered["state"], "话出门了那一态")
         self.assertTrue(delivered["delivered"], "软转向也是拒绝，真对话里要投给心")
         self.assertEqual("猫", delivered["topic"])
         self.assertTrue(delivered["until"], "投进去必须带回冷却到什么时候")
@@ -808,7 +818,10 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertEqual("猫", rows[0]["topic"])
         self.assertEqual("refused-topic", rows[0]["reason"])
-        self.assertEqual("hard", self._refusal_rows()[0]["shape"])
+        ledger = self._refusal_rows()[0]
+        self.assertEqual("hard", ledger["shape"])
+        self.assertEqual(STATES[mouth_refusal.STATE_SENT], ledger["state"])
+        self.assertEqual(STATES[mouth_refusal.STATE_SENT], section["delivered"]["state"])
 
     def test_answered_reply_leaves_no_section_and_no_row(self):
         """正面答了：refusal 只剩「没在冷却」这一格（那四样不加空壳），两本账一行都不添。"""
@@ -833,7 +846,97 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual([], self._heart_rows(), "认不出话题就一个字节都不写心")
         ledger = self._refusal_rows()
         self.assertEqual(1, len(ledger), "她拒了这件事照记，不因为投不进心就不记账")
-        self.assertFalse(ledger[0]["sent"])
+        # 账本那一列记的是「这句话出没出门」：话真说出去了（出门了），只是没投进心（认不出话题）。
+        self.assertTrue(ledger[0]["sent"])
+        self.assertEqual(STATES[mouth_refusal.STATE_SENT], ledger[0]["state"])
+
+    # —— 两态：话没出门就不算冷却用过（这一轮加的） ————————————
+
+    def _seed_heart_file(self) -> Path:
+        """在心根里造一份 refusals.json 种子：没出门那一轮要拿它验「一个字节都没写」。"""
+        path = self._heart_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, {"version": 1, "config": {}, "refusals": []})
+        return path
+
+    def _print_of(self, path: Path) -> tuple:
+        """一份文件的读数：大小 / mtime / sha256——「读一次」不等于「写一次」。"""
+        blob = path.read_bytes()
+        return (len(blob), path.stat().st_mtime_ns, hashlib.sha256(blob).hexdigest())
+
+    def _event_of(self) -> dict:
+        """现装一条拒绝事件（形状与 why 都取自数据）：投递那一步只认这四个键。"""
+        return mouth_refusal.event("topic", mouth_refusal.say("topic"), chat._stamp())
+
+    def test_a_refusal_that_never_left_does_not_burn_a_cooling(self):
+        """门说 send=false：账上「没出门」、心一个字节不写、同一话题再问仍然会拒。
+
+        四件事一起断言，缺一条两态就不成立：账本那一行 state/why/sent 说得清没出门；心的
+        refusals.json 前后 size/mtime/sha256 一字不差（读一次不等于写一次）；下一轮 refusal.cooling
+        仍是 false；拒绝话照说——**那次拒绝没白烧**。
+        """
+        said = mouth_refusal.say("refused-topic")
+        with mock.patch.object(brain_model, "now_iso", lambda: DAYTIME):
+            self._double_low(DAYTIME)
+            seed = self._seed_heart_file()
+            before = self._print_of(seed)
+            with self._topics("猫"):
+                status, payload = self._send(text=self.ASKED_CAT, reply=said)
+        self.assertEqual(200, status)
+        self.assertIs(False, payload["send"], "双低这一轮门说不发")
+        delivered = payload["refusal"]["delivered"]
+        self.assertFalse(delivered["delivered"], "没出门就不许说投过了")
+        self.assertEqual(STATES[mouth_refusal.STATE_UNSENT], delivered["state"])
+        self.assertEqual(before, self._print_of(seed),
+                         "没出门却写了心的账（size / mtime / sha256 变了）")
+        row = self._refusal_rows()[0]
+        self.assertFalse(row["sent"])
+        self.assertEqual(STATES[mouth_refusal.STATE_UNSENT], row["state"])
+        self.assertEqual(STATES["suppressed_why"][mouth_refusal.SUPPRESSED_OUTBOUND], row["why"])
+        self.assertEqual(payload["reason"], row["reason"], "那一轮门给的理由要一并落账")
+        self.assertEqual(payload["level"], row["level"], "那一轮门给的层级要一并落账")
+        # 同一话题再问一次：**冷却没起**，所以她照样拒（对方上一轮压根没听到）
+        for name in (mood.MOOD_FILE, energy.ENERGY_FILE):
+            (self._heart_root() / name).unlink(missing_ok=True)
+        with mock.patch.object(brain_model, "now_iso", lambda: DAYTIME):
+            with self._topics("猫"):
+                status2, again = self._send(text=self.ASKED_CAT, reply=said)
+        self.assertEqual(200, status2)
+        self.assertIs(True, again["send"])
+        self.assertFalse(again["refusal"]["cooling"], "上一轮没出门，这一轮不该在冷却里")
+        self.assertEqual(said, again["reply"], "拒绝话照说")
+        self.assertEqual(STATES[mouth_refusal.STATE_SENT], again["refusal"]["delivered"]["state"])
+        self.assertEqual(1, len(self._heart_rows()), "这一回真出门了，冷却才起一次")
+        self.assertEqual(2, len(self._refusal_rows()))
+
+    def test_a_refusal_the_mouth_gate_swallowed_is_its_own_case(self):
+        """门说发、八股闸把这一泡吞了：也算没出门（不起冷却），而 why 与「门说不发」不同。"""
+        seed = self._seed_heart_file()
+        before = self._print_of(seed)
+        payload = {"send": True, "reason": "门说这一轮发", "level": "engage",
+                   "gate": {"decision": "dropped"}, "chunks": []}
+        judged = {"kind": mouth_refusal.KIND_HARD, "shape": "topic",
+                  "verdict_reason": AUDIENCE["reason"], "asked": self.ASKED_CAT,
+                  "event": self._event_of(), "sent": True,
+                  "reason": "门说这一轮发", "level": "engage"}
+        with self._topics("猫"):
+            chat._deliver_judged(judged, payload)
+        delivered = judged["delivered"]
+        self.assertFalse(delivered["delivered"], "闸吞了就是没出门")
+        self.assertEqual(STATES[mouth_refusal.STATE_UNSENT], delivered["state"])
+        row = self._refusal_rows()[0]
+        self.assertEqual(STATES["suppressed_why"][mouth_refusal.SUPPRESSED_SWALLOWED], row["why"])
+        self.assertNotEqual(STATES["suppressed_why"][mouth_refusal.SUPPRESSED_OUTBOUND], row["why"],
+                            "两种来由必须分得开：她不想说 / 她自己把话拦了")
+        self.assertEqual(before, self._print_of(seed), "闸吞了也不许起冷却（心一个字节都不写）")
+
+    def test_a_missing_send_flag_raises_instead_of_guessing(self):
+        """payload 里没有 send、或它不是布尔：当场抛并指名 payload.send——不默认成发了。"""
+        for bad in ({}, {"send": 1}, {"send": "true"}, {"send": None}):
+            with self.subTest(payload=bad):
+                with self.assertRaises(mouth_refusal.RefusalBroken) as caught:
+                    chat._send_flag(bad)
+                self.assertIn("payload.send", str(caught.exception))
 
     # —— 冷却里主动拒（这一轮加的） ————————————————
 
@@ -2141,6 +2244,92 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("passive", row["mode"], "账上那一行不是这一轮落下的")
         self.assertNotIn(row["note"], capture[0]["messages"][0]["content"],
                          "事件账上的依据进了提示词：%r" % (row["note"],))
+
+    # —— 主动开口（proactive）：她自己起头那一轮 ——————————
+
+    def test_proactive_without_seed_is_400_and_calls_no_model(self):
+        """proactive 缺由头 → 400 并点名 seed；一个模型请求都不发（空由头不是「她想开口」）。"""
+        capture = []
+        for body in ({"mode": "proactive"},
+                     {"mode": "proactive", "seed": "   "},
+                     {"mode": "proactive", "seed": 3, "text": QUESTION}):
+            with self.subTest(body=body):
+                status, payload = self._post(body, _body(LONG_REPLY, capture))
+                self.assertEqual(400, status, "缺由头却没拦：%r" % (payload,))
+                self.assertIn("seed", payload["message"], "400 没点名 seed：%r" % (payload,))
+        self.assertEqual([], capture, "由头缺了还是把请求发出去问了模型")
+
+    def test_an_unknown_mode_falls_back_to_passive(self):
+        """非法 mode（大写 / 空串 / None / 非字符串）→ 按 passive 走，不 400：与 scene 同一个口径。"""
+        for bad in ("self-talk", "PROACTIVE", "", None, 3):
+            with self.subTest(mode=bad):
+                capture = []
+                status, payload = self._post({"text": QUESTION, "mode": bad},
+                                             _body(LONG_REPLY, capture))
+                self.assertEqual(200, status, "非法 mode 被拦了：%r" % (payload,))
+                self.assertEqual("passive", payload["mode"], "非法值没回落 passive")
+                self.assertEqual(QUESTION, capture[0]["messages"][1]["content"],
+                                 "回落 passive 之后 user 那一问该是对方原话")
+                self.assertEqual({"text": "", "reason": ""}, payload["seed"],
+                                 "被动那一轮不该记下由头")
+
+    def test_a_proactive_round_reaches_the_prompt_with_an_empty_question(self):
+        """proactive 走真链路：主动那份模板、user 空、段那句是「这一段没有别的发言」。
+
+        顺手钉住「段给了也忽略」：body 里塞一份完全正常的段，段那一节仍是那句实话。
+        """
+        conf = conversation.load_assembly()
+        capture = []
+        status, payload = self._post({"mode": "proactive", "seed": SEED, "reason": "evening",
+                                      "segment": [["234567890", "我妈住院了"]]},
+                                     _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual("proactive", payload["mode"], "回包的 mode 不是 proactive")
+        self.assertEqual({"text": SEED, "reason": "evening"}, payload["seed"],
+                         "回包没记下由头与理由码")
+        prompt = capture[0]["messages"][0]["content"]
+        self.assertIn(conf["prompt"]["proactive"].split("{sections}")[0].strip(), prompt,
+                      "提示词没用 prompt.proactive 那份模板")
+        self.assertNotIn(conf["prompt"]["system"].split("{sections}")[0].strip(), prompt,
+                         "主动那一轮还在用被动的模板")
+        self.assertIn(SEED, prompt, "由头没进提示词")
+        self.assertEqual("", capture[0]["messages"][1]["content"],
+                         "主动那一轮 user 那一问该是空串（没有对方的话）")
+        self.assertEqual(conversation.NO_SEGMENT, self._segment_body(prompt),
+                         "主动那一轮的段不是「这一段没有别的发言」")
+        self.assertEqual(conf["order"], payload["assembly"]["order"], "装配的几段被改了")
+
+    def test_a_night_time_proactive_round_is_not_sent(self):
+        """同样由她起头：夜里出站闸判不发（reason=night），chunks 清空——**这不是空产出**。"""
+        with mock.patch.object(brain_model, "now_iso", lambda: NIGHTTIME):
+            status, payload = self._post({"mode": "proactive", "seed": SEED},
+                                         _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual("proactive", payload["mode"])
+        self.assertIs(False, payload["send"], "夜里主动该判不发：%r" % (payload.get("reason"),))
+        self.assertEqual(heart_model.REASON_NIGHT, payload["reason"], "不是夜里那道硬门拦的")
+        self.assertEqual([], payload["chunks"])
+        self.assertEqual("", payload["reply"])
+        self.assertNotIn("outbound", payload["gate"],
+                         "send=false 被记成了空产出（那是两件事）")
+
+    def test_an_empty_reply_is_reported_as_core_empty(self):
+        """门说发、装配却一个字都没出来 → gate.outbound 记 core_empty，chunks 与 reply 都是空。
+
+        素材是红线那一句（唯一不许留原话的一类）：这一轮 send 是 true，可 reply 是空串——
+        与「门说不发」的那一轮必须分得开。
+        """
+        # 钉在一个确定是白天的时刻：夜里那一道硬门先判「不发」，这一条要的是「门说发」那一态。
+        with mock.patch.object(brain_model, "now_iso", lambda: DAYTIME):
+            status, payload = self._post({"mode": "proactive", "seed": SEED},
+                                         _body("我手机号是 13812345678，你记一下"))
+        self.assertEqual(200, status)
+        self.assertIs(True, payload.get("send"), "这一轮门说发，只是没话可发：%r"
+                      % (payload.get("reason"),))
+        self.assertEqual("", payload["reply"], "空的那一轮还是把话交出去了")
+        self.assertEqual([], payload["chunks"])
+        self.assertEqual({"status": chat.CORE_EMPTY}, payload["gate"]["outbound"],
+                         "空产出没记成 core_empty：%r" % (payload["gate"].get("outbound"),))
 
 
 if __name__ == "__main__":

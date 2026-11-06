@@ -112,6 +112,17 @@ assembly.json 的 sections.segment）。它**不写进 recent**：段是刚刚�
 不兜底：悄悄当成空段，等于让她以为这一段没人说话。只给段、没给 text 时，这一问取段里最后
 那一条（他刚说的那句）。
 
+**mode 往核里传（这一轮加的）：body 多一个可选「mode」**——认 passive（缺省，人发消息触发）
+与 proactive（她自己开口，日子线给她一个由头）。**非法值不 400**，回落 passive：与 scene 同
+一个口径（这一格只决定她这一轮的提示词与心判决，判不出就按常态走，不拦人）。proactive 的三个
+入参：`seed`（由头，**必填**，缺了或全空白 400 并点名）、`reason`（理由码，可选，进提示词与
+回包 seed.reason）、`who`（可选）。它与常态的差别**只有输入**：没有「对方原话」，这一轮的一问
+就是 seed（回想也用它），`segment` 给了也忽略（这一轮没有别人说话），recent 照常只当背景。
+出站闸、拒绝、边界三关一个字都不改地走同一条路。回包因此多两格：`mode`（passive / proactive）
+与 `seed{text, reason}`。**产出为空是另一件事**：send=true 而装配出来的 reply 是空（模型那句
+被嘴弃掉、或改完仍是空）时，不认识成「门说不发」，而是 gate.outbound 写 {status: core_empty}
+并清空 chunks——两者都会让 chunks 空，混成一条，人事后就分不清该查门还是查嘴。
+
 **顺序钉死：冷却 → audience 边界 → 闸 → 长度。** 冷却排在所有人前面，是因为它早于装配——那一轮
 压根没有 `recalled`，本就没有边界话可说；也因为「这个话题已经拒过」比「这条记忆是私密」更靠前：
 让边界话抢在冷却之前，就是把一次已经记过的拒绝再说一遍、再投一遍。audience 边界排在闸之前，是
@@ -128,6 +139,14 @@ topic, until, remaining_min, reason}}——那四样是拒绝的读数，不是�
 event: null, note}，line 是面板那一句人话（模板与单位在 data/cooldown.json），say 是她这一轮真说的
 那一句，reason 是心给的理由（refused-topic）。**event 恒为 null 是有意的**：这一轮不投事件，
 所以它没有事件可给——写成「投了、只是没落盘」就是编。
+
+**拒绝两态：「说出去过」与「没出去」——冷却只认前者。** 判拒绝发生在闸之前（enforce 要拿她进门
+那句原话判），但**投递与起话题冷却必须在闸之后**：先知道这句话到底出了没有。判据只有一处
+（_went_out）：`payload["send"]`（出站闸的答案）为真是前提，八股闸还得没把这一轮整句吞掉
+（gate.decision 不是 dropped、chunks 还在）。出门 → 账本记 sent=True 并 heart.refuse.ingest
+起话题冷却；没出门 → 账本记 sent=False、**绝不调 ingest**，另记是哪一种来由（门说不发 / 门说发
+而闸吞了——两种说法都在 data/refusal.json 的 states 节）。`payload["send"]` 缺失或不是布尔当场
+抛，不猜。**她拒了但没说出来，对方根本不知道；算冷却已用等于白白烧掉一次拒绝。**
 
 **这一轮借了家里哪几份词条、各用掉几条也随成功体出去**（同样是加一节、不动既有键）：多一节
 borrow {status, files:[{source, borrow_id, learned}], note}。名单是 api/chat.py 的 _books() 真读过
@@ -154,6 +173,7 @@ from organs.heart import refuse as heart_refuse
 from organs.home import residents as home_residents
 from organs.home import store as home_store
 from organs.mind import conversation
+from organs.mind import events
 from organs.mind import llm
 from organs.mind import recent as mind_recent
 from organs.mind.llm import LLMError
@@ -171,6 +191,7 @@ CHAT_ROUTES = {"/chat": "POST"}
 
 LOGGER_NAME = "qqagent.chat"
 MISSING_TEXT = "POST /chat 要给 text（一句话）"
+MISSING_SEED = "POST /chat 的 proactive 要给 seed（这一轮她自己开口的由头）"
 SEGMENT_BROKEN = "POST /chat 的 segment 收不了：%s"   # 段形状坏：400，并把她认不出的那一条点名
 STORE_MISSING = "魂未载入：说话前先起核"
 BRAIN_MISSING = "脑未载入：没有记忆就不开口"
@@ -192,6 +213,8 @@ LOG = logging.getLogger(LOGGER_NAME)
 
 #: 出站闸没判成时 gate.outbound.status 的取值（不是门的一个判决，是「这一关没跑」的记号）。
 OUTBOUND_UNJUDGED = "unjudged"
+#: 产出为空时 gate.outbound.status 的取值（send=true 却一个字都没装出来）：与 send=false 两件事。
+CORE_EMPTY = "core_empty"
 
 # 重写那一次模型调用的注入点：与装配（answer() → llm.complete）走的是同一条出口，本文件不另开
 # HTTP 客户端。生产三样都是 None（配置从 data/llm.json 读、key 从环境读、transport 走 urllib）；
@@ -244,6 +267,19 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
 
     body 里还可以给一个 segment（刚刚这一小段，两种形状都收）：归一化后交给 answer(segment=...)，
     进「这一小段」那一节；形状坏了当场 400。没给就是 None（私聊与老调用一字不改）。
+    **proactive 那一轮段一律忽略**（给了也不读、不判形状）：段是别人刚刚说的话，这一轮没人说话。
+
+    body 里还可以给一个 mode（passive / proactive，缺省 passive）：**非法值不 400**，回落 passive
+    （与 scene 同一个口径）。proactive 是她自己开口那一轮，入参三样：seed（由头，**必填**，
+    缺了或全空白 400 并点名——没有由头就没有这一轮）、reason（理由码，可选，进提示词与回包
+    seed.reason）、who（可选，与常态同一格）。它与常态的差别**只有输入**：没有对方原话，这一轮
+    的一问就是 seed（回想也用它），段为空，recent 照常只当背景；出站闸、拒绝、边界三关走同一条
+    路（`_outbound_round` 一个字都没改）。回包因此多两格：mode 与 seed{text, reason}
+    ——注意顶层 reason 一直是**出站闸**的理由码，与由头的理由码不是一回事，两处不共用一个字段。
+
+    **产出为空**也在最后一步看：门说发（send=true）而装配出来的 reply 是空（模型那句被嘴弃掉、
+    或改完仍是空）时，`gate.outbound` 写 {status: core_empty} 并清空 chunks——这一笔与
+    send=false 是两件事（那一件是门的结论，这一件是装配没装出话来），别混成一条。
 
     装配回包里的 event（核·识别这一轮的读数：kind / who / applied / reason / mode）**照旧原样
     透出去**：本层不重组、不改写、不拿它做任何判断——识别与投心是装配那一步的事。
@@ -262,15 +298,27 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     里的场合（私聊一律 None，不占群额度）。取不到输入就记一行 WARNING 并在 gate.outbound 里
     说这一关没判——不静默，也不替她拿主意。
     """
-    segment, broken = _segment_state(body)
-    if broken:
-        return 400, {"ok": False, "message": broken}
-    text = _text(body)
-    # 只给了段、没给 text：这一问就是段里最后那一条（他刚说的那句），不另外编一句。
-    if text is None and segment:
-        text = segment[-1][1]
-    if text is None:
-        return 400, {"ok": False, "message": MISSING_TEXT}
+    # 谁起的头先归一化：proactive 只认那一个字面值，其余（含缺省 / 非法值）一律 passive。
+    # 它排在最前面，因为下面「这一轮的输入是什么」两种 mode 各读各的。
+    mode = _mode_of(body)
+    seed = ""
+    segment: Optional[List[Tuple[str, str]]] = None
+    if mode == events.MODE_PROACTIVE:
+        # 她自己开口：**必填的是由头**，不是 text；段给了也不读（这一轮没有别人说话）。
+        seed = _seed_of(body)
+        if not seed:
+            return 400, {"ok": False, "message": MISSING_SEED}
+        text = seed
+    else:
+        segment, broken = _segment_state(body)
+        if broken:
+            return 400, {"ok": False, "message": broken}
+        text = _text(body)
+        # 只给了段、没给 text：这一问就是段里最后那一条（他刚说的那句），不另外编一句。
+        if text is None and segment:
+            text = segment[-1][1]
+        if text is None:
+            return 400, {"ok": False, "message": MISSING_TEXT}
     # 场景（可选，缺省值是数据里那个）：只决定「私密记忆这一轮能不能被引用」，非法值当场 400 并点名。
     scene = _scope_state(body)
     if scene["error"]:
@@ -289,22 +337,38 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     if cooled["cooling"]:
         return 200, _cooled_payload(cooled, text, store, history, _who(body))
     try:
-        # mode="passive"：/chat 是人发消息触发的（她自己开口那条路不经过本文件，那边自己传
-        # "proactive"）。它只进事件账与回包 event.mode，不改任何判据，也不进提示词。
-        payload = conversation.answer(text, who=_who(body), scene=place, segment=segment,
-                                      mode="passive", store=store, brain=brain)
+        # mode 原样交给装配：passive 是人发消息触发的，proactive 是她自己开口（由头在 seed）。
+        # 装配按 seed 给不给决定走哪条路（prompt.proactive / INTENT_PROACTIVE / 只有她那句），
+        # 这一层只负责认字段与翻状态码。
+        payload = conversation.answer(
+            text, who=_who(body), scene=place, segment=segment, mode=mode,
+            seed=seed if mode == events.MODE_PROACTIVE else None,
+            reason=_reason_of(body) if mode == events.MODE_PROACTIVE else None,
+            store=store, brain=brain)
     except LLMError as exc:
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
         LOG.warning("POST /chat 失败：kind=%s message=%s", exc.kind, exc.message)
         return status, {"ok": False, "kind": exc.kind, "message": exc.message}
-    _address_round(payload, text, brain, _who(body))
-    # audience 边界：装配之后（recalled 到这一步才有）、过闸之前（边界话也要过闸）。
-    boundary = _audience_round(payload, text, _who(body), scene["scope"])
-    _gate_round(payload, text, store, history)
-    payload["refusal"] = _refusal_section(
-        cooled, boundary["judged"] or _judge(text, payload.get("reply")))
-    _borrow_round(payload)
+    # 出站闸先判、先问、**先不落手**：拒绝要不要算数取决于她的话到底有没有出去，
+    # 所以 sent 必须在判拒绝之前拿到。清正文（send=false 的双保险）留到最后一步。
     _outbound_round(payload, body)
+    sent = _send_flag(payload)                 # 只认 payload["send"]（门说发不发）；缺了或不是布尔当场抛
+    _address_round(payload, text, brain, _who(body))
+    boundary = _audience_round(payload, text, _who(body), scene["scope"], sent=sent)
+    _gate_round(payload, text, store, history)
+    # 八股闸排在出站闸之后，它也可能把这一轮的话整句吞掉：门说发、闸吞了，对方还是没听到。
+    # 所以「出没出门」到这一步才定（_went_out 是唯一那处判据），边界话那条的投递也搬到这里。
+    judged = boundary["judged"]
+    if judged is not None:
+        _deliver_judged(judged, payload)
+    else:
+        outcome = _went_out(sent, payload)
+        judged = _judge(text, payload.get("reply"), sent=outcome["sent"],
+                        reason=outcome["reason"], level=outcome["level"], why=outcome["why"])
+    payload["refusal"] = _refusal_section(cooled, judged)
+    _borrow_round(payload)
+    _outbound_apply(payload)
+    _core_empty(payload)
     return 200, payload
 
 
@@ -336,9 +400,39 @@ def _outbound_round(payload: Dict[str, Any], body: Optional[Dict[str, Any]]) -> 
     payload["reason"] = verdict["reason"]
     payload["level"] = verdict["level"]
     payload["limits"] = dict(verdict["limits"] or {})
-    if not verdict["send"]:
+
+
+def _outbound_apply(payload: Dict[str, Any]) -> None:
+    """闸的最后一步：send=false 就把正文清干净（双保险）。
+
+    放在判拒绝之后：那一判要用她装配出来的原话，先清正文会把输入抹掉。这里只落手，不重判。
+    """
+    if payload.get("send") is not True:
         payload["chunks"] = []
         payload["reply"] = ""
+
+
+def _core_empty(payload: Dict[str, Any]) -> None:
+    """产出为空：门说发，装配却一个字都没拿出来——chunks 清空，gate.outbound 记 `core_empty`。
+
+    **与 send=false 是两件事**：那一件是「门说这一轮不发了」（正文其实装出来了，被门拦下），
+    这一件是「装出来的就是空的」（模型那句被嘴弃掉、或改完仍是空）。两者都会让 chunks 空，
+    混成一条，人事后就分不清该查门还是查嘴。所以这里只在**门说发**而 reply 空时才记这一笔；
+    门已经判过不发的那一轮不动它——那一轮的沉默是门的结论，不是空产出。
+
+    已经记过的那一格不覆盖（未判 unjudged 是另一份读数：那一关根本没跑，别把它改写成一笔
+    「空产出」，那是替一次没发生的判决作证）。
+    """
+    if payload.get("send") is not True:
+        return
+    if str(payload.get("reply") or "").strip():
+        return
+    section = dict(payload.get("gate") or {})
+    if "outbound" in section:
+        return
+    section["outbound"] = {"status": CORE_EMPTY}
+    payload["gate"] = section
+    payload["chunks"] = []
 
 
 def _unjudged(payload: Dict[str, Any], why: str) -> None:
@@ -369,6 +463,73 @@ def _group_of(body: Any) -> Optional[str]:
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
     return None
+
+
+# —— 出门没有：门说发不发 + 八股闸吞没吞（起不起冷却的唯一判据） ————
+
+#: 没出门却说不清是哪一种来由时的那句人话（正常路径到不了：_went_out 一定给得出那两种之一）。
+UNKNOWN_SUPPRESSED = "她的话没发出去，也没说清是哪一种来由（门说不发 / 门说发而闸吞了）"
+
+
+def _send_flag(payload: Any) -> bool:
+    """这一轮发不发：只认 payload["send"]（出站闸的答案），缺了或不是布尔就抛，**绝不猜**。
+
+    不许默认成发了（那会把一次没出门的拒绝记成发出去了，还顺手烧掉一次冷却）；也不许拿闸的
+    别的读数顶替（chunks 非空不等于话出去了：send=false 时正文要到 _outbound_apply 才清）。
+    判不了就说判不了，抛出来点名缺的是哪一格。
+    """
+    value = payload.get("send") if isinstance(payload, Mapping) else None
+    if not isinstance(value, bool):
+        raise refusal.RefusalBroken("的 payload.send 没给或不是布尔（读到的是 %r）：这一轮的话"
+                                   "到底有没有出去判不了，拒绝生效与否要等这一格（门说发不发）"
+                                    % (value,))
+    return value
+
+
+def _swallowed(payload: Mapping[str, Any]) -> bool:
+    """八股闸把这一轮的话吞了没有：判词记 dropped，或者一泡都不剩。
+
+    这不是第二处判据，是同一个问题的另一半：门说发、闸却把话吞了，对方还是一个字没听到。
+    """
+    section = payload.get("gate")
+    section = section if isinstance(section, Mapping) else {}
+    return section.get("decision") == "dropped" or not (payload.get("chunks") or [])
+
+
+def _went_out(send: bool, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """这一轮的话到底出门没有：门说的（send）+ 八股闸吞没吞。**这一层只有这一处判据。**
+
+    返回 {"sent", "why", "reason", "level"}：
+      sent    话真出去了没有（出去才算冷却用过）
+      why     没出去时是哪种来由的名字（refusal.SUPPRESSED_OUTBOUND＝门说不发 /
+              SUPPRESSED_SWALLOWED＝门说发而闸吞了）；出去了就是 None。整句说法在数据里，
+              由 refusal.record 取——这里只报是哪一种，好让复查时分得清「她不想说」与
+              「她自己把话拦了」。
+      reason  门给的那句理由（落账用）
+      level   门给的那一层（落账用）
+    """
+    if not send:
+        why: Optional[str] = refusal.SUPPRESSED_OUTBOUND
+    elif _swallowed(payload):
+        why = refusal.SUPPRESSED_SWALLOWED
+    else:
+        why = None
+    return {"sent": why is None, "why": why,
+            "reason": payload.get("reason"), "level": payload.get("level")}
+
+
+def _deliver_judged(judged: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+    """边界话那条拒绝的投递：**搬到闸之后**——先知道话出没出去，再决定冷却烧不烧。
+
+    它那一份 sent 是闸之前拿到的（门说发不发），这里再叠一次「八股闸吞没吞」（_went_out），
+    与平常拒绝那条路是同一个判据：两条路只有一个投递口，也只有一处「算不算出门」。
+    """
+    if not isinstance(judged, dict) or "event" not in judged:
+        return
+    outcome = _went_out(bool(judged.get("sent")), payload)
+    judged["delivered"] = _deliver(judged.get("asked"), judged["event"], judged.get("kind"),
+                                   sent=outcome["sent"], reason=judged.get("reason"),
+                                   level=judged.get("level"), why=outcome["why"])
 
 
 # —— 称呼：这一轮叫他什么 ——————————————————————
@@ -490,7 +651,7 @@ def _scope_state(body: Any) -> Dict[str, Any]:
 
 
 def _audience_round(payload: Dict[str, Any], asked: str, who: str,
-                    scope: Optional[str]) -> Dict[str, Any]:
+                    scope: Optional[str], *, sent: bool = True) -> Dict[str, Any]:
     """出口认 audience：私密记忆在群里守边界（剔除注入 / 被问到就说一句边界话）。
 
     三步，顺序钉死：
@@ -543,7 +704,9 @@ def _audience_round(payload: Dict[str, Any], asked: str, who: str,
         return {"held": payload["audience_held"], "spoke": False, "judged": None}
     _say_boundary(payload, str(cfg["say"]), who)
     return {"held": payload["audience_held"], "spoke": True,
-            "judged": _audience_judged(cfg, book, asked)}
+            "judged": _audience_judged(cfg, book, asked, sent=sent,
+                                       reason=payload.get("reason"),
+                                       level=payload.get("level"))}
 
 
 def _say_boundary(payload: Dict[str, Any], said: str, who: str) -> None:
@@ -561,11 +724,13 @@ def _say_boundary(payload: Dict[str, Any], said: str, who: str) -> None:
 
 
 def _audience_judged(cfg: Mapping[str, Any], book: Mapping[str, Any],
-                     asked: str) -> Optional[Dict[str, Any]]:
+                     asked: str, *, sent: bool = True,
+                     reason: Any = None, level: Any = None) -> Optional[Dict[str, Any]]:
     """边界话走拒绝那条路：装事件 → 投一次（心那本账 + 我们自己的 refuse.jsonl）。
 
     与平常的拒绝**同一个投递点**（_deliver：认话题 → heart.refuse.ingest → 记一行账本），
-    why 里带数据里的记号（mark），所以账本那一行的 why 一眼看得出这次是 audience 挡下的。
+    但**投递落在闸之后**（dispatch 调 _deliver_judged）：先知道这句话到底出了没有，再定它算不算
+    冷却用过。why 里带数据里的记号（mark），所以账本那一行的 why 一眼看得出这次是 audience 挡下的。
     事件形状取自数据的 event_shape（refused-topic），本文件不写死理由名：边界话不是新理由，
     是「这个话题先不接」的另一种来由。
 
@@ -578,11 +743,13 @@ def _audience_judged(cfg: Mapping[str, Any], book: Mapping[str, Any],
     except refusal.RefusalBroken as exc:
         LOG.warning("POST /chat 记边界事件没成：%s", exc)
         return None
-    delivered = _deliver(asked, found, refusal.KIND_HARD)
+    # 投递**不在这里**：这里只把事件与「门说发不发」这一份交给 dispatch，等八股闸判完再投
+    # （_deliver_judged）——门说发、闸把那句话吞了，对方还是没听到，那就不该起冷却。
     return {"kind": refusal.KIND_HARD, "shape": found["shape"],
             "verdict_reason": _word(str(cfg["reason"]), "audience.reason",
                                     mark=str(cfg["mark"])),
-            "delivered": delivered}
+            "asked": asked, "event": dict(found),
+            "sent": sent, "reason": reason, "level": level}
 
 
 def _audience_of(one: Mapping[str, Any], field: str) -> str:
@@ -938,7 +1105,9 @@ def _refusal_section(cooled: Mapping[str, Any],
     section: Dict[str, Any] = {"cooling": False, "topic": cooled.get("topic"),
                                "note": cooled.get("note")}
     if judged:
-        section.update(judged)
+        # 只透出这四样：事件与投递用那几格中间量已经落进两本账，回包里不重复贴。
+        section.update({name: judged[name] for name in ("kind", "shape", "verdict_reason",
+                                                       "delivered") if name in judged})
     return section
 
 
@@ -1317,7 +1486,9 @@ def _day() -> str:
 
 # —— 拒绝：判一次、投一次（唯一的投递点） ————————————————————
 
-def _judge(asked: str, answer: Any) -> Optional[Dict[str, Any]]:
+def _judge(asked: str, answer: Any, *, sent: bool = True,
+           reason: Any = None, level: Any = None,
+           why: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """一轮说完之后判一次拒绝：判出来就投给心；没判出来返回 None（成功体里不出现这一节）。
 
     两条路，顺序钉死：先问「她这句是不是把话转开了」（refusal.soft_scan），再看它是不是那三句
@@ -1342,14 +1513,22 @@ def _judge(asked: str, answer: Any) -> Optional[Dict[str, Any]]:
 
         def sink(found_event: Dict[str, Any]) -> None:
             """库约定的投递口：事件到手就投一次心，投没投成如实写进 delivered 那一节。"""
-            delivered.update(_deliver(asked, found_event, kind))
+            delivered.update(_deliver(asked, found_event, kind, sent=sent,
+                                      reason=reason, level=level, why=why))
 
         # 软转向那一遍不过闸（她的原话一个字都不改），所以只有硬拒绝才去取条款与红线表。
         # 红线表透传给闸：拒绝的那三句"改了还不成"时，闸照样留原话，但踩上红线才丢。
-        found = refusal.enforce(shape, table=book, refuse_sink=sink, now=_stamp(),
+        # **sink 只在「话真出门了」时挂上**：没出门就没有投递，那句 reason 于是如实说没投
+        # （sink 是 None，账本里记 sent=false），不会在面板上冒充「投给心」——两个格子各说各的，
+        # 谁也不许替另一格作证。没挂 sink 时事件仍在（enforce 照旧返回它），投递那一步自己走。
+        found = refusal.enforce(shape, table=book, refuse_sink=sink if sent else None,
+                                now=_stamp(),
                                 clauses=None if soft.is_soft else _clauses(),
                                 asked=asked if soft.is_soft else None, answer=body,
                                 fatal=warehouse.load("fatal"))
+        if not sent:
+            delivered.update(_deliver(asked, found.event, kind, sent=sent, reason=reason,
+                                      level=level, why=why))
     except (refusal.RefusalBroken, ClauseBroken, warehouse.WarehouseMiss,
             warehouse.WarehouseBroken) as exc:
         LOG.warning("POST /chat 判拒绝没成：%s", exc)
@@ -1361,7 +1540,9 @@ def _judge(asked: str, answer: Any) -> Optional[Dict[str, Any]]:
             "delivered": delivered}
 
 
-def _deliver(asked: str, found_event: Mapping[str, Any], kind: str) -> Dict[str, Any]:
+def _deliver(asked: str, found_event: Mapping[str, Any], kind: str, *,
+             sent: bool = True, reason: Any = None, level: Any = None,
+             why: Optional[str] = None) -> Dict[str, Any]:
     """把这一次拒绝投给心：认话题 → heart.refuse.ingest → 把心的账翻成五样，顺手记我们自己的账。
 
     事件由库（refusal.enforce 的 refuse_sink）交过来，这里只认 {ts, shape, full_name, why} 那四键：
@@ -1372,10 +1553,34 @@ def _deliver(asked: str, found_event: Mapping[str, Any], kind: str) -> Dict[str,
     词表以外的话题，这一层也不替它造分类。投不进去（今日额度用完）也照实 false，不写成投过了。
 
     落盘两处：心的 refusals.json（ingest 那一笔，**全仓唯一写它的地方**）与我们自己的
-    refuse.jsonl（refusal.record，一行一次拒绝，sent 记这次投没投进去）。**投不进去也照记那一行**
-    ——她拒了这件事是真的，与「有没有落到心上」是两件事。写不进去也是失败：记一行 WARNING 并在
-    reason 里说清楚，不把「账没记上」当成「没拒过」。
+    refuse.jsonl（refusal.record，一行一次拒绝）。写不进去也是失败：记一行 WARNING 并在 reason
+    里说清楚，不把「账没记上」当成「没拒过」。
+
+    **两态：话出没出门，后果不一样。** sent 是「这一轮的话到底出门没有」，由调用方按 _went_out
+    判，**这一层不重判一遍**；why 只在没出门时有意义，报的是哪一种来由
+    （refusal.SUPPRESSED_OUTBOUND＝门说不发 / SUPPRESSED_SWALLOWED＝门说发而闸吞了），整句说法由
+    refusal.record 从数据里取。
+
+    - sent=True  → 投心（**起话题冷却**）+ 账本 sent=True。投不进去（认不出话题 / 额度用完）照实
+      delivered=false，账本照样是 sent=True：话确实出去了，「有没有落到心上」是另一件事。
+    - sent=False → **一个字都不写心（绝不 ingest，不起冷却）**，账本记 sent=False + 那一态 +
+      why + 那一轮的 reason / level。
     """
+    if not sent:
+        # 她的话没出去：这次拒绝不生效——**不投心（不起冷却）**，账上记 sent=false、是哪一态、
+        # 为什么没发（门说不发 / 门说发而闸吞了）与那一轮的 reason / level。两态的名字与整句说法
+        # 都不在这份代码里：refusal.record 从 data/refusal.json 的 states 节取。
+        state, tail = refusal.state_of(False), ""
+        try:
+            refusal.record(refusal.path_of(), found_event, False, shape=kind,
+                           why=why, reason=reason, level=level)
+        except (OSError, ValueError) as exc:
+            LOG.warning("POST /chat 记拒绝账没成：%s", exc)
+            tail = "；但拒绝账没记上：%s" % exc
+        word = refusal.suppressed_why(why) if why else UNKNOWN_SUPPRESSED
+        return {"delivered": False, "suppressed": True, "state": state, "topic": None,
+                "until": None, "remaining_min": None, "reason": word + tail}
+
     topic = refusal.topic_in(asked, heart_refuse.vocabulary())
     if topic is None:
         answer = {"ok": False,
@@ -1389,15 +1594,16 @@ def _deliver(asked: str, found_event: Mapping[str, Any], kind: str) -> Dict[str,
             LOG.warning("POST /chat 投拒绝没成：%s", exc)
             answer = {"ok": False, "message": "投心失败：%s" % exc}
     delivered = bool(answer.get("ok"))
+    state = refusal.state_of(True)
     try:
-        refusal.record(refusal.path_of(), found_event, delivered, shape=kind)
+        refusal.record(refusal.path_of(), found_event, True, shape=kind)
     except (OSError, ValueError) as exc:
         LOG.warning("POST /chat 记拒绝账没成：%s", exc)
         tail = "；但拒绝账没记上：%s" % exc
     else:
         tail = ""
-    return {"delivered": delivered, "topic": topic, "until": answer.get("until"),
-            "remaining_min": answer.get("remaining_min"),
+    return {"delivered": delivered, "state": state, "topic": topic,
+            "until": answer.get("until"), "remaining_min": answer.get("remaining_min"),
             "reason": _delivered_word(topic, found_event, answer) + tail}
 
 
@@ -1466,6 +1672,29 @@ def _who(body: Any) -> str:
         return ""
     raw = body.get("who")
     return raw.strip() if isinstance(raw, str) else ""
+
+
+def _mode_of(body: Any) -> str:
+    """这一轮是谁起的头：proactive 只认那一个字面值，其余一律 passive。
+
+    **非法值回落、不 400**（与 scene 同一个口径）：这一格只决定她用哪份提示词与心判决的
+    意图；认不出就按常态走，不拿一个错字段把人拦在门外。取值不在这里另写一份字符串，
+    从 organs/mind/events.py 的 MODE_* 来。
+    """
+    raw = body.get("mode") if isinstance(body, Mapping) else None
+    return events.MODE_PROACTIVE if raw == events.MODE_PROACTIVE else events.MODE_PASSIVE
+
+
+def _seed_of(body: Any) -> str:
+    """她自己开口那一轮的由头：不是字 / 全空白都算没给（返回空串，由调用方回 400 点名）。"""
+    raw = body.get("seed") if isinstance(body, Mapping) else None
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _reason_of(body: Any) -> Optional[str]:
+    """由头那一侧的理由码（可选）：不是字就当作没给——它是给人看的码，不是判据。"""
+    raw = body.get("reason") if isinstance(body, Mapping) else None
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
 # —— 借阅读数：这一轮借了家里哪几份词条、各用掉几条 ——————————

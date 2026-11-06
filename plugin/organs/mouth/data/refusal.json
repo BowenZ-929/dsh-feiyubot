@@ -101,6 +101,34 @@
       "plain": "不是软转向：开头没有垫话，或者既没转向也没反问——光有语气词、没有走开的意思，不算拒绝。"
     }
   },
+  "audience": {
+    "_note": "出口认 audience 那一节：私密记忆在群里守边界。field / private_value 是「记忆行上哪一栏、哪个值是私密」——代码里不写死这两个词（那一栏由脑在写入时打标，本轮只做「出口认它」这一半）。scopes 是 /chat body 里 scope 认的值与缺省值：它只影响「私密记忆这一轮能不能被引用」，别的行为一个字都不改。",
+    "field": "audience",
+    "private_value": "私密",
+    "scopes": {
+      "group": "group",
+      "private": "private",
+      "default": "private"
+    },
+    "scope_message": "scope 只认 {allowed}（读到的 {value}）：它只决定私密记忆这一轮能不能被引用，别的行为一个字都不改。",
+    "say": "这个不好在群里讲。",
+    "blur": "有个人跟我说过…",
+    "say_note": "群里被直接问到时她说的就是 say 这一句：不说谁、不说什么时候、不说是什么事，说完就停。**沉默不算数**——沉默等于「她刚好没想到」，说了才等于「她在守边界」，所以被问到就必须出声。",
+    "blur_note": "模糊化那一句（blur）留着不用：模糊化仍是「说了」，等于替一件私密的事在群里留一个能被追问的钩子（「有个人是谁？」）；这一轮要做的是把话交回当事人，不是换个说法继续讲。留它做备用文案，换个场景（比如对当事人本人提起）再用。",
+    "reason": "边界话的读数：群里被直接问到一条打了 {mark} 私密标记的记忆（判据见 criteria 节），于是只回一句边界话；那条记忆这一轮不进注入、也不进 recalled，正文一个字都不往外说。",
+    "why": "群里被直接问到的是一条私密记忆（{mark}）：这一轮只说一句边界话，内容一个字都不往外说。",
+    "mark": "audience",
+    "event_shape": "refused-topic",
+    "event_shape_note": "走拒绝那条路时记哪个事件形状：取 shapes 里某一节的完整名（这里是 refused-topic）。边界话不是新理由，是「这个话题先不接」的另一种来由，心那边也只收这三个理由。",
+    "criteria": {
+      "overlap_min": 4,
+      "gram_n": 2,
+      "gram_cover": 0.5,
+      "excerpt_chars": 6
+    },
+    "criteria_note": "「被直接问到」要能离线复算：用户这句与该条 text 去掉空白后的最长连续重合 ≥ overlap_min 字，或该条 text 的 gram_n 元组覆盖率 ≥ gram_cover（分母是这条 text 自己的元组数）。两条都不过就是没被问到：那一轮不主动引用、也不出声——不为没发生的事拒绝。excerpt_chars 是 audience_held 里那句摘要截几个字：读数给 id 与一小截，不贴正文。",
+    "note": "这一节与 shapes 那三句拒绝说法各走各路：shapes 管「她不接这一句怎么说」，这一节管「什么话不该在群里往外讲」。改阈值、换说法、换标记词都改这里，api/chat.py 一个字都不用动。"
+  },
   "style_rules": {
     "say_len_min": 6,
     "say_len_max": 14,
@@ -124,5 +152,14 @@
     "template": "{note}｜{full_name}：{why}｜闸：{gate}｜事件：{sent}",
     "sent": "已交给注入的 sink，投给心",
     "unsent": "sink 是 None，没投（账本里记 sent=false）"
+  },
+  "states": {
+    "delivered": "delivered",
+    "suppressed": "suppressed-by-gate",
+    "suppressed_why": {
+      "outbound": "suppressed-by-gate：出站闸说这一轮不发（send=false），这句话一个字都没出去——对方没听到，冷却没意义。",
+      "swallowed": "suppressed-by-gate：门说这一轮发（send=true），八股闸把这一泡吞了，话还是没出去——不是她不想说，是她自己把话拦了。"
+    },
+    "note": "两态必须分开：她拒了但没说出来，对方根本不知道，账上却记成发出去了、还照旧烧掉一次话题冷却——等于白白烧掉一次拒绝。同一个「没出门」还要再分两种来由（门说不发 / 门说发而闸吞了），复查时才分得清「她不想说」与「她自己把话拦了」。"
   }
 }
