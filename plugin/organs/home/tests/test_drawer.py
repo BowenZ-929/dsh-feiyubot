@@ -54,8 +54,17 @@ class DrawerTest(unittest.TestCase):
         self._write(diary("2026-11-04"), dream("2026-11-04"))
         got = cards.list_room(self.root, room="抽屉")
         by_kind = {card["kind"]: card for card in got["items"]}
-        self.assertEqual(LONG, by_kind["日记"]["params"]["text"], "日记读回原文")
-        self.assertEqual(DREAM_TEXT, by_kind["梦"]["params"]["text"], "梦读回原文")
+        # 列表里正文是摘要（text_truncated），全文从 read_item 取——枚举才翻得完。
+        # 列表带 text_chars（真实长度）；超过 LIST_EXCERPT_CHARS 才打 text_truncated。
+        self.assertEqual(len(LONG), by_kind["日记"]["params"]["text_chars"])
+        self.assertLessEqual(len(by_kind["日记"]["params"]["text"]), max(120, len(LONG)))
+        # 按 card_id 取：日记与梦同一天时 name 会撞，id 才唯一。
+        diary_full = cards.read_item(self.root, room="抽屉",
+                                     name=by_kind["日记"]["card_id"])
+        self.assertEqual(LONG, diary_full["body"], "日记全文逐字")
+        dream_full = cards.read_item(self.root, room="抽屉",
+                                     name=by_kind["梦"]["card_id"])
+        self.assertEqual(DREAM_TEXT, dream_full["body"], "梦全文逐字")
         self.assertEqual("梦", by_kind["梦"]["params"]["source_type"])
         self.assertFalse(by_kind["梦"]["testimony"], "梦不作证词")
         self.assertTrue(by_kind["梦"]["display"].startswith("（梦）"), "梦要带显示前缀")

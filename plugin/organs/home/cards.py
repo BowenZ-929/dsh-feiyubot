@@ -41,6 +41,8 @@ SHELF_KINDS: Tuple[str, ...] = ("自画像", "人设卡", "日记", "梦")
 SHELF_ROOM = access.DRAWER_ROOM
 #: 她一天一张的那两类。
 DATE_KINDS: Tuple[str, ...] = ("日记", "梦")
+#: 列表里正文只带这么多字；全文去 read_item 取（一页才翻得完，一次也不会被几百篇日记撑爆）。
+LIST_EXCERPT_CHARS = 120
 DIARY_MIN_CHARS = 80
 DIARY_MAX_CHARS = 150
 
@@ -667,24 +669,48 @@ def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] 
             "left": 0, "audit": entry}
 
 
-def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
-              include_consumed: bool = False) -> dict:
-    """读一间房的索引：offset/limit 分页，再按 access 的读上限截断，截了就说截了。
+def _excerpt(card: Dict[str, Any], chars: int) -> Dict[str, Any]:
+    """列表用的轻量视图：正文只带前 `chars` 字，全文去 read_item 取。
 
-    房名与 root 一样只能按关键字传：冻结契约里那句 `list_room(root=None, room: str, *)`
-    在 Python 里是语法错误（有默认值的参数后面跟着没默认值的参数），所以 room 落进
-    `*` 之后——名字与顺序照旧，只是不能按位置传。
+    不这么做就没法既「一页真能翻完」又「不把几百份日记一次塞回去」——一篇日记光正文就几百字，
+    整条卡上千字，按旧写法一页只装得下六条。
+    """
+    if not chars or chars < 0:
+        return card
+    params = dict(card.get("params") or {})
+    text = params.get("text")
+    if isinstance(text, str) and len(text) > chars:
+        params["text"] = text[:chars]
+        params["text_truncated"] = True
+    if isinstance(text, str):
+        params["text_chars"] = len(text)
+    view = dict(card)
+    view["params"] = params
+    return view
+
+
+def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
+              include_consumed: bool = False, shelf: Optional[str] = None,
+              excerpt_chars: int = LIST_EXCERPT_CHARS) -> dict:
+    """读一间房的索引：**房级 + 各格子**合起来折叠，offset/limit 真能翻完。
+
+    三个口径在这里定死，免得再出现「数得出 345、翻不出 345」：
+
+    · `total` = **房内可见总数**（折叠后、按 `include_consumed` 过滤之后的卡数）；
+    · `shelves` = **同一个可见集按格子分组的卡数**，与 `total` 严格对齐（加起来就是 total）；
+    · `truncated` = **还有没翻到的卡**（`offset + len(items) < total`），最后一页一定是 false。
+
+    分页只受 `limit`（上限 `access.READ_MAX_LINES`）约束，**不拿单次读取的字数上限当页上限**——
+    那是 `check_read` 管「读一件东西」的尺子，用在枚举上就会把一页压到六条。
+    正文按 `excerpt_chars` 截断并标 `text_truncated`，全文去 read_item 取。
     """
     target = _target_room(room)
     home = store_module.home_root(root)
     rows, bad = _read_room_rows(home, target.name)
     stats: Dict[str, Any] = {}
     items = fold(rows, stats=stats)
-    shelves: Dict[str, int] = {}
-    for shelf, path in _index_paths(home, target.name):
-        count = _line_count(path)
-        if count:
-            shelves[shelf or target.name] = count
+    if shelf:
+        items = [card for card in items if (card.get("shelf") or target.name) == shelf]
     consumed = sum(1 for card in items if card.get("consumed"))
     if not include_consumed:
         items = [card for card in items if not card.get("consumed")]
@@ -692,25 +718,18 @@ def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
     offset = max(0, int(offset))
     limit = max(0, int(limit))
     capped = min(limit, access.READ_MAX_LINES)
-    shown: List[Dict[str, Any]] = []
-    chars = 0
-    truncated = False
-    for card in items[offset:]:
-        if len(shown) >= capped:
-            truncated = True
-            break
-        cost = len(json.dumps(card, ensure_ascii=False))
-        if chars + cost > access.READ_MAX_CHARS:
-            truncated = True
-            break
-        shown.append(card)
-        chars += cost
-    if offset + len(shown) < len(items):
-        truncated = True
+    shown = [_excerpt(card, excerpt_chars) for card in items[offset:offset + capped]]
+    chars = sum(len(json.dumps(card, ensure_ascii=False)) for card in shown)
+
+    shelves: Dict[str, int] = {}
+    for card in items:
+        name = card.get("shelf") or target.name
+        shelves[name] = shelves.get(name, 0) + 1
 
     return {"room": target.name, "slug": target.slug, "offset": offset, "limit": limit,
+            "shelf": shelf,
             "total": len(items), "lines": len(shown), "chars": chars,
-            "truncated": truncated, "bad_lines": bad, "items": shown,
+            "truncated": offset + len(shown) < len(items), "bad_lines": bad, "items": shown,
             "shelves": shelves,
             "consumed": consumed,
             "orphan_consumes": int(stats.get("orphans", 0)),

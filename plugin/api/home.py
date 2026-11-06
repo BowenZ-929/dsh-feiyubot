@@ -246,10 +246,13 @@ def _list(root: Any, params: Mapping[str, str]) -> Result:
     payload: Dict[str, Any] = {"ok": True, "readonly": True, "agent": AGENT}
     payload.update(cards.list_room(
         root, room=room, offset=offset, limit=limit,
-        include_consumed=params.get("include_consumed") in ("1", "true", "yes")))
-    payload["note"] = "一次最多读 %d 行／%d 字：截了就 truncated=true，total 是折叠后的件数" \
-                      "（不是 index.jsonl 的行数）；被拿走的默认不列，include_consumed=1 才看得见" \
-                      % (access.READ_MAX_LINES, access.READ_MAX_CHARS)
+        include_consumed=params.get("include_consumed") in ("1", "true", "yes"),
+        shelf=_text(params, "shelf")))
+    payload["note"] = ("分页只受 limit（上限 %d 条）约束，截了就 truncated=true；"
+                       "total 是房内可见总数，shelves 是同一可见集按格子分组、加起来等于 total；"
+                       "正文按 LIST_EXCERPT_CHARS 截断（text_truncated=true 时要全文请读 /home/read）"
+                       % access.READ_MAX_LINES) + ("；一次最多读 %d 行／%d 字" \
+                      % (access.READ_MAX_LINES, access.READ_MAX_CHARS))
     return 200, payload
 
 
