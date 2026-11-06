@@ -32,5 +32,5 @@ fi
 curl -s --max-time 3 "http://127.0.0.1:${PORT}/healthz" | head -c 300; echo
 
 echo "== 她自己的 DSH =="
-echo "数据目录：$DSH_HOME（和你日常的 ~/.dsh 分开）"
+echo "数据目录：${DSH_HOME}（和你日常的 ~/.dsh 分开）"
 exec dsh --profile web

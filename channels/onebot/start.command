@@ -80,7 +80,7 @@ if [ -n "${NAPCAT_QUICK_PASSWORD:-}" ]; then
 elif [ -n "${NAPCAT_QUICK_PASSWORD_MD5:-}" ]; then
   echo "  密码：已配置 MD5（免扫码快速登录）"
 else
-  echo "  密码：未配置 → 会要求扫码。要免扫码，写 $CRED："
+  echo "  密码：未配置 → 会要求扫码。要免扫码，写 ${CRED}："
   echo "        NAPCAT_QUICK_ACCOUNT=$ACCOUNT"
   echo "        NAPCAT_QUICK_PASSWORD=你的小号密码"
 fi
