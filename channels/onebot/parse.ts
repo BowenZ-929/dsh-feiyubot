@@ -32,6 +32,14 @@ export type ParsedEvent = {
   text: string;
   hasImage: boolean;
   images: ImageSummary[];
+  // 下面几个字段是给合批用的结论，不在合批里重读消息：同一件事只判一次。
+  // atTargets 留着原始 qq（"all" 也在里面），排障时要能一眼看出这条 @ 的是谁。
+  atTargets: string[];
+  mentionedSelf: boolean;
+  mentionedAll: boolean;
+  hasTextSegment: boolean;
+  isBareImage: boolean;
+  isSticker: boolean;
 };
 
 export type ParseFailure = {
@@ -168,10 +176,31 @@ export const parseEvent = (raw: unknown): ParseResult => {
 
   const texts: string[] = [];
   const images: ImageSummary[] = [];
+  const atTargets: string[] = [];
+  let hasTextSegment = false;
+  let stickerSegments = 0;
   for (const segment of value.message) {
     texts.push(segmentToText(segment));
-    if (isRecord(segment) && segment.type === "image") images.push(imageSummary(segment));
+    if (!isRecord(segment)) continue;
+    const data = isRecord(segment.data) ? segment.data : {};
+    if (segment.type === "image") images.push(imageSummary(segment));
+    // 空白文本段不算"有话说"：她收到一个只有空格的消息，那仍然是一张裸图。
+    if (segment.type === "text" && (asText(data.text) ?? "").trim() !== "") hasTextSegment = true;
+    if (segment.type === "at") {
+      const qq = asText(data.qq);
+      if (qq !== undefined) atTargets.push(qq);
+    }
+    if (segment.type === "face" || segment.type === "mface") stickerSegments += 1;
   }
+
+  const selfId = asId(value.self_id) ?? null;
+  // 没有 self_id 就答不出"@ 我"：宁可说没有，也不能猜一个 id 当成自己。
+  const mentionedSelf = selfId !== null && atTargets.some((qq) => qq === String(selfId));
+  const mentionedAll = atTargets.includes("all");
+  // 裸图 = 有图且一句话都没有；纯表情 = 只有 face/mface，别的段一个都不许有。
+  const isBareImage = images.length > 0 && !hasTextSegment;
+  const isSticker =
+    stickerSegments > 0 && stickerSegments === value.message.length && images.length === 0 && !hasTextSegment;
 
   return {
     ok: true,
@@ -179,11 +208,17 @@ export const parseEvent = (raw: unknown): ParseResult => {
     subType: asText(value.sub_type) ?? "",
     messageId: asId(value.message_id) ?? null,
     time: asId(value.time) ?? null,
-    selfId: asId(value.self_id) ?? null,
+    selfId,
     who,
     where,
     text: texts.join(""),
     hasImage: images.length > 0,
     images,
+    atTargets,
+    mentionedSelf,
+    mentionedAll,
+    hasTextSegment,
+    isBareImage,
+    isSticker,
   };
 };

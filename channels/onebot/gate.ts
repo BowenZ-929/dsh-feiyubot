@@ -69,7 +69,9 @@ export const dedupKey = (input: DedupInput): string => {
 };
 
 // empty = 核回得成但一个泡都没有；error = 这一轮压根没走到发（原因写进 note）。
-export type LedgerKind = "blocked" | "sent" | "failed" | "uncertain" | "unsent" | "dup" | "empty" | "error";
+// batched = 这一条已经进了某一段（带 batch=<id> 的那一行）：消息账讲「进没进来」，决策账讲「为什么没发」。
+// silent = 核主动说「这轮不说话」（send:false）：不是故障，别记成 empty/error，面板要能一眼分开。
+export type LedgerKind = "blocked" | "sent" | "failed" | "uncertain" | "unsent" | "dup" | "empty" | "error" | "batched" | "silent";
 
 // claimed 只在内存里存在：已认领、还没落账。它必须能被 firstKind 看见，
 // 否则「等核回 / 等 ack」这段窗口里 key 是隐形的，重投就会被领两次。

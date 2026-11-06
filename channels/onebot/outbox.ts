@@ -32,7 +32,13 @@ export const readCoreTimeout = (raw: string | null): CoreTimeout => {
   return { ms: Math.round(value), warn: null };
 };
 
-export type CoreReply = { ok: true; chunks: Chunk[] } | { ok: false; reason: string };
+// silent = 核主动说「这轮不说话」（响应里的 send:false）。它不是故障，也不是「憋回去了」：
+// 前者要照实记一行 silent，后者才是 empty。reason 只收一句人话，核没给就是 null。
+export type CoreSilence = { reason: string | null };
+
+export type CoreReply =
+  | { ok: true; chunks: Chunk[]; silent?: CoreSilence }
+  | { ok: false; reason: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -46,6 +52,12 @@ const asSeconds = (value: unknown): number =>
 // 核的响应按固定顺序认：chunks 优先于 text，两者都认不出就是本轮不发（绝不猜着发）。
 export const parseCoreResponse = (payload: unknown): CoreReply => {
   if (!isRecord(payload)) return { ok: false, reason: "响应不是 JSON 对象" };
+  // send:false 优先于 ok：主动沉默是核的意思，不该因为 ok 写没写、写成什么就被判成「响应认不出」。
+  if (payload.send === false) {
+    const text = asText(payload.reason);
+    // reason 只收非空字符串：对象/数组塞进账里，面板与 grep 都读不出来。
+    return { ok: true, chunks: [], silent: { reason: text !== undefined && text.trim().length > 0 ? text.trim() : null } };
+  }
   if (payload.ok !== true) {
     const detail = asText(payload.error) ?? asText(payload.message);
     return { ok: false, reason: `ok 不是 true${detail ? `（${detail}）` : ""}` };
@@ -279,7 +291,7 @@ export type SettleInput = {
 };
 
 export type SettleResult = {
-  kind: "error" | "empty" | "blocked" | "ran";
+  kind: "error" | "empty" | "silent" | "blocked" | "ran";
   note: string;
   plan: PlanEntry[];
   batch: BatchResult | null;
@@ -332,6 +344,16 @@ export const settleRound = async (input: SettleInput): Promise<SettleResult> => 
       : parseCoreResponse(attempt.payload);
   if (!reply.ok) {
     return failed(`响应认不出：${reply.reason}`, `核的响应认不出：${reply.reason}，本轮不发`);
+  }
+
+  // 核主动说「这轮不说话」：一行 silent，一个 action 都不构造，也不重试。
+  // 理由进 note——「她今天不想说」和「她憋回去了」在账上必须一眼分得开。
+  if (reply.silent !== undefined) {
+    const reason = reply.silent.reason;
+    const note = reason === null ? "她这轮不想说（核没给理由）" : `她这轮不想说：${reason}`;
+    row({ kind: "silent", note });
+    input.log("plan", `req#${id} ${note}`);
+    return { kind: "silent", note, plan: [], batch: null };
   }
 
   // send_at 相对这一批，起点是「算计划的这一刻」，不是事件到达的那一刻。

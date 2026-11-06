@@ -1,0 +1,43 @@
+{
+  "batch": {
+    "quietGapMs": 30000,
+    "tiersMs": {
+      "quietOpen": 2000,
+      "activeOpen": 5000,
+      "sameSpeaker": 2000,
+      "switchSpeaker": 500
+    },
+    "hardCapMs": 8000,
+    "mentionCapMs": 1000,
+    "bareImageMs": 4000,
+    "stickerMs": 500,
+    "privateCapMs": 1000
+  },
+  "outbound": {
+    "maxChars": 512,
+    "maxSentences": 8,
+    "maxChunks": 3,
+    "defaultReplies": [
+      "嗯，我在。",
+      "……我在听。",
+      "这句我想说的太长，先简短回一句：我在。"
+    ]
+  },
+  "quota": {
+    "windowMs": 3600000,
+    "perGroupMax": 6,
+    "mentionCanExceed": true
+  },
+  "decide": {
+    "reasonCodes": [
+      "sent",
+      "silent_mode",
+      "quota_exceeded",
+      "core_error",
+      "outbound_failed",
+      "core_empty",
+      "replaced_too_long",
+      "no_mention"
+    ]
+  }
+}
