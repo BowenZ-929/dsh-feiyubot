@@ -31,7 +31,10 @@ inject=None，如实记 audit-unavailable（不是通过）。重写那一步这
 **闸在 /chat 生效（这一轮加的）**：answer() 返回之后、组装响应之前，逐泡再过一遍闸
 （条款 → 动作配额 → 动作括注 → 内容重复 → 冒充做过 → 复述审计），命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里
 删掉，剩下的重算 send_at，全被弃掉就是 chunks=[]、reply=""（每一泡弃言各记一行弃言账）。所以
-gate 节除了既有的 decision / hit / drops，还逐泡交代 parts / in_parts / out_parts / blocked / note。
+gate 节除了既有的 decision / hit / drops，还逐泡交代 parts / in_parts / out_parts / blocked / note，
+整轮再摘一行 summary（{at, audit: {status, hit, lcs_len, threshold}, rewrite: {status}}）：决策账
+（通道那本 decisions.jsonl）就该抄这一行——上一轮她照着念了自己的设定，账上却一个字都没说闸判了
+什么，人查了两圈才明白；以后「她说了不该说的」先看这一行。
 判据一个都不在本文件：条款、复述审计、动作括注、内容重复全部经 warehouse.load 读；
 「她最近几条回话」只读 mind 的 recent_turns.jsonl，取最近几轮的条数同样从 repeat.json 里读。
 **动作配额也从装配传进闸**：answer() 回包的 action.quota.blocked 为真就传 forbid、为假传 allow；
@@ -253,6 +256,9 @@ GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（�
              "以及 kept_after_rewrite 是「改过一次还是命中、按原话发了」（true 时这一泡没被丢掉），"
              "加上 rewrite 是这一泡的重写读数"
              "（{status: ok|failed|not-tried, why, from, to}，from / to 只是一小截）；"
+             "整轮另摘一行 summary（{at, audit: {status, hit, lcs_len, threshold},"
+             " rewrite: {status}}，与逐泡那几格同一套词、同一批读数）——决策账把这一行抄进它那"
+             "一行，事后看账就知道这一轮闸判了什么，不必一泡一泡翻 parts；"
              "顶层的 quota 是这一轮交给闸的配额写法"
              "（forbid / allow / null），取自装配 action.quota.blocked，装配没标就是 null。"
              "每一泡弃言都记一行账（organs/mouth/drops.py）。")
@@ -1098,7 +1104,9 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     不是整条丢。
 
     gate 节既不新增顶层键，也不丢既有键：decision / hit / drops 是 answer() 给的那一份（页面与既有
-    断言都在读它），这里追加 parts / in_parts / out_parts / blocked / quota / note；被闸改过时
+    断言都在读它），这里追加 parts / in_parts / out_parts / blocked / quota / note / summary；
+    summary 是**整轮的闸判摘要**（_gate_summary：{at, audit{status,hit,lcs_len,threshold},
+    rewrite{status}}），给决策账那一行抄——逐泡读数一个不少地留在 parts 里。被闸改过时
     decision 与 hit 按最终结果改写——她一句都没出去，就不能还挂着 pass。
     """
     chunks = [dict(one) for one in (payload.get("chunks") or [])]
@@ -1210,7 +1218,8 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
         changed = True
     kept = [{"text": one["text"], "gap_before": one["gap_before"]} for one in shaped["chunks"]]
 
-    section.update({"parts": parts, "out_parts": len(kept), "blocked": _unique(blocked)})
+    section.update({"parts": parts, "out_parts": len(kept), "blocked": _unique(blocked),
+                    "summary": _gate_summary(parts)})
     if changed:
         _resend(payload, kept, books["digits"])
         section["decision"] = "dropped" if not kept else "rewritten"
@@ -1727,6 +1736,51 @@ def _resend(payload: Dict[str, Any], kept: List[Dict[str, Any]], digits: int) ->
         rows.append({"text": one["text"], "gap_before": one["gap_before"], "send_at": clock})
     payload["chunks"] = rows
     payload["reply"] = "".join(str(one["text"]) for one in rows)
+
+
+def _gate_summary(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """这一轮的闸判摘要（gate.summary）：一行答「她这轮说了不该说的吗、改没改」。
+
+    **为什么要有这一行**：上一轮她把自己的设定念了出来，事后查了两圈才断清是哪一关判了什么
+    ——决策账上（channels/onebot/.state/decisions.jsonl，通道那本）只记门说不说，没有一个字说闸
+    判了什么，人只能一泡一泡翻 parts，翻不到就猜。以后「她说了不该说的」先看这一行：
+    audit.hit 为真、lcs_len 贴着 threshold，就是照抄了设定原文；rewrite.status 随后说这一泡
+    被改过（ok）、想改没改成（failed）、还是一次都没送出去改（not-tried）。
+
+    判据全是现成的读数，这里只做**整轮的归并**（逐泡的读数仍原样留在 parts[*].audit /
+    parts[*].rewrite，一处读数只算一次）：
+      audit.status    "ok" 只在这一轮每一泡都真比过时成立；有一泡没比过就是那一泡的状态
+                      （audit-unavailable）——**没判过不许写成通过**
+      audit.hit       有一泡撞上了设定段（hit 不是 None）就是 True
+      audit.lcs_len   各泡里最长的那一截（放行时是最长的、拦下时是撞上的那一截）
+      audit.threshold 这一轮用的阈值（数据给的，不是代码里的常数）
+      rewrite.status  ok / failed / not-tried 三选一，与逐泡那三格同一套词
+    audit 整格都是**进门那一次**的读数（与 parts[*].audit 同一个口径：改完那一遍不覆盖它，所以
+    「她引了设定」在改写成功的那一轮也照样看得见）。
+    **没有泡就不写这一格**（整轮被装配那一步弃掉、或压根没进闸）：那时它是「没判」，不是
+    「判过没事」，gate.note 与 gate.outbound 会说明为什么——凑一个空壳摘要等于替一次没发生的
+    判决作证。
+    """
+    seen = [dict(one.get("audit") or {}) for one in parts]
+    rewritten = [str((one.get("rewrite") or {}).get("status") or "") for one in parts]
+    status = "ok" if all(one.get("status") == "ok" for one in seen) else next(
+        (one.get("status") for one in seen if one.get("status") != "ok"), None)
+    lengths = [one["lcs_len"] for one in seen if isinstance(one.get("lcs_len"), int)]
+    thresholds = [one["threshold"] for one in seen if isinstance(one.get("threshold"), int)]
+    if rewrite_rules.STATUS_OK in rewritten:
+        rewrote = rewrite_rules.STATUS_OK
+    elif rewrite_rules.STATUS_FAILED in rewritten:
+        rewrote = rewrite_rules.STATUS_FAILED
+    else:
+        rewrote = rewrite_rules.STATUS_NOT_TRIED
+    return {
+        "at": _stamp(),
+        "audit": {"status": status,
+                  "hit": any(one.get("hit") is not None for one in seen),
+                  "lcs_len": max(lengths) if lengths else 0,
+                  "threshold": thresholds[0] if thresholds else None},
+        "rewrite": {"status": rewrote},
+    }
 
 
 def _audit_row(seen: Any) -> Dict[str, Any]:

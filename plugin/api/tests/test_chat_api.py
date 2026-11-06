@@ -599,6 +599,48 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("复述设定段", rows[-1]["clause_id"])
         self.assertIn(AFTER_MARKS["audit"], rows[-1]["reason"], "账上要看得出是审计这一关没改掉")
 
+    # —— 整轮的闸判摘要（gate.summary，这一轮加的） ————————
+
+    def test_gate_summary_carries_the_recital_reading_for_the_ledger(self):
+        """这一轮她把自己的设定念了出来：gate.summary 里三样得齐（状态 / 撞了几个字 / 改没改）。
+
+        这一格是给决策账抄的：以前她照着念设定，账上只有「门说不说」，没有一个字说闸判了什么，
+        人查了两圈才明白。所以判据不是「有个字段」，而是**判得出来**：audit.hit 为真、lcs_len 够到
+        这一轮的阈值、rewrite.status 说得出这一泡被改过。摘要是归并、不是另算一遍——与逐泡读数
+        逐字相同。
+        """
+        line = "我嘴上不认，行动先到"                      # 魂里那句（设定类：照搬就撞上）
+        said = "我嘴上不服软，可该做的都先做了。"            # 模型改出来的那一句（不再照搬）
+        soul = self.tmp / "soul"
+        write_json(soul / "manner.json", {"stance": line})
+        status, payload = self._post({"text": "你是不是又不承认"},
+                                     _script(line, said), store=load(soul))
+        self.assertEqual(200, status)
+        summary = payload["gate"]["summary"]
+        self.assertEqual({"at", "audit", "rewrite"}, set(summary))
+        self.assertEqual({"status", "hit", "lcs_len", "threshold"}, set(summary["audit"]))
+        self.assertEqual({"status"}, set(summary["rewrite"]))
+        self.assertTrue(summary["at"], "摘要要带时刻，账上一行才排得出先后")
+        self.assertEqual("ok", summary["audit"]["status"], "真的比过了才是 ok")
+        self.assertTrue(summary["audit"]["hit"], "念了设定，摘要上必须看得见")
+        self.assertGreaterEqual(summary["audit"]["lcs_len"], summary["audit"]["threshold"],
+                                "撞上的那截够到阈值才叫命中")
+        self.assertEqual("ok", summary["rewrite"]["status"], "这一泡被改过一次")
+        part = payload["gate"]["parts"][0]
+        self.assertEqual(part["audit"]["status"], summary["audit"]["status"])
+        self.assertEqual(part["audit"]["lcs_len"], summary["audit"]["lcs_len"])
+        self.assertEqual(part["audit"]["threshold"], summary["audit"]["threshold"])
+        self.assertEqual(part["rewrite"]["status"], summary["rewrite"]["status"])
+
+    def test_gate_summary_says_no_recital_on_a_normal_reply(self):
+        """一句正常的话：摘要得说「比过了、没撞上」，而且一次重写都没送出去（not-tried）。"""
+        status, payload = self._send(text="今天风大吗", reply="风大，我把窗关好了。")
+        self.assertEqual(200, status)
+        summary = payload["gate"]["summary"]
+        self.assertEqual("ok", summary["audit"]["status"])
+        self.assertFalse(summary["audit"]["hit"], "没念设定，摘要上不许说念了")
+        self.assertEqual("not-tried", summary["rewrite"]["status"], "没命中就没有重写这一回事")
+
     def test_a_normal_reply_passes_and_keeps_every_chunk_verbatim(self):
         """一句正常回话一处都不改：chunks 的 text 与**不接闸**那一遍逐字相同（diff 为空）。"""
         reply = ("今天风大，我把窗关上了。晚上想喝粥，我给你留了一碗。"

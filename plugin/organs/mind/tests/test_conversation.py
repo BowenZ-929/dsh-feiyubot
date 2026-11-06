@@ -195,6 +195,52 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn("把话说短。", system)
         self.assertLess(system.index("[嘴语气]"), system.index("[魂六件]"), "提示词的顺序没跟着改")
 
+    # —— 1.5) 魂那一段的段首说明（这一轮加的） ——————————
+
+    def test_soul_section_starts_with_the_not_to_recite_line(self):
+        """魂六件顶上第一行是那句说明（来自 assembly.json），而且读起来是人话、不是系统提示。
+
+        为什么：魂六件是人写给她的底子，整段照抄进提示词读起来与台词一模一样，上一轮她就把
+        「喜欢的食物」那半句原样念了出来。这一句说的是「这些是你的底子，不是要背出来的话」。
+        判据两条：**在段首**（标签之后、正文之前），**是人话**（以下 / 注意 / 请勿 / 系统 这类
+        系统腔一个都不许有）。
+        """
+        notice = conversation.load_assembly()["sections"]["soul"]["notice"]
+        self.assertIn("别照着念", notice, "这句话说的就是「别照着念」")
+        for word in ("以下", "注意", "请勿", "系统"):
+            self.assertNotIn(word, notice, "段首那句是人话，一个系统腔的词都不该有：%s" % word)
+        capture = []
+        self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        label = conversation.load_assembly()["sections"]["soul"]["label"]
+        block = _section(system, label)
+        first = [line for line in block.strip().splitlines() if line.strip()][0]
+        self.assertEqual(notice, first, "魂那一段的第一行不是那句说明")
+        self.assertLess(system.index(notice), system.index(SOUL_HEADINGS[0]),
+                        "说明要排在魂正文之前")
+
+    def test_soul_notice_missing_or_empty_is_a_named_error(self):
+        """数据把这句话删掉 / 写成空白：当场 ValueError 并点名 sections.soul.notice（不许悄悄少一句）。
+
+        这句话不是样式，是她念不念设定的那一格：悄悄少了，装配照旧跑、账上也看不出来，
+        于是又回到「查两圈才明白她为什么念」。
+        """
+        live = self.tmp / "home" / "mind"
+        live.mkdir(parents=True)
+        base = conversation.load_assembly()               # 出厂那份（实盘根还空着），照着改
+        for how in ("missing", "empty"):
+            data = json.loads(json.dumps(base, ensure_ascii=False))
+            if how == "missing":
+                data["sections"]["soul"].pop("notice")
+            else:
+                data["sections"]["soul"]["notice"] = "   "
+            (live / "assembly.json").write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaises(ValueError) as caught:
+                conversation.load_assembly()
+            self.assertIn("sections.soul.notice", str(caught.exception),
+                          "报错要点名缺的是哪一格（%s）：%s" % (how, caught.exception))
+
     # —— 2) 四段都装进去了 ————————————————————————
 
     def test_prompt_carries_soul_headings_memory_evidence_and_tone_line(self):

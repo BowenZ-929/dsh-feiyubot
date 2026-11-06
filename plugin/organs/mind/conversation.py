@@ -5,7 +5,8 @@
 
   order      各段拼装的先后（soul / person / caller / anchors / recent / segment / banned / action /
              memory / drawer / heart / mouth / scene）
-  sections   {key: {"label": 段落标题, "cap": 字数上限}}
+  sections   {key: {"label": 段落标题, "cap": 字数上限, "notice": 段首那句说明}}
+             魂那一节的 notice 是**非给不可**的一格（缺了 / 写成空串当场 ValueError）。
   prompt     system / user 两段模板（占位符见下）
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
   recent     turns（读几轮）/ cap（每侧截多少字）/ notice（「更早还有 N 轮」那句模板）
@@ -19,6 +20,10 @@
   scene      场合：group / private / unknown 各一句，按归一化后的场景取一句进提示词
   segment    notice：只有「群聊 + 这一段里至少两个人说话」才把 group 那一句接在段尾
              （私聊 / 单人 / unknown 一律不接）。段的标题与上限在 sections.segment 里
+  soul       sections.soul.notice：魂那一段**段首**的那句话，接在标签之后、正文之前。
+             魂六件是人写给她的底子，整段照抄进提示词读起来与台词一样，她会照着念出来；
+             这一句说的是「这些是你的底子，不是要背出来的话——别照着念」。锚句那一段不重复加
+             （它本来就有「给半句」的口径）。这句说明不占 sections.soul.cap（cap 量的仍是正文）
 读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先（存在才读），否则读
 出厂 organs/mind/data/assembly.json。
 
@@ -217,6 +222,9 @@ NO_SEGMENT = "这一段没有别的发言"          # 段空着 / 没给时这�
 SEGMENT_LINE = "%s：%s"                    # 段里一行的样子：谁 + 说了什么（没有项目符号，与 recent 一眼分开）
 SEGMENT_KEYS = ("speaker", "text")         # 段里一条记录的两个键（两种形状：对象，或二元组）
 SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可以更小，不许更大（这节只有一句「在哪儿说」）
+SOUL_KEY = "soul"                         # 魂那一节在 order / sections 里的键：只有它非带 notice 不可
+SOUL_NOTICE_HINT = ("魂六件是她写下的底子，不是台词：原文照抄进提示词，她就会当台词念出来，"
+                    "所以段首那句说的是「别照着念」")   # 数据缺这句话时点名用的一句解释
 CALLER_KEY = "caller"                     # 「这一轮是谁」在 order / sections 里的键
 CALLER_SHAPES = ("known", "unknown", "missing")   # 「这一轮是谁」三种形状：数据里一句都不许缺
 # 名片上「关系 / 称呼 / 昵称」三类各看哪几栏：键名是名片的结构，不是文案，所以不进 assembly.json。
@@ -305,6 +313,16 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
             raise ValueError("sections.%s 的 cap 要正整数：%s" % (key, where))
         checked[key] = {"label": label.strip(), "cap": cap}
+        # 段首那句说明（现在只有魂那一节有）：写了就必须是一句能读的话，空串等于没写。
+        notice = spec.get("notice")
+        if notice is not None:
+            if not isinstance(notice, str) or not notice.strip():
+                raise ValueError("sections.%s.notice 要一句非空的话（空串等于没这句说明）：%s"
+                                 % (key, where))
+            checked[key]["notice"] = notice.strip()
+    if SOUL_KEY in checked and "notice" not in checked[SOUL_KEY]:
+        raise ValueError("sections.%s.notice 缺这一格（段首那句「别照着念」）：%s（%s）"
+                         % (SOUL_KEY, SOUL_NOTICE_HINT, where))
     if "scene" in checked and checked["scene"]["cap"] > SCENE_CAP_MAX:
         raise ValueError("sections.scene.cap 不许超过 %d（场合只是一句话）：现在是 %d：%s"
                          % (SCENE_CAP_MAX, checked["scene"]["cap"], where))
@@ -1169,7 +1187,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         if key in (DRAWER_KEY, DRAWER_ALWAYS_KEY) and not body:
             continue
         clipped = body if len(body) <= spec["cap"] else body[:spec["cap"]]
-        blocks.append("[%s]\n%s" % (spec["label"], clipped))
+        blocks.append("[%s]\n%s%s" % (spec["label"], _notice_head(spec), clipped))
         row = {"key": key, "chars": len(clipped), "cap": spec["cap"]}
         if key == DRAWER_KEY:
             row["count"] = drawer_read["count"]      # 这一轮真放进几篇（页面照它显示）
@@ -1359,6 +1377,17 @@ def _segment_text(rows: List[Tuple[str, str]], conf: Mapping[str, Any],
         return notice[:spec["cap"]]
     head = body if len(body) <= room else body[:room]
     return head + "\n" + notice
+
+
+def _notice_head(spec: Mapping[str, Any]) -> str:
+    """段首那句说明（接在标签之后、正文之前）：有就带一个换行，没有就是空串。
+
+    魂那一段现在带着一句「这些是你的底子，不是要背出来的话——别照着念。」：魂六件是人手写给
+    她的底子，整段照抄进提示词时读起来与台词一样，她会照着念出来。这句话是**说明**，不是内容，
+    所以不占 sections.soul.cap 的字数（cap 量的仍是正文），也不进任何账。
+    """
+    notice = spec.get("notice")
+    return "%s%s" % (notice, LINE_JOIN) if notice else ""
 
 
 def _segment_notice(rows: List[Tuple[str, str]], conf: Mapping[str, Any],
