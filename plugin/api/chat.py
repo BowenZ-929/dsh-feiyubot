@@ -186,7 +186,7 @@ from organs.mouth import action_note, address, audit, borrow, cooldown, drops
 from organs.mouth import gate, refusal, repeat, warehouse
 from organs.mouth.pace import fill as pace_fill          # 节奏：与装配同一个函数，不另造一套
 from organs.mouth.split import split as split_text       # 切分：包里的 split 是函数名，这里直接点模块
-from organs.mouth import kin as kin_rules               # 认亲：谁是主人由号定，不由话定（判据在 data/kin.json）
+from organs.mouth import kin as kin_rules               # 认亲：认不认这个号由人名录定（判据在 data/kin.json）
 from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
 from organs.mouth import rewrite as rewrite_rules      # 参数名就叫 rewrite，模块用别名进来免得被挡住
 from organs.mouth import style as style_rules          # 目标长度与句末标点：判据在 data/style_target.json
@@ -245,7 +245,10 @@ GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（�
              "skipped 是「对方要她重复／引用、这一关只记账没判废」，此时 hit 照旧带着）、"
              "action_status 是动作括注、repeat_status 是内容重复（skipped-by-request 是「对方要她"
              "再说一遍、这一关只记账没判废」）、quota_status 是动作配额、claim_status 是冒充做过"
-             "（not-checked 是这一轮没拿到动作账、这一关没跑）、fatal_status 是红线这一关"
+             "（not-checked 是这一轮没拿到动作账、这一关没跑）、kin_status 是认亲（not-checked 是"
+             "这一轮没拿到人名录读数、这一关没跑，**不是「判过不是认亲」**）、"
+             "fabricate_status 是编记忆（not-checked 同理，这一轮没拿到想起来的记忆）、"
+             "fatal_status 是红线这一关"
              "（not-checked 都是这一关没跑，不是通过）、fatal 是踩上的那一类红线（没踩就是 null），"
              "以及 kept_after_rewrite 是「改过一次还是命中、按原话发了」（true 时这一泡没被丢掉），"
              "加上 rewrite 是这一泡的重写读数"
@@ -340,12 +343,15 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     # 闸要的「她最近几条回话」在答题之前读：answer() 最后一步会把这一轮追加进同一份账，
     # 之后再读就把本轮当成了历史——她这句会跟自己比一次，于是每一句都成复读。
     history = _her_recent()
+    # 认亲那一格同样要在答题之前读：answer() 最后一步会把他这句话投进脑，而 ingest 会顺手给他
+    # 建一张卡——读晚了这一关永远看到「他在册」，于是对谁都放行，那不是判据，是自己把自己的读数
+    # 改了。所以「这一轮他在不在人名录里」问的是**这一轮开口之前**的名录。
+    known = _known(brain, _who(body))
     # 冷却先问一次心：在冷却里就整轮短路，模型一次都不调（见 _cooled_payload 的说明）。
     cooled = _cooling_state(text)
     if cooled["cooling"]:
         return 200, _cooled_payload(cooled, text, store, history, _who(body),
-                                    scope=scene["scope"],
-                                    known=_known(brain, _who(body)))
+                                    scope=scene["scope"], known=known)
     try:
         # mode 原样交给装配：passive 是人发消息触发的，proactive 是她自己开口（由头在 seed）。
         # 装配按 seed 给不给决定走哪条路（prompt.proactive / INTENT_PROACTIVE / 只有她那句），
@@ -367,7 +373,7 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     _address_round(payload, text, brain, _who(body))
     boundary = _audience_round(payload, text, _who(body), scene["scope"], sent=sent)
     _gate_round(payload, text, store, history, scope=scene["scope"], who=_who(body),
-                known=_known(brain, _who(body)))
+                known=known)
     # 八股闸排在出站闸之后，它也可能把这一轮的话整句吞掉：门说发、闸吞了，对方还是没听到。
     # 所以「出没出门」到这一步才定（_went_out 是唯一那处判据），边界话那条的投递也搬到这里。
     judged = boundary["judged"]
@@ -1046,7 +1052,7 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     六件事：
 
     - **逐泡过闸**：每一泡各调一次 gate.enforce（条款 → 动作配额 → 动作括注 → 内容重复 →
-      冒充做过 → 复述审计）。注入的
+      冒充做过 → 认亲 → 编记忆 → 复述审计）。注入的
       原文、最近几轮、判据表都是同一份——同一轮里的几泡是同一句话切出来的，凭什么两样看待。
     - **命中先改一次，不再命中即弃**（这一轮接上的）：命中之后把「她的原话 + 命中的那一条 + 一句
       人话原因」交给模型改一次（走 answer() 同一个 transport，带 data/rewrite.json 的 budget_ms
@@ -1064,6 +1070,9 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
       照旧 dropped（parts[*].fatal 里看得见是哪一类）。
     - **真的落到返回体**：pass 原样留着；rewritten 换 Verdict.text（gap 沿用那一泡的）；dropped 从
       chunks 里删掉。**一处都没被改时不碰 chunks**——不接闸时逐字相同，这条是被测过的。
+    - **改形排在闸之后**：留下来的那几泡再按数据修「形」（逐泡目标长度、整段句末「。」比例，
+      见 _style_round）。顺序不能反：闸要判的是**她说的那句话**，先改形再判，照抄审计比的注入
+      原文、内容重复比的最近几轮就都对不上。改形只动长短与句末标点，不动她说了什么。
     - **重算 send_at**：删掉几泡之后，剩下的按原来的 gap_before 累加重排，不留洞（小数位与
       pace.fill 同一个数，取自 policy 的 pace 段）。
     - **全被弃掉**：chunks=[]、reply=""，gate.decision 记 dropped；每一泡弃言由 sink 记一行账。
@@ -1079,6 +1088,14 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     （闸记 claim_status=not-checked）。它原来那句「我这就去画」改不掉时，闸**删掉那一句**、剩下的
     正文接着过其余判据，于是这一泡是 rewritten（salvaged=true、text 是删剩下的正文），删完只剩
     空白才是 dropped——谎只长在那一句里，别的话照发。
+
+    认亲（这一轮加的）同一条路：known 是**一份人名录读数**（不在册 / 在册 + relation 档位 / 判不了就
+    None），原样交给闸，判没判看 parts[*].kin_status。**「在册」不是「熟」**：够不够熟由 data/kin.json
+    的 known_by 判（现在 relation ≥ 3，档位与档界全在 address_table.json 的 tiers 里），所以刚被 ingest
+    建档的陌生号第二轮也照样判。**仍然在 answer() 之前读**：读的是「这一轮开口之前」的名录，不依赖
+    ingest 的副作用，两轮之间口径一致（答题那一步会把他这句话投进脑，顺手就把他建了档）。
+    命中之后走的是「救人」那一族——改一次还不行就把那一处称呼 / 那一句记忆换成数据里的中性说法，
+    不是整条丢。
 
     gate 节既不新增顶层键，也不丢既有键：decision / hit / drops 是 answer() 给的那一份（页面与既有
     断言都在读它），这里追加 parts / in_parts / out_parts / blocked / quota / note；被闸改过时
@@ -1117,26 +1134,10 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
         drops.record(trace, clause_id, reason, datetime.now())
         recorded.append(clause_id)
 
-    # 长度与句末标点先修一遍形，再逐泡过闸：闸判的是**要发出去的那些字**，不是修之前的。
-    # 这一层读不动（数据坏/缺件）不吞掉这一轮：话照发，回包如实记 not-checked——它是目标，
-    # 不是红线；「没跑」与「合格」照样分得开。
-    try:
-        shaped = _style_round(chunks, payload=payload, books=books, assembled=assembled,
-                              scope=scope, who=who)
-    except (style_rules.StyleBroken, warehouse.WarehouseMiss,
-            warehouse.WarehouseBroken, OSError) as exc:
-        LOG.warning("POST /chat 长度/标点这一层没跑成：%s", exc)
-        shaped = {"chunks": chunks, "rows": [None for _ in chunks], "changed": False,
-                  "section": {"status": STYLE_NOT_CHECKED,
-                              "note": "长度与句末标点这一层没跑（%s：%s）：话照发，"
-                                      "但这是「改不了」，不是「合格」。" % (type(exc).__name__, exc)}}
-    chunks = shaped["chunks"]
-    section["style"] = shaped["section"]
-
     parts: List[Dict[str, Any]] = []
     kept: List[Dict[str, Any]] = []
     blocked: List[str] = []
-    changed = bool(shaped["changed"])
+    changed = False
     for index, chunk in enumerate(chunks):
         rewritten = _outcome()
         rewrite_one = (_rewriter(chunk["text"], asked=asked, books=books, inject=inject,
@@ -1167,7 +1168,7 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
                       "fatal_status": verdict.fatal_status,
                       "kept_after_rewrite": bool(verdict.kept_after_rewrite),
                       "rewrite": rewritten,
-                      "style": shaped["rows"][index]})
+                      "style": None})
         if verdict.decision == "pass":
             kept.append({"text": chunk["text"], "gap_before": chunk["gap_before"]})
             continue
@@ -1176,6 +1177,38 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
             blocked.append(verdict.hits[-1].clause_id if verdict.hits else "")
             continue
         kept.append({"text": verdict.text, "gap_before": chunk["gap_before"]})
+
+    # 长度与句末标点排在闸**之后**：闸判的必须是她说的那句话——先改形再判，闸看到的就是另一句
+    # 了（照抄审计比的是注入原文、内容重复比的是最近几轮，字形一改这两关都对不上；词组命中被
+    # 改短之后连命中都没有了）。反过来，改形只动长短与句末标点，落在闸之后才不会被自己改过的
+    # 字骗过。这一层读不动（数据坏 / 缺件）不吞掉这一轮：话照发，回包如实记 not-checked。
+    if kept:
+        try:
+            shaped = _style_round(kept, payload=payload, books=books, assembled=assembled,
+                                  scope=scope, who=who)
+        except (style_rules.StyleBroken, warehouse.WarehouseMiss,
+                warehouse.WarehouseBroken, OSError) as exc:
+            LOG.warning("POST /chat 长度/标点这一层没跑成：%s", exc)
+            shaped = {"chunks": kept, "rows": [None for _ in kept], "changed": False,
+                      "section": {"status": STYLE_NOT_CHECKED,
+                                  "note": "长度与句末标点这一层没跑（%s：%s）：话照发，"
+                                          "但这是「改不了」，不是「合格」。"
+                                          % (type(exc).__name__, exc)}}
+    else:
+        shaped = {"chunks": [], "rows": [], "changed": False,
+                  "section": {"status": STYLE_NOT_CHECKED,
+                              "note": "这一轮一句都没留下来（闸全弃了）：没有字可判长短与句末标点。"}}
+    survived = [one for one in parts if one["decision"] != "dropped"]
+    rows = list(shaped["rows"] or [])
+    for row, part in zip(rows, survived):
+        part["style"] = row
+    if len(rows) != len(survived):
+        section["style"] = dict(shaped["section"], resplit=True)
+    else:
+        section["style"] = shaped["section"]
+    if shaped["changed"]:
+        changed = True
+    kept = [{"text": one["text"], "gap_before": one["gap_before"]} for one in shaped["chunks"]]
 
     section.update({"parts": parts, "out_parts": len(kept), "blocked": _unique(blocked)})
     if changed:
@@ -1957,22 +1990,31 @@ def _who(body: Any) -> str:
     return who if brain_model.valid_who(who) else ""
 
 
-def _known(brain: Any, who: str) -> Optional[bool]:
-    """这一轮这个号在不在人名录里：交给闸的认亲那一关，**判不了就说判不了**。
+def _known(brain: Any, who: str) -> Optional[Dict[str, Any]]:
+    """这一轮的人名录读数（在不在册 + 够不够熟）：交给闸的认亲那一关，**判不了就说判不了**。
 
-    三种形状，各是一种结论，一个都不许含糊：
-    - True：人名录里有这张卡——熟人，他爱怎么叫就怎么叫，认亲那一关一律放行；
-    - False：名录读得动、里面没有这个号——陌生号，回复里出现只有熟人才能触发的称呼或记忆复述就要判；
-    - None：**判不了**。who 为空（认不出是谁）、脑没接、或脑自己坏了都算这一种：这一关不跑，
-      闸记 kin_status="not-checked"，不判、也不声称判过。猜成 True 这一关就永远放行，猜成 False
-      就凭一个读错的格子把熟人当生人拦下来——两种猜法都比「如实说没查」难查。
+    三种结论，一个都不许含糊：
+    - {"in_book": False}：名录读得动、里面没有这个号——陌生号，回复里出现只有熟人才能触发的称呼
+      或记忆复述就要判；
+    - {"in_book": True, "relation": n, "tier": …}：在册。**在册不等于熟**：answer() 会把他这句话
+      ingest 建档，所以「查得到他」说一句话就成立；够不够熟由闸按 data/kin.json 的 known_by 判
+      （现在要 relation ≥ 3，那一档叫什么名字、档界在哪，全在 address_table.json 的 tiers 里）。
+      这里的 relation / tier 就是称呼那一关现算出来的那份读数（address.resolve），**不另造一套判定**；
+    - None：**判不了**。who 为空（认不出是谁）、脑没接、称呼表读不动、或脑自己坏了都算这一种：
+      这一关不跑，闸记 kin_status="not-checked"，不判、也不声称判过。猜成「在册」这一关就永远放行，
+      猜成「不在册」就凭一个读错的格子把熟人当生人拦下来——两种猜法都比「如实说没查」难查。
     """
     if brain is None or not who:
         return None
     try:
-        return brain.lookup(who) is not None
-    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
-        LOG.warning("POST /chat 查这个号在不在人名录里没成（who=%s）：%s", who, exc)
+        person = brain.lookup(who)
+        if not person:
+            return {"in_book": False}
+        called = address.resolve(person, address.load_table(), who=who)
+        return {"in_book": True, "relation": called.relation, "tier": called.tier}
+    except (address.PolicyMiss, warehouse.WarehouseMiss, warehouse.WarehouseBroken,
+            OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        LOG.warning("POST /chat 查这一轮认不认得这个号没成（who=%s）：%s", who, exc)
         return None
 
 

@@ -80,6 +80,17 @@ Verdict.action_status 上（"ok" 真的判过，"not-checked" 这一轮没给表
 挂在 Verdict.repeat_status 上（"ok" 真的比过，"not-checked" 这一轮没拿到），照 action_status 那个
 写法。闸不记账、不取时钟：谁记着她说过什么，是调用方的事。
 
+**冒充做过是第五道判据（这一轮加的）**：她说了这一轮没做过的动作，就是演一个做完的样子。判据与
+词表全在 organs/mouth/claim.py 与 data/claim.json——魂那条红线（bounds.no-fake-doing，
+enforced_by=mouth·语义复核）说的就是这件事，闸这边接的是它：回复里出现「人称 +（前缀）+
+（填充）+ 动作类动词 +（后缀）」这种「说成做过的」写法，而这一轮的动作账里对不上这个动词，就算
+命中（词表与前后缀全在 data/claim.json，闸里一个词都不写）。顺序排在
+内容重复之后、复述审计之前：前两关问「这句话是不是又是我说的、说的事是不是抄来的」，这一关问
+「这件事我到底做没做过」，最后才是审计。actions 是调用方给的动作账，**None 就是拿不到账**——
+判不了就不判、也不声称判过，判没判挂在 Verdict.claim_status 上；**空清单 [] 是给了账、账上空着**，
+那就该判冒充。这条差别是这一关的命门：把「没给账」当成「没做过」，会把她真做过的事当成谎话拦下
+来；把「给了空账」当成「判不了」，这一关就白设了。**命中之后改不动就删那一句，不整条丢**（见下）。
+
 **对方明说要她重复时，这一关只记账、不判废（这一轮加的）。** asked 是对方这一轮说的那句话，
 由调用方原样传下来、交给 repeat 判「是不是在要她再说一遍」；撞上重复而对方确实要她重复时，
 repeat 给的不是命中而是一条 RepeatSkip：**decision 保持 pass、text 一个字不改**，但闸要替这一关
@@ -123,15 +134,31 @@ category 是数据里那一类，reason 里带着数据里那个记号（fatal-<
 动作」时，她根本没资格写动作，那就不必先问「动作里有没有编场景」。判据与说法全在
 organs/mouth/quota.py 与 data/quota.json；quota 是调用方给的配额写法（forbid / allow），**None 就是
 装配没标**——没标不是 allow，判没判挂在 Verdict.quota_status 上。顺序因此钉成：条款 → 动作配额 →
-动作括注 → 内容重复 → 复述审计。**顺序不是风格问题**：验收句「（一段尾巴动作，里面带着我们没给
+动作括注 → 内容重复 → 冒充做过 → 复述审计。**顺序不是风格问题**：验收句「（一段尾巴动作，里面带着我们没给
 过的场景词）可爱归可爱，那也不是胖。」两关都踩——动作括注先判，这句就整条丢了，走不到配额兜底；
 配额先判，她至少还能把正文留下（验收句原文收在 organs/mouth/quota.py 与 data/quota.json 的说明里，
 闸里一个字都不抄：抄进来就又是一处真源）。
 
-**配额命中是唯一一条「不丢整句」的路。** 其它判据第二次命中照旧弃掉整句（旧行为一个字节都不变）；
-配额命中时第二次（以及没给重写器时）改为 quota.strip() 把动作行剥掉、正文接着往下判（其余判据
-照跑），剥完只剩空白才 decision="dropped"。救回来那一句挂在 Verdict.salvaged 上，账本照样记一笔
-（sink 收的是配额那条 clause_id 与剥行那句话），好让人看见「这句本来要丢、靠剥行留下」。
+**配额剥行与冒充做过的删句是两条「不丢整句」的路（后者这一轮加的）。** 其它判据第二次命中照旧
+弃掉整句（旧行为一个字节都不变）；配额命中时第二次（以及没给重写器时）改为 quota.strip() 把动作行
+剥掉、正文接着往下判（其余判据照跑），剥完只剩空白才 decision="dropped"。救回来那一句挂在
+Verdict.salvaged 上，账本照样记一笔（sink 收的是配额那条 clause_id 与剥行那句话），好让人看见
+「这句本来要丢、靠剥行留下」。**冒充做过与之同族、但删的是那一句**：谎只长在那一句里，别的话还是
+她要说的话，删句比整条丢下强；删完只剩空白才弃整条，也照样记账。
+
+**编记忆排在冒充做过后面、复述审计前面（这一轮加的）。** 这一关问的是「她引用的那段过去，这一轮到底
+想起来没有」：回复里出现引用标记（你说过／你当时说／我记着／我照做了……）**加上具体细节**（数字、
+时间词、引号里的原话、或一段说得够长的话），而这一轮的 recalled 里没有一条对得上——那就是她编的。
+判据与说法全在 organs/mouth/fabricate.py 与 data/fabricate.json。recalled 是这一轮真的想起来的记忆，
+**None 表示拿不到**——这一关没跑，Verdict.fabricate_status 记 not-checked，不判、也不声称判过；
+**空清单 [] 是给了账、这一轮一条都没想起来**，照判。**态度不是事实**：「我没忘你」「我记得你这人」
+说的是心，豁免表上的那一句整句跳过（宁可放过一句带细节的，也不冤枉一句只是在表心意的）。
+这一条的处置与别的判据不同，与冒充做过的删句同族：命中先交给 rewrite 改一次，**改不了（没给重写器 /
+抛错 / 改回来是空的）或改完还命中，就把这一整泡换成一句实话**（fabricate.fallback_text；那句原话的
+原文在 data/fabricate.json 里，闸一个字都不抄）——**不是整条丢**。说不真话的时候认怂，比在最该回话的那
+一句上沉默强：人那边至少知道该再提一句。救回来的那一泡同样挂在 Verdict.salvaged 上、照样记一笔账。
+**这一条也盖过 keep_unrewritten**：留原话就是留一句编出来的过去。换成实话之后只再过一遍红线——
+那句实话取自数据、不是她说的，别拿条款 / 配额 / 重复 / 冒充四关去卡一句我们自己写的话。
 
 纯函数：入参只有一段文本与一张只读的条款清单，出参只有结构化数据；不碰时钟、不碰随机数、
 不联网、不碰宿主 IO（本文件不 import time / datetime / random），所以能离线预览，也能被单独替换。
@@ -143,6 +170,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import action_note, repeat
+from . import claim as claim_rules         # 参数名就叫 claim（调用方按这个名字传），模块用别名进来免得被挡住
+from . import fabricate as fabricate_rules  # 参数名就叫 fabricate（调用方按这个名字传），同上
+from . import kin as kin_rules               # 参数名就叫 kin（调用方按这个名字传），同上
 from . import quota as quota_rules          # 参数名就叫 quota（调用方按这个名字传），模块用别名进来免得被挡住
 from . import rewrite as rewrite_rules      # 参数名就叫 rewrite（调用方按这个名字传），模块用别名进来免得被挡住
 from .audit import AuditResult, audit as _audit
@@ -201,8 +231,20 @@ class Verdict:
     # 动作配额那一关判没判过：quota.STATUS_OK（装配标了这一轮的配额，forbid 与 allow 都算）或
     # STATUS_NOT_CHECKED（装配没标，quota 是 None）。同理——「没标」不是「标了 allow」。
     quota_status: str = quota_rules.STATUS_NOT_CHECKED
-    # 这一句是不是靠剥行救回来的：配额命中之后剥掉动作行、正文过了其余判据才为真。为真时
-    # decision 是 "rewritten"（剥行也是一种改写），text 是剥完的正文——账本上因此看得见这件事。
+    # 冒充做过那一关判没判过：claim.STATUS_OK（这一轮给了动作账，空账也算给了）或
+    # STATUS_NOT_CHECKED（actions 是 None，拿不到账）。同理——「没给账」不是「没做过」。
+    claim_status: str = claim_rules.STATUS_NOT_CHECKED
+    # 认亲那一关判没判过：kin.STATUS_OK（这一轮拿到了人名录读数，True 与 False 都算）或
+    # STATUS_NOT_CHECKED（known 是 None，没拿到读数）。同理——「没查」不是「查过、是熟人」，
+    # 也不是「查过、是生人」；判不了就不诬陷。
+    kin_status: str = kin_rules.STATUS_NOT_CHECKED
+    # 编记忆那一关判没判过：fabricate.STATUS_OK（这一轮给了 recalled，空清单也算给了）或
+    # STATUS_NOT_CHECKED（recalled 是 None，拿不到这一轮想起来的是什么）。同理——「没给账」不是
+    # 「没编记忆」，两件事必须分得开。
+    fabricate_status: str = fabricate_rules.STATUS_NOT_CHECKED
+    # 这一句是不是靠「救人」那一族救回来的，两条路各救各的：配额命中之后剥掉动作行（quota.strip），
+    # 或冒充做过命中之后删掉那一句（claim.strip_sentence），剩下的正文过了其余判据才为真。为真时
+    # decision 是 "rewritten"（剥行与删句都是一种改写），text 是剥完 / 删完的正文——账本上因此看得见。
     salvaged: bool = False
     # 红线这一关的读数：这一轮踩上红线就是一条 FatalHit（category / tag / matched / reason 全在里面），
     # 面板据此看得见「这句为什么连原话都没留下」。没踩就是 None——**没给表的时候也是 None**，
@@ -301,19 +343,25 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
           repeat_table: Optional[Mapping[str, Any]] = None,
           quota: Any = None,
           asked: str = "",
-          fatal: Any = None) -> Optional[Hit]:
-    """看这段字有没有踩条款、有没有超动作配额、有没有在动作里带场景、有没有在反复念、有没有在复述注入的原文：命中给一条 Hit，否则 None。
+          fatal: Any = None,
+          actions: Any = None,
+          claim: Any = None,
+          recalled: Any = None,
+          fabricate: Any = None,
+          kin: Any = None,
+          known: Any = None) -> Optional[Hit]:
+    """看这段字有没有踩条款、有没有超动作配额、有没有在动作里带场景、有没有在反复念、有没有说这一轮没做过的动作、有没有编一段这一轮没想起来的过去、有没有在复述注入的原文：命中给一条 Hit，否则 None。
 
     **返回的不是布尔。** Hit 里带一句人话原因，原因里含这次命中的那段原文，所以日志、面板、
     复盘都能直接用这句话，不必再翻译一遍。
 
-    顺序钉死：条款 → 动作配额 → 动作括注 → 内容重复 → 复述审计。条款按 clauses 的先后顺序逐条
-    re.search，返回第一条命中的（顺序即优先级）；零宽正则也会命中，那种情况下原因里改说位置，
-    免得出现一对空引号。**动作配额排在动作括注前面，因为「本轮根本没资格写动作」比「动作写得对
-    不对」更早**：验收句是一段行首括注的动作（里面带着没给过的场景词）加上「可爱归可爱，那也不
-    是胖。」，两关都踩——动作括注先判就整条丢了，走不到配额兜底。动作括注与条款一样是「怎么写」
-    的形状判据，所以紧跟其后；内容重复接着判「这句是不是又是我说的」；审计管的是「说的事是不是
-    抄来的」，仍是最后一关。
+    顺序钉死：条款 → 动作配额 → 动作括注 → 内容重复 → 冒充做过 → 编记忆 → 复述审计。条款按 clauses 的
+    先后顺序逐条 re.search，返回第一条命中的（顺序即优先级）；零宽正则也会命中，那种情况下原因里
+    改说位置，免得出现一对空引号。**动作配额排在动作括注前面，因为「本轮根本没资格写动作」比
+    「动作写得对不对」更早**：验收句是一段行首括注的动作（里面带着没给过的场景词）加上「可爱归
+    可爱，那也不是胖。」，两关都踩——动作括注先判就整条丢了，走不到配额兜底。动作括注与条款一样
+    是「怎么写」的形状判据，所以紧跟其后；内容重复接着判「这句是不是又是我说的」；冒充做过问的是
+    「这件事我到底做没做过」；审计管的是「说的事是不是抄来的」，仍是最后一关。
 
     **没给 inject 就整段不跑审计**：没有料可比的审计既不是通过、也不是拦住，而这个返回类型装不下
     第三种状态。要区分 ok 与 audit-unavailable，看 enforce 的 Verdict.audit 或直接调 audit()。
@@ -327,6 +375,21 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
     命中（返回 None：跳过不是命中，这个返回类型装不下它，账与状态由 enforce 记）。
     **fatal 是这一轮的红线表**：给了就跟条款一样当一次命中（而且排在最前面）——红线问的不是
     「怎么写」，是「这一句能不能出去」。没给（None）这一关不跑，判没判看 Verdict.fatal_status。
+    **actions 是这一轮的动作账**：None 表示拿不到账，冒充做过这一关整段不跑（返回 None 不是放行，
+    判没判看 Verdict.claim_status）；给了清单就照实判，**空清单 [] 也算给了**——账上空着就是说这一轮
+    什么都没做，该判冒充。claim 是那一关的判据表，账本形状坏掉由 claim 当场抛 ClaimBroken。
+    **recalled 是这一轮真的想起来的记忆**：None 表示拿不到，编记忆这一关整段不跑（返回 None 不是放行，
+    判没判看 Verdict.fabricate_status）；**空清单 [] 也算给了**——这一轮一条都没想起来，出现「引用标记
+    + 具体细节」就是编的，照判。fabricate 是那一关的判据表。编记忆与冒充做过同族（都问「说的是不是真
+    发生过的」），排在它后面：先说做过没做过，再说记得没记得。
+    **known 是一份人名录读数（两段判），不是布尔**：None 表示这一轮没拿到读数，这一关整段不跑
+    （返回 None 不是放行，判没判看 Verdict.kin_status）；给了读数就在册看 in_book、够不够熟看数据里
+    known_by 那一档（现在 relation ≥ 3）。**在册不等于熟**——answer() 会把他这句话 ingest 建档，
+    「查得到他」说一句话就成立，所以只有在册 *且* 读数到档才放行；刚建档的新号照样照实判。
+    别的形状（True / False / 1 / "true"）由 kin 当场抛 KinBroken：一个布尔说不出「够不够熟」，猜一次
+    等于替调用方把这一关关掉。
+    认亲排在冒充做过后面、编记忆前面：先问「这件事我到底做没做过」，再问「这个人在不在册」，最后问
+    「这段过去是不是编的」；前两关都答「不是」，才轮到「记不记得」。
     """
     prepared, _disabled = _prepared(clauses)
     body = text or ""
@@ -346,6 +409,15 @@ def check(text: str, clauses: Sequence[Mapping[str, Any]],
     repeated, _skip = _dedup(body, recent, repeat_table, wanted)
     if repeated is not None:
         return repeated
+    claimed = _claimed(body, actions, claim)
+    if claimed is not None:
+        return claimed
+    kinned, _evidence = _kin(body, known, kin)
+    if kinned is not None:
+        return kinned
+    invented, _fact = _fabricated(body, recalled, fabricate)
+    if invented is not None:
+        return invented
     return _recited(body, inject, policy, wanted)
 
 
@@ -359,7 +431,13 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             quota: Any = None,
             asked: str = "",
             keep_unrewritten: bool = False,
-            fatal: Any = None) -> Verdict:
+            fatal: Any = None,
+            actions: Any = None,
+            claim: Any = None,
+            recalled: Any = None,
+            fabricate: Any = None,
+            kin: Any = None,
+            known: Any = None) -> Verdict:
     """过闸：命中一次 → 用注入的 rewrite 改一次 → 再 check；还命中就弃掉这句（配额那一条另有兜底）。
 
     rewrite 是调用方注入的 callable（text -> text），本文件没有模型客户端。六种结局：
@@ -368,6 +446,8 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     - 命中但 rewrite 是 None：decision="dropped"、text=""——改不了就不许发，不许 fail-open。
     - rewrite 抛错、或改回来是空的：同样 dropped，并把「重写失败」这件事本身写进 reason。
     - 改完不再命中：decision="rewritten"，text 是改写后的那句。
+    - **冒充做过命中、改不动或二次仍命中：删掉那一句**（decision="rewritten"、salvaged=True、text 是
+      删剩下的正文）；删完只剩空白才 decision="dropped"。
     - **改完还命中（且不是红线）：decision="pass"，text 是进门那句原话**，hits 两条都留着，
       kept_after_rewrite=True，sink 记一行 reason 带「<通道>-after-rewrite」的账。为什么不再丢：
       **在最该回答的那一句上沉默，比「说话带点毛病」糟得多**——她改了、也尽力了，这时候把整泡
@@ -405,6 +485,43 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     一轮拿到了历史、真的比过，"not-checked" 表示 recent 是 None、这一关没跑；**没比不是没重复**，
     两者同样必须分得开。
 
+    冒充做过（这一轮加的）接在内容重复后面、复述审计前面，判据与词表全在 organs/mouth/claim.py 与
+    data/claim.json（魂那条红线 bounds.no-fake-doing 的出口）。actions 是这一轮的动作账，**None
+    表示拿不到账**——这一关没跑，Verdict.claim_status 记 not-checked，不判冒充、也不声称判过；
+    **空清单 [] 是给了账，账上空着就说这一轮什么都没做，该判冒充**。这一条的处置与别的判据不同：
+    命中之后照样先交给 rewrite 改一次，**改不了（没给重写器 / 抛错 / 改回来是空的）或改完还命中，
+    就删掉那一句**（claim.strip_sentence，只删那一句连同它自己的句末标点），剩下的正文接着过其余
+    判据（条款 → 配额 → 动作括注 → 重复 → 冒充 → 审计，命中哪一条就照旧弃）；删完只剩空白才
+    decision="dropped"。救回来的那一句挂在 Verdict.salvaged 上（与配额剥行同族），账本照样记一笔
+    （sink 收的是冒充做过那条 clause_id 与删句那句话）——**谎只长在那一句里，别的话还是她要说的话**，
+    为一句删掉整条，比删句更糟。
+    **这一条盖过 keep_unrewritten**：留原话就是留一句谎，所以改不动时选的是删句，不是留原话。
+
+    编记忆（这一轮加的）接在冒充做过后面、复述审计前面：判据与说法全在 organs/mouth/fabricate.py 与
+    data/fabricate.json。recalled 是这一轮真的想起来的记忆——**None 表示拿不到**，这一关没跑，
+    Verdict.fabricate_status 记 not-checked，不判也不声称判过；**空清单 [] 是给了账、这一轮一条都
+    没想起来**，照判。处置与冒充做过同族、但换的不是「删一句」而是「整泡换成一句实话」：命中之后照样
+    先交给 rewrite 改一次，**改不了（没给重写器 / 抛错 / 改回来是空的）或改完还命中，就把这一泡换成
+    fabricate.fallback_text**（那句实话的原文在 data/fabricate.json 里，闸不抄），decision="rewritten"、
+    salvaged=True、text 是那句实话，hits 两条都留着，账本记一笔——**不是整条丢**：说不真话的时候认怂，
+    比在最该回话的那一句上沉默强，人那边至少知道该再提一句。**这一条同样盖过 keep_unrewritten**：
+    留原话就是留一段编出来的过去。
+    **换成实话之后只再过一遍红线**：那句实话取自数据、不是她说的，别拿条款 / 配额 / 动作括注 / 内容
+    重复 / 冒充做过 / 审计去卡一句我们自己写的话——拿自己的话把自己的救场话拦掉，等于换了个法子变哑。
+
+    认亲（这一轮加的）排在冒充做过后面、编记忆前面：判据与词表全在 organs/mouth/kin.py 与 data/kin.json
+    （魂那条红线 bounds.no-claim-kin 的出口：认不认这个号由人名录定，不由回复里的字定）。known 是一份
+    人名录读数，**两段判**：在册看 in_book、够不够熟看数据里 known_by 那一档（现在 relation ≥ 3，
+    档位阶梯只有 address_table.json 那一份）。**只有在册且读数到档才放行**，他爱怎么叫就怎么叫；
+    不在册、或刚被 ingest 建档还没爬到那一档（也就是「说过一句话」的陌生人，第二轮起也一样），回复里
+    出现只有熟人才能触发的称呼或记忆复述就照实判。**None 表示没拿到人名录读数**，这一关没跑，
+    Verdict.kin_status 记 not-checked，不判也不声称判过（判不了就不诬陷）。处置与冒充做过同族、但换的
+    不是「删一句」也不是「整泡换」：命中之后照样先交给 rewrite 改一次，**改不了（没给重写器 / 抛错 /
+    改回来是空的）或改完还命中，就把命中的那一处中性化**（kin.neutralize：称呼换成数据里的中性词、
+    记忆那一句换成数据里的实话，再补一句稳妥话术），decision="rewritten"、salvaged=True、text 是改完
+    的正文——**认错人不必把整泡丢掉**：别的句子还是她要说的话。**这一条同样盖过 keep_unrewritten**：
+    留原话就是留一句替他认亲的话。改完只剩空白才 decision="dropped"。
+
     asked 是对方这一轮说的那句话：闸拿 repeat.requested(asked, 表) 算一次，把同一个结论交给内容
     重复与复述审计两关。他明说要她重复时，撞上的那一关只记一笔账（clause_id 与 reason 都取自
     数据，各带自己的 skip 记号：skipped-by-request / audit-skipped-by-request），decision 保持
@@ -437,11 +554,17 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     quoted = _quota(body, quota)
     noted = _noted(body, action)
     repeated, skipped = _dedup(body, recent, repeat_table, wanted)
+    claimed = _claimed(body, actions, claim)
+    kinned, kin_evidence = _kin(body, known, kin)
+    invented, invented_fact = _fabricated(body, recalled, fabricate)
     judged = action_note.STATUS_OK if _has_action(action) else action_note.STATUS_NOT_CHECKED
     deduped = _dedup_status(recent, skipped)
     quotaed = quota_rules.STATUS_OK if _has_quota(quota) else quota_rules.STATUS_NOT_CHECKED
+    ledgered = claim_rules.STATUS_OK if _has_actions(actions) else claim_rules.STATUS_NOT_CHECKED
     base = dict(disabled=disabled, audit=seen, action_status=judged,
-                repeat_status=deduped, quota_status=quotaed,
+                repeat_status=deduped, quota_status=quotaed, claim_status=ledgered,
+                kin_status=_kin_status(known),
+                fabricate_status=_fabricate_status(recalled),
                 fatal_status=_fatal_reading(dead, fatal))
     if dead is not None:
         # 红线：不重写、不留原话，进门这一遍就丢掉（改一次也不能保证它不出去）
@@ -473,8 +596,14 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                     **dict(base, fatal_status=FATAL_HIT)), sink)
         again_repeated, again_skipped = _dedup(bodies, recent, repeat_table, wanted)
         again_seen = _audit(bodies, inject, policy, requested=wanted)
+        again_kinned, again_evidence = _kin(bodies, known, kin)
+        again_invented, again_fact = _fabricated(bodies, recalled, fabricate)
         after = _first(_scan(prepared, bodies), _noted(bodies, action), again_repeated,
-                       _from_audit(again_seen))
+                       again_kinned, again_invented, _from_audit(again_seen))
+        if after is not None and after is again_invented:
+            return _confess(list(hits) + [after], again_fact)   # 剥出来的正文还在编：换成实话
+        if after is not None and after is again_kinned:
+            return _neutralize_kin(bodies, list(hits) + [after], again_evidence)
         if after is not None:
             return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
                                     reason=quota_rules.leftover_reason(after.clause_id,
@@ -485,7 +614,146 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
         return Verdict(text=bodies, decision="rewritten", hits=list(hits), reason=kept,
                        salvaged=True, **base)
 
-    first = _first(found, quoted, noted, repeated, _from_audit(seen))
+    def _strip_claim(source: str, hits: List[Hit]) -> Verdict:
+        """冒充做过命中之后：只删那一句，剩下的话接着往下判；删完只剩空白才弃整条。
+
+        为什么删句而不是整条丢：这一关判的是「这一句说了没做过的事」，谎只长在那一句里——别的话
+        还是她要说的话，为一句谎把整条吞掉，等于在最该回答的那一句上沉默。删句与配额剥行同族
+        （两块都是「救人」的分支，被救回来的那一句都挂在 Verdict.salvaged 上、都记一笔账），
+        差别只在删什么：配额剥的是动作行，这一关删的是那一整句。
+
+        **删过不等于放行**：剩下的正文要照原样再过一遍其余判据（条款 → 配额 → 动作括注 → 重复 →
+        冒充做过 → 审计），命中哪一条就照旧弃掉；剩下的正文里再有一句冒充，就接着删那一句——
+        递归的深度由句数封顶，删一句少一句。删完只剩空白时没有正文可发，照样弃掉。
+
+        那一句取不出来（strip_sentence 一个字都没删）也弃掉：拿不准删没删干净，就不许把一句谎
+        当「处理过了」发出去。救回来的那一笔照样记进 sink——账本上要看得见「本来要弃、被删句
+        留下」，不然后人只看到一句没被弃的话，猜不出闸动过手。
+        """
+        rest, removed = claim_rules.strip_sentence(source, hits[-1], claim)
+        if not removed:
+            return _dropped(Verdict(text="", decision="dropped", hits=list(hits),
+                                    reason=claim_rules.leftover_reason(hits[-1].clause_id,
+                                                                      hits[-1].matched, claim),
+                                    **base), sink)
+        if not rest.strip():
+            return _dropped(Verdict(text="", decision="dropped", hits=list(hits),
+                                    reason=claim_rules.blank_reason(removed, claim), **base), sink)
+        kept = claim_rules.strip_reason(removed, claim)
+        dead_rest = _fatal(rest, fatal)                # 删掉一句谎也救不回一句带手机号的话
+        if dead_rest is not None:
+            return _dropped(Verdict(text="", decision="dropped",
+                                    hits=list(hits) + [_from_fatal(dead_rest)],
+                                    reason=dead_rest.reason, fatal=dead_rest,
+                                    **dict(base, fatal_status=FATAL_HIT)), sink)
+        again_repeated, again_skipped = _dedup(rest, recent, repeat_table, wanted)
+        again_seen = _audit(rest, inject, policy, requested=wanted)
+        again_claimed = _claimed(rest, actions, claim)
+        again_kinned, again_evidence = _kin(rest, known, kin)
+        again_invented, again_fact = _fabricated(rest, recalled, fabricate)
+        after = _first(_scan(prepared, rest), _quota(rest, quota), _noted(rest, action),
+                       again_repeated, again_claimed, again_kinned, again_invented,
+                       _from_audit(again_seen))
+        if after is None:
+            if sink is not None:
+                sink(hits[-1].clause_id, kept)
+            _note(sink, _skip_rows(again_skipped, again_seen))
+            return Verdict(text=rest, decision="rewritten", hits=list(hits), reason=kept,
+                           salvaged=True, **base)
+        if after is not None and after is again_invented:
+            return _confess(list(hits) + [after], again_fact)   # 删剩的正文还在编：换成实话
+        if again_claimed is not None and after is again_claimed:
+            return _strip_claim(rest, list(hits) + [after])     # 剩下的正文还有一句冒充：接着删
+        if again_kinned is not None and after is again_kinned:
+            return _neutralize_kin(rest, list(hits) + [after], again_evidence)
+        return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
+                                reason=claim_rules.leftover_reason(after.clause_id, after.matched,
+                                                                   claim),
+                                **base), sink)
+
+    def _confess(hits: List[Hit], fact: Any) -> Verdict:
+        """编记忆命中之后：把这一整泡换成那句实话，不是整条丢；换过不等于放行，红线照样先判。
+
+        为什么换、而不是删句或丢空：这一关判的是「她引用了一段没发生过的过去」——**编造长在整泡的
+        前提上**，删掉哪一句都可能剩下半截照样在替自己编（「是周三上午吧？」删了前半句就只剩一个
+        反问）。所以处置与配额剥行、冒充做过删句不同：**整泡换成 data 里那句实话**（fallback_text）。
+        这一格与它们同族的地方在于——都是「救人」的分支：救回来的那一泡挂在 Verdict.salvaged 上、
+        都一样记一笔账（否则账本上只看到一句没被弃的话，猜不出闸动过手）。
+        **换上去的那句只再过一遍红线**：那句实话取自数据、不是她说的，拿条款 / 配额 / 动作括注 /
+        内容重复 / 冒充做过 / 审计去卡一句我们自己写的话，等于用自己的规矩把自己的救场话拦掉——
+        那就又变哑了。红线例外：一句带手机号 / 骂人的话，换成实话也不许发出去。
+        """
+        honest = fabricate_rules.fallback_text(fabricate)
+        why = fabricate_rules.fallback_reason(fact, fabricate)
+        dead_honest = _fatal(honest, fatal)      # 换成实话也救不回一句带手机号的话
+        if dead_honest is not None:
+            return _dropped(Verdict(text="", decision="dropped",
+                                    hits=list(hits) + [_from_fatal(dead_honest)],
+                                    reason=dead_honest.reason, fatal=dead_honest,
+                                    **dict(base, fatal_status=FATAL_HIT)), sink)
+        if sink is not None:
+            sink(hits[-1].clause_id, why)
+        return Verdict(text=honest, decision="rewritten", hits=list(hits), reason=why,
+                       salvaged=True, **base)
+
+    def _neutralize_kin(source: str, hits: List[Hit], evidence: Any) -> Verdict:
+        """认亲命中之后：把命中的那一处换成中性说法，剩下的话接着往下判；换完只剩空白才弃整条。
+
+        为什么中性化、而不是删句或整泡换：认亲错长在「对谁的称呼 / 谁的记忆」上，不在整句话上——
+        叫错了人，不该把整泡吞掉（那是在最该回话的那一句上沉默），也不该删掉那一句（删完她连招呼
+        都没打）。所以处置是：称呼类只换那一处称呼、记忆类只换那一句，别的句子一个字不动，再补一句
+        数据里的稳妥话术；救回来的这一泡挂在 Verdict.salvaged 上（与配额剥行、冒充删句同族），
+        账本照样记一笔——**不然后人只看到一句没被弃的话，猜不出闸动过手**。
+
+        **换过不等于放行**：剩下的正文要照原样再过一遍其余判据（条款 → 配额 → 动作括注 → 重复 →
+        冒充做过 → 认亲 → 编记忆 → 审计），命中哪一条就照旧弃掉；剩下的正文里还有一处认亲，就接着
+        换那一处——递归的深度由命中的处数封顶，换一处少一处。
+
+        那一处换不出来（neutralize 一个字都没改）也弃掉：拿不准换没换，就不许把一句认亲的话当
+        「处理过了」发出去。**这一条盖过 keep_unrewritten**：留原话就是留一句替他认亲的话。
+        """
+        rest, changed = kin_rules.neutralize(source, evidence, kin)
+        if not changed:
+            return _dropped(Verdict(text="", decision="dropped", hits=list(hits),
+                                    reason=kin_rules.leftover_reason(hits[-1].clause_id,
+                                                                     hits[-1].matched, kin),
+                                    **base), sink)
+        if not rest.strip():
+            return _dropped(Verdict(text="", decision="dropped", hits=list(hits),
+                                    reason=kin_rules.blank_reason(changed, kin), **base), sink)
+        kept = kin_rules.neutralize_reason(changed, kin)
+        dead_rest = _fatal(rest, fatal)          # 换个称呼也救不回一句带手机号的话
+        if dead_rest is not None:
+            return _dropped(Verdict(text="", decision="dropped",
+                                    hits=list(hits) + [_from_fatal(dead_rest)],
+                                    reason=dead_rest.reason, fatal=dead_rest,
+                                    **dict(base, fatal_status=FATAL_HIT)), sink)
+        again_repeated, again_skipped = _dedup(rest, recent, repeat_table, wanted)
+        again_seen = _audit(rest, inject, policy, requested=wanted)
+        again_claimed = _claimed(rest, actions, claim)
+        again_kinned, again_evidence = _kin(rest, known, kin)
+        again_invented, again_fact = _fabricated(rest, recalled, fabricate)
+        after = _first(_scan(prepared, rest), _quota(rest, quota), _noted(rest, action),
+                       again_repeated, again_claimed, again_kinned, again_invented,
+                       _from_audit(again_seen))
+        if after is None:
+            if sink is not None:
+                sink(hits[-1].clause_id, kept)
+            _note(sink, _skip_rows(again_skipped, again_seen))
+            return Verdict(text=rest, decision="rewritten", hits=list(hits), reason=kept,
+                           salvaged=True, **base)
+        if after is not None and after is again_invented:
+            return _confess(list(hits) + [after], again_fact)   # 换过的正文还在编：换成实话
+        if again_claimed is not None and after is again_claimed:
+            return _strip_claim(rest, list(hits) + [after])     # 换过的正文还有一句冒充：接着删
+        if again_kinned is not None and after is again_kinned:
+            return _neutralize_kin(rest, list(hits) + [after], again_evidence)
+        return _dropped(Verdict(text="", decision="dropped", hits=list(hits) + [after],
+                                reason=kin_rules.leftover_reason(after.clause_id, after.matched,
+                                                                 kin),
+                                **base), sink)
+
+    first = _first(found, quoted, noted, repeated, claimed, kinned, invented, _from_audit(seen))
     if first is None:
         reason = "没命中任何条款，这句照发。"
         if _has_action(action):
@@ -494,11 +762,23 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
             reason += repeat.clear_reason(repeat_table)    # 这一关查过了，也要说出来
         if _has_quota(quota):
             reason += quota_rules.clear_reason()           # 配额这一关查过了，同样要说出来
+        if _has_actions(actions):
+            reason += claim_rules.clear_reason(claim)      # 冒充做过这一关查过了，同样要说出来
+        if _has_kin(known):
+            reason += kin_rules.clear_reason(kin)          # 认亲这一关查过了，同样要说出来
+        if _has_recalled(recalled):
+            reason += fabricate_rules.clear_reason(fabricate)   # 编记忆这一关查过了，同样要说出来
         rows = _skip_rows(skipped, seen)
         if rows:
             return _skipped(body, rows, reason, sink, base)  # 这几关本来要判废，按他说的放
         return Verdict(text=body, decision="pass", hits=[], reason=reason, **base)
     if rewrite is None:
+        if first is claimed:
+            return _strip_claim(body, [first])             # 冒充做过自带兜底：没有重写器也删那一句
+        if first is kinned:
+            return _neutralize_kin(body, [first], kin_evidence)   # 认亲自带兜底：没有重写器也中性化
+        if first is invented:
+            return _confess([first], invented_fact)        # 编记忆自带兜底：没有重写器也换成实话
         if first is quoted:
             return _salvage(body, [first])                 # 配额自带兜底：没有重写器也剥
         if keep_unrewritten:
@@ -509,6 +789,12 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     try:
         again = rewrite(body)
     except Exception as exc:          # 重写失败只算「改不了」，出口不许抛错
+        if first is claimed:
+            return _strip_claim(body, [first])             # 改不动一句谎：删那一句，不留原话
+        if first is kinned:
+            return _neutralize_kin(body, [first], kin_evidence)   # 改不动一处认亲：中性化，不留原话
+        if first is invented:
+            return _confess([first], invented_fact)        # 改不动一段编出来的过去：换成实话
         if keep_unrewritten:
             if first is quoted:
                 return _salvage(body, [first])             # 配额命中：剥掉动作行比留原话强
@@ -519,6 +805,12 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                 **base), sink)
     rewritten = again if isinstance(again, str) else ("" if again is None else str(again))
     if not rewritten.strip():
+        if first is claimed:
+            return _strip_claim(body, [first])             # 改回来是空的等于改不了：删那一句
+        if first is kinned:
+            return _neutralize_kin(body, [first], kin_evidence)   # 改回来是空的：中性化
+        if first is invented:
+            return _confess([first], invented_fact)        # 改回来是空的：换成实话
         if keep_unrewritten:
             if first is quoted:
                 return _salvage(body, [first])
@@ -530,11 +822,14 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     requoted = _quota(rewritten, quota)
     again_noted = _noted(rewritten, action)
     again_repeated = _dedup(rewritten, recent, repeat_table, wanted)[0]
+    again_claimed = _claimed(rewritten, actions, claim)
+    again_kinned, again_evidence = _kin(rewritten, known, kin)
     # 改完这句自己过的那一遍同样按他说的放：他要求的是重复，不是允许她抄一段设定出去——
     # 所以这里的审计若给出 skipped，second 就是 None（不弃），但账不再记一笔：发出去的是新稿，
     # 新稿没撞上，跳过的那一句没被发出去，记了就与事实对不上。
     again_seen = _audit(rewritten, inject, policy, requested=wanted)
     again_hit = _from_audit(again_seen)
+    again_invented, again_fact = _fabricated(rewritten, recalled, fabricate)
     # 新稿自己踩上红线：一个新稿都还没判它撞不撞条款，就已经不能发了——所以红线排在 second 前面。
     dead_new = _fatal(rewritten, fatal)
     if dead_new is not None:
@@ -542,10 +837,17 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
                                 hits=[first, _from_fatal(dead_new)],
                                 reason=dead_new.reason, fatal=dead_new,
                                 **dict(base, fatal_status=FATAL_HIT)), sink)
-    second = _first(retried, requoted, again_noted, again_repeated, again_hit)
+    second = _first(retried, requoted, again_noted, again_repeated, again_claimed,
+                    again_kinned, again_invented, again_hit)
     if second is None:
         return Verdict(text=rewritten, decision="rewritten", hits=[first],
                        reason="%s改写一次后不再命中，发改写后的这句。" % _lead(first), **base)
+    if second is again_claimed:
+        return _strip_claim(rewritten, [first, second])     # 改完还谎：删那一句，不丢整条
+    if second is again_invented:
+        return _confess([first, second], again_fact)        # 改完还在编：整泡换成实话，不丢整条
+    if second is again_kinned:
+        return _neutralize_kin(rewritten, [first, second], again_evidence)   # 改完还在认亲：中性化
     if requoted is not None and second is requoted:
         return _salvage(rewritten, [first, second])        # 配额第二次命中：剥行兜底，不丢整句
     # 二次命中且不是红线：留进门那句原话，记一行 <通道>-after-rewrite 的账（不再丢空）。
@@ -620,6 +922,89 @@ def _noted(text: str, action: Any) -> Optional[Hit]:
 def _has_action(action: Any) -> bool:
     """给没给判据表：None 就是没给。别的形状一律当成给了，交给 action_note 去报错并指名缺哪一项。"""
     return action is not None
+
+
+def _claimed(text: str, actions: Any, claim: Any) -> Optional[Hit]:
+    """冒充做过这一关：说了这一轮没做过的动作就返回一条 Hit；没给动作账（None）就整段不跑。
+
+    clause_id 与 kind 都取自判据表（claim 带出来的那两个名字），闸不自己造名字——账本里看到的
+    因此是一个数据里能指认的名字。**没给账（None）就返回 None 不是放行**：这一关判没判挂在
+    Verdict.claim_status 上（「没给账」与「给了账、判过没问题」挤不进同一条通道，所以不塞假 Hit）；
+    给了空账（[]）时 claim 自己按「账上空着」判，那才是真的判过。**这两种形状差一个字，差的却是
+    「判没判」这件事**，所以这里只认 None，别的一律交给 claim 去判。账本形状坏掉由 claim 当场抛
+    ClaimBroken，照实往上抛——不许猜成「账上没有这个动作」。
+    """
+    if not _has_actions(actions):
+        return None
+    found = claim_rules.check(text, actions, claim)
+    if found is None:
+        return None
+    return Hit(clause_id=found.clause_id, kind=found.kind, matched=found.matched,
+               reason=found.reason)
+
+
+def _has_actions(actions: Any) -> bool:
+    """这一轮给没给动作账：None 就是没给（拿不到）。空清单是给了、只是账上空着，照样算判过。"""
+    return actions is not None
+
+
+def _fabricated(text: str, recalled: Any,
+                fabricate: Any) -> Tuple[Optional[Hit], Any]:
+    """编记忆这一关：引用了过去、细节又对不上就返回（闸那条 Hit, fabricate 那条证据）。
+
+    返回两样是因为两处都要用：闸用 Hit 比身份、记账；「换成实话」那一步要用证据里的标记与细节，
+    把「换掉了什么」写进账本。**没给 recalled（None）时两个都是 None，这不是放行**：判没判挂在
+    Verdict.fabricate_status 上（「拿不到这一轮想起来的是什么」与「判过没问题」挤不进同一条通道，
+    所以不塞假 Hit）；给了空清单 [] 时 fabricate 自己按「这一轮一条都没想起来」判，那才是真的判过。
+    **这两种形状差一个字，差的却是「判没判」这件事**，所以这里只认 None。
+    判据表形状坏掉由 fabricate 当场抛 FabricateBroken，照实往上抛——不许猜成「对得上」。
+    """
+    if not _has_recalled(recalled):
+        return None, None
+    found = fabricate_rules.check(text, recalled, fabricate)
+    if found is None:
+        return None, None
+    return Hit(clause_id=found.clause_id, kind=found.kind, matched=found.matched,
+               reason=found.reason), found
+
+
+def _has_recalled(recalled: Any) -> bool:
+    """这一轮给没给想起来的记忆：None 就是没给（拿不到）。空清单是给了、只是一条都没想起来，照样算判过。"""
+    return recalled is not None
+
+
+def _fabricate_status(recalled: Any) -> str:
+    """编记忆这一关的读数：STATUS_OK（给了 recalled，真的判过）或 STATUS_NOT_CHECKED（没给，这一关没跑）。"""
+    return (fabricate_rules.STATUS_OK if _has_recalled(recalled)
+            else fabricate_rules.STATUS_NOT_CHECKED)
+
+
+def _kin(text: str, known: Any, kin: Any) -> Tuple[Optional[Hit], Any]:
+    """认亲这一关：跟着文本认亲就返回（闸那条 Hit, kin 那条证据）；没拿到人名录读数（None）就整段不跑。
+
+    返回两样是因为两处都要用：闸用 Hit 比身份、记账；「中性化」那一步要用证据里的那个词——不知道
+    命中的是哪个称呼 / 哪一段记忆，就不知道换哪一处。**没给读数（None）时两个都是 None，这不是放行**：
+    判没判挂在 Verdict.kin_status 上（「没拿到人名录」与「判过、不是认亲」挤不进同一条通道，所以不塞
+    假 Hit）；给了 True / False 时 kin 自己判，那才是真的判过。known 不是布尔也不是 None 时由 kin 当场
+    抛 KinBroken，照实往上抛——不许猜成 True（那这一关就永远放行）。
+    """
+    if not _has_kin(known):
+        return None, None
+    found = kin_rules.check(text, known, kin)
+    if found is None:
+        return None, None
+    return Hit(clause_id=found.clause_id, kind=found.kind, matched=found.matched,
+               reason=found.reason), found
+
+
+def _has_kin(known: Any) -> bool:
+    """这一轮拿没拿到人名录读数：None 就是没拿到。True 与 False 都算拿到了（都判过，结论不同）。"""
+    return known is not None
+
+
+def _kin_status(known: Any) -> str:
+    """认亲这一关的读数：STATUS_OK（这一轮拿到了人名录读数）或 STATUS_NOT_CHECKED（没拿到，这一关没跑）。"""
+    return kin_rules.STATUS_OK if _has_kin(known) else kin_rules.STATUS_NOT_CHECKED
 
 
 def _quota(text: str, quota: Any) -> Optional[Hit]:
@@ -789,7 +1174,9 @@ def _rewrite_channel(second: Hit, retried: Any, noted: Any, repeated: Any,
     """第二次拦下它的是哪一关：返回 rewrite.py 认的那个通道名，记号与说法仍旧由数据决定。
 
     四个名字是闸自己的判据通道（与 Verdict 上的 action_status / repeat_status 同一套口径）：
-    条款 / 动作括注 / 内容重复 / 复述审计。账本上要看出「改了一次没改掉的是哪一关」，通道名就得
+    条款 / 动作括注 / 内容重复 / 复述审计。**冒充做过与编记忆不在这四个里**：冒充做过二次命中不整条
+    丢（它删那一句）、编记忆二次命中也不整条丢（它把整泡换成那句实话），两关都走不到这条路，用不着
+    一个通道名。账本上要看出「改了一次没改掉的是哪一关」，通道名就得
     对得上；而那个记号（<通道>-after-rewrite）与整句人话都取自 data/rewrite.json 的 after_rewrite。
     对不上就当场响：这一句明明被拦下了，却说不出是哪一关拦的，账本就白记了。
     """
@@ -849,7 +1236,7 @@ def _has_inject(inject: Any) -> bool:
 
 
 def _first(*hits: Optional[Hit]) -> Optional[Hit]:
-    """按判据顺序取第一条命中的：先到先报，顺序即优先级（条款 → 配额 → 动作括注 → 重复 → 审计）。"""
+    """按判据顺序取第一条命中的：先到先报，顺序即优先级（条款 → 配额 → 动作括注 → 重复 → 冒充做过 → 编记忆 → 审计）。"""
     for one in hits:
         if one is not None:
             return one

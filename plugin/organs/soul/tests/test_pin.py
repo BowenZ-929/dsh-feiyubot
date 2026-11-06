@@ -36,10 +36,16 @@ class TakePinTest(unittest.TestCase):
         self.assertIn("｜", rows[1])
 
     def test_pin_fits_the_1200_byte_budget_on_real_data(self):
-        """真数据 7 条红线：pin 678 字节，离 1200 的顶还远（见交付记录的实跑数字）。"""
-        text = pin.take_pin(load(DATA).snapshot().bounds)
+        """真数据的每一条生效红线各占一行，且总量不超 1200 字节。
+
+        条数读数据、不写死：红线是会加的（这一轮就加了两条），写死数字等于让「加一条线」变成
+        「改一次测试」——那正是我们刚清掉的那种钉旧数。
+        """
+        snapshot = load(DATA).snapshot()
+        text = pin.take_pin(snapshot.bounds)
         self.assertLessEqual(pin.pin_bytes(text), pin.PIN_LIMIT)
-        self.assertEqual(7, len(text.splitlines()))
+        active = [item for item in snapshot.bounds.items if item.active]
+        self.assertEqual(len(active), len(text.splitlines()))
 
     def test_retired_lines_are_not_pinned(self):
         self.store.edit(actor="bowen", reason="撤一条", block="bounds",

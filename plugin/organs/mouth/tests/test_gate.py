@@ -17,11 +17,14 @@ import unittest
 from pathlib import Path
 
 from organs.mouth import audit as recitation
+from organs.mouth import claim as claims
 from organs.mouth import gate
 from organs.mouth import repeat as repeats
 from organs.mouth import rewrite as rewriting
 from organs.mouth.action_note import ActionBroken
 from organs.mouth.audit import AuditBroken
+from organs.mouth import kin as kins
+from organs.mouth.claim import ClaimBroken
 from organs.mouth.gate import ClauseBroken, Hit, Verdict, check, enforce
 from organs.mouth.warehouse import load
 
@@ -1206,6 +1209,380 @@ class QuotaOverruns(unittest.TestCase):
         self.assertNotIn(self.BOOK["hit"]["clause_id"], source)
         for line in self.BOOK["reason"].values():
             self.assertNotIn(line.split("{")[0], source)
+
+
+class ClaimRidesTheGate(unittest.TestCase):
+    """冒充做过（这一轮加的）接在内容重复后面、复述审计前面：改不动就删那一句，删完只剩空白才弃。
+
+    判据表与闸用的两个名字全从 data/claim.json 读：这里只验「接上了没有、判没判看得出来没有」。
+    """
+
+    BOOK = load("claim")
+    CLAUSE_ID = BOOK["hit"]["clause_id"]
+    KIND = BOOK["hit"]["kind"]
+    VERB = BOOK["action_verbs"][0]
+    LINE = BOOK["person"] + BOOK["bare_prefixes"][0] + VERB     # 这一轮手头什么都没做时她会说的那句
+    OTHER = "今天风挺大的。"
+    FIXED = "这件事我做不了，我没手。"                           # 改写之后不再说做过
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_check_reports_it_with_an_empty_ledger(self):
+        hit = check(self.LINE, CLAUSES, actions=[], claim=self.BOOK)
+        self.assertIsInstance(hit, Hit)
+        self.assertEqual(self.CLAUSE_ID, hit.clause_id)      # 名字取自数据，闸不自己造
+        self.assertEqual(self.KIND, hit.kind)
+        self.assertIn(self.VERB, hit.reason)                  # 是一句人话：说清哪个动作对不上账
+
+    def test_no_ledger_is_not_checked(self):
+        """actions=None：拿不到账，这一关没跑——不判冒充，claim_status 如实记 not-checked。"""
+        self.assertIsNone(check(self.LINE, CLAUSES, actions=None, claim=self.BOOK))
+        verdict = enforce(self.LINE, CLAUSES, None, actions=None, claim=self.BOOK)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.LINE, verdict.text)
+        self.assertEqual(claims.STATUS_NOT_CHECKED, verdict.claim_status)
+
+    def test_an_empty_ledger_is_judged(self):
+        """actions=[]：给了账、账上空着——同一句话同一份结局，状态与上面那条不一样。"""
+        verdict = enforce(self.LINE, CLAUSES, None, actions=[], claim=self.BOOK)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual(claims.STATUS_OK, verdict.claim_status)
+        self.assertNotEqual(claims.STATUS_OK, claims.STATUS_NOT_CHECKED)
+
+    def test_a_done_action_passes_with_its_reason(self):
+        """真做过（账上有这个动词）→ 放行；放行要有据：那一关查过了就说出来。"""
+        verdict = enforce(self.LINE, CLAUSES, None,
+                          actions=[{"verb": self.VERB}], claim=self.BOOK)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.LINE, verdict.text)
+        self.assertIn(self.BOOK["reason"]["clear"], verdict.reason)
+
+    def test_speech_is_exempt(self):
+        book = self.BOOK
+        line = "%s%s%s" % (book["person"], book["speech_verbs"][0], book["suffixes"][0])
+        self.assertIsNone(check(line, CLAUSES, actions=[], claim=self.BOOK))
+        self.assertEqual("pass", enforce(line, CLAUSES, None, actions=[], claim=self.BOOK).decision)
+
+    def test_the_rewrite_clears_it(self):
+        verdict = enforce(self.LINE, CLAUSES, lambda text: self.FIXED,
+                          actions=[], claim=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.FIXED, verdict.text)
+        self.assertFalse(verdict.salvaged)
+
+    def test_no_rewriter_strips_that_sentence_and_drops_the_rest(self):
+        """验收 1：不给重写器 → 那一句被删掉；整条只有那一句 → 空、dropped、照着名字记账。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.LINE, CLAUSES, None, sink, actions=[], claim=self.BOOK)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual([self.CLAUSE_ID], [one.clause_id for one in verdict.hits])
+        self.assertEqual(1, len(seen))
+        self.assertEqual(self.CLAUSE_ID, seen[0][0])
+        self.assertEqual(verdict.reason, seen[0][1])
+        self.assertIn(self.LINE, verdict.reason)              # 账本里读得出删掉的是哪一句
+
+    def test_the_other_sentence_is_kept(self):
+        """验收 5：混合句只删前一句，后一句原样留下——这一泡照发（rewritten + salvaged）。"""
+        seen, sink = self._spy()
+        line = self.LINE + "。" + self.OTHER
+        verdict = enforce(line, CLAUSES, None, sink, actions=[], claim=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.OTHER, verdict.text)
+        self.assertTrue(verdict.salvaged, "删句是救人那一族，与配额剥行同一口径")
+        self.assertEqual(1, len(seen), "删句救回来的那一笔也要记账")
+        self.assertEqual(self.CLAUSE_ID, seen[0][0])
+        self.assertIn(self.LINE, seen[0][1])
+
+    def test_every_claim_sentence_is_stripped(self):
+        """剩下的正文里还有一句冒充：接着删那一句，不整条丢（删一句少一句）。"""
+        line = self.LINE + "。" + self.LINE + "。" + self.OTHER
+        verdict = enforce(line, CLAUSES, None, actions=[], claim=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.OTHER, verdict.text)
+        self.assertEqual([self.CLAUSE_ID] * 2, [one.clause_id for one in verdict.hits])
+
+    def test_a_second_hit_after_the_rewrite_strips_the_sentence(self):
+        """改完还命中：删那一句（不是整条丢，也不是留原话）——hits 两条都在。"""
+        line = self.LINE + "。" + self.OTHER
+        verdict = enforce(line, CLAUSES, _same, None, actions=[], claim=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.OTHER, verdict.text)
+        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
+                         [one.clause_id for one in verdict.hits])
+
+    def test_keep_unrewritten_does_not_keep_a_lie(self):
+        """keep_unrewritten 盖不过这一条：留原话就是留一句谎，改不动时选的是删句。"""
+        line = self.LINE + "。" + self.OTHER
+        verdict = enforce(line, CLAUSES, None, None, actions=[], claim=self.BOOK,
+                          keep_unrewritten=True)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.OTHER, verdict.text)
+        self.assertFalse(verdict.kept_after_rewrite)
+
+    def test_the_stripped_body_still_faces_the_other_criteria(self):
+        """删过不等于放行：剩下的正文还踩条款，照样弃掉整条。"""
+        verdict = enforce(self.LINE + "。" + SPEECH, CLAUSES, None,
+                          actions=[], claim=self.BOOK)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual("courtesy-open", verdict.hits[-1].clause_id)
+
+    def test_the_clause_comes_first(self):
+        """条款先判（既有逻辑不动）：两边都撞时先报条款。"""
+        hit = check(SPEECH + self.LINE, CLAUSES, actions=[], claim=self.BOOK)
+        self.assertEqual("courtesy-open", hit.clause_id)
+
+    def test_the_quota_comes_before_it(self):
+        """顺序：动作配额排在冒充做过前面（两关都踩时先报配额）。"""
+        line = "（尾巴晃了一下）" + self.LINE
+        hit = check(line, CLAUSES, quota="forbid", actions=[], claim=self.BOOK)
+        self.assertEqual(load("quota")["hit"]["clause_id"], hit.clause_id)
+
+    def test_unchecked_lets_the_line_through(self):
+        """没给账时按既有规矩放行（不替调用方做主）：这一关拦不下任何人。"""
+        self.assertEqual("pass", enforce(self.LINE, CLAUSES, None, actions=None).decision)
+
+    def test_broken_table_is_loud(self):
+        with self.assertRaises(ClaimBroken) as caught:
+            enforce(self.LINE, CLAUSES, None, actions=[], claim={})
+        self.assertIn("hit", str(caught.exception))
+
+    def test_gate_source_has_no_claim_word(self):
+        """冒充做过的说法也不许进闸：闸只接判据，不持判据。"""
+        source = Path(gate.__file__).read_text(encoding="utf-8")
+        for line in self.BOOK["reason"].values():
+            self.assertNotIn(line.split("{")[0], source)
+
+
+class AckAskStanceShape(unittest.TestCase):
+    """三件套：先应一声 → 再问一句 → 表个态。判据全在数据里，这里只写结构与素材。"""
+
+    #: 数据里那条条款的 id（改数据里的 id 就改这一个串；pattern 一个字都不抄进来）
+    CLAUSE = "ack-ask-stance"
+    #: 三样全齐
+    FULL = "好。你今天干嘛了？我觉得挺好的。"
+    #: 只有应答 + 问句（没有表态）——三样不全，不许命中
+    NO_STANCE = "好。你今天干嘛了？"
+    #: 顺序反过来（表态在前、应答在后）——顺序不对，不许命中
+    WRONG_ORDER = "我觉得挺好的。好。你今天干嘛了？"
+
+    def _clause(self) -> dict:
+        rows = [one for one in _all_on(CLAUSES) if one["id"] == self.CLAUSE]
+        self.assertEqual(1, len(rows), "数据里该有且只有一条 %r" % self.CLAUSE)
+        return rows[0]
+
+    def _only(self) -> list:
+        """只留这一条：命中与否只说明这一条形状，不掺别的条款。"""
+        return [self._clause()]
+
+    def test_the_three_parts_together_hit(self):
+        hit = check(self.FULL, self._only())
+        self.assertIsInstance(hit, Hit)
+        self.assertEqual(hit.clause_id, self.CLAUSE)
+        self.assertTrue(hit.reason.strip())
+
+    def test_ack_and_question_without_a_stance_do_not_hit(self):
+        """只有两样：应答 + 问句，没有表态那一句——不命中（三样都要）。"""
+        self.assertIsNone(check(self.NO_STANCE, self._only()))
+
+    def test_the_order_is_part_of_the_clause(self):
+        """三样都在，但顺序是「表态 → 应答 → 问句」——顺序不对，不命中。"""
+        self.assertIsNone(check(self.WRONG_ORDER, self._only()))
+
+    def test_stance_before_the_question_does_not_hit(self):
+        """表态落在问号前面：位置不对，不命中（pattern 里表态必须排在问句之后）。"""
+        self.assertIsNone(check("好。我觉得挺好的。你今天干嘛了？", self._only()))
+
+    def test_an_ordinary_reply_does_not_hit(self):
+        self.assertIsNone(check("行吧，那你先忙。", self._only()))
+
+    def test_the_shape_is_data(self):
+        """改数据就改行为：把应答词表改成只认一个绝不可能出现的字，同一句立刻不命中。"""
+        clause = self._clause()
+        star = dict(clause, pattern=clause["pattern"].replace("好|行|嗯|成|可以", "龘"))
+        self.assertIsNone(check(self.FULL, [star]))
+        loosened = dict(clause, pattern="^.+$")
+        self.assertIsInstance(check(self.NO_STANCE, [loosened]), Hit)
+
+    def test_replies_across_parts_hit_when_judged_whole(self):
+        """逐泡判看不见它，整段判看得见：切分每泡最多两句，这条形状跨得过泡的边界。"""
+        parts = ["好。你今天干嘛了？", "我觉得挺好的。"]
+        self.assertIsNone(check(parts[0], self._only()), "一泡两句：三件套不该在逐泡这一遍命中")
+        self.assertIsInstance(check("".join(parts), self._only()), Hit)
+
+    def test_rewrite_once_then_keep_the_original(self):
+        """命中改一次；改完仍命中（不是红线）→ 按原话发，并记一行账（五态走既有那一条）。"""
+        noted = []
+        verdict = enforce(self.FULL, self._only(), _same, lambda cid, why: noted.append(cid),
+                          keep_unrewritten=True)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.FULL, verdict.text, "二次命中不许把这句话吞掉")
+        self.assertTrue(verdict.kept_after_rewrite)
+        self.assertEqual([self.CLAUSE], noted)
+
+
+class KinRidesTheGate(unittest.TestCase):
+    """认亲（这一轮加的）接在冒充做过后面、编记忆前面：改不动就中性化，换完只剩空白才弃。
+
+    判据表与闸用的两个名字全从 data/kin.json 读：这里只验「接上了没有、判没判看得出来没有」。
+    """
+
+    BOOK = load("kin")
+    CLAUSE_ID = BOOK["hit"]["clause_id"]
+    KIND = BOOK["hit"]["kind"]
+    MIN = BOOK["known_by"]["min"]                 # 「够不够熟」那一档也从数据读
+    FIELD = BOOK["known_by"]["field"]
+    STRANGER = {"in_book": False}                 # 名录里查不到这个号
+    NEW_FACE = {"in_book": True, FIELD: MIN - 1}  # 刚被 ingest 建档，读数还没到档
+    FAMILIAR = {"in_book": True, FIELD: MIN}      # 够得着（阈值那一档）
+    TERM = BOOK["kin_terms"][0]
+    MEMORY = BOOK["memory_markers"][0]
+    NEUTRAL = BOOK["neutral"]["term_word"]
+    SAY = BOOK["neutral"]["say_once"]
+    HONEST = BOOK["neutral"]["memory_sentence"]
+    OTHER = "今天风挺大的。"
+    LINE = TERM + "，" + OTHER                        # 熟人才能触发的称呼
+    MEMORY_LINE = MEMORY + "要去医院复查。"            # 熟人才能触发的记忆复述
+    FIXED = "这句改好了，没有称呼。"                    # 改写之后不再认亲
+
+    def _spy(self):
+        seen = []
+        return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
+
+    def test_check_reports_it_for_a_stranger(self):
+        hit = check(self.LINE, CLAUSES, known=self.STRANGER, kin=self.BOOK)
+        self.assertIsInstance(hit, Hit)
+        self.assertEqual(self.CLAUSE_ID, hit.clause_id)      # 名字取自数据，闸不自己造
+        self.assertEqual(self.KIND, hit.kind)
+        self.assertIn(self.TERM, hit.reason)                 # 是一句人话：说清命中的是哪个词
+
+    def test_a_memory_marker_hits_too(self):
+        hit = check(self.MEMORY_LINE, CLAUSES, known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual(self.CLAUSE_ID, hit.clause_id)
+
+    def test_an_acquaintance_passes_with_its_reason(self):
+        """验收 2：熟人（known=self.FAMILIAR）一律放行——同一个称呼照常叫，不许误伤。"""
+        verdict = enforce(self.LINE, CLAUSES, None, known=self.FAMILIAR, kin=self.BOOK)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.LINE, verdict.text)
+        self.assertEqual(kins.STATUS_OK, verdict.kin_status)
+        self.assertIn(self.BOOK["reason"]["clear"], verdict.reason)
+
+    def test_no_reading_is_not_checked(self):
+        """验收 5：known=None 判不了——不判、也不声称判过，状态如实记 not-checked。"""
+        self.assertIsNone(check(self.LINE, CLAUSES, known=None, kin=self.BOOK))
+        verdict = enforce(self.LINE, CLAUSES, None, known=None, kin=self.BOOK)
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.LINE, verdict.text)
+        self.assertEqual(kins.STATUS_NOT_CHECKED, verdict.kin_status)
+        self.assertNotEqual(kins.STATUS_OK, kins.STATUS_NOT_CHECKED)
+
+    def test_a_non_reading_is_loud(self):
+        """验收 6：known 传 True / False / 1 / "true" 一律抛——一个布尔说不出「够不够熟」。"""
+        for bad in (True, False, 1, "true"):
+            with self.assertRaises(kins.KinBroken):
+                enforce(self.LINE, CLAUSES, None, known=bad, kin=self.BOOK)
+
+    def test_a_registered_but_unfamiliar_id_is_still_judged(self):
+        """回修重点：刚建了档（读数没到档）说出熟人称呼，**仍然判**——在册不是熟。"""
+        self.assertIsNotNone(check(self.LINE, CLAUSES, known=self.NEW_FACE, kin=self.BOOK))
+        verdict = enforce(self.LINE, CLAUSES, None, None, known=self.NEW_FACE, kin=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertNotIn(self.TERM, verdict.text)
+        self.assertEqual(kins.STATUS_OK, verdict.kin_status)
+
+    def test_politeness_passes(self):
+        """验收 3 / 4：对陌生人客气、问一句「你是？」，或回那句稳妥话术，都放行。"""
+        for line in ("你是？", "今天天气不错。", self.SAY):
+            self.assertEqual("pass",
+                             enforce(line, CLAUSES, None, known=self.STRANGER, kin=self.BOOK).decision,
+                             "这句不该被当成认亲：%r" % line)
+
+    def test_the_rewrite_clears_it(self):
+        verdict = enforce(self.LINE, CLAUSES, lambda text: self.FIXED,
+                          known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.FIXED, verdict.text)
+        self.assertFalse(verdict.salvaged)
+
+    def test_no_rewriter_neutralizes_instead_of_dropping(self):
+        """验收 1：不给重写器 → 称呼换成中性词，并带上那句稳妥话术；别的句子一个字不动。"""
+        seen, sink = self._spy()
+        verdict = enforce(self.LINE, CLAUSES, None, sink, known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertNotIn(self.TERM, verdict.text)
+        self.assertIn(self.NEUTRAL, verdict.text)
+        self.assertIn(self.SAY, verdict.text)                 # 带上数据里那句稳妥话术
+        self.assertIn(self.OTHER, verdict.text)
+        self.assertTrue(verdict.salvaged, "中性化与配额剥行、冒充删句同族")
+        self.assertEqual([self.CLAUSE_ID], [one.clause_id for one in verdict.hits])
+        self.assertEqual(1, len(seen), "中性化救回来的那一笔也要记账")
+        self.assertEqual(self.CLAUSE_ID, seen[0][0])
+
+    def test_the_memory_sentence_is_replaced_by_the_truth(self):
+        seen, sink = self._spy()
+        verdict = enforce(self.MEMORY_LINE, CLAUSES, None, sink, known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertIn(self.HONEST, verdict.text)
+        self.assertNotIn(self.MEMORY, verdict.text)
+        self.assertTrue(verdict.salvaged)
+
+    def test_a_second_hit_after_the_rewrite_neutralizes(self):
+        """改完还认亲：中性化（不是整条丢、也不是留原话）——hits 两条都在。"""
+        verdict = enforce(self.LINE, CLAUSES, _same, None, known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertNotIn(self.TERM, verdict.text)
+        self.assertFalse(verdict.kept_after_rewrite)
+        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
+                         [one.clause_id for one in verdict.hits])
+
+    def test_keep_unrewritten_does_not_keep_it(self):
+        """keep_unrewritten 盖不过这一条：留原话就是留一句替他认亲的话。"""
+        verdict = enforce(self.LINE, CLAUSES, None, None, known=self.STRANGER, kin=self.BOOK,
+                          keep_unrewritten=True)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertNotIn(self.TERM, verdict.text)
+        self.assertFalse(verdict.kept_after_rewrite)
+
+    def test_the_neutralized_body_still_faces_the_other_criteria(self):
+        """换过不等于放行：剩下的正文还踩条款，照样弃掉整条。"""
+        verdict = enforce(self.LINE + "。" + SPEECH, CLAUSES, None,
+                          known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual("dropped", verdict.decision)
+        self.assertEqual("", verdict.text)
+        self.assertEqual("courtesy-open", verdict.hits[-1].clause_id)
+
+    def test_the_clause_comes_first(self):
+        """条款先判（既有逻辑不动）：两边都撞时先报条款。"""
+        hit = check(SPEECH + self.LINE, CLAUSES, known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual("courtesy-open", hit.clause_id)
+
+    def test_the_claim_comes_first(self):
+        """顺序：冒充做过排在认亲前面（两关都踩时先报冒充）。"""
+        claim = load("claim")
+        line = self.TERM + "，" + claim["person"] + claim["bare_prefixes"][0] + claim["action_verbs"][0]
+        hit = check(line, CLAUSES, actions=[], claim=claim, known=self.STRANGER, kin=self.BOOK)
+        self.assertEqual(claim["hit"]["clause_id"], hit.clause_id)
+        self.assertEqual(load("claim")["hit"]["clause_id"], hit.clause_id)
+
+    def test_unchecked_lets_the_line_through(self):
+        """既有的调用方不传这一格时按老规矩放行：这一关拦不下任何人。"""
+        self.assertEqual("pass", enforce(self.LINE, CLAUSES, None).decision)
+
+    def test_broken_table_is_loud(self):
+        with self.assertRaises(kins.KinBroken) as caught:
+            enforce(self.LINE, CLAUSES, None, known=self.STRANGER, kin={})
+        self.assertIn("hit", str(caught.exception))
+
+    def test_gate_source_has_no_kin_words(self):
+        """认亲的说法也不许进闸：闸只接判据，不持判据。"""
+        source = Path(gate.__file__).read_text(encoding="utf-8")
+        for line in self.BOOK["reason"].values():
+            self.assertNotIn(line.split("{")[0], source)
+        self.assertNotIn(self.SAY, source)
 
 
 if __name__ == "__main__":

@@ -338,7 +338,9 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 `organs/mouth/data/borrow.json`。
 
 **闸在 `/chat` 生效（这一轮加的）**：`conversation.answer()` 返回之后、组装响应之前，把 `chunks`
-里的**每一泡单独过一遍闸**（条款 → 动作括注 → 内容重复 → 复述审计）。命中就改一次、改不了就弃那一泡：
+里的**每一泡单独过一遍闸**（条款 → 动作配额 → 动作括注 → 内容重复 → 冒充做过 → 编记忆 → 复述审计）。
+命中就改一次、改不了就按各关的兜底处置（配额剥动作行 / 冒充做过删那一句 / 编记忆整泡换成一句实话），
+一条兜底都走不通才弃那一泡：
 
 - `rewritten`：用闸给的 `Verdict.text` 换掉那一泡（`gap_before` 沿用原来的）；
 - `dropped`：把那一泡从 `chunks` 里删掉，剩下的按原来的间隔**重排 `send_at`**（不留洞）；
@@ -358,7 +360,7 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 
 | 字段 | 是什么 |
 | --- | --- |
-| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,skipped,hit,lcs_len,threshold}, action_status, repeat_status, quota_status, fatal{category,tag,clause_id,kind,matched,reason}, fatal_status, kept_after_rewrite, rewrite{status,why,from,to}}`；`audit.skipped=true` 表示「对方要她重复／引用，这一关只记账没判废」，此时 `hit` 照旧带着；`fatal` 是踩上的那一类红线（没踩就是 `null`，**不是「不是红线」**，判没判看 `fatal_status`）；`kept_after_rewrite=true` 表示「改过一次还是命中、按进门那句原话发了」 |
+| `parts[]` | 逐泡判词：`{i, decision, hits[{clause_id,kind,reason,matched}], reason, before, after, audit{status,skipped,hit,lcs_len,threshold}, action_status, repeat_status, quota_status, claim_status, fabricate_status, fatal{category,tag,clause_id,kind,matched,reason}, fatal_status, kept_after_rewrite, rewrite{status,why,from,to}}`；`audit.skipped=true` 表示「对方要她重复／引用，这一关只记账没判废」，此时 `hit` 照旧带着；`fatal` 是踩上的那一类红线（没踩就是 `null`，**不是「不是红线」**，判没判看 `fatal_status`）；`kept_after_rewrite=true` 表示「改过一次还是命中、按进门那句原话发了」 |
 | `in_parts` / `out_parts` | 进闸的泡数 / 出闸（真发出去）的泡数 |
 | `blocked[]` | 这次拦下过她的 `clause_id`（去重、按出现顺序），一条都没拦就是空表 |
 | `quota` | 这一轮交给闸的动作配额写法：`forbid`（装配标了本轮不许写动作）/ `allow`（标了放行）/ `null`（装配没标——闸记 `quota_status=not-checked`，**没标不是 allow**） |
@@ -367,8 +369,49 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 **动作配额从装配传进闸**：`answer()` 回包里的 `action.quota.blocked`（装配按
 `organs/mind/data/assembly.json` 的 `action.quota` 数最近几轮算出来的那个布尔）为真就传 `forbid`、
 为假传 `allow`，装配里没有这一项才传 `None`——**不许猜成 allow**：没标是这一关没跑，放行是真的判过。
-配额命中是闸里唯一一条不丢整句的路：它把动作行剥掉、正文接着过其余判据（`quota.strip`），
+配额命中是闸里两条不丢整句的路之一：它把动作行剥掉、正文接着过其余判据（`quota.strip`），
 所以那一泡是 `rewritten` 而不是 `dropped`，账本里那一行的 `reason` 带 `action-over-quota`。
+
+**动作账从回包传进闸，治「冒充做过」（本轮加的）**：魂那条红线 `bounds.no-fake-doing`
+（`enforced_by=mouth·语义复核`）在嘴这侧的出口就是这一关——回复里出现「人称 +（前缀）+（填充）+
+动作类动词 +（后缀）」这种**说成做过**的写法，而这一轮的动作账里对不上那个动词，就是演一个做完的
+样子。判据、词表、人话全在 `organs/mouth/claim.py` 与 `data/claim.json`（闸只接判据）。
+三种形状三件事，**不许混**：
+
+- 回包里**没有** `actions` 这一格 → 交给闸的是 `[]`（这一轮确实什么都没做，该判冒充）；
+- 回包给了清单 → 原样交下去（空清单也是清单），闸按账上有没有这个动词判；
+- 形状读不动 → 交给闸的是 `None`：`claim_status=not-checked`，**拿不到账不是没做过**，这一关不跑，
+  那一泡照发。猜一个空清单顶上，等于替她记一笔「什么都没做」。
+
+处置与别的判据不同：命中之后照样先改一次（`rewrite`），**改不动或改完还命中就删掉那一句**
+（`claim.strip_sentence` 只删那一句连同它自己的句末标点，逗号不算句末），剩下的正文接着过其余判据，
+所以那一泡是 `rewritten`（`salvaged=true`、`after` 是删剩下的正文）；删完只剩空白才 `dropped`，
+账本记一行 `clause_id` 取自数据 `hit.clause_id`、`reason` 里带着被删掉的那一句的账。
+**这一条盖过 `keep_unrewritten`**：留原话就是留一句谎，改不动时选的是删句，不是留原话。
+
+**记忆从回包传进闸，治「编记忆」（本轮加的）**：回复里出现**引用标记**（你说过／你当时说／你上次说／
+我记着／我照做了……）**加上具体细节**（数字、时间词、引号里的原话、或说得够长的一截），而这一轮的
+`recalled` 里没有一条对得上，就是她替自己编了一段没发生过的对话。判据、词表、两把尺子的阈值与
+全部说法在 `organs/mouth/fabricate.py` 与 `data/fabricate.json`（闸只接判据）。**三种形状三件事**：
+
+- 回包里**没有** `recalled` 这一格 → 交给闸的是 `None`：`fabricate_status=not-checked`，
+  **拿不到这一轮想起来什么就不是「她编了」**，这一关不跑、那一泡照发（判不了就不诬陷）；
+- 回包给了清单 → 原样交下去，**空清单也是清单**：这一轮确实一条都没想起来，出现「标记 + 细节」就该判；
+- 形状读不动 → 交给闸的同样是 `None`（同上，不猜）。
+
+**「对得上」是两把离线可复算的尺子**（任一把过线就放行）：她认领的那一截与某条 `recalled[*].text`
+贴住连续 `align.min_run` 个字，或 2-gram 覆盖率到 `align.bigram_overlap`。两边都先去标点去空白。
+**说心意的句子整句跳过**（`exempt` 表：「我没忘你」「我记得你这人」「我不会忘」说的是心，不是
+「哪天谁说了什么」）——宁可放过一句带细节的，也不冤枉一句只是在表心意的。**长度这一路是弱细节**：
+只在 `recalled` 一条都没想起来时算证据（有召回在手却对不上，很可能只是换了个说法讲同一件事）。
+
+处置与冒充做过同族，但换的不是「删一句」而是「**整泡换成一句实话**」（`data/fabricate.json` 的
+`fallback`）：命中之后照样先交给重写器改一次，**改不了或改完还命中就整泡换成它**，
+`decision: rewritten`、`salvaged: true`、`after` 是那句实话，`hits` 两条都留着，账本记一行
+`clause_id` 取自数据、`reason` 里带着「换成了什么」的账。**不是 `dropped`**：说不真话的时候认怂，
+比在最该回话的那一句上沉默强——人那边至少知道该再提一句。**这一条盖过 `keep_unrewritten`**：
+留原话就是留一段编出来的过去。换成实话之后**只再过一遍红线**：那句实话取自数据、不是她说的，拿
+条款／配额／重复／冒充／审计去卡一句我们自己写的话，等于用自己的规矩把自己的救场话拦掉。
 
 **命中先改一次，二次命中才丢（本轮接上的老账）**：以前命中即弃，一句口癖就让她整泡消失。
 现在 `gate.enforce` 拿到一个真的重写器——`api/chat.py` 把「她的原话 + 命中的那一条 + 一句人话
@@ -425,8 +468,31 @@ Python 在**进程启动时**把 `organs/*` 载进内存，之后改文件不会
 `data/rewrite.json` 的 `after_rewrite.unchecked`——判不了不等于可以把这句话吞掉。判据表在真链路上
 三处都传：逐泡过闸、拒答那三句（`organs/mouth/refusal.py` 只透传、自己不读盘）、`/mouth/gate` 干跑。
 
+**认亲从号里判、不从话里判（本轮加的）**：魂那条红线 `bounds.no-claim-kin` 的出口——
+谁是主人由号定，不由话定。判据只有一条：这一轮的 `who` **不够熟**（不在人名录里，或者刚建档、
+读数还没爬到熟人那一档），而回复里出现了**只有熟人才能触发的称呼或记忆复述**，就是认亲错。称呼表、记忆复述标记、中性替换词、稳妥话术、命中与
+放行的人话、闸用的两个名字全在 `organs/mouth/data/kin.json`，代码里一个词都不写死。
+`known` 由出口现算，是**一份读数、两段判**：`{"in_book": …, "relation": n, "tier": …}`
+（`who` 为空 / 称呼表读不动 → `None`，判不了）。**「在册」不是「熟」**——`answer()` 会把他这句话
+`ingest` 建档，所以「名录里查得到他」说一句话就成立；够不够熟看 `data/kin.json` 的
+`known_by`（现在 `relation ≥ 3`＝熟人档，档位与档界只有 `address_table.json` 的 `tiers` 那一份，
+出口用 `address.resolve` 现算，不另造一套判定）。所以**陌生人第一轮、第二轮都照样判**，直到读数真的
+爬到那一档。**三种结论不许折叠**：够熟（在册 + 到档）一律放行——他叫「老大」照常叫，不许误伤；
+不够熟（不在册，或在册但没到档）照实判；`None` 不判，`parts[*].kin_status` 记 `not-checked`，
+**判不了就不诬陷**。读数只收 `None` 或那份键值表，传 `True` / `False` / `1` / `"true"` 当场抛
+`KinBroken`（布尔守卫：一个布尔说不出「够不够熟」，猜一次就等于把这一关关掉）。处置与冒充做过、编记忆同族，但换的不是「删一句」也不是「整泡换」：命中之后照样
+先交给重写器改一次，**改不了或改完还命中就中性化**——称呼换成数据里的中性词、记忆那一句换成数据里的
+实话，再补一句稳妥话术（同一泡里已经有那句就不再补），`decision="rewritten"`、`salvaged=true`、
+`text` 是改完的正文；**认错人不必把整泡丢掉**，别的句子还是她要说的话。改完只剩空白才 `dropped`。
+两条边界因此是判据的一部分：**对陌生人客气、问一句「你是？」照样放行**（这一关判的是称呼与记忆，
+不是礼貌）；**陌生号自称主人时她可以回数据里那句稳妥话术**（它不含判据词，所以不会被当成认亲）。
+闸里的顺序钉死：条款 → 动作配额 → 动作括注 → 内容重复 → 冒充做过 → **认亲** → 编记忆 → 复述审计
+（先问「这件事做没做过」，再问「这个人在不在册」，最后问「这段过去是不是编的」）。数据里另有一条硬
+要求：中性词与那句实话**不许自己带着判据词**，否则中性化之后的正文还命中，闸会一直换下去最后把整条
+吞掉——写数据时踩上就当场抛，不留到线上才发现。
+
 五样「判没判」的读数**不许折叠**：`audit.status` 不是 `ok` 就是没真的比过，
-`action_status` / `repeat_status` / `quota_status` / `fatal_status` 的 `not-checked` 是**这一关没跑**，
+`action_status` / `repeat_status` / `quota_status` / `claim_status` / `fatal_status` 的 `not-checked` 是**这一关没跑**，
 不是「查过没问题」（红线那一关尤其：`not-checked` 时 `fatal` 也是 `null`，那不等于「不是红线」；
 `fatal` 非 `null` 时 `fatal_status` 一定是 `fatal`，三态在返回里分得开）。
 `pages/chat.html` 的「命中门」那块因此多一行 `gate-line`：「这次过闸：N 泡进 / M 泡出 / 拦了什么」
@@ -519,6 +585,34 @@ proactive 与常态的差别**只有输入**：
 {"send": true,  "reason": null, "reply": "", "chunks": [], "gate": {"outbound": {"status": "core_empty"}}}
 {"send": false, "reason": "night", "reply": "", "chunks": []}
 ```
+
+### 6.1.2 长度与句末标点（过闸之后修形，`organs/mouth/style.py`）
+
+`POST /chat` 在逐泡过完八股闸、话定了之后，再按数据把「形」修一遍（两层，判据全在
+`organs/mouth/data/style_target.json`，这一层不写死一个数）：
+
+| 层 | 判什么 | 超了怎么办 | 回包落在哪儿 |
+|---|---|---|---|
+| 长度 | 逐泡的字数，按**场景 × tone 档**的目标区间（`scenes.private` 12–32、`scenes.group` 中位 20 上下；`p90` 只报不判） | 用同一份 transport 改一次；改不进区间也**不截断**，放行并记账 | `gate.parts[*].style` |
+| 句末标点 | **整条回复**里句末是「。」的比例（上限 0.30、最少句数 1，都在数据里；段里句子不够数就 `judged=false` 不判） | 改一次；改完仍超上限就**发原话**并记账——标点是毛病，不是红线，不拿一次没解决问题的改写换掉她的话 | `gate.style.stopped` |
+
+场景从 body 的 `scope`（`group` / `private`）来，档位从 `tone.tier` 来，上限从
+`reply_budget.chars` 来——都是这一轮现成的读数，不另算一遍。**没拿到档位就整层不跑**，
+`gate.style.status` 记 `not-checked` 并写明理由（「没跑」不等于「合格」）；判据读不动也记
+`not-checked`，话照发。
+
+**目标区间只能改短、不能改长**：她本来就只写一两句，所以实测中位多半落在区间下半截，那是正常的。
+**没给场景的调用方**（`/mouth/gate` 只给 `tier`）读的是 `scenes.tier_only`——上一版那四个数
+原样留着，改 `/chat` 不会顺手改了那个端点的契约。
+
+整条回复被改过（句号率那一层）就**按同一个切分器重新切泡**（`split` + `pace.fill`，与装配同一个
+拼法），改完的整段才是 `reply`，`chunks` 与 `send_at` 一并重排。记账仍是那一本：长度与标点都走
+`style.record`（`style.jsonl`，吃 `MOUTH_TRACE_DIR`），一行一条判词，附这一行是拿哪一套区间判的
+（`target` 列）。两层各自最多往外发一次请求，同一次回复里不连发两轮。
+
+**三件套形状**（先应一声 → 再问一句 → 表个态）不在这里判：它是 `clauses.json` 里
+`scope=reply` 的那一条，由**装配那一步**（`organs/mind/conversation.py` 的 `_through_mouth`）
+拿整句过闸、命中即弃——那一层没有重写器，所以这一条目前是「命中即弃」，不是「改一次」。
 
 ## 7 家（第四批：十间房 + 存取接口 + 审计）
 
