@@ -178,6 +178,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from organs.brain import model as brain_model
 from organs.heart import gate as heart_gate
 from organs.heart import refuse as heart_refuse
+from organs.home import preference_of                # 家·偏好卡：这个人希望她怎么说话
 from organs.home import residents as home_residents
 from organs.home import store as home_store
 from organs.mind import conversation
@@ -193,6 +194,7 @@ from organs.mouth import kin as kin_rules               # 认亲：认不认这�
 from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
 from organs.mouth import rewrite as rewrite_rules      # 参数名就叫 rewrite，模块用别名进来免得被挡住
 from organs.mouth import style as style_rules          # 目标长度与句末标点：判据在 data/style_target.json
+from organs.mouth import style_policy                  # 偏好卡盖 policy：判据只有这一份（mind 也调它）
 from organs.mouth.gate import ClauseBroken
 
 from .core import Result
@@ -733,6 +735,41 @@ def _audience_round(payload: Dict[str, Any], asked: str, who: str,
                                        level=payload.get("level"))}
 
 
+def _style_for(who: str) -> dict:
+    """这个人的偏好卡：他希望她怎么说话。没有这张卡就是 {}（不补默认值）。
+
+    只读家·名片盒里那张卡（organs/home/residents.py 的 preference_of）：空串不是一个人，不去问家；
+    缺卡返回 {} 是家的语义，坏卡/读不动照实往上抛——不在这里翻成「没偏好」。
+    """
+    if not str(who or "").strip():
+        return {}
+    return dict(preference_of(root=None, who=str(who)) or {})
+
+
+def _styled(who: str) -> Tuple[dict, Optional[Dict[str, Any]]]:
+    """这一轮该用的 policy，与「字限赢」的那句留痕：**两份读数一次盖出来**。
+
+    覆盖规则不在本文件：organs/mouth/style_policy.py 的 overlay 是唯一判据（普通一轮在
+    organs/mind/conversation.py 也调它），这里只负责「读家卡 → 盖一次」。两处若各写一份，
+    同一个人在主路径与边界话上就会被切成两种样子。
+    """
+    return style_policy.overlay(dict(warehouse.load("policy")), _style_for(who))
+
+
+def _policy_for(who: str) -> dict:
+    """warehouse.load("policy") 的副本，按这个人的偏好卡盖掉 split 的旋钮（**字限优先**）。
+
+    三条规则见 organs/mouth/style_policy.py 的 overlay（那条路是唯一一份判据）。
+    没有卡就原样返回 policy：一个键都不动，改前改后逐字一致。
+    """
+    return _styled(who)[0]
+
+
+def _style_note(who: str) -> Optional[Dict[str, Any]]:
+    """「两者都有、字限优先」时如实记一笔；没有这种冲突就返回 None（回包形状不许无故变）。"""
+    return _styled(who)[1]
+
+
 def _say_boundary(payload: Dict[str, Any], said: str, who: str) -> None:
     """把这一轮的 reply / chunks 换成那句边界话：切分与节奏仍走平常那两处（不另造一套）。
 
@@ -740,11 +777,14 @@ def _say_boundary(payload: Dict[str, Any], said: str, who: str) -> None:
     每泡停多久，跟她平常说话是同一份判据，预览与实发才不会对不上。
     """
     policy = warehouse.load("policy")
-    batch = pace_fill(split_text(said, policy, warehouse.load("action_note")), policy,
+    batch = pace_fill(split_text(said, _policy_for(who), warehouse.load("action_note")), policy,
                       "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
     payload["reply"] = said
     payload["chunks"] = [{"text": part.text, "gap_before": part.gap_before,
                           "send_at": part.send_at} for part in batch.parts]
+    note = _style_note(who)
+    if note is not None:
+        payload["style"] = note
 
 
 def _audience_judged(cfg: Mapping[str, Any], book: Mapping[str, Any],
@@ -978,7 +1018,7 @@ def _stop_row(counted: Any) -> Dict[str, Any]:
 def _resplit(said: str, who: str) -> List[Dict[str, Any]]:
     """整段被改过之后重新切一次泡：与装配 / 边界话 / 冷却那一轮同一个拼法（split + pace）。"""
     policy = warehouse.load("policy")
-    batch = pace_fill(split_text(said, policy, warehouse.load("action_note")), policy,
+    batch = pace_fill(split_text(said, _policy_for(who), warehouse.load("action_note")), policy,
                       "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
     return [{"text": part.text, "gap_before": part.gap_before, "send_at": part.send_at}
             for part in batch.parts]
@@ -1317,7 +1357,7 @@ def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
     """
     policy = warehouse.load("policy")
     said = str(state["say"])
-    batch = pace_fill(split_text(said, policy, warehouse.load("action_note")), policy,
+    batch = pace_fill(split_text(said, _policy_for(who), warehouse.load("action_note")), policy,
                       "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
     payload: Dict[str, Any] = {
         "ok": True,
@@ -1328,6 +1368,9 @@ def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
         "refusal": _cooled_section(state),
         "audience_held": [],               # 冷却那一轮没有装配、没有 recalled：没人可剔，这一格在
     }
+    note = _style_note(who)
+    if note is not None:
+        payload["style"] = note
     _gate_round(payload, asked, store, history, assembled=False, scope=scope, who=who,
                 known=known)
     # 冷却这一轮没有装配、没有 EngageInput：出站闸无从判，四格照给并如实说「没判」。

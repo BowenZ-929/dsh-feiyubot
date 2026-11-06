@@ -30,10 +30,11 @@ from . import store as store_module
 
 INDEX_NAME = "index.jsonl"
 
-# 七种卡：物件（放着的）、痕迹（写下的经过）、名片（一人一卡）、借阅条（借来的一份语料）、
-# 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）。
+# 这几种卡：物件（放着的）、痕迹（写下的经过）、名片（一人一卡）、借阅条（借来的一份语料）、
+# 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）、
+# 偏好（一人一张：她想怎么对这个人说话）。
 CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费",
-                               "进度", "日记", "梦", "人设卡", "任务")
+                               "进度", "日记", "梦", "人设卡", "任务", "偏好")
 #: 抽屉里的「格子」：这四个 kind 各自落一个子目录，各一份 index.jsonl。
 #: 房名表不变（还是十间）——格子是**一间房里的抽屉分格**，不是新房间。
 SHELF_KINDS: Tuple[str, ...] = ("自画像", "人设卡", "日记", "梦")
@@ -57,6 +58,15 @@ TASK_KIND = "任务"
 TASK_ROOM = "工作台"
 #: 完成那一行的审计名字前缀。与「消费:」分开，免得完成任务偷吃这一间的拿取额度。
 TASK_DONE_AUDIT_PREFIX = "任务完成:"
+
+PREF_KIND = "偏好"
+#: 偏好卡只落名片盒：它是**跟着人卡住**的一张卡（一人一张），不是第十一间房，也不进别处。
+#: 它不走 index.jsonl（那人卡的规矩不破），落名片盒里独立的 prefs.jsonl——照 borrow.jsonl 的先例。
+PREF_ROOM = "名片盒"
+#: params 的键只有这四样。多一个键就是第二种「怎么说话」的写法，读的人得去猜哪个算数。
+PREF_KEYS: Tuple[str, ...] = ("who", "chunks_per_reply", "max_chars", "at")
+#: 这两个是旋钮：**只判类型不判范围**。范围（几个块一口、最多几个字）是手那边的判据。
+PREF_INT_KEYS: Tuple[str, ...] = ("chunks_per_reply", "max_chars")
 
 #: 进度是 **0-100 的整数**，不是文本、不是任意数。只选一套：可校验、可排序、面板能一眼读到「到哪一步」；
 #: 文字说明已经在 `note` 里，再开一套自由文本就是第二个真源。
@@ -234,6 +244,53 @@ def _need(params: Dict[str, Any], key: str, kind: str) -> str:
     return value
 
 
+def _check_at(value: Any) -> str:
+    """at 只收「能当 ISO8601 读」的字符串。读不出来 → BAD_AT，不猜、不替它补一个当前时间。"""
+    text = value.strip() if isinstance(value, str) else ""
+    if text:
+        iso = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            datetime.fromisoformat(iso)
+        except ValueError:
+            pass
+        else:
+            return text
+    raise CardError("BAD_AT", {"at": value},
+                    "at 要能当 ISO8601 读（可省）：%r" % (value,))
+
+
+def _check_pref_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """偏好卡的字段校验：**只做结构与类型，不判取值范围**。
+
+    为什么范围不在这里：几个块拼一口回、一条最多几个字，是**她怎么对这个人说话**的判据，长在
+    手那边；家只保证这张卡立得住（键认得、类型对、时间读得出来）。范围写进家，等于手的判断
+    多一个真源，改上限要改两处，两处早晚分叉。
+
+    为什么 bool 特别点出来：bool 是 int 的子类，True 落盘就成了 1，读回来没人分得清
+    「一个块」与「打开这个开关」。
+
+    为什么没给的旋钮不进 params：**空卡 = 两个旋钮都没设过**，跟「设成 0」是两件事；
+    补 0 就把「没设过」写成了一条决定。
+    """
+    extra = sorted(str(key) for key in params if key not in PREF_KEYS)
+    if extra:
+        raise CardError("BAD_KEY", {"keys": extra, "allowed": list(PREF_KEYS)},
+                        "%s 的 params 只许这几样：%s；多出来的是：%s"
+                        % (PREF_KIND, "、".join(PREF_KEYS), "、".join(extra)))
+    for key in PREF_INT_KEYS:
+        value = params.get(key)
+        if value is None:              # 没给 = 这个旋钮没设过
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise CardError("BAD_VALUE", {"field": key, "value": value},
+                            "%s 的 %s 只收 int（bool 也不算）：%r；"
+                            "不合法不静默改成 0" % (PREF_KIND, key, value))
+    params["who"] = _need(params, "who", PREF_KIND).strip()   # 谁这张卡是给他的
+    if params.get("at") is not None:
+        params["at"] = _check_at(params.get("at"))
+    return params
+
+
 def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
                        room_name: str) -> Dict[str, Any]:
     """按 kind 校验字段；返回补齐后的 params。
@@ -322,6 +379,14 @@ def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
         if note is not None and not isinstance(note, str):
             raise CardError("BAD_NOTE", {"kind": kind, "note": note},
                             "%s 的 note 只收字符串：%r" % (kind, note))
+    elif kind == PREF_KIND:
+        # 偏好卡只落名片盒。它跟着人卡住——一人一张，落名片盒里独立的 prefs.jsonl，
+        # **不进 index.jsonl**（那间房的索引仍只放人卡）。字段规矩全在 _check_pref_params。
+        if room_name != PREF_ROOM:
+            raise CardError("KIND_WRONG_ROOM", {"kind": kind, "room": room_name},
+                            "%s 只落%s（落 %s/prefs.jsonl，不进 index.jsonl）："
+                            "一人一张的旋钮跟着人卡住" % (kind, PREF_ROOM, PREF_ROOM))
+        params = _check_pref_params(params)
     return params
 
 

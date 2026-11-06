@@ -22,6 +22,9 @@
    画风／参考图 → **仓库**当素材卡。**「她长什么样」的定性描述不在家**（在魂的 identity.json
    的 appearance）：本文件的入参里没有、也不认 appearance／look／长相 这类键，传了即
    CardError(code="NOT_HOME_BUSINESS")——长相有唯一真源，在第二个地方再写一遍就分叉了。
+5. 「这个人希望她怎么说话」→ 名片盒里的**偏好卡**（kind="偏好"，一人一张、按 QQ 号）：
+   只记两个旋钮，落名片盒里独立的 prefs.jsonl（照 borrow.jsonl 的先例，index.jsonl 仍只放
+   人卡），只增不改、读时折成最新一行。取值范围不在这里判——那是手的判据，家只管卡的结构。
 """
 from __future__ import annotations
 
@@ -400,3 +403,119 @@ def register_asset(root=None, *, by: str, path: str, note: str = "") -> dict:
             "chars": len(note or ""), "note": note or "", "by": by, "params": {}}
     outcome = cards.append_cards(root=root, role=_role_of(by), by=by, cards=[card])
     return {"room": WAREHOUSE_ROOM, "card": outcome["cards"][0], "audit": outcome["audit"]}
+
+
+# ---------------------------------------------------------------- 5. 名片盒里的偏好卡
+
+#: 名片盒里独立的第二份账（照 borrow.jsonl 的先例）：名字里就写明它不是 index.jsonl。
+PREF_KIND = cards.PREF_KIND
+PREF_ROOM = cards.PREF_ROOM
+PREF_FILE = "prefs.jsonl"
+
+
+def _prefs_path(home: Path) -> Path:
+    return home / PREF_ROOM / PREF_FILE
+
+
+def _pref_entry(row: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """折出来的一条：只带设过的旋钮。没给的那一个**不出现在返回值里**（不补 0、不补默认值）。"""
+    entry: Dict[str, Any] = {"who": params["who"]}
+    for key in cards.PREF_INT_KEYS:
+        if key in params:
+            entry[key] = params[key]
+    entry["at"] = row.get("at")
+    entry["card_id"] = row.get("card_id")
+    return entry
+
+
+def _fold_prefs(root=None, *, stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """把 prefs.jsonl 的流水折成「一人一条最新」：**按追加顺序取最新，不比 at**。
+
+    卡片只增不改：同一个人再写一次就是在后面再追加一行，盘上旧行一个字都不动；「哪一行算数」
+    只在读的这一刻由顺序决定（与台词卡、指针卡同一个口径）。比的若是 at，人写错一个时间戳就能
+    盖掉后写的那一行。
+
+    坏行不静默吞：JSON 读不出来的由 store.read_lines 计数（bad_lines），读得出来但字段立不住的
+    另计（bad_rows）并跳过——坏的这一行不参与折叠，也不拿它的值去顶一个「没设过」。
+    """
+    seen: Dict[str, Any] = stats if stats is not None else {}
+    path = _prefs_path(store.home_root(root))
+    rows, bad = _read_jsonl(path)
+    seen["lines"] = len(rows)
+    seen["bad_lines"] = bad
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if row.get("kind") != PREF_KIND:
+            continue
+        try:
+            params = cards._check_pref_params(dict(row.get("params") or {}))
+        except cards.CardError:
+            seen["bad_rows"] = int(seen.get("bad_rows", 0)) + 1
+            continue
+        who = params["who"]
+        latest.pop(who, None)      # 挪到末尾：写得更晚的人排在后面
+        latest[who] = _pref_entry(row, params)
+    return latest
+
+
+def add_preference(root=None, *, role: str, by: str, who: str,
+                   chunks_per_reply=None, max_chars=None, at=None) -> dict:
+    """给某个人加一张偏好卡：**追加一行**到 名片盒/prefs.jsonl，返回写进去的那张卡。
+
+    只加一行、盘上别的行一个字不动——同一个人再写一次就是再追加一行，读的时候折成最新
+    （见 _fold_prefs）。这条与借阅条、痕迹、审计同源：只增不改才追得回「她什么时候改的口径」。
+
+    为什么独立文件、不进 index.jsonl：名片盒的索引只放**人卡**，这条规矩不破；偏好是跟着人卡住的
+    另一张卡（一人一张），照 borrow.jsonl 的先例单开一份。房名不变、房间不新增。
+
+    为什么没有取值范围：几个块拼一口、一条最多几个字，是「她怎么对这个人说话」的判据，长在手那边。
+    家只保证这张卡的结构成立（键认得、int 不是 bool、at 读得出来），范围不在这里判第二遍。
+
+    为什么空卡也落一行：两个旋钮都不给 = 这个人「还没设过」，那是他自己的一行账；
+    不落行就等于「不知道」和「没设过」长得一模一样。写权照旧只在 access.check_write 判一次。
+    """
+    params: Dict[str, Any] = {"who": who}
+    for key, value in (("chunks_per_reply", chunks_per_reply), ("max_chars", max_chars),
+                       ("at", at)):
+        if value is not None:      # 没给 ≠ 给了个空：没给的旋钮不进 params
+            params[key] = value
+    access.check_write(role=role, room=PREF_ROOM, name=PREF_FILE, chars=0, root=root,
+                       kind=PREF_KIND)
+    params = cards._check_pref_params(params)
+
+    home = store.home_root(root)
+    path = _prefs_path(home)
+    card = cards._new_card({"kind": PREF_KIND, "name": params["who"], "at": params.get("at"),
+                            "params": params},
+                           role=role, by=by, room_name=PREF_ROOM,
+                           seq=(store.line_count(path) if path.exists() else 0) + 1,
+                           prefix=PREF_KIND)
+    store.append_line(path, card)
+    audit.append_entry(root=root, role=role, by=by, room=PREF_ROOM, name=PREF_FILE, chars=0,
+                       bytes=len(json.dumps(card, ensure_ascii=False).encode("utf-8")))
+    return card
+
+
+def preference_of(root=None, *, who: str) -> dict:
+    """这个人**最新**的那张偏好卡；**没有这张卡就返回 {}**（不返回 None、不补默认值、不落空文件）。"""
+    key = who.strip() if isinstance(who, str) else ""
+    if not key:
+        raise cards.CardError("BAD_ARGUMENT", {"who": who},
+                              "who 不能空：要说清这张卡是给谁的，收到 %r" % (who,))
+    return _fold_prefs(root).get(key, {})
+
+
+def preferences(root=None) -> list:
+    """全部人的最新偏好，一人一条（面板与验收用；后写的排在后面）。"""
+    return list(_fold_prefs(root).values())
+
+
+def preference_ledger(root=None) -> dict:
+    """偏好这份账的读数：几条、几个人、坏行几条。坏行计数**读得到**，不静默吞。"""
+    stats: Dict[str, Any] = {}
+    folded = _fold_prefs(root, stats=stats)
+    path = _prefs_path(store.home_root(root))
+    return {"room": PREF_ROOM, "path": str(path), "cards": stats["lines"],
+            "people": len(folded), "bad_lines": stats["bad_lines"],
+            "bad_rows": int(stats.get("bad_rows", 0)),
+            "status": "已接入" if stats["lines"] else "未接入"}

@@ -22,7 +22,8 @@ from .anchors import (AnchorError, append_anchors, latest_by_scene, read_all as 
 from .audit import AuditShrunk, Entry, append_entry, read_tail, verify
 from .cards import (CardError, add_task, append_cards, complete_task, consume, fold,
                      list_room, list_tasks, read_item, set_progress)
-from .residents import (borrow_ledger, read_drawer, read_learned, register_artwork,
+from .residents import (add_preference, borrow_ledger, preference_ledger, preference_of,
+                        preferences, read_drawer, read_learned, register_artwork,
                         register_asset, register_borrow, seed_mouth_pointers,
                         warehouse_pointers)
 from .rooms import (DEFAULT_WRITABLE, READONLY_ROOMS, ROOM_NAMES, ROOMS, Room, RoomMiss, find,
@@ -38,6 +39,7 @@ __all__ = [
     "AuditShrunk", "Entry", "append_entry", "read_tail", "verify",
     "CardError", "add_task", "append_cards", "complete_task", "consume", "fold",
     "list_room", "list_tasks", "read_item", "set_progress",
+    "add_preference", "preference_ledger", "preference_of", "preferences",
     "borrow_ledger", "read_drawer", "read_learned", "register_artwork", "register_asset",
     "register_borrow", "seed_mouth_pointers", "warehouse_pointers",
     "DEFAULT_WRITABLE", "READONLY_ROOMS", "ROOM_NAMES", "ROOMS", "Room", "RoomMiss", "find",

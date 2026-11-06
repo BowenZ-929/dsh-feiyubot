@@ -126,6 +126,15 @@ def _home_of(root: Optional[Path]) -> Optional[Path]:
     return hand_store.home_root(root)
 
 
+def _style_table() -> Dict[str, List[int]]:
+    """「怎么说话」能改哪两样、各自能写多少：**从 whitelist.STYLE_KEYS 派生**。
+
+    范围的真源在手那边的一份常量里（手按它判、这里按它显示）。本层不抄第二份：
+    加一个旋钮、改一次范围，面板跟着变，而不是等谁想起来再改一行。
+    """
+    return {name: list(bounds) for name, bounds in hand_whitelist.STYLE_KEYS.items()}
+
+
 def _actions_table() -> Dict[str, Any]:
     """判据快照的三块：名单（白名单）、风险档、要不要一次性授权。
 
@@ -147,11 +156,13 @@ def _snapshot(params: Mapping[str, str]) -> Result:
     """/hand：判据快照 + 今天还剩几次。who 缺省按空串算，不 400。
 
     额度只调 quota.remaining（本层不数额度：账头是唯一计数真源）。
+    多一格 `style_keys`：`set_style` 能写的那两个旋钮与闭区间（从手那边的常量派生）。
     """
     root, now = _root(params), _now(params)
     who = _who(params)
     payload: Dict[str, Any] = {"ok": True, "readonly": True, "agent": AGENT}
     payload.update(_actions_table())
+    payload["style_keys"] = _style_table()
     payload["who"] = who
     payload["quota"] = hand_quota.remaining(who, now=now, root=root)
     payload["limits_note"] = LIMITS_NOTE

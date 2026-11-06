@@ -188,6 +188,7 @@ from ..brain import model as brain_model
 from ..home import access as home_access
 from ..home import anchors as home_anchors
 from ..home import cards
+from ..home import residents as home_residents
 from ..home import store as home_store
 from ..heart import card as card_module
 from ..heart import effective as effective_module
@@ -204,6 +205,7 @@ from ..mouth import drops as drops_module
 from ..mouth import gate as gate_module
 from ..mouth import pace as pace_module
 from ..mouth import rewrite as rewrite_rules     # 参数名就叫 rewrite：模块用别名进来免得被挡住
+from ..mouth import style_policy
 from ..mouth import tone as tone_module
 from ..mouth import warehouse
 from ..mouth.split import split as split_text
@@ -2908,16 +2910,43 @@ def _through_mouth(reply: str, trace: Any) -> Tuple[Any, Dict[str, Any]]:
     return verdict, drops_module.report(trace, _day())
 
 
+def _pref_card(who: str) -> Dict[str, Any]:
+    """这一轮是谁的偏好卡：「这个人希望她怎么说话」的两个旋钮；没有卡就是 {}。
+
+    读的是家的名片盒（organs/home/residents.py 的 preference_of，与 api/chat.py 同一个读口）。
+    **读不到偏好不算错**：偏好是「怎么说」的调节，不是这一轮能不能说话的前提——空 who、卡片坏件、
+    家根读不动，一律只记一行、照默认往下走。范围判定（0 / 负数 / bool 算没设）不在这里：
+    那是 organs/mouth/style_policy.py 那一份判据的事。
+    """
+    key = str(who or "").strip()
+    if not key:
+        return {}
+    try:
+        return dict(home_residents.preference_of(root=None, who=key) or {})
+    except Exception as exc:                       # CardError / OSError 全算「没卡」
+        LOGGER.warning("嘴·偏好卡读不动（%s）：这一轮按默认口径说话", exc)
+        return {}
+
+
 def _bubbles(reply: str, who: str, at: str) -> List[Dict[str, Any]]:
     """她说出口的那一句怎么分包：切分 + 节奏（seed 稳定，同一轮两次调用得到同一组间隔）。
 
     必须排在照抄审计之后：审计那一档会把整句换掉或弃掉，拿旧的那句算分包，
     发出去的就是她没说的那句。
+
+    **这一轮的 who 就是「触发者」**：按他的偏好卡盖掉 split 的旋钮再切（覆盖规则在
+    organs/mouth/style_policy.py，与 api/chat.py 同一份判据，不在这里另抄一套）。节奏仍用
+    没盖过的 policy——卡管的是「切成几泡、每泡几个字」，不是「停多久」。
+    「两个旋钮都给了、字限赢」的留痕不回包（这一层没有回包），只记一行日志。
     """
     if not reply:
         return []
     policy = warehouse.load("policy")
-    batch = pace_module.fill(split_text(reply, policy), policy,
+    split_policy, note = style_policy.overlay(policy, _pref_card(who))
+    if note is not None:
+        LOGGER.info("嘴·本次忽略 chunks_per_reply=%s：字限优先（max_chars=%s 那一档赢）",
+                    note["chunks_per_reply"], note["max_chars"])
+    batch = pace_module.fill(split_text(reply, split_policy), policy,
                              "%s%s%s" % (who or "", SEED_SEP, at))
     return [{"text": part.text, "gap_before": part.gap_before, "send_at": part.send_at}
             for part in batch.parts]
