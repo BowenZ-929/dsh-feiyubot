@@ -63,7 +63,7 @@ def status_writer_report() -> list:
 
 # who 主键必须是平台+数字号（如 aiocqhttp:3425635473 或裸 3425635473）。
 # 昵称不是身份：同一个人在多个群用不同昵称，按名字建卡会把他建成三个人。
-WHO_RE = re.compile(r"^([a-z0-9]+:)?\d{5,15}$")
+WHO_RE = re.compile(r"^([a-z0-9]+:)?\d{3,15}$")
 
 
 def valid_who(who: str) -> bool:

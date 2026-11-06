@@ -34,6 +34,20 @@ class WhoKeyTest(unittest.TestCase):
         self.assertIn("昵称不是身份", result["message"])
         self.assertEqual([], store.people_list("2026-11-03T10:01:00+00:00"))
 
+    def test_valid_who_accepts_the_formats_in_our_own_error_message(self):
+        """错误信息里举的例子必须能过：qq:1001 / 1001 / aiocqhttp:1001 / onebot:1001。"""
+        from organs.brain.model import valid_who
+
+        for who in ("qq:1001", "1001", "aiocqhttp:1001", "onebot:1001"):
+            self.assertTrue(valid_who(who), "%s 必须能通过 valid_who" % who)
+        self.assertFalse(valid_who("小明"))
+        store, tmp = fresh_store()
+        self.addCleanup(tmp.cleanup)
+        for who in ("qq:1001", "1001", "aiocqhttp:1001", "onebot:1001"):
+            result = ingest(store, who, "在吗", "2026-11-03T10:00:00+00:00")
+            self.assertTrue(result["ok"], "%s 建卡失败：%s" % (who, result))
+        self.assertEqual(4, len(store.people_list("2026-11-03T10:01:00+00:00")))
+
     def test_bot_does_not_build_card(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
