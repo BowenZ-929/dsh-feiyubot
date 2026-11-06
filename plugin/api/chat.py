@@ -74,6 +74,34 @@ resolve 退到中性叫法，那一轮既不投记忆、也不记会话账。返
 addressed: {who, address, source}。（提示词那一段称呼由 organs/mind/conversation.py 自己按人名录
 算，不在本次边界内——会话覆盖目前落在出口读数与脑那条记忆上。）
 
+**出口认 audience（这一轮加的）：私密记忆在群里守边界。** `/chat` 的 body 多一个可选
+`scope`（只认数据里那两个值、缺省值也在数据里；**非法值 400 并点名**）。装配之后、过闸之前，
+`recalled[*]` 里标成私密的那几条（栏名与取值取自 organs/mouth/data/refusal.json 的 audience 节）
+在 `scope=group` 时**从出口剔除**：不再进 `recalled`（于是页面不再引用它、复述审计的记忆那一档
+也不再有它），剔了谁记在回包的 `audience_held: [{id, text_min, source}]`（id 与一小截摘要，不贴
+正文）。**被直接问到就必须出声**：用户这句与该条 text 的连续重合 ≥ 阈值、或该条 text 的 N 元组
+覆盖率 ≥ 阈值（两条判据与四个阈值全在数据里，可离线复算）时，她这一轮说的不是模型那句，而是数据
+里那句边界话 `say`，并走拒绝那条路（事件形状取 `event_shape`、我们自己的 refuse.jsonl 记一行、
+心那边记一次冷却，事件 why 与账本那一行里带 `mark` 记号）。**没被问到就不出声**：不为没发生的事
+拒绝，但照样剔除（`audience_held` 里看得见）。`scope=private` 一律照常——私聊里内容可以说，既
+不剔除也不出声。
+
+**场合往核里传（这一轮加的）：body 多一个可选「scene」**（认 group / private / unknown，
+缺省与非法一律 unknown；旧字段名「scope」只在 scene 缺席时兜底）。它与上面那一格 scope
+是两件事：scope 管出口「私密记忆这一轮能不能被引用」（非法值 400 并点名），scene 管她
+「在哪儿说话」（**非法值不 400**，落成 unknown）。同一个 body 里两个字段各读各的，互不顶替。
+读出来的值原样交给 conversation.answer(scene=...)：装配里多一段「场合」（三句话在
+assembly.json 的 scene.lines）、落脑时写给那一轮的两条记忆、回想时交给脑（group 时脑才把
+audience=私密 的条目打上 retellable=False，recalled[] 里原样透出）。成功体因此多一节
+scene{value}。**不猜**：缺省也是 unknown——猜成私聊，就是把私事在群里说出去了。
+
+**顺序钉死：冷却 → audience 边界 → 闸 → 长度。** 冷却排在所有人前面，是因为它早于装配——那一轮
+压根没有 `recalled`，本就没有边界话可说；也因为「这个话题已经拒过」比「这条记忆是私密」更靠前：
+让边界话抢在冷却之前，就是把一次已经记过的拒绝再说一遍、再投一遍。audience 边界排在闸之前，是
+因为边界话也要过八股闸（她的话都过闸，边界不是免检章），而闸是逐泡改/弃的那一关，替换必须发生在
+它之前。判据读不动时 (a) 场景判不出就不判场景、(b) 私密判不出就**一条记忆都不引用**：没有判据，
+就没有哪一条敢说它能往外讲。
+
 成功体里多一节 refusal（**不破坏既有键**）。**冷却那一格恒在**：{cooling, topic, note}——
 以前「什么也没判出来」时这一节整节不出现，于是人分不清「判过了、没在冷却」与「压根没看」；现在
 cooling 永远答得出来（true / false，抽不到话题时 false + topic:null），note 说清这一轮冷却这一关
@@ -103,6 +131,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from organs.brain import model as brain_model
 from organs.heart import refuse as heart_refuse
 from organs.home import residents as home_residents
 from organs.home import store as home_store
@@ -184,6 +213,13 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     拒绝（_cooled_payload）。这一步排在 answer() 前面，所以那一轮一次模型调用都没有；认不出话题
     或判据读不动就往下走，照常说话。
 
+    body 里还可以给一个 `scope`（group / private，缺省取数据里那个）：它只决定「私密记忆这一轮
+    能不能被引用」。非法值当场 400 并点名，连魂与脑都不必在场——body 就是错的。
+
+    body 里还可以给一个 `scene`（group / private / unknown，缺省 unknown，旧字段名 scope 兜底）：
+    它只决定「这是哪儿说话」——装配里写哪一句、落脑写哪一栏、回想时脑要不要把私密条目打上
+    retellable=False。**非法值不 400**（落成 unknown，不猜成 private），与上面那一格各读各的。
+
     成功之后先过闸：拿 answer() 装配进去的那几段原文（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句 /
     对方原话）与装配体逐泡过一遍闸，结果就地落回 payload（chunks / reply / gate）。闸坏了不 fail-open：
     判据读不动就整轮弃掉，并在 gate 里如实说为什么。
@@ -195,6 +231,12 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     text = _text(body)
     if text is None:
         return 400, {"ok": False, "message": MISSING_TEXT}
+    # 场景（可选，缺省值是数据里那个）：只决定「私密记忆这一轮能不能被引用」，非法值当场 400 并点名。
+    scene = _scope_state(body)
+    if scene["error"]:
+        return 400, {"ok": False, "message": scene["error"]}
+    # 场合（可选，缺省 unknown）：只决定「装配里写哪一句 / 落脑写哪一栏」，非法值不 400。
+    place = _scene_of(body)
     if store is None:
         return 503, {"ok": False, "message": STORE_MISSING}
     if brain is None:
@@ -207,14 +249,18 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     if cooled["cooling"]:
         return 200, _cooled_payload(cooled, text, store, history, _who(body))
     try:
-        payload = conversation.answer(text, who=_who(body), store=store, brain=brain)
+        payload = conversation.answer(text, who=_who(body), scene=place,
+                                      store=store, brain=brain)
     except LLMError as exc:
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
         LOG.warning("POST /chat 失败：kind=%s message=%s", exc.kind, exc.message)
         return status, {"ok": False, "kind": exc.kind, "message": exc.message}
     _address_round(payload, text, brain, _who(body))
+    # audience 边界：装配之后（recalled 到这一步才有）、过闸之前（边界话也要过闸）。
+    boundary = _audience_round(payload, text, _who(body), scene["scope"])
     _gate_round(payload, text, store, history)
-    payload["refusal"] = _refusal_section(cooled, _judge(text, payload.get("reply")))
+    payload["refusal"] = _refusal_section(
+        cooled, boundary["judged"] or _judge(text, payload.get("reply")))
     _borrow_round(payload)
     return 200, payload
 
@@ -273,6 +319,268 @@ def _remember_rename(brain: Any, who: str, called: str) -> None:
         brain.ingest(**address.rename_memory(who, called, ts=_stamp()))
     except (OSError, ValueError, TypeError, KeyError) as exc:
         LOG.warning("POST /chat 记改称呼没成：%s", exc)
+
+
+# —— 出口认 audience：私密记忆在群里守边界 ————————————————
+
+#: 判据那一节的名字（organs/mouth/data/refusal.json）：栏名、取值、阈值、说法全在那一节里。
+AUDIENCE_KEY = "audience"
+
+#: 这一节必须有的字符串键与表键：缺一个就抛（缺键不补默认值——补一个就是第二处真源）。
+AUDIENCE_WORDS = ("field", "private_value", "scope_message", "say", "blur",
+                  "reason", "why", "mark", "event_shape")
+AUDIENCE_TABLES = ("scopes", "criteria")
+#: scopes 与 criteria 两张表里各自必须有的键。
+SCOPE_VALUES = ("group", "private", "default")
+CRITERIA_VALUES = ("overlap_min", "gram_n", "gram_cover", "excerpt_chars")
+
+
+def _scene_of(body: Any) -> str:
+    """读 body 里的场合：认 scene，旧字段名 scope 兜底；缺省 / 空白 / 非法一律 unknown。
+
+    与 _scope_state 是两件事，别合并：那一格管「私密记忆这一轮能不能被引用」（非法值当场 400
+    并点名），这一格管「她在哪儿说话」（非法值**不 400**——body 没错到说不出话，只是我们不知道
+    这是哪儿）。三个取值不在这里另写一份字符串，从 organs/brain/model.py 的 SCENE_* 来：
+    核里多写一份，迟早跟脑分叉。**不猜成 private**：猜错就是把私事在群里说出来。
+    """
+    raw: Any = None
+    if isinstance(body, Mapping):
+        raw = body.get("scene")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            raw = body.get("scope")      # 旧字段名：只给了 scope 的老调用照旧读得出来
+    if isinstance(raw, str) and raw.strip() in brain_model.SCENE_TYPES:
+        return raw.strip()
+    return brain_model.SCENE_UNKNOWN
+
+
+def _scope_state(body: Any) -> Dict[str, Any]:
+    """读 body 里的场景：合法就交回那一个值，非法就交回一句点名的人话（由 dispatch 翻成 400）。
+
+    只认数据里那两个值（`scopes` 节），缺省也是数据里那个；没给、给了空白都按缺省算。
+    **判据读不动时不 400**：那是我们的数据坏了，不是他的 body 坏了，所以只记一行 WARNING 并交回
+    scope=None——下游看见 None 就一条记忆都不引用（没有判据，就没有哪一条敢说它能往外讲）。
+
+    返回 {"scope": str|None, "error": str|None}；error 非空时 dispatch 直接 400。
+    """
+    try:
+        cfg = _audience_cfg(warehouse.load("refusal"))
+        scopes = cfg["scopes"]
+        allowed = [str(scopes[name]) for name in SCOPE_VALUES[:2]]
+        default = str(scopes["default"])
+        message = str(cfg["scope_message"])
+    except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, refusal.RefusalBroken,
+            OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("POST /chat 读场景判据没成：%s", exc)
+        return {"scope": None, "error": None}
+    raw = body.get("scope") if isinstance(body, Mapping) else None
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {"scope": default, "error": None}
+    value = raw.strip() if isinstance(raw, str) else raw
+    if value in allowed:
+        return {"scope": value, "error": None}
+    return {"scope": None,
+            "error": _word(message, "audience.scope_message",
+                           allowed=" / ".join(allowed), value="%r" % (raw,))}
+
+
+def _audience_round(payload: Dict[str, Any], asked: str, who: str,
+                    scope: Optional[str]) -> Dict[str, Any]:
+    """出口认 audience：私密记忆在群里守边界（剔除注入 / 被问到就说一句边界话）。
+
+    三步，顺序钉死：
+
+    1. **剔**：scope=group 时把 `recalled[*]` 里那一栏等于私密值的条目从出口剔掉（栏名与取值
+       都取自数据）。剔掉之后这一轮就没有它了：页面不再引用它（recalled 里没有）、复述审计的
+       「记忆原文」那一档也不再拿它当注入原文。剔了谁记在 payload["audience_held"] 里，每行
+       {id, text_min, source}——id 与一小截摘要，**不贴正文**。scope=private 一律不动。
+    2. **问**：被剔掉的那几条里，有哪一条是这一轮**被直接问到**的（判据见 _asked_private：
+       连续重合与 N 元组覆盖率两条，阈值全在数据里的 criteria 节）。一条都没被问到就到此为止
+       ——**不为没发生的事拒绝**：不出声、不投事件，召回里少了它这件事由 audience_held 交代。
+    3. **说**：被问到了就换说法——reply 与 chunks 换成数据里那句边界话（切分与节奏仍走
+       split.split + pace.fill，与平常说话同一份判据），并走拒绝那条路（_audience_judged）。
+       **沉默不算数**：沉默等于「她刚好没想到」，说了才等于「她在守边界」。这一句仍要过八股闸
+       （调用方在下一步做，她的话都过闸）。
+
+    **判据读不动就一条记忆都不引用**（不 fail-open）：这时候连「哪条是私密」「算不算被问到」都
+    判不出，于是把 recalled 整份剔掉、也不出声，只记一行 WARNING——没有判据，就没有哪一条敢说
+    它能往外讲。payload["audience_held"] 里照样看得见被剔掉的 id（摘要那一格留空，因为截多少字
+    也在那份读不动的数据里）。
+
+    为什么排在这里：它必须在装配之后（recalled 到这时才有），又必须在过闸之前（边界话要过闸，
+    而闸逐泡改/弃，替换得在它前面）。冷却更早：那一轮压根没有装配，也就没有边界话可言。
+
+    返回 {"held": [...], "spoke": bool, "judged": {...}|None}；judged 非空时由 dispatch 拿去当
+    这一轮 refusal 节里那四样（它已经投过一次，不许再让 _judge 判第二遍）。
+    """
+    rows = [one for one in (payload.get("recalled") or []) if isinstance(one, Mapping)]
+    try:
+        book = warehouse.load("refusal")
+        cfg = _audience_cfg(book)
+    except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, refusal.RefusalBroken,
+            OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("POST /chat 判 audience 没成：%s", exc)
+        payload["recalled"] = []
+        payload["audience_held"] = [{"id": str(one.get("id") or ""), "text_min": "",
+                                     "source": str(one.get("source") or "")} for one in rows]
+        return {"held": payload["audience_held"], "spoke": False, "judged": None}
+    payload["audience_held"] = []
+    if str(scope or "") != str(cfg["scopes"]["group"]):
+        return {"held": [], "spoke": False, "judged": None}
+    field, private = str(cfg["field"]), str(cfg["private_value"])
+    held = [one for one in rows if _audience_of(one, field) == private]
+    if not held:
+        return {"held": [], "spoke": False, "judged": None}
+    payload["recalled"] = [one for one in rows if _audience_of(one, field) != private]
+    payload["audience_held"] = _held_rows(held, int(cfg["criteria"]["excerpt_chars"]))
+    criteria = cfg["criteria"]
+    if not any(_asked_private(one, asked, criteria) for one in held):
+        return {"held": payload["audience_held"], "spoke": False, "judged": None}
+    _say_boundary(payload, str(cfg["say"]), who)
+    return {"held": payload["audience_held"], "spoke": True,
+            "judged": _audience_judged(cfg, book, asked)}
+
+
+def _say_boundary(payload: Dict[str, Any], said: str, who: str) -> None:
+    """把这一轮的 reply / chunks 换成那句边界话：切分与节奏仍走平常那两处（不另造一套）。
+
+    与冷却那一轮同一个拼法（split.split + pace.fill，seed 是 who 与时刻）：同一句话切几泡、
+    每泡停多久，跟她平常说话是同一份判据，预览与实发才不会对不上。
+    """
+    policy = warehouse.load("policy")
+    batch = pace_fill(split_text(said, policy, warehouse.load("action_note")), policy,
+                      "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
+    payload["reply"] = said
+    payload["chunks"] = [{"text": part.text, "gap_before": part.gap_before,
+                          "send_at": part.send_at} for part in batch.parts]
+
+
+def _audience_judged(cfg: Mapping[str, Any], book: Mapping[str, Any],
+                     asked: str) -> Optional[Dict[str, Any]]:
+    """边界话走拒绝那条路：装事件 → 投一次（心那本账 + 我们自己的 refuse.jsonl）。
+
+    与平常的拒绝**同一个投递点**（_deliver：认话题 → heart.refuse.ingest → 记一行账本），
+    why 里带数据里的记号（mark），所以账本那一行的 why 一眼看得出这次是 audience 挡下的。
+    事件形状取自数据的 event_shape（refused-topic），本文件不写死理由名：边界话不是新理由，
+    是「这个话题先不接」的另一种来由。
+
+    事件装不出来（数据里 event_shape 指向一个不存在的形状）就记一行 WARNING、返回 None：
+    那句边界话已经说出去了，事件这一笔缺了不该把整轮吞掉——但也不假装投过。
+    """
+    try:
+        why = _word(str(cfg["why"]), "audience.why", mark=str(cfg["mark"]))
+        found = refusal.event(str(cfg["event_shape"]), why, now=_stamp(), table=book)
+    except refusal.RefusalBroken as exc:
+        LOG.warning("POST /chat 记边界事件没成：%s", exc)
+        return None
+    delivered = _deliver(asked, found, refusal.KIND_HARD)
+    return {"kind": refusal.KIND_HARD, "shape": found["shape"],
+            "verdict_reason": _word(str(cfg["reason"]), "audience.reason",
+                                    mark=str(cfg["mark"])),
+            "delivered": delivered}
+
+
+def _audience_of(one: Mapping[str, Any], field: str) -> str:
+    """这一条记忆那一栏的值（去掉空白）；没有那一栏就是空串——**没标不是私密**。"""
+    value = one.get(field)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _held_rows(held: List[Mapping[str, Any]], chars: int) -> List[Dict[str, str]]:
+    """扣下的那几条在回包里的样子：{id, text_min, source}——摘要只给一小截，不贴正文。"""
+    return [{"id": str(one.get("id") or ""),
+             "text_min": _excerpt(str(one.get("text") or ""), chars),
+             "source": str(one.get("source") or "")} for one in held]
+
+
+def _excerpt(text: str, chars: int) -> str:
+    """一小截摘要：截 chars 个字（截多少在数据里）；chars 不是正数就一个字都不给。"""
+    body = "".join((text or "").split())
+    return body[:chars] if chars > 0 else ""
+
+
+def _asked_private(one: Mapping[str, Any], asked: str, criteria: Mapping[str, Any]) -> bool:
+    """这一条私密记忆是不是被这一轮**直接问到**了：两条判据，过一条就算（都能离线复算）。
+
+    - 连续重合：用户这句与这条 text 去掉空白后的最长连续重合 ≥ overlap_min 字；
+    - 覆盖率：这条 text 的 gram_n 元组里有多少出现在用户这句里，占比 ≥ gram_cover。
+
+    两条都不过就是没被问到：那一轮不主动引用、也不出声。判据与阈值全在数据的 criteria 节；
+    读不动（缺键、不是数）照实抛，由调用方翻成「一条记忆都不引用」。
+    """
+    body = str(one.get("text") or "")
+    if not body.strip():
+        return False
+    overlap_min = int(criteria["overlap_min"])
+    gram_n = int(criteria["gram_n"])
+    cover = float(criteria["gram_cover"])
+    return (_longest_run(asked, body) >= overlap_min
+            or _gram_cover(asked, body, gram_n) >= cover)
+
+
+def _longest_run(asked: Any, body: Any) -> int:
+    """两段字的最长连续重合有几个字（去空白后逐字比）：0 就是一处都没撞上。"""
+    left = "".join(str(asked or "").split())
+    right = "".join(str(body or "").split())
+    best = 0
+    previous = [0] * (len(right) + 1)
+    for one in left:
+        current = [0] * (len(right) + 1)
+        for index in range(1, len(right) + 1):
+            if one == right[index - 1]:
+                current[index] = previous[index - 1] + 1
+                best = max(best, current[index])
+        previous = current
+    return best
+
+
+def _gram_cover(asked: Any, body: Any, size: int) -> float:
+    """这条 text 的 N 元组覆盖率：它的元组里有几分之几出现在用户这句里（0.0–1.0）。"""
+    left = "".join(str(asked or "").split())
+    right = "".join(str(body or "").split())
+    if size < 1 or len(right) < size:
+        return 0.0
+    grams = {right[index:index + size] for index in range(len(right) - size + 1)}
+    if not grams:
+        return 0.0
+    return len([one for one in grams if one in left]) / float(len(grams))
+
+
+def _audience_cfg(book: Any) -> Mapping[str, Any]:
+    """取 audience 那一节：字符串键、两张表、表里那几个数，缺一个就抛并指名。
+
+    读不动一律抛（缺键不补默认值）：补一个「私密」或补一个阈值，代码里就又多一处真源。
+    """
+    part = book.get(AUDIENCE_KEY) if isinstance(book, Mapping) else None
+    if not isinstance(part, Mapping):
+        raise refusal.RefusalBroken("的数据里没有一节可用的 %r（私密记忆的出口判据）" % AUDIENCE_KEY)
+    for name in AUDIENCE_WORDS:
+        value = part.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise refusal.RefusalBroken("的 %s 节缺 %r，或它不是一句非空字符串（缺键不补默认值）"
+                                        % (AUDIENCE_KEY, name))
+    for name in AUDIENCE_TABLES:
+        if not isinstance(part.get(name), Mapping):
+            raise refusal.RefusalBroken("的 %s 节缺 %r，或它不是一份键值表（缺键不补默认值）"
+                                        % (AUDIENCE_KEY, name))
+    for name in SCOPE_VALUES:
+        value = part["scopes"].get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise refusal.RefusalBroken("的 %s.scopes 缺 %r（场景认的那几个值缺一个，"
+                                        "缺键不补默认值）" % (AUDIENCE_KEY, name))
+    for name in CRITERIA_VALUES:
+        value = part["criteria"].get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise refusal.RefusalBroken("的 %s.criteria 缺 %r，或它不是个数（判据不许是字面量，"
+                                        "缺键不补默认值）" % (AUDIENCE_KEY, name))
+    return part
+
+
+def _word(template: str, where: str, **fields: Any) -> str:
+    """把数据里那句话填成人话；占位符在数据里有、代码这里没给就抛，别把 {mark} 发出去。"""
+    try:
+        return template.format(**fields)
+    except (KeyError, IndexError, ValueError) as exc:
+        raise refusal.RefusalBroken("的 %s 这句填不出来：%s" % (where, exc)) from None
 
 
 # —— 闸：逐泡过一遍，结果落回返回体 ————————————————
@@ -492,6 +800,7 @@ def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
                     "send_at": part.send_at} for part in batch.parts],
         "gate": {"decision": "pass", "hit": None},
         "refusal": _cooled_section(state),
+        "audience_held": [],               # 冷却那一轮没有装配、没有 recalled：没人可剔，这一格在
     }
     _gate_round(payload, asked, store, history, assembled=False)
     return payload

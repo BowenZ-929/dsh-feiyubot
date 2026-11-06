@@ -3,7 +3,7 @@
 这是**全仓唯一的装配点**：QQ 通道将来直接调 answer()，不再自己拼第二遍。装配的规矩
 一个数都不写在本文件里，全在 organs/mind/data/assembly.json：
 
-  order      各段拼装的先后（soul / anchors / recent / banned / action / memory / heart / mouth）
+  order      各段拼装的先后（soul / anchors / recent / banned / action / memory / heart / mouth / scene）
   sections   {key: {"label": 段落标题, "cap": 字数上限}}
   prompt     system / user 两段模板（占位符见下）
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
@@ -11,6 +11,7 @@
   banned     rounds（抽她最近几轮）/ opening_chars（开场取几个字）/ note（那句禁令怎么说）
   action     {"pool": 部位池, "rule": 写法规矩, "quota": 配额}：动作给池子，但配额说了算
   anchors    {"label", "cap", "room", "name"}：锚句从家·哪一间房的哪一张卡读
+  scene      场合：group / private / unknown 各一句，按归一化后的场景取一句进提示词
 读法同 llm.json：实盘 <仓库>/home/organs/mind/assembly.json 优先（存在才读），否则读
 出厂 organs/mind/data/assembly.json。
 
@@ -49,6 +50,10 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           **不 decide_and_log**）；提示词与返回体都**只给档位词**，一个数都不出门
   mouth   address.resolve + tone.from_store（口径行进提示词），过闸用 gate.enforce
           （重写器传 None：本轮命中即弃，不进第二次模型调用），节奏用 split + pace.fill
+  scene   场合：按 answer(scene=...) 归一化后的值（只认 organs/brain/model.py 的 SCENE_*，
+          缺省 / 空白 / 非法一律 unknown——**不猜成私聊**，猜错就是把私事说出去了）从
+          assembly.json 的 scene.lines 取一句，本文件一个字的文案都不写。order 里排在最后：
+          说给谁、说什么都定了，最后交代在哪儿说。
 
 坏卡不是崩溃：mood 照读，effective_state 抛 CardError 就降级成只要 mood 那一块——
 与 api/heart.py 的既有口径同一条（面板能显示「拒载」，这一轮照旧说得出话）。
@@ -111,6 +116,7 @@ ANCHORS_HINT = "锚句由人写，程序不替她造。"
 SEED_SEP = "|"                            # 节奏的种子：who 与时刻拼起来，同一轮两次调用得到同一组间隔
 POOL_SEP = "／"                            # 动作池进提示词时部位之间的分隔（全角斜杠，与标点同一套）
 BANNED_EMPTY = "最近几轮没有可禁用的动作行与开场。"   # 一条都抽不出来时的实话（空白会被她读成「随便用」）
+SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可以更小，不许更大（这节只有一句「在哪儿说」）
 
 
 # —— 装配说明书 ———————————————————————————————————
@@ -168,6 +174,9 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
             raise ValueError("sections.%s 的 cap 要正整数：%s" % (key, where))
         checked[key] = {"label": label.strip(), "cap": cap}
+    if "scene" in checked and checked["scene"]["cap"] > SCENE_CAP_MAX:
+        raise ValueError("sections.scene.cap 不许超过 %d（场合只是一句话）：现在是 %d：%s"
+                         % (SCENE_CAP_MAX, checked["scene"]["cap"], where))
     prompt = data.get("prompt")
     if not isinstance(prompt, dict):
         raise ValueError("装配说明缺 prompt（system / user 两段模板）：%s" % where)
@@ -214,6 +223,7 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         "banned": banned_conf,
         "action": action_conf,
         "anchors": _check_anchors(data.get("anchors"), where),
+        "scene": _check_scene(data.get("scene"), where),
     }
 
 
@@ -379,10 +389,31 @@ def _check_guard(spec: Any, where: str) -> Dict[str, Any]:
     return clean
 
 
+def _check_scene(spec: Any, where: str) -> Dict[str, Any]:
+    """场合那一格：三个场景各一句话，一句都不许缺。
+
+    场景名取自 organs/brain/model.py 的 SCENE_TYPES（核里不另写一份 group / private / unknown）。
+    缺一句就当场报——补一句默认话，就等于在数据之外又造了一处「什么时候说什么」的真源。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("装配说明缺 scene（group / private / unknown 各说一句）：%s" % where)
+    lines = spec.get("lines")
+    if not isinstance(lines, dict):
+        raise ValueError("scene.lines 要一份 {场景: 一句话} 的表：%s" % where)
+    clean: Dict[str, str] = {}
+    for name in brain_model.SCENE_TYPES:
+        text = lines.get(name)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("scene.lines.%s 要一句非空的话：%s" % (name, where))
+        clean[name] = text.strip()
+    return {"lines": clean}
+
+
 # —— 唯一入口 ————————————————————————————————————
 
 
-def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
+def answer(text: str, who: str = "", *, scene: Optional[str] = None,
+           store: Any = None, brain: Any = None,
            heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
            now: Optional[str] = None,
            transport: Optional[Any] = None, config: Optional[Mapping[str, Any]] = None,
@@ -397,10 +428,16 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
     usage_root：口癖账的落点（None → <器官目录>/mind/anchor_usage.jsonl）。
     assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
+    scene：这是什么场合（group / private / unknown，取值以 organs/brain/model.py 的 SCENE_* 为准）。
+    缺省 / 空白 / 非法一律 unknown，**不猜成私聊**——猜错就是把私事说出去了。它一路往下走三处：
+    装配加一段「场合」（文本来自 assembly.json 的 scene.lines）、落脑时写进那一条的 scene 栏、
+    回想时交给脑（group 才把 audience=私密 的条目打上 retellable=False）。位置写在 order 里
+    （出厂数据排在最后：说给谁、说什么都定了，最后交代在哪儿说）。
 
     返回（键名对外冻结，pages/chat.html 照它渲染）：
-      ok / reply / chunks[{text,gap_before,send_at}] / recalled[{id,text,source,
-      source_type,evidence_key,score,who,note_display}] / heart{mood{tier,direction},
+      ok / reply / chunks[{text,gap_before,send_at}] / scene{value} /
+      recalled[{id,text,source,source_type,evidence_key,score,who,note_display,
+      retellable?,retell_note?}]（后两栏只在脑给了的时候带）/ heart{mood{tier,direction},
       voice{tone,direction,bans}, axes{轴: 档位词}, engage{state,reason}}
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
       assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
@@ -426,6 +463,8 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
         raise ValueError("text 不能为空：没有一句话就没有这一轮")
     conf = _check_assembly(assembly, "传入的 assembly") if assembly is not None else load_assembly()
     at = now if isinstance(now, str) and now else brain_model.now_iso()
+    # 场合先归一化：后面三处（装配 / 落脑 / 回想）都只认这一个值，不各自再判一遍。
+    where = _scene_value(scene)
 
     # 0) 最近几轮先读、先对账：脑里记了、这份账上却没落的轮，**这一轮就得看见**。
     #    这一读必须排在 recall 之前——recall 会按它自己的钟顺手换日（换日就把「今日在役」
@@ -437,7 +476,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
 
     # 1) 魂与脑：先回想（这一轮该想起什么，要在写提示词之前定下来）
     soul_text = store.render()
-    recalled, memory_text = _recall(brain, said, who)
+    recalled, memory_text = _recall(brain, said, who, where)
 
     # 1.5) 锚句与连续性：几个读数都在写提示词之前定下来
     omitted = int(loaded.get("omitted") or 0)
@@ -484,7 +523,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
                 "banned": banned_text, "action": action_text,
                 "memory": memory_text, "heart": heart_text, "mouth": mouth_text,
-                "person": person_text}
+                "person": person_text, "scene": _scene_text(conf, where)}
     blocks: List[str] = []
     sections: List[Dict[str, Any]] = []
     for key in conf["order"]:
@@ -524,7 +563,7 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     hit = verdict.hits[0] if verdict.hits else None
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
-    wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at)
+    wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at, where)
     # 7.5) 落账：这一轮的原文进最近几轮（reply 不管有没有说出口，人那句一定留着）。
     # msg_id 取人那句进脑回来的 id：下一次装配对账就靠它把「脑里有、账上也有」认出来。
     recent.append({"ts": at, "who": who or HUMAN_WHO, "said": said, "reply": reply,
@@ -533,14 +572,17 @@ def answer(text: str, who: str = "", *, store: Any = None, brain: Any = None,
     #    命中一律对**家现行全部台词**，不是只注入的那几条（口癖统计看的是全部台词）。
     if not dropped and reply and isinstance(guard_conf, Mapping):
         # 名字不与上面的闸命中（hit）撞车：两件事互不相干，共用一个变量就会互相踩。
-        spoken, scene = usage.match(reply, anchors_rows, int(guard_conf["prefix_chars"]))
-        usage.append(spoken, usage.opening(reply, int(guard_conf["opening_chars"])), scene,
-                     root=usage_root)
+        # 这一格是「命中了哪条台词的 scene」，与上面的场合参数不是一件事：换个名字，免得互相踩。
+        spoken, anchor_scene = usage.match(reply, anchors_rows,
+                                           int(guard_conf["prefix_chars"]))
+        usage.append(spoken, usage.opening(reply, int(guard_conf["opening_chars"])),
+                     anchor_scene, root=usage_root)
 
     return {
         "ok": True,
         "reply": reply,
         "chunks": chunks,
+        "scene": {"value": where},
         "recalled": recalled,
         "heart": heart_words,
         "gate": {
@@ -856,24 +898,61 @@ def _anchors_missing() -> Tuple[str, Dict[str, Any]]:
             {"configured": False, "note": ANCHORS_MISSING})
 
 
-def _recall(brain: Any, said: str, who: str) -> Tuple[List[Dict[str, Any]], str]:
+# —— 场合 ————————————————————————————————————
+
+
+def _scene_value(value: Any) -> str:
+    """归一化场景：只认脑那三个值（SCENE_TYPES），别的说法一律 unknown。
+
+    缺省 / 空白 / 非法都不**猜**成私聊：猜错的代价是把一件私事在群里说出来，
+    而 unknown 那句话说得很清楚——按平常说，不假设是群，也不假设是私聊。
+    """
+    if isinstance(value, str) and value.strip() in brain_model.SCENE_TYPES:
+        return value.strip()
+    return brain_model.SCENE_UNKNOWN
+
+
+def _scene_text(conf: Mapping[str, Any], scene: str) -> str:
+    """场合这一段进提示词的样子：按归一化后的场景取数据里那一句，本层一个字的文案都不写。
+
+    三句话都在 assembly.json 的 scene.lines（_check_scene 已经保证三个场景各有一句），
+    缺哪一句在装载那一步就报了，这里不做第二遍判。
+    """
+    return str(conf["scene"]["lines"].get(scene) or "")
+
+
+def _recall(brain: Any, said: str, who: str, scene: Optional[str] = None
+            ) -> Tuple[List[Dict[str, Any]], str]:
     """脑装包：既进提示词，也原样进返回体（页面要显示「想起了什么 + 证据指针」）。
 
     记忆行在脑里是两栏：quote（对方原话，逐字）与 note（她的理解，可为空）。note_display
     由脑的 recall 装配好（「她理解：…」/「（无理解）」/「（unclear，未理解）」），本层只搬运、
     一个前缀都不自己加——「召回时标明这是她的理解」这条判据的真源在脑，不在这里。
+
+    scene 原样交给脑的 recall：**判据不在这一层**——group 时脑才把 audience=私密 的条目打上
+    retellable=False / retell_note（它只打标记、不过滤召回）。这两个键脑给了就原样透出，
+    没给就不带（没给不是「能讲」，是这一栏压根没判）。
     """
-    result = brain.recall(query=said, who=who or None)
+    try:
+        result = brain.recall(query=said, who=who or None, scene=scene)
+    except TypeError:      # 只认两个参数的假脑 / 老脑：这一次就不带 scene（不猜，也不让它闭口）
+        result = brain.recall(query=said, who=who or None)
     items = result.get("items") or []
-    recalled = [{"id": item.get("id", ""),
-                 "text": item.get("text", ""),
-                 "display_text": item.get("display_text", item.get("text", "")),
-                 "source": item.get("source", ""),
-                 "source_type": item.get("source_type", ""),
-                 "evidence_key": item.get("evidence_key", ""),
-                 "score": item.get("score", 0.0),
-                 "who": item.get("who", ""),
-                 "note_display": item.get("note_display", "")} for item in items]
+    recalled: List[Dict[str, Any]] = []
+    for item in items:
+        row = {"id": item.get("id", ""),
+               "text": item.get("text", ""),
+               "display_text": item.get("display_text", item.get("text", "")),
+               "source": item.get("source", ""),
+               "source_type": item.get("source_type", ""),
+               "evidence_key": item.get("evidence_key", ""),
+               "score": item.get("score", 0.0),
+               "who": item.get("who", ""),
+               "note_display": item.get("note_display", "")}
+        for name in ("retellable", "retell_note"):
+            if name in item:
+                row[name] = item[name]
+        recalled.append(row)
     if not recalled:
         return recalled, NO_MEMORY
     lines: List[str] = []
@@ -1088,8 +1167,12 @@ def _day() -> str:
 
 
 def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
-              dropped: bool, at: str) -> Tuple[List[Dict[str, str]], str]:
+              dropped: bool, at: str, scene: Optional[str] = None
+              ) -> Tuple[List[Dict[str, str]], str]:
     """落脑：人的原话先记；她真说出口的那句再记（被弃的那句没说出口，不进脑）。
+
+    两条都带同一个 scene（人那句与她那句）：场合是这一轮的事实，不是她那一侧才有的。
+    unknown 也照传 unknown——脑自己认不出这个值就按 unknown 存，本层不替它抹成别的。
 
     时刻与 schema 全走脑自己的 ingest：这里不新开表、不另造一行形状。
     id 用的是 ingest 回来的 evidence_key——亲历这一条的 id 就是它自己的证据指针。
@@ -1097,7 +1180,7 @@ def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
     人那句没落成（脑拒了）就是空串：没有凭据，下一轮对账认不出来也不要假装认出来了。
     """
     wrote: List[Dict[str, str]] = []
-    human = brain.ingest(who=who or HUMAN_WHO, text=said, ts=at)
+    human = brain.ingest(who=who or HUMAN_WHO, text=said, ts=at, scene=scene)
     msg_id = ""
     if human.get("ok"):
         row = _wrote_row(human)
@@ -1106,7 +1189,7 @@ def _remember(brain: Any, store: Any, who: str, said: str, reply: str,
     if dropped or not reply:
         return wrote, msg_id
     hers = brain.ingest(who=store.snapshot().identity.display, text=reply, ts=at,
-                          side=brain_model.SIDE_SELF)
+                          side=brain_model.SIDE_SELF, scene=scene)
     if hers.get("ok"):
         wrote.append(_wrote_row(hers))
     return wrote, msg_id

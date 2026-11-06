@@ -40,6 +40,7 @@ import hashlib
 from api import api, chat
 from api.tests.helpers import copy_fixture, write_json
 from organs.brain import BrainStore
+from organs.brain import model as brain_model
 from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.home import residents as home_residents
@@ -83,6 +84,16 @@ GIVE_UP_CATEGORY = FATAL_BOOK["categories"][2]      # 放弃式那一类（顺�
 GIVE_UP_LINE = "反正我不疼，你别管了"                 # 一句放弃式的素材，不是判据
 AFTER_MARKS = json.loads((MOUTH_DATA / "rewrite.json").read_text(
     encoding="utf-8"))["after_rewrite"]["marks"]
+# 私密记忆那一节的判据全在数据里：栏名、取值、两个场景值、边界话、事件形状、记号、摘要截几个字
+AUDIENCE = json.loads((MOUTH_DATA / "refusal.json").read_text(
+    encoding="utf-8"))["audience"]
+
+
+def _section(text: str, label: str) -> str:
+    """提示词里某一节的正文：从「[标题]」到下一个空行分节为止（段与段之间是空行）。"""
+    head = text.index("[%s]" % label) + len(label) + 2
+    tail = text.find("\n\n[", head)
+    return text[head:tail] if tail >= 0 else text[head:]
 
 
 def _mark_of(tag: str) -> str:
@@ -94,9 +105,9 @@ REWRITE_KEYS = {"status", "why", "from", "to"}
 CLAUSES = json.loads((MOUTH_DATA / "clauses.json").read_text(encoding="utf-8"))["clauses"]
 ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
-CONTRACT_KEYS = {"ok", "reply", "chunks", "recalled", "heart", "gate",
+CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
-                 "guard", "memory", "addressed", "borrow", "refusal"}
+                 "guard", "memory", "addressed", "borrow", "refusal", "audience_held"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
 ACTION_KEYS = {"pool", "rule", "quota"}
 QUOTA_KEYS = {"window", "max", "used", "blocked", "stripped", "kept_because_empty"}
@@ -848,6 +859,139 @@ class ChatApiTest(unittest.TestCase):
         self.assertIsNone(section["topic"], "认不出就是 null，不替她猜一个话题")
         self.assertEqual([], self._heart_rows())
 
+    # —— 出口认 audience：私密记忆在群里守边界（这一轮加的） ——————————
+
+    PRIVATE_TEXT = "我妈住院那事，别到处说"          # 一条真写进临时脑根的记忆（正文不许出群）
+    PRIVATE_ASKED = "你上次跟我说你妈住院那事"        # 直问那条记忆的那一句（连续重合过阈值）
+    GROUP = AUDIENCE["scopes"]["group"]
+    PRIVATE = AUDIENCE["scopes"]["private"]
+    PRIVATE_FIELD = AUDIENCE["field"]
+    PRIVATE_VALUE = AUDIENCE["private_value"]
+    PRIVATE_SAY = AUDIENCE["say"]
+
+    @contextlib.contextmanager
+    def _private_memory(self, text: str = PRIVATE_TEXT):
+        """在临时脑根里**真写一条记忆**，并让装配那一层的 recalled 带上私密标记。
+
+        记忆这一侧是真的（brain.ingest 落到 setUp 那个临时脑根）；标记只能在这一层补上——
+        **audience 的生产者不在本轮**：mind 的 _recall 现在只搬固定那几栏，出口要认的那一栏
+        因此得靠这个假 _recall 打上（验收里允许的两条路之一）。
+        """
+        self.brain.ingest(who="主人", text=text)
+        real = conversation._recall
+
+        def tagged(brain, said, who, scene=None):
+            rows, memory_text = real(brain, said, who, scene)
+            for row in rows:
+                row[self.PRIVATE_FIELD] = self.PRIVATE_VALUE
+            if not any(row.get("text") == text for row in rows):
+                rows.append({"id": "私密-被试", "text": text, "display_text": text,
+                             "source": "longterm", "source_type": "亲历",
+                             "evidence_key": "被试", "score": 1.0, "who": "主人",
+                             "note_display": "", self.PRIVATE_FIELD: self.PRIVATE_VALUE})
+            return rows, memory_text
+
+        with mock.patch.object(conversation, "_recall", tagged):
+            yield
+
+    def test_a_private_memory_asked_in_a_group_says_the_boundary_line(self):
+        """验收 1：scope=group + 直问 → 出声、说的是数据里那句边界话、正文一个字都不出群。
+
+        四件事一起断言，缺一条这条边界就不成立：reply 非空且含那句边界话；正文不出现（reply 与
+        整个回包都不出现）；事件与账本各一行（reason / full_name 取数据里那个 refused-topic，
+        账本的 why 带 mark 记号）；audience_held 里看得见被扣下的那一条（id + 一小截摘要，不贴正文）。
+        """
+        with self._private_memory(), self._topics("住院"):
+            status, payload = self._post({"text": self.PRIVATE_ASKED, "scope": self.GROUP},
+                                         _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertTrue(payload["reply"], "群里被问到私密条目：她必须出声，沉默是最糟的一种哑")
+        self.assertIn(self.PRIVATE_SAY, payload["reply"])
+        self.assertNotIn(self.PRIVATE_TEXT, payload["reply"], "边界话里不许出现那条记忆的正文")
+        self.assertNotIn(self.PRIVATE_TEXT, json.dumps(payload, ensure_ascii=False),
+                         "被扣下的正文一个字都不许往外带（recalled / 读数里都不许有）")
+        held = payload["audience_held"]
+        self.assertEqual(1, len(held), "扣下的那一条要在读数里看得见")
+        self.assertEqual({"id", "text_min", "source"}, set(held[0]))
+        self.assertTrue(held[0]["id"])
+        self.assertTrue(held[0]["text_min"])
+        self.assertLessEqual(len(held[0]["text_min"]),
+                             AUDIENCE["criteria"]["excerpt_chars"], "读数只给一小截摘要")
+        self.assertEqual([], payload["recalled"], "剔掉了就不再进 recalled")
+        rows = self._heart_rows()
+        self.assertEqual(1, len(rows), "边界话走拒绝那条路：心那边记一次")
+        self.assertEqual(AUDIENCE["event_shape"], rows[0]["reason"])
+        ledger = self._refusal_rows()
+        self.assertEqual(1, len(ledger), "我们自己的账也记一行")
+        self.assertEqual(AUDIENCE["event_shape"], ledger[0]["full_name"])
+        self.assertIn(AUDIENCE["mark"], ledger[0]["why"], "reason 里要带 audience 记号")
+        self.assertTrue(ledger[0]["sent"])
+        section = payload["refusal"]
+        self.assertFalse(section["cooling"], "这不是冷却那一轮")
+        self.assertEqual("hard", section["kind"])
+        self.assertTrue(section["delivered"]["delivered"])
+        self.assertEqual("pass", payload["gate"]["decision"], "边界话照样过闸")
+
+    def test_the_same_private_memory_is_spoken_in_private(self):
+        """验收 2：同一句 + scope=private → 照常说内容，不剔除、不出声、不投事件。"""
+        spoken = "你妈住院那事我记着呢，你放心，不往外说。"
+        with self._private_memory(), self._topics("住院"):
+            status, payload = self._post({"text": self.PRIVATE_ASKED, "scope": self.PRIVATE},
+                                         _body(spoken))
+        self.assertEqual(200, status)
+        self.assertEqual(spoken, payload["reply"], "私聊里照常说：内容不被边界话替换")
+        self.assertIn("住院", payload["reply"], "那条记忆的关键词要能说出来")
+        self.assertEqual([], payload["audience_held"], "私聊里不剔除，也没有边界话")
+        self.assertEqual(1, len(payload["recalled"]), "私聊里照常召回（这一条仍在 recalled 里）")
+        self.assertEqual([], self._refusal_rows(), "没走拒绝就不记账")
+
+    def test_a_group_round_that_does_not_ask_holds_it_silently(self):
+        """验收 3：scope=group 但没被问到 → 不主动引用（正文不出现）、也不说边界话，但剔除看得见。"""
+        with self._private_memory(), self._topics("住院"):
+            status, payload = self._post({"text": "今天吃啥", "scope": self.GROUP},
+                                         _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual(LONG_REPLY, payload["reply"], "没被问到就照常说她自己那句")
+        self.assertNotIn(self.PRIVATE_SAY, payload["reply"],
+                         "不为没发生的事拒绝：这一轮不说边界话")
+        self.assertNotIn(self.PRIVATE_TEXT, json.dumps(payload, ensure_ascii=False),
+                         "没被问到也不主动引用：正文一个字都不出现")
+        self.assertEqual(1, len(payload["audience_held"]), "剔除照做，读数里看得见")
+        self.assertEqual([], payload["recalled"])
+        self.assertEqual([], self._refusal_rows(), "没被问到不投事件")
+        self.assertEqual([], self._heart_rows())
+
+    def test_an_illegal_scope_is_400_and_names_it(self):
+        """验收 4：scope 非法值 → 400，message 里点名读到的值，并列出认得的两个。"""
+        status, payload = self._post({"text": QUESTION, "scope": "公屏"}, _body(LONG_REPLY))
+        self.assertEqual(400, status, "非法场景当场 400")
+        self.assertFalse(payload["ok"])
+        self.assertIn("公屏", payload["message"], "要点名读到的那个值")
+        for name in (self.GROUP, self.PRIVATE):
+            self.assertIn(name, payload["message"], "顺带列出认得的两个值")
+        self.assertEqual([], self._refusal_rows(), "body 就是错的：一个字都不写")
+
+    def test_a_cooling_topic_beats_the_boundary_line_and_records_once(self):
+        """验收 5：已冷却 + 私密被问 → 走冷却那条（不重复投事件，也不说边界话）。
+
+        顺序的理由：冷却在装配前就短路了（那一轮没有 recalled），它也比边界更靠前——让边界话抢在
+        冷却前面，就是把一次已经记过的拒绝再说一遍、再投一遍。
+        """
+        said = mouth_refusal.say(AUDIENCE["event_shape"])
+        with self._cooling("住院"):
+            heart_before = len(self._heart_rows())
+            with self._private_memory():
+                status, payload = self._post(
+                    {"text": self.PRIVATE_ASKED, "scope": self.GROUP}, _body(LONG_REPLY))
+            heart_after = len(self._heart_rows())
+        self.assertEqual(200, status)
+        self.assertEqual(said, payload["reply"], "冷却优先：说的是冷却那一句，不是边界话")
+        self.assertTrue(payload["refusal"]["cooling"])
+        self.assertNotIn(self.PRIVATE_SAY, payload["reply"])
+        self.assertEqual(heart_before, heart_after, "冷却里不投事件（同一件事不记两遍）")
+        self.assertEqual([], self._refusal_rows(), "我们自己的账也不添一行")
+        self.assertEqual([], payload["audience_held"], "冷却那一轮没有装配，也没有 recalled")
+
     # —— 失败 ————————————————————————————————
 
     def test_missing_key_is_503_with_a_readable_message(self):
@@ -1536,6 +1680,93 @@ class ChatApiTest(unittest.TestCase):
         self.assertIn("读数", section["note"])
         self.assertEqual([], self._borrow_rows(), "不可写时一条都没落地")
         self.assertEqual({}, self._readouts())
+
+    # —— 场合 ————————————————————————————————
+
+    def test_the_scene_section_follows_the_body_for_all_three_states(self):
+        """group → 说群里那句，private → 说私聊那句，不传 / 传个没听过的 → 说不知道在哪儿那句。
+
+        「不猜」这一条是验收的重点：不传不是私聊（猜成私聊就是把私事在群里说出去了），
+        非法值也不 400——body 没错到说不出话，只是我们不知道这是哪儿。
+        """
+        conf = conversation.load_assembly()
+        label, lines = conf["sections"]["scene"]["label"], conf["scene"]["lines"]
+        cases = ((brain_model.SCENE_GROUP, brain_model.SCENE_GROUP),
+                 (brain_model.SCENE_PRIVATE, brain_model.SCENE_PRIVATE),
+                 (None, brain_model.SCENE_UNKNOWN),
+                 ("公屏", brain_model.SCENE_UNKNOWN))
+        for scene, expected in cases:
+            body = {"text": QUESTION}
+            if scene is not None:
+                body["scene"] = scene
+            capture = []
+            status, payload = self._post(body, _body(LONG_REPLY, capture))
+            self.assertEqual(200, status, "scene=%r 不该 400：%s" % (scene, payload))
+            self.assertEqual({"value": expected}, payload["scene"])
+            system = capture[0]["messages"][0]["content"]
+            block = _section(system, label)
+            self.assertEqual(lines[expected], block.strip().splitlines()[0],
+                             "scene=%r 时「场合」那段不是数据里那一句" % (scene,))
+            for name, text in lines.items():
+                if name != expected:
+                    self.assertNotIn(text, system, "别的场合那句也进了提示词：%s" % name)
+
+    def test_the_old_scope_field_still_names_the_scene(self):
+        """只给了 scope 的老调用照旧读得出来；两个都给时 scene 说了算（各读各的，不互相顶替）。"""
+        status, payload = self._post({"text": QUESTION, "scope": brain_model.SCENE_GROUP},
+                                     _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual({"value": brain_model.SCENE_GROUP}, payload["scene"])
+        status, payload = self._post({"text": QUESTION, "scope": brain_model.SCENE_GROUP,
+                                      "scene": brain_model.SCENE_PRIVATE}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual({"value": brain_model.SCENE_PRIVATE}, payload["scene"],
+                         "两个字段都给时 scene 说了算")
+
+    def test_the_three_scenes_reach_the_brain(self):
+        """三态各打一次：脑里今日两条（人和她）的 scene 都等于这一轮给的（不传就是 unknown）。"""
+        for name, scene, expected in (
+                ("group", brain_model.SCENE_GROUP, brain_model.SCENE_GROUP),
+                ("private", brain_model.SCENE_PRIVATE, brain_model.SCENE_PRIVATE),
+                ("none", None, brain_model.SCENE_UNKNOWN)):
+            brain = BrainStore(self.tmp / ("brain-" + name))
+            body = {"text": QUESTION}
+            if scene is not None:
+                body["scene"] = scene
+            status, payload = self._post(body, _body(LONG_REPLY), brain=brain)
+            self.assertEqual(200, status)
+            self.assertEqual({"value": expected}, payload["scene"])
+            rows = brain.today_entries()
+            self.assertEqual(2, len(rows), "这一轮该落两条（人一句、她一句）：%r" % (rows,))
+            self.assertEqual([expected, expected], [row.get("scene") for row in rows],
+                             "scene=%r 没落到脑里（两条还不一致）" % (scene,))
+
+    def test_a_private_memory_is_marked_not_retellable_in_a_group(self):
+        """group 时脑把 audience=私密 的那条打 retellable=False，那一栏原样透到 recalled[]。
+
+        先打一轮、再写那条记忆：同一个人 10 分钟内的话会被脑并成一条，先写记忆会被这一轮
+        自己的原话盖掉（那是脑的合并窗口，这一层不改它）。
+        """
+        status, _ = self._post({"text": "今天吃啥"}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.brain.ingest(who="主人", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
+        status, payload = self._post({"text": QUESTION, "scene": brain_model.SCENE_GROUP},
+                                     _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        row = next(one for one in payload["recalled"] if one["text"] == MEMORY_TEXT)
+        self.assertIs(False, row["retellable"], "群里这一条没被标成不可复述")
+        self.assertTrue(row.get("retell_note"), "retell_note 空着：判据没透出来")
+
+        brain = BrainStore(self.tmp / "brain-private")
+        status, _ = self._post({"text": "今天吃啥"}, _body(LONG_REPLY), brain=brain)
+        self.assertEqual(200, status)
+        brain.ingest(who="主人", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
+        status, payload = self._post({"text": QUESTION, "scene": brain_model.SCENE_PRIVATE},
+                                     _body(LONG_REPLY), brain=brain)
+        self.assertEqual(200, status)
+        row = next(one for one in payload["recalled"] if one["text"] == MEMORY_TEXT)
+        self.assertTrue(row["retellable"], "私聊里这一条该是可复述的")
+        self.assertNotIn("retell_note", row, "私聊里不该有「不可复述」那条理由")
 
 if __name__ == "__main__":
     unittest.main()
