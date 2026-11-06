@@ -37,6 +37,14 @@ gate 节除了既有的 decision / hit / drops，还逐泡交代 parts / in_part
 **动作配额也从装配传进闸**：answer() 回包的 action.quota.blocked 为真就传 forbid、为假传 allow；
 装配里没有这一项就是 None（闸记 quota_status=not-checked）——没标不是 allow，不许猜。
 
+**出站闸在 /chat 生效（这一轮加的）**：这是「她这轮到底说不说」的那道门（organs/heart/gate.py），
+排在最后一步：拒绝判完、扣留读数收好之后才问它。输入不在这里造——answer() 用私有键 "_gate_input"
+把这一轮判决用的那一份 EngageInput 交出来（同一份输入，不给门就得在这儿另造一套），这一层只负责
+pop 掉它、取群号（body 的场合是 group 才取，私聊一律 None 不占群额度）、调门、把答案写回回包：
+send / reason / level / limits 四格，不发就 chunks=[]、reply=""。**这一层一个判据都不写**：
+门只回答发不发，心怎么想、嘴说什么都不归它。输入没交出来就记一行 WARNING，并在 gate.outbound 里
+写明这一关没判（不静默）——门缺席不该让她开不了口。
+
 **重写真的接到模型上（这一轮加的老账）**：以前命中即弃，一句口癖让她整泡消失。现在命中先改一次——
 「她的原话 + 命中的那一条 + 一句人话原因」交给模型（走 answer() 用的**同一条出口** llm.complete，
 不另开 HTTP 客户端），带 data/rewrite.json 的 budget_ms 硬时限；拿回来先过 rewrite.accept
@@ -141,6 +149,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from organs.brain import model as brain_model
+from organs.heart import gate as heart_gate
 from organs.heart import refuse as heart_refuse
 from organs.home import residents as home_residents
 from organs.home import store as home_store
@@ -180,6 +189,9 @@ STATUS_BY_KIND = {
 DEFAULT_STATUS = 502
 
 LOG = logging.getLogger(LOGGER_NAME)
+
+#: 出站闸没判成时 gate.outbound.status 的取值（不是门的一个判决，是「这一关没跑」的记号）。
+OUTBOUND_UNJUDGED = "unjudged"
 
 # 重写那一次模型调用的注入点：与装配（answer() → llm.complete）走的是同一条出口，本文件不另开
 # HTTP 客户端。生产三样都是 None（配置从 data/llm.json 读、key 从环境读、transport 走 urllib）；
@@ -233,6 +245,9 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     body 里还可以给一个 segment（刚刚这一小段，两种形状都收）：归一化后交给 answer(segment=...)，
     进「这一小段」那一节；形状坏了当场 400。没给就是 None（私聊与老调用一字不改）。
 
+    装配回包里的 event（核·识别这一轮的读数：kind / who / applied / reason / mode）**照旧原样
+    透出去**：本层不重组、不改写、不拿它做任何判断——识别与投心是装配那一步的事。
+
     成功之后先过闸：拿 answer() 装配进去的那几段原文（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句 /
     对方原话）与装配体逐泡过一遍闸，结果就地落回 payload（chunks / reply / gate）。闸坏了不 fail-open：
     判据读不动就整轮弃掉，并在 gate 里如实说为什么。
@@ -240,6 +255,12 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     再过一步：拿对方那句（text）与她那句（payload["reply"]）判一次拒绝，判出来就投——
     **全仓唯一的投递点就在这一处**。判据坏了（拒绝数据读不动）不改这一轮的成功：她那句话已经
     说出口了，写一行 WARNING、并在 refusal 那一节里如实说这次没判成、没投心。
+
+    最后一步是**出站闸**（organs/heart/gate.py，_outbound_round）：装配用私有键 "_gate_input"
+    交回这一轮判决用的那一份 EngageInput，门据此只回答一件事——这一轮发不发。send=false 就
+    chunks=[]、reply=""，send / reason / level 三格与 limits（交给嘴）一并回包；群号只看 body
+    里的场合（私聊一律 None，不占群额度）。取不到输入就记一行 WARNING 并在 gate.outbound 里
+    说这一关没判——不静默，也不替她拿主意。
     """
     segment, broken = _segment_state(body)
     if broken:
@@ -268,8 +289,10 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     if cooled["cooling"]:
         return 200, _cooled_payload(cooled, text, store, history, _who(body))
     try:
+        # mode="passive"：/chat 是人发消息触发的（她自己开口那条路不经过本文件，那边自己传
+        # "proactive"）。它只进事件账与回包 event.mode，不改任何判据，也不进提示词。
         payload = conversation.answer(text, who=_who(body), scene=place, segment=segment,
-                                      store=store, brain=brain)
+                                      mode="passive", store=store, brain=brain)
     except LLMError as exc:
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
         LOG.warning("POST /chat 失败：kind=%s message=%s", exc.kind, exc.message)
@@ -281,7 +304,71 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     payload["refusal"] = _refusal_section(
         cooled, boundary["judged"] or _judge(text, payload.get("reply")))
     _borrow_round(payload)
+    _outbound_round(payload, body)
     return 200, payload
+
+
+# —— 出站闸：这一轮到底发不发 ———————————————————
+
+
+def _outbound_round(payload: Dict[str, Any], body: Optional[Dict[str, Any]]) -> None:
+    """拿装配交回的那一份 EngageInput 问心一句「这一轮发不发」，答案落进回包。
+
+    **这一层一个判据都不写**：门只回答发不发（send）与拦下时的 level / reason，心怎么想
+    （organs/heart/engage.py 那三道硬门、五道软门）、嘴说什么都不归它。这里做四件事：
+    取出输入 → 取群号 → 调门 → 把门的答案原样写进回包。
+
+    - **输入是装配那一份**：answer() 用 "_gate_input" 交回来（私有键，pop 掉就不会进 JSON）。
+      取不到不当作「发」也不当作「不发」，而是如实说这一关没判：记一行 WARNING，
+      gate.outbound 写 status=unjudged——门缺席不该让她开不了口，但也不许假装判过了。
+    - **群号只看 body**（_group_of）：私聊一律 None，不占群额度（门那边 group=None 就是私聊）。
+    - **root 不传**：门自己走器官默认根（HEART_ROOT 是测试的切换口），这一层不替它挑根。
+    - **不发就把话说回去**：chunks=[]、reply=""——她要说的那句不发了；
+      send / reason / level 三格照门说的写，limits 交给嘴（有限制没限制都在这一格，形状不随状态变）。
+    """
+    inp = payload.pop("_gate_input", None)
+    if inp is None:
+        LOG.warning("POST /chat 出站闸未判：装配没交出 EngageInput（这一轮照常发）")
+        _unjudged(payload, "装配没交出 EngageInput（_gate_input 缺席）")
+        return
+    verdict = heart_gate.gate(inp, group=_group_of(body))
+    payload["send"] = bool(verdict["send"])
+    payload["reason"] = verdict["reason"]
+    payload["level"] = verdict["level"]
+    payload["limits"] = dict(verdict["limits"] or {})
+    if not verdict["send"]:
+        payload["chunks"] = []
+        payload["reply"] = ""
+
+
+def _unjudged(payload: Dict[str, Any], why: str) -> None:
+    """门这一轮没判：四格照常给（send=true，她照常开口），并在 gate.outbound 里写明为什么。
+
+    没判不是通过、也不是拦下——两样都不许冒充，所以 reason / level 是 None（门没给答案），
+    limits 是空（没有限制可谈）。gate 节其余键一个不动（decision / hit / drops 是嘴那一道的）。
+    """
+    payload["gate"] = dict(payload.get("gate") or {},
+                           outbound={"status": OUTBOUND_UNJUDGED, "why": why})
+    payload["send"] = True
+    payload["reason"] = None
+    payload["level"] = None
+    payload["limits"] = {}
+
+
+def _group_of(body: Any) -> Optional[str]:
+    """这一轮在哪个群：只认 body 里的场合，**私聊一律 None**（不占群额度、不写群窗）。
+
+    两个来源按约定次序：body["where"]["groupId"] 先，取不到再退到老字段 body["group"]。
+    场合不是 group 就是私聊，哪怕 body 里塞了群号也不占——场合是这一轮的判据，群号只是账。
+    """
+    if not isinstance(body, Mapping) or _scene_of(body) != brain_model.SCENE_GROUP:
+        return None
+    where = body.get("where")
+    for raw in ((where.get("groupId") if isinstance(where, Mapping) else None),
+                body.get("group")):
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
 
 
 # —— 称呼：这一轮叫他什么 ——————————————————————
@@ -822,6 +909,8 @@ def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
         "audience_held": [],               # 冷却那一轮没有装配、没有 recalled：没人可剔，这一格在
     }
     _gate_round(payload, asked, store, history, assembled=False)
+    # 冷却这一轮没有装配、没有 EngageInput：出站闸无从判，四格照给并如实说「没判」。
+    _unjudged(payload, "冷却那一轮没有装配、没有 EngageInput")
     return payload
 
 

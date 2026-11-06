@@ -73,6 +73,22 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           当段又当 recent——recent 的写入在说完之后，段从不回写进 recent。段尾那句「几个人在
           说话」只在这一轮是群聊、且段里至少两个人说话时才接（assembly.json 的 segment.notice）。
 
+**四个旋钮落到能验收的东西上**（阈值、字数上限、玩笑词表全在 assembly.json 的 tone_rules 里，
+本文件一个数都不写）：
+  长度  心情凉（mood < low_mood_below，0–1 刻度）或精力低（energy < low_energy_below，0–100 刻度）
+        的那一轮，上限取 min(档位预算, max_chars_low)，装配完在**句末**硬截（绝不截半句），
+        截了记 truncated。中性档取 max_chars_neutral；为 null 就照旧用 reply.budget_by_tier，
+        也从不硬截——档位预算历来只是提示词里的一句话，不是锯子。
+  软硬  softness 由嘴按心的读数现算，核**只记录**它，一个字都不改；心情凉那一轮不强制改称呼，
+        只把 address 与 softness 一起落账，供人事后核对。
+  主动  engage 判成「少说」→ no_question=true，装配后把带问句标点的整句删掉（删空则留原句，
+        记 kept_because_empty）；「不说」由出站闸整轮拦下，不归这一层。
+  玩笑  mood < low_mood_below → ban_joke=true：提示词加一句（文案在 tone_rules.ban_joke_note，
+        本文件没有这句中文），装配后把含玩笑词的整句删掉（同一套删空保护）。
+四个读数**都是这一轮已经算好的**（eff / mood_read / energy_read / offsets / judgement）：
+多读一遍盘或多 decide 一次，同一个人同一刻就会得出两种结论。每轮落一行账：
+<器官目录>/mind/tone_log.jsonl（只追加，坏行跳过），字段见 TONE_FIELDS。
+
 坏卡不是崩溃：mood 照读，effective_state 抛 CardError 就降级成只要 mood 那一块——
 与 api/heart.py 的既有口径同一条（面板能显示「拒载」，这一轮照旧说得出话）。
 
@@ -89,7 +105,7 @@ import logging
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import paths
 from ..brain import model as brain_model
@@ -115,6 +131,7 @@ from ..mouth import rewrite as rewrite_rules     # 参数名就叫 rewrite：模
 from ..mouth import tone as tone_module
 from ..mouth import warehouse
 from ..mouth.split import split as split_text
+from . import events
 from . import llm
 from . import recent
 from . import repeat
@@ -144,6 +161,12 @@ NO_SEGMENT = "这一段没有别的发言"          # 段空着 / 没给时这�
 SEGMENT_LINE = "%s：%s"                    # 段里一行的样子：谁 + 说了什么（没有项目符号，与 recent 一眼分开）
 SEGMENT_KEYS = ("speaker", "text")         # 段里一条记录的两个键（两种形状：对象，或二元组）
 SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可以更小，不许更大（这节只有一句「在哪儿说」）
+TONE_LOG = "tone_log.jsonl"               # 语气账的文件名（落在 <器官目录>/mind 下，只追加）
+# 每轮那一行的字段（冻结，人事后照这个核对）：四个旋钮落到哪儿、心与嘴各在哪一档、软度与称呼。
+# address 也在里面：心情凉的那一轮不强制改称呼，所以事后要看得见她当时叫的是什么。
+TONE_FIELDS = ("at", "mood_tier", "energy_tier", "tone_tier", "softness", "max_chars",
+               "no_question", "ban_joke", "truncated", "dropped_questions", "dropped_jokes",
+               "kept_because_empty", "heart_source", "address")
 
 
 # —— 装配说明书 ———————————————————————————————————
@@ -252,7 +275,55 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         "anchors": _check_anchors(data.get("anchors"), where),
         "scene": _check_scene(data.get("scene"), where),
         "segment": _check_segment(data.get("segment"), where, "segment" in checked),
+        "tone_rules": _check_tone_rules(data.get("tone_rules"), where),
     }
+
+
+def _check_tone_rules(spec: Any, where: str) -> Dict[str, Any]:
+    """四个旋钮那一条：阈值、字数上限、玩笑词表、问句标点——全在数据里，代码里一个都不写。
+
+    两条上限都可以空着（null）：max_chars_low 是「心情凉/精力低」那一档压到几句；
+    max_chars_neutral 为 null 就是「中性档照旧用 reply.budget_by_tier 那一档」，不许在这里
+    替它补一个默认数——那样人改了数据还以为生效了。判不了就当场报：缺一条阈值，这一轮要么
+    白收紧、要么白放宽，两种都比报错难查。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("装配说明缺 tone_rules（四个旋钮的阈值与词表）：%s" % where)
+    clean: Dict[str, Any] = {}
+    for name in ("low_energy_below", "low_mood_below", "neutral_mood_below"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("tone_rules.%s 要一个数：%s" % (name, where))
+        clean[name] = float(value)
+    low = spec.get("max_chars_low")
+    if isinstance(low, bool) or not isinstance(low, int) or low <= 0:
+        raise ValueError("tone_rules.max_chars_low 要正整数：%s" % where)
+    clean["max_chars_low"] = low
+    neutral = spec.get("max_chars_neutral")
+    if neutral is not None and (isinstance(neutral, bool) or not isinstance(neutral, int)
+                                or neutral <= 0):
+        raise ValueError("tone_rules.max_chars_neutral 要么 null（照旧用档位预算），"
+                         "要么正整数：%s" % where)
+    clean["max_chars_neutral"] = neutral
+    words = spec.get("joke_words")
+    if not isinstance(words, list) or not words:
+        raise ValueError("tone_rules.joke_words 要一份非空的玩笑词表：%s" % where)
+    clean_words: List[str] = []
+    for word in words:
+        if not isinstance(word, str) or not word.strip():
+            raise ValueError("tone_rules.joke_words 里有空词：%s" % where)
+        clean_words.append(word.strip())
+    clean["joke_words"] = clean_words
+    for name in ("question_chars", "sentence_end_chars", "ban_joke_note"):
+        text = spec.get(name)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("tone_rules.%s 要一段非空的字：%s" % (name, where))
+        clean[name] = text
+    note = spec.get("rules_note")
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError("tone_rules.rules_note 要一句人话（这张表是干什么的）：%s" % where)
+    clean["rules_note"] = note
+    return clean
 
 
 def _check_rules(spec: Any, name: str, where: str) -> List[str]:
@@ -529,11 +600,41 @@ def normalize_segment(segment: Any) -> Optional[List[Tuple[str, str]]]:
     return rows
 
 
+# —— 事件（核·识别）：这一句话对她意味着什么 ————————————
+
+def _reply_window(cfg: Mapping[str, Any]) -> int:
+    """冷落窗口要几轮她的回话：轮数**从识别数据里读**，核里不写死。
+
+    判据是"最近 N 轮她的回话都是极短应答"，N 与词表同一份东西，改数据就改行为。
+    取 rule == "window" 的那一类（窗口类判据不止 cold 一个时也按各自的数据走路）。
+    """
+    for kind in cfg["priority"]:
+        rule = cfg["kinds"][kind]
+        if rule.get("rule") == "window":
+            return int(rule.get("window") or 0)
+    return 0
+
+
+def _her_replies(turns: Sequence[Mapping[str, Any]],
+                 window: int) -> Tuple[str, List[str]]:
+    """最近几轮**她那侧**的回话：(最后一句, 最后 window 句)——老的在前、新的在后。
+
+    取的是 recent 那本账的 reply 栏（她那侧），不是人的原话：冷落窗口数的是她回了什么。
+    窗口凑不满就凑不满（不拿一轮当 N 轮），短了照样原样交出去，由识别那一侧自己判。
+    """
+    rows = list(turns)
+    if window > 0:
+        rows = rows[-window:]
+    replies = [str(row.get(recent.REPLY) or "") for row in rows]
+    return (replies[-1] if replies else ""), replies
+
+
 # —— 唯一入口 ————————————————————————————————————
 
 
 def answer(text: str, who: str = "", *, scene: Optional[str] = None,
            segment: Optional[Any] = None,
+           mode: str = events.MODE_PASSIVE,
            store: Any = None, brain: Any = None,
            heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
            now: Optional[str] = None,
@@ -559,13 +660,31 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     recent 是更早的那几轮，段是眼下这一小段，两份输入谁都不顶替谁（同一条消息不许既当段又当
     recent）。形状不对当场 ValueError，不兜底也不猜。
 
+    mode：这一轮是谁起的头——events.MODE_PASSIVE（"passive"，人发消息触发的，/chat 走这条）
+    或 events.MODE_PROACTIVE（"proactive"，她自己开口那条路），其它值一律回落 passive（口径在
+    events.record 里，本层不再判第二遍）。它只进事件账的那一栏与回包 event.mode：
+    不进提示词、不动任何判据。
+
+    **事件排在所有器官之前**（这一条必须留在这里：位置一挪，整轮读到的就是旧心情）：
+    装配先调一次 events.record，它落一行事件账、并把事件投给心（praise 上行 / insult、cold
+    下行），之后才读心、才回想、才写提示词——这一轮的口径档与限额因此吃得到刚发生的这件事。
+    反过来它**一个字都不进提示词**：note / evidence 只落在账上，装配不因为多识别出一件事
+    而多一节（order 与 sections 一位不动）。
+    被骂那一门也与它同口径：engage 的 insulted_today 取 events.is_insult(text)，与 record
+    用的是同一个函数——**全仓唯一被骂判据**，这里不许另写一张脏话表。
+
     返回（键名对外冻结，pages/chat.html 照它渲染）：
       ok / reply / chunks[{text,gap_before,send_at}] / scene{value} /
+      event{kind,who,applied,reason,mode}（核·识别这一轮的读数：kind 是五类之一或空串
+      ——空串＝没识别出，不是"被心拒了"，那两件事在 reason 上分得开；applied 是心接没接；
+      mode 是这一轮落账用的那个值） /
       recalled[{id,text,source,source_type,evidence_key,score,who,note_display,
       retellable?,retell_note?}]（后两栏只在脑给了的时候带）/ heart{mood{tier,direction},
       voice{tone,direction,bans}, axes{轴: 档位词}, engage{state,reason}}
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
-      assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars}} /
+      assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars,tier_chars}} /
+      tone{tier,label,softness,max_chars,no_question,ban_joke,truncated,heart_source}
+      （四个旋钮落到这一轮的实话：max_chars 是硬截用的那个数，truncated 说截了没有） /
       continuity{turns_loaded, omitted, notice, reconciled, rounds[{ts,fidelity,msg_id}]} /
       banned{rounds, action_lines[{text,count}], openings[开场前 N 字]} /
       action{pool, rule, quota{window,max,used,blocked}} /
@@ -576,6 +695,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
       decision 是 pass / rewritten / dropped，与上面 gate 那个 decision 各说各的） /
       guard{window, threshold, min_rounds, rounds, hits, rate, over, injected, available} /
       memory{wrote[{id,who}]}
+      另带一个**私有键** "_gate_input"：这一轮判决用的那一份 EngageInput（对象本身，不是 dict）。
+      它只给 api 层的出站闸（organs/heart/gate.py）用——门判「发不发」必须用同一份输入，
+      不给它就得在 api 层另造一套。**回包前必须 pop 掉，绝不进 JSON**：它不是给页面看的。
 
     guard 的读数一律是**这一轮之前**的滚动窗口（口癖账还没记这一轮），八个键对外冻结。
     落账放在最后一步：只有过了闸、reply 非空的那一轮才有「开头」可算——
@@ -602,6 +724,20 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 她自己的自称表现读一次：对账要靠它把「她自己的回话」认出来（见 _reconcile 第三条剔除）
     her_names = _her_names(store)
     loaded = _reconcile(brain, loaded, recent_root, conf, at, her_names)
+
+    # 0.5) 事件：这一句话对她意味着什么——**排在任何一个器官读数之前**（心读数之前、回想之前）。
+    #     record 只做两件事：落一行事件账、把事件投给心（praise 上行 / insult、cold 下行），
+    #     所以它必须在读心之前：这一轮的口径档与限额才吃得到刚发生的这件事。反过来，它
+    #     **一个字都不进提示词**（note / evidence 只在账上），order 与 sections 一位不动。
+    #     她那几句回话从 recent 那本账取：窗口 N 从识别数据来（_reply_window），不在这里写死。
+    #     一份规则快照同时给识别与窗口用：两份读数各读一次数据，迟早一处按旧窗口、一处按新窗口。
+    event_conf = events.load_config()
+    last_reply, recent_replies = _her_replies(loaded.get("turns") or [],
+                                              _reply_window(event_conf))
+    event = events.record(said, last_reply=last_reply, scene=where, who=who, at=at,
+                          mode=mode, recent_replies=recent_replies, data=event_conf)
+    # 被骂那一门与上面这条事件同一个函数（events.is_insult）：两处各写一份判据，迟早就分叉。
+    insulted = events.is_insult(said, data=event_conf)
 
     # 1) 魂与脑：先回想（这一轮该想起什么，要在写提示词之前定下来）
     soul_text = store.render()
@@ -634,13 +770,17 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     offsets = offset_module.overview(root=heart_root, now=at)
     eff = _effective(heart_root, at, mood_read, offsets)
     energy_read = energy_module.read(heart_root, at, **_sleep_terms(heart_root, at))
-    judgement = _engage(heart_root, at, eff, energy_read, brain, who)
+    gate_input, judgement = _engage(heart_root, at, eff, energy_read, brain, who, insulted)
     heart_words = _heart_words(eff, judgement)
     heart_text = _heart_text(eff, heart_words)
 
-    # 3) 嘴：称呼 → 语气档（口径行进提示词）
-    voice = _voice(store, brain, who, mood_read, energy_read)
-    mouth_text = _mouth_text(voice)
+    # 3) 嘴：称呼 → 语气档（口径行进提示词）。心的四样读数**真传进去**：心情凉得能压住话长、
+    #    精力低得能收紧口径，softness 才不是一句空话（口径行的 heart_source 也从「未接入」变实话）。
+    heart_read = _heart_readings(mood_read, energy_read, offsets, judgement)
+    voice = _voice(store, brain, who, heart_read)
+    # 四个旋钮：判据全在 assembly.json 的 tone_rules 里，这一层只照着判，一个阈值都不带。
+    knobs = _knobs(conf["tone_rules"], heart_read, judgement)
+    mouth_text = _mouth_text(voice, knobs, conf["tone_rules"])
     person_text = _person_text(brain, who)
 
     # 4) 提示词与回复预算
@@ -651,6 +791,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
              else conf["reply"]["format"])
     reply_rule = "\n".join([conf["reply"]["instruction"]] + list(rules))
     budget = conf["reply"]["budget_by_tier"].get(tier, conf["reply"]["default"])
+    # 这一轮的硬上限：低档压到 max_chars_low，中性档看 max_chars_neutral（null 就是照旧）。
+    # {reply_budget} 与后面那一步的硬截用的是同一个数——提示词说 60、手里截 220 就成了两套口径。
+    max_chars, capped = _max_chars(budget, knobs, conf["tone_rules"])
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
                 "segment": _segment_text(rows, conf, where),
                 "banned": banned_text, "action": action_text,
@@ -666,7 +809,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         sections.append({"key": key, "chars": len(clipped), "cap": spec["cap"]})
     system = _fill(conf["prompt"]["system"], {
         "sections": "\n\n".join(blocks),
-        "reply_budget": str(budget),
+        "reply_budget": str(max_chars),
         "reply_instruction": reply_rule,
     })
     user = _fill(conf["prompt"]["user"], {"text": said})
@@ -677,7 +820,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     call_conf = llm.resolve_config(config)
     policy = llm.temperature_policy(config)
     temperature_tier, temperature = llm.choose_temperature(
-        policy, recalled_nonempty=bool(recalled), reply_budget=budget)
+        policy, recalled_nonempty=bool(recalled), reply_budget=max_chars)
 
     # 5) 发模型（LLMError 原样上抛）
     said_back = llm.complete(messages, config=call_conf, env=env, transport=transport,
@@ -700,6 +843,10 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     if not dropped and reply and isinstance(conf.get("anchors"), Mapping):
         audit_read, phrase_hit, reply, dropped = _copy_audit(
             reply, anchors_rows, conf, _copy_rewriter(transport, call_conf, env), _sink(trace))
+    # 6.9) 四个旋钮落到这一句上：删玩笑句、删问句、按上限在句末截断。
+    #      排在闸与照抄审计之后（被弃掉的句子没人听得见）、分包之前（拿改过的句子算分包）。
+    shaped = _shape_reply(reply, max_chars, capped, knobs, conf["tone_rules"])
+    reply = shaped["reply"]
     chunks = [] if dropped else _bubbles(reply, who, at)
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
@@ -719,12 +866,24 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
                      str(spoken.get(usage.SCENE) or ""), root=usage_root,
                      card_id=str(spoken.get(usage.CARD_ID) or ""),
                      phrase=str(spoken.get(usage.PHRASE) or ""))
+    # 8.5) 落语气账：每轮一行（被闸弃掉的那轮也有一行——那一轮同样判过四个旋钮）。
+    _log_tone(_tone_row(at, heart_words, energy_read, voice, shaped, max_chars, knobs))
 
     return {
+        # 私有键（带下划线）：这一轮判决用的那一份 EngageInput，只给 api 层的出站闸用——
+        # 回包前必须 pop 掉，绝不进 JSON（它不是给页面看的东西，也没法序列化）。
+        "_gate_input": gate_input,
         "ok": True,
         "reply": reply,
         "chunks": chunks,
         "scene": {"value": where},
+        # 核·识别这一轮的读数（五键冻结）：kind 是五类之一或空串——空串＝"没识别出"，
+        # 与"心拒了"是两件事，reason 上分得开。它只落账与投心，一个字都没进提示词。
+        "event": {"kind": str(event.get("kind") or ""),
+                  "who": str(event.get("who") or ""),
+                  "applied": bool(event.get("applied")),
+                  "reason": str(event.get("reason") or ""),
+                  "mode": str(event.get("mode") or "")},
         "recalled": recalled,
         "heart": heart_words,
         "gate": {
@@ -738,8 +897,15 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         "assembly": {
             "order": list(conf["order"]),
             "sections": sections,
-            "reply_budget": {"key": REPLY_KEY, "tier": tier, "chars": budget},
+            # chars 是这一轮**真正**的上限（低档已收紧）：提示词与硬截用的是同一个数。
+            "reply_budget": {"key": REPLY_KEY, "tier": tier, "chars": max_chars,
+                             "tier_chars": budget},
         },
+        # 嘴这一格给页面看的四样：哪一档、多软、上限几位、两个开关、截没截、心到底接上没有。
+        "tone": {"tier": voice.tier, "label": voice.label, "softness": voice.softness,
+                 "max_chars": max_chars, "no_question": bool(knobs["no_question"]),
+                 "ban_joke": bool(knobs["ban_joke"]), "truncated": bool(shaped["truncated"]),
+                 "heart_source": voice.heart_source},
         "continuity": {"turns_loaded": len(loaded.get("turns") or []),
                        "omitted": omitted, "notice": note,
                        "reconciled": recent.reconciled(history),
@@ -1358,18 +1524,29 @@ def _intent_context(readout: Any, name: str, at: str,
 
 
 def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
-            energy_read: Mapping[str, Any], brain: Any, who: str) -> Dict[str, Any]:
+            energy_read: Mapping[str, Any], brain: Any, who: str,
+            insulted: bool = False
+            ) -> Tuple[Any, Dict[str, Any]]:
     """一次判决：只 decide，不 decide_and_log（核不写门的日志，那是心的账）。
+
+    返回 (判决输入本身, 判决)。**输入也要交回去**：出站闸（organs/heart/gate.py）判「这一轮
+    到底发不发」，用的必须是同一份 EngageInput——api 层另造一套就是第二处真源，同一个人同一刻
+    两处会读出两种结论。这里只多交一个引用：不重算、也不第二次 decide。
 
     入参与 api/heart.py 的 _engage 一毫不差：窗口、意图排序（第 5 道软门要它）、
     按睡眠账结算过的精力、熟稔与今日条数。少喂一项，门判出的理由就跟面板不一样——
     同一个人同一刻，面板说「不是时候」，她这边却说「夜里」。
+
+    insulted 是这一轮的「被骂」：**由调用方用 events.is_insult(text) 算好传进来**，本函数
+    不判、也不许另写一张脏话表——engage 的硬门（第 2 道）与投 insult 事件用的必须是同一个
+    布尔、同一个函数（全仓唯一被骂判据在 organs/mind/events.is_insult），否则"她今天被骂了
+    没有"会有两份结论。不给就是 False（老调用与面板那条路一字不改）。
     """
     readout = ports_module.from_brain(brain)
     name = who or DEFAULT_WHO
     intents = intent_module.rank(heart_root, at,
                                  context=_intent_context(readout, name, at, energy_read))
-    judgement = engage_module.EngageInput.from_effective(
+    inp = engage_module.EngageInput.from_effective(
         dict(eff),
         window=engage_module.window_signal(heart_root, at),
         intents=intents,
@@ -1379,8 +1556,9 @@ def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
         intent=heart_model.INTENT_PASSIVE,
         who=name,
         now=at,
+        insulted_today=bool(insulted),
     )
-    return engage_module.decide(judgement)
+    return inp, engage_module.decide(inp)
 
 
 def _person_text(brain: Any, who: str) -> str:
@@ -1465,24 +1643,263 @@ def _heart_text(eff: Mapping[str, Any], heart_words: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _voice(store: Any, brain: Any, who: str, mood_read: Mapping[str, Any],
-           energy_read: Mapping[str, Any]) -> Any:
-    """嘴的语气档：称呼走人名录（与 api/mouth.py 同一个用法），心的读数原样交过去。"""
+def _voice(store: Any, brain: Any, who: str, heart: Mapping[str, Any]) -> Any:
+    """嘴的语气档：称呼走人名录（与 api/mouth.py 同一个用法），心的四样读数原样交过去。
+
+    heart 是这一轮**已经算好的**那一份（见 _heart_readings）：本函数既不重读盘，
+    也不再 decide 一次——同一个人同一刻判两遍，迟早得出两种语气。
+    """
     table = address_module.load_table()
     person = brain.lookup(who) if who else None
     called = address_module.resolve(person, table)
-    heart = {"mood": mood_read["now"], "energy": energy_read["value"],
-             "offset": None, "engage": None}
     return tone_module.from_store(store, called, heart=heart, table=table)
 
 
-def _mouth_text(voice: Any) -> str:
-    """嘴这一段进提示词的样子：称呼、语气档、口径行、禁不禁开玩笑（都是词）。"""
+def _mouth_text(voice: Any, knobs: Mapping[str, Any], rules: Mapping[str, Any]) -> str:
+    """嘴这一段进提示词的样子：称呼、语气档、口径行、禁不禁开玩笑（都是词）。
+
+    心情凉那一轮再加一句「这一轮不逗人」：文案在 tone_rules.ban_joke_note 里，本文件没有
+    这句中文。禁玩笑在这一层落到两处——提示词这一句，与装配后的整句删（见 _shape_reply）。
+    """
     lines = ["称呼：%s（关系档：%s）" % (voice.address, voice.relation),
              "语气档：%s" % voice.label,
              "口径行：%s" % voice.line,
              "禁玩笑：%s" % ("禁" if voice.ban_joke else "不禁")]
+    if knobs["ban_joke"]:
+        lines.append(str(rules["ban_joke_note"]))
     return "\n".join(lines)
+
+
+def _heart_readings(mood_read: Mapping[str, Any], energy_read: Mapping[str, Any],
+                    offsets: Any, judgement: Mapping[str, Any]) -> Dict[str, Any]:
+    """心的四样读数交给嘴的形状：mood 0–1、energy 原值 0–100、offset 六轴、engage 三态之一。
+
+    两档刻度都是嘴的数据定的（address_table 的 high_mood_at_least = 0.2 按 0–1 判，
+    low_energy_below = 30 按 0–100 判），所以 mood 先除 100 再进嘴，energy 原样进。
+    这四样全是这一轮**已经算好的**：少一样，嘴那边就少一条折算；重算一遍，就多一处真源。
+    """
+    mood_now = _float(mood_read.get("now"))
+    engage = str(judgement.get("state") or "").strip()
+    return {"mood": None if mood_now is None else round(mood_now / 100.0, 3),
+            "energy": _float(energy_read.get("value")),
+            "offset": _offset_readings(offsets),
+            "engage": engage or None}
+
+
+def _offset_readings(offsets: Any) -> Optional[Dict[str, float]]:
+    """六轴折算压成一层「轴 → 值」再交给嘴。
+
+    不把整份 overview 原样交过去：它带着 week / at 与四个派生量，str() 出来五百多字，
+    嘴那一节（sections.mouth.cap）会把「禁玩笑」那一行悄悄锯掉——读数要如实，
+    但摊在提示词里的那本字典不是读数。
+    """
+    if not isinstance(offsets, Mapping):
+        return None
+    axes = offsets.get("axes")
+    if not isinstance(axes, Mapping):
+        return None
+    rows: Dict[str, float] = {}
+    for axis, row in axes.items():
+        value = _float(row.get("value")) if isinstance(row, Mapping) else None
+        if value is not None:
+            rows[str(axis)] = round(value, 3)
+    return rows or None
+
+
+def _knobs(rules: Mapping[str, Any], heart: Mapping[str, Any],
+           judgement: Mapping[str, Any]) -> Dict[str, Any]:
+    """四个旋钮这一轮各按哪个档：判据全部来自 tone_rules，本函数一个阈值都不带。
+
+    low_mood / low_energy 是「长度收紧 + 玩笑全不产出」那两条；neutral 只管字数那一格
+    （max_chars_neutral 为 null 时它什么也不做）。no_question 只认「少说」这一态：
+    「不说」由出站闸整轮拦下（不归这一层），「说」就照常问。
+    """
+    mood = _float(heart.get("mood"))
+    energy = _float(heart.get("energy"))
+    low_mood = mood is not None and mood < float(rules["low_mood_below"])
+    low_energy = energy is not None and energy < float(rules["low_energy_below"])
+    state = str(judgement.get("state") or "").strip()
+    return {"low_mood": low_mood, "low_energy": low_energy,
+            "low": bool(low_mood or low_energy),
+            "neutral": mood is not None and mood < float(rules["neutral_mood_below"]),
+            "no_question": state == heart_model.STATE_LESS,
+            "ban_joke": bool(low_mood)}
+
+
+def _max_chars(budget: int, knobs: Mapping[str, Any], rules: Mapping[str, Any]
+               ) -> Tuple[int, bool]:
+    """这一轮的回复字数上限，以及要不要按它在句末硬截。
+
+    低档取 min(档位预算, max_chars_low)；中档取 max_chars_neutral（null = 照旧用档位预算）；
+    其余原样。第二个值是「这一轮有没有一条硬线」：档位预算历来只是提示词里的一句话，
+    从来没硬截过——只有压到数据给的那条线时才动锯子（中性那一轮因此与改动前逐字相同）。
+    """
+    limit: Optional[int] = None
+    if knobs["low"]:
+        limit = int(rules["max_chars_low"])
+    elif knobs["neutral"] and rules["max_chars_neutral"] is not None:
+        limit = int(rules["max_chars_neutral"])
+    if limit is None:
+        return int(budget), False
+    return min(int(budget), limit), True
+
+
+def _shape_reply(reply: str, max_chars: int, capped: bool, knobs: Mapping[str, Any],
+                 rules: Mapping[str, Any]) -> Dict[str, Any]:
+    """装配后按四个旋钮收拾这一句：删玩笑句 → 删问句 → 按上限在句末截断。
+
+    三件事都排在闸与照抄审计之后（被弃掉的句子再说也没人听得见）、分包之前。
+    **删空不是沉默**：整句都该删就保留原句，并记 kept_because_empty——删光了不是「她没说」，
+    是她把该说的说完了，剩下的都是不该说的。
+    中性那一轮一个字都不动：两个开关都关、也没有硬线时原样返回，与改动前逐字相同。
+    """
+    shaped: Dict[str, Any] = {"reply": reply, "truncated": False, "dropped_questions": 0,
+                              "dropped_jokes": 0, "kept_because_empty": False}
+    if not reply:
+        return shaped
+    ends = str(rules["sentence_end_chars"])
+    if knobs["ban_joke"] or knobs["no_question"]:
+        jokes = [str(word) for word in rules["joke_words"]]
+        questions = str(rules["question_chars"])
+        # 行是她的排版单位（嘴要求分行说）：先按行切，行内再按句切。
+        # 一行里整句删光了就整行不留——删句不许在原文里留一串空行，那不是她的排版。
+        kept: List[str] = []
+        for line in reply.split("\n"):
+            if not line.strip():
+                kept.append(line)          # 空行是排版，不是句子
+                continue
+            left: List[str] = []
+            for row in _sentences(line, ends):
+                # 先玩笑后问句：一句里两样都占，记在玩笑那一栏（一处只记一次）。
+                if knobs["ban_joke"] and any(word in row for word in jokes):
+                    shaped["dropped_jokes"] += 1
+                    continue
+                if knobs["no_question"] and any(char in row for char in questions):
+                    shaped["dropped_questions"] += 1
+                    continue
+                left.append(row)
+            if left:
+                kept.append("".join(left))
+        while kept and not kept[0].strip():
+            kept.pop(0)                # 删掉的头几行不许在原文最前面留一串空行
+        while kept and not kept[-1].strip():
+            kept.pop()                 # 尾巴同理
+        if "".join(kept).strip():
+            shaped["reply"] = "\n".join(kept)
+        else:
+            shaped["kept_because_empty"] = True
+    if capped and len(shaped["reply"]) > max_chars:
+        shaped["reply"], shaped["truncated"] = _clip_at_sentence(
+            shaped["reply"], max_chars, ends)
+    return shaped
+
+
+def _sentences(text: str, ends: str) -> List[str]:
+    """按句末标点切成整句（标点跟着前一句走）；没有标点的尾巴也算一句。
+
+    碎片一片都不许丢：一块空白也是原文的一块（她分行的空行就是分行的那个空行），
+    丢一片再拼回去，等于替她改行——那正是「一个字都不许动」不许做的事。
+    """
+    rows: List[str] = []
+    start = 0
+    for index, char in enumerate(text):
+        if char in ends:
+            rows.append(text[start:index + 1])
+            start = index + 1
+    if start < len(text):
+        rows.append(text[start:])
+    return rows
+
+
+def _clip_at_sentence(text: str, max_chars: int, ends: str) -> Tuple[str, bool]:
+    """按上限在句末截：取不超过上限的最后一个句末；一句都放不下就留第一句整句。
+
+    绝不截半句：宁可比上限长一句，也不把一句话锯成两截——那半句她没说过。
+    """
+    first = 0
+    cut = 0
+    for index, char in enumerate(text):
+        if char not in ends:
+            continue
+        if not first:
+            first = index + 1
+        if index + 1 <= max_chars:
+            cut = index + 1
+        else:
+            break
+    if cut and cut < len(text):
+        return text[:cut], True
+    if first and first < len(text):
+        return text[:first], True
+    # 整段就是一句、又比上限长：留整句，并如实说「一个字节都没截」（截了才算 truncated）
+    return text, False
+
+
+def _float(value: Any) -> Optional[float]:
+    """只管数：布尔与别的类型一律当「没有」（不把 None 悄悄当 0）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _tone_row(at: str, heart_words: Mapping[str, Any], energy_read: Mapping[str, Any],
+              voice: Any, shaped: Mapping[str, Any], max_chars: int,
+              knobs: Mapping[str, Any]) -> Dict[str, Any]:
+    """这一轮那一行账（字段见 TONE_FIELDS）：档位词、软度、上限、两个开关、删了几处、心接上没有。
+
+    行形状只由 TONE_FIELDS 一份说了算：少一栏当场 KeyError，不许悄悄多一栏、也不许少一栏。
+    """
+    row = {"at": at,
+            "mood_tier": heart_words["mood"]["tier"],
+            "energy_tier": energy_read.get("tier"),
+            "tone_tier": voice.label,
+            "softness": voice.softness,
+            "max_chars": int(max_chars),
+            "no_question": bool(knobs["no_question"]),
+            "ban_joke": bool(knobs["ban_joke"]),
+            "truncated": bool(shaped["truncated"]),
+            "dropped_questions": int(shaped["dropped_questions"]),
+            "dropped_jokes": int(shaped["dropped_jokes"]),
+            "kept_because_empty": bool(shaped["kept_because_empty"]),
+            "heart_source": voice.heart_source,
+            "address": voice.address}
+    return {name: row[name] for name in TONE_FIELDS}
+
+
+def tone_log_path(root: Optional[Any] = None) -> Path:
+    """这一份账的落点：root 给定时按它（测试），否则 <器官目录>/mind/tone_log.jsonl。"""
+    base = Path(root) if root is not None else paths.organ_dir("mind")
+    return base / TONE_LOG
+
+
+def read_tone_log(root: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """读账本：坏行（不是 JSON、不是对象）跳过不炸——记账的一份底稿读不下去，不该让她闭口。"""
+    path = tone_log_path(root)
+    if not path.is_file():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _log_tone(row: Mapping[str, Any], root: Optional[Any] = None) -> None:
+    """追一行账：只追加，不重写全文件。写不进去只 WARN——记账不许把这一轮的话挡回去。"""
+    path = tone_log_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        LOGGER.warning("核·语气账写不进去（%s）：%s", path, exc)
 
 
 def _through_mouth(reply: str, trace: Any) -> Tuple[Any, Dict[str, Any]]:

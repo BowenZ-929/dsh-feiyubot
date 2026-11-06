@@ -65,11 +65,13 @@ from api import api
 from organs.brain import BrainStore
 from organs.brain import model as brain_model
 from organs.heart import energy
+from organs.heart import engage as engage_module
+from organs.heart import events as heart_events
 from organs.heart import model as heart_model
 from organs.heart import mood, sleep
 from organs.home import anchors as home_anchors
 from organs.home import cards
-from organs.mind import conversation, llm, recent, repeat, usage
+from organs.mind import conversation, events, llm, recent, repeat, usage
 from organs.soul import load as load_soul
 
 PLUGIN = Path(__file__).resolve().parents[3]
@@ -184,7 +186,7 @@ class ConversationAnswerTest(unittest.TestCase):
     # —— 2) 四段都装进去了 ————————————————————————
 
     def test_prompt_carries_soul_headings_memory_evidence_and_tone_line(self):
-        entry = self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0))
+        entry = self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0))
         capture = []
         got = self._answer(captured=capture)
         system = capture[0]["messages"][0]["content"]
@@ -214,6 +216,20 @@ class ConversationAnswerTest(unittest.TestCase):
             self.assertNotIsInstance(node, (int, float), "心里混进了数：%r" % (node,))
         text = json.dumps(heart, ensure_ascii=False)
         self.assertEqual([], [ch for ch in text if ch.isdigit()], "心的返回体里有数字：%s" % text)
+
+    def test_the_engage_input_itself_goes_out_under_a_private_key(self):
+        """装配把这一轮判决用的那一份 EngageInput 原样交出来（私有键 _gate_input）。
+
+        出站闸判「发不发」必须用**同一份输入**：这里钉住它是这一轮那一份——时刻、是谁、
+        以及拿它再 decide 一次得到的态与回包 heart.engage 那份一致（不是另一个造出来的）。
+        """
+        got = self._answer(now=_at(5), who="主人")
+        inp = got["_gate_input"]
+        self.assertIsInstance(inp, engage_module.EngageInput, "交出来的不是判决输入本身")
+        self.assertEqual(_at(5), inp.now, "不是这一轮那个时刻")
+        self.assertEqual("主人", inp.who)
+        self.assertEqual(got["heart"]["engage"]["state"], engage_module.decide(inp)["state"],
+                         "交回来的不是这一轮判决用的那一份输入")
 
     def _walk(self, node):
         if isinstance(node, dict):
@@ -340,7 +356,7 @@ class ConversationAnswerTest(unittest.TestCase):
     # —— 5) 退档不回想 ————————————————————————————
 
     def test_retired_memory_is_not_recalled_again(self):
-        entry = self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0))
+        entry = self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0))
         entry_id = entry["entry"]["id"]
         first = self._answer()
         self.assertEqual([entry_id], [row["id"] for row in first["recalled"]],
@@ -500,7 +516,7 @@ class ConversationAnswerTest(unittest.TestCase):
         root = self.tmp / name
         ids = []
         for index, text in enumerate(self.SPOKEN):
-            got = self.brain.ingest(who="主人", text=text, ts=_at(index * 12))
+            got = self.brain.ingest(who="3425635473", text=text, ts=_at(index * 12))
             ids.append(got["entry"]["id"])
         for index in range(3 if missed else 4):
             row = {"ts": _at(index * 12), "who": "主人",
@@ -617,8 +633,8 @@ class ConversationAnswerTest(unittest.TestCase):
         """她早年那句回话被错标成 side=他说，ts 与账上人那一轮完全相同：同一轮，别补。"""
         root = self.tmp / "reconcile_same_ts"
         stamp = _at(0)
-        human = self.brain.ingest(who="主人", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
-        self.brain.ingest(who="江迟", text="江迟。\n（尾巴尖轻轻摆了一下）", ts=stamp,
+        human = self.brain.ingest(who="3425635473", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
+        self.brain.ingest(who="3425635473", text="江迟。\n（尾巴尖轻轻摆了一下）", ts=stamp,
                           side=brain_model.SIDE_OTHER)
         recent.append({"ts": stamp, "who": "主人", "said": "我今早去医院拿片子",
                        "reply": "江迟。"}, root=root)
@@ -640,7 +656,7 @@ class ConversationAnswerTest(unittest.TestCase):
     def test_a_future_entry_is_not_treated_as_just_now(self):
         """ts 晚于本轮装配时刻的条（明天才发生的事）不是「刚才那一轮」，不回填。"""
         root = self.tmp / "reconcile_future"
-        self.brain.ingest(who="主人", text="他要求过叫他什么", ts=_at(90))
+        self.brain.ingest(who="3425635473", text="他要求过叫他什么", ts=_at(90))
         capture = []
         box: list = []
         lines = self._warned(
@@ -662,7 +678,7 @@ class ConversationAnswerTest(unittest.TestCase):
         root = self.tmp / "reconcile_her_line"
         display = self._her_display()
         stamp = _at(0)
-        human = self.brain.ingest(who="主人", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
+        human = self.brain.ingest(who="3425635473", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
         recent.append({"ts": stamp, "who": "主人", "said": "我今早去医院拿片子",
                        "reply": "江迟。"}, root=root, cap=99999)
         # 账上少了这一行（ts=T）：脑里同一时刻有两条——真·对方（QQ 号）与她自己的回话
@@ -1129,7 +1145,7 @@ class ConversationAnswerTest(unittest.TestCase):
 
     def test_factual_tier_when_recalled_and_the_budget_is_tight(self):
         """回想非空 + 预算 ≤ 阈值（冷心境那一档是 40）→ 降成事实档 0.5。"""
-        self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0))
+        self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0))
         cold = self._heart_root("temp_cold")
         last = self._seed(cold, "cold", 4, gap=0.5)
         capture = []
@@ -1145,7 +1161,7 @@ class ConversationAnswerTest(unittest.TestCase):
 
     def test_both_tiers_follow_the_data_trigger(self):
         """两跑对拍：档位名必须与数据里那两条判据算出来的一致，不许另有第二套判据。"""
-        self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0))
+        self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0))
         trigger = llm.load_config()["temperature_tiers"]["trigger"]
         cold = self._heart_root("temp_rule_cold")
         last = self._seed(cold, "cold", 4, gap=0.5)
@@ -1743,7 +1759,7 @@ class ConversationAnswerTest(unittest.TestCase):
         那一轮的记忆离这一轮 15 分钟（脑的合并窗口 10 分钟）：同一个人窗口内的两条会被并成
         一条，并的时候 audience 也一起被这一轮自己的原话盖掉——那是脑的规矩，这里不去动它。
         """
-        self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0),
+        self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0),
                           audience=brain_model.AUDIENCE_PRIVATE)
         got = self._answer(scene=brain_model.SCENE_GROUP, now=_at(15))
         row = next(one for one in got["recalled"] if one["text"] == MEMORY_TEXT)
@@ -1751,7 +1767,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertTrue(row["retell_note"], "retell_note 空着：判据没透出来")
 
         brain = BrainStore(self.tmp / "private" / "brain")
-        brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0),
+        brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0),
                      audience=brain_model.AUDIENCE_PRIVATE)
         got = self._answer(scene=brain_model.SCENE_PRIVATE, now=_at(15), brain=brain)
         row = next(one for one in got["recalled"] if one["text"] == MEMORY_TEXT)
@@ -1918,6 +1934,320 @@ class ConversationAnswerTest(unittest.TestCase):
             with self.subTest(segment=case):
                 with self.assertRaises(ValueError):
                     self._answer(segment=case)
+
+    # —— 18) 四个旋钮：心的读数真进嘴 ————————————————
+
+    def _heart_state(self, name: str, *, mood_now: float, energy_value: float,
+                     at: str = "") -> Path:
+        """一份心状态：两个状态文件都写在这一刻（与 api 侧 _double_low 同一种写法）。
+
+        写文件而不是 apply_event：心情要落在一个精确的数上（33 落在低档里、又高过「双低」的
+        30），精力也只在这一处给。updated_at 就是这一轮的时刻，两笔都不结算。
+        """
+        root = self._heart_root(name)
+        when = at or _at(5)
+        (root / mood.MOOD_FILE).write_text(
+            json.dumps({"now": mood_now, "baseline": 60.0, "updated_at": when}),
+            encoding="utf-8")
+        (root / energy.ENERGY_FILE).write_text(
+            json.dumps({"value": energy_value, "updated_at": when, "tier": "一般"}),
+            encoding="utf-8")
+        return root
+
+    def test_low_mood_and_low_energy_narrow_the_round_and_switch_both_valves(self):
+        """心情 0.33 + 精力 20：上限收紧、玩笑句与问句整句删掉，提示词与回包都写明。
+
+        这份心数据特意高过「双低」的 30（心情 33：低，但不双低）：双低是 SILENT，由出站闸
+        整轮拦下，不归装配这一层；判成「少说」才是 no_question 那一条该走的路。
+        """
+        rules = conversation.load_assembly()["tone_rules"]
+        root = self._heart_state("low_both", mood_now=33.0, energy_value=20.0)
+        keep_line = "今天有点累。"
+        joke_line = "哈哈，这有什么。"
+        ask_line = "你还要去吗？"
+        reply = "%s\n%s\n%s" % (keep_line, joke_line, ask_line)
+        capture = []
+        got = self._answer(reply=reply, heart_root=root, captured=capture)
+        tone = got["tone"]
+        tier_chars = got["assembly"]["reply_budget"]["tier_chars"]
+        self.assertEqual(min(tier_chars, rules["max_chars_low"]), tone["max_chars"],
+                         "心情凉/精力低没收紧上限")
+        self.assertTrue(tone["no_question"], "判成「少说」却没关问句")
+        self.assertTrue(tone["ban_joke"], "心情凉却没禁玩笑")
+        self.assertIn("已接入", tone["heart_source"], "心读数没真传进嘴：%s" % tone["heart_source"])
+        self.assertNotIn("未接入", tone["heart_source"])
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn("已接入", system, "提示词的口径行还写着「未接入」")
+        self.assertIn("这一次回复不超过 %d 个字" % tone["max_chars"], system,
+                      "提示词里的字数上限没跟着收紧")
+        self.assertIn(rules["ban_joke_note"], system, "禁玩笑那句没进提示词")
+        self.assertEqual(keep_line, got["reply"], "该留的那一句被动了，或该删的没删干净")
+        row = conversation.read_tone_log()[-1]
+        self.assertEqual(1, row["dropped_jokes"], "玩笑句该整句删掉")
+        self.assertEqual(1, row["dropped_questions"], "问句该整句删掉")
+        self.assertTrue(row["ban_joke"])
+        self.assertTrue(row["no_question"])
+
+    def test_a_neutral_round_keeps_every_byte_and_the_tier_budget(self):
+        """中性一轮：上限就是档位预算、两个开关都关、回话一个字都不动。
+
+        这一轮得真判成「说」：熟稔过线（数字号那个人、真建档）+ 心那边一条 replied 事件
+        （没聊完那个意图过线）。少一样门就判「少说」，no_question 会是 true——那是另一条路，
+        与「中性行为一字不改」不是同一条判据。
+        """
+        self.brain.interact("3425635473", ts=_at(0))
+        heart_events.deliver(heart_events.KIND_REPLIED, who="3425635473",
+                             root=self.tmp / "heart", now=_at(4))
+        rules = conversation.load_assembly()["tone_rules"]
+        capture = []
+        got = self._answer(who="3425635473", captured=capture)
+        tone = got["tone"]
+        budget = conversation.load_assembly()["reply"]["budget_by_tier"][
+            got["assembly"]["reply_budget"]["tier"]]
+        self.assertEqual(budget, tone["max_chars"], "中性档该照旧用档位预算")
+        self.assertEqual(budget, got["assembly"]["reply_budget"]["chars"])
+        self.assertFalse(tone["no_question"])
+        self.assertFalse(tone["ban_joke"])
+        self.assertFalse(tone["truncated"])
+        self.assertEqual(SENTENCE, got["reply"], "中性一轮把她的话改了")
+        system = capture[0]["messages"][0]["content"]
+        self.assertNotIn(rules["ban_joke_note"], system, "中性一轮不该加禁玩笑那句")
+        self.assertIn("这一次回复不超过 %d 个字" % budget, system)
+
+    def test_a_long_reply_is_cut_at_a_sentence_end_not_in_the_middle(self):
+        """低心情那一轮按上限在句末截：留下的最后一个是句末标点，绝不留半句。"""
+        rules = conversation.load_assembly()["tone_rules"]
+        root = self._heart_state("cold_long", mood_now=20.0, energy_value=80.0)
+        reply = ("今天下雨了，路上有点滑。"
+                 "你问医院那回事，我记得的，是陪你妈去复查对吧。"
+                 "中午吃了面，汤有点咸，晚上想喝粥。"
+                 "周末要是不下雨，我陪你去一趟。")
+        self.assertGreater(len(reply), rules["max_chars_low"], "这段假回复本来就不长，截不出来")
+        got = self._answer(reply=reply, heart_root=root)
+        self.assertTrue(got["tone"]["truncated"], "超了上限却没截")
+        self.assertLess(len(got["reply"]), len(reply))
+        self.assertTrue(reply.startswith(got["reply"]), "留下的不是原话的前缀：%r" % got["reply"])
+        self.assertIn(got["reply"][-1], str(rules["sentence_end_chars"]), "断在半句上了")
+        self.assertLessEqual(len(got["reply"]), got["tone"]["max_chars"])
+        row = conversation.read_tone_log()[-1]
+        self.assertTrue(row["truncated"], "账上没写截了")
+        self.assertEqual(got["tone"]["max_chars"], row["max_chars"])
+        self.assertEqual(0, row["dropped_questions"], "这句里没有问句，不该有删问的记录")
+        self.assertEqual(0, row["dropped_jokes"], "这句里没有玩笑词，不该有删玩笑的记录")
+
+    def test_the_two_word_lists_and_thresholds_come_from_the_data_file(self):
+        """改 tone_rules 就改结果：阈值抬到 0.99 → 中性这一轮也算心情凉；词表换成别的词 → 那句被删。"""
+        live = self.tmp / "home" / "mind"
+        live.mkdir(parents=True)
+        data = conversation.load_assembly()
+        data["tone_rules"]["low_mood_below"] = 0.99
+        data["tone_rules"]["max_chars_low"] = 12
+        data["tone_rules"]["joke_words"] = ["医院"]
+        (live / "assembly.json").write_text(json.dumps(data, ensure_ascii=False),
+                                            encoding="utf-8")
+        got = self._answer(reply=SENTENCE)
+        self.assertTrue(got["tone"]["ban_joke"], "阈值改了，判据还是老那个")
+        self.assertEqual(12, got["tone"]["max_chars"], "上限没跟着数据走")
+        self.assertEqual("今天挺好的。", got["reply"], "换过的玩笑词表没生效")
+
+    def test_a_round_that_is_only_a_question_keeps_the_line_and_says_why(self):
+        """整句都该删就留原句：删光了不是「她没说」，账上记 kept_because_empty。"""
+        root = self._heart_state("only_question", mood_now=20.0, energy_value=80.0)
+        only = "你还要去吗？"
+        got = self._answer(reply=only, heart_root=root)
+        self.assertTrue(got["tone"]["no_question"])
+        self.assertEqual(only, got["reply"], "删空了该留原句，不许把她的话删成沉默")
+        row = conversation.read_tone_log()[-1]
+        self.assertEqual(1, row["dropped_questions"])
+        self.assertTrue(row["kept_because_empty"])
+
+    def test_the_tone_ledger_gets_one_row_per_round_with_every_field(self):
+        """每轮一行、字段齐、与回包对得上：两跑两行，一行不多一行不少。"""
+        self.brain.interact("主人", ts=_at(0))
+        low = self._heart_state("ledger_low", mood_now=33.0, energy_value=20.0)
+        first = self._answer(now=_at(5))
+        second = self._answer(now=_at(6), heart_root=low)
+        rows = conversation.read_tone_log()
+        self.assertEqual(2, len(rows), "两轮该有两行：%r" % (rows,))
+        lines = conversation.tone_log_path().read_text(encoding="utf-8").splitlines()
+        self.assertEqual(2, len([line for line in lines if line.strip()]), "一轮不止一行")
+        for row, got in zip(rows, (first, second)):
+            self.assertEqual(set(conversation.TONE_FIELDS), set(row), "账上字段不齐：%r" % (row,))
+            self.assertEqual(got["heart"]["mood"]["tier"], row["mood_tier"])
+            self.assertEqual(got["tone"]["label"], row["tone_tier"])
+            self.assertEqual(got["tone"]["softness"], row["softness"])
+            self.assertEqual(got["tone"]["max_chars"], row["max_chars"])
+            self.assertEqual(got["tone"]["no_question"], row["no_question"])
+            self.assertEqual(got["tone"]["ban_joke"], row["ban_joke"])
+            self.assertEqual(got["tone"]["truncated"], row["truncated"])
+            self.assertEqual(got["tone"]["heart_source"], row["heart_source"])
+            self.assertNotIn("未接入", row["heart_source"], "账上还写着心未接入")
+            self.assertTrue(str(row["energy_tier"] or "").strip(), "精力档位是空的")
+            self.assertTrue(str(row["address"] or "").strip(), "称呼是空的")
+        self.assertNotEqual(rows[0]["max_chars"], rows[1]["max_chars"], "两跑的上限该不一样")
+
+    def test_broken_tone_rules_are_reported_not_defaulted(self):
+        """tone_rules 缺阈值 / 上限写成 0 / 词表空 → ValueError，且指名道姓。"""
+        cases = ((lambda conf: conf.pop("tone_rules"), "tone_rules"),
+                 (lambda conf: conf["tone_rules"].pop("low_mood_below"),
+                  "tone_rules.low_mood_below"),
+                 (lambda conf: conf["tone_rules"].__setitem__("low_energy_below", "三十"),
+                  "tone_rules.low_energy_below"),
+                 (lambda conf: conf["tone_rules"].__setitem__("max_chars_low", 0),
+                  "tone_rules.max_chars_low"),
+                 (lambda conf: conf["tone_rules"].__setitem__("max_chars_neutral", 0),
+                  "tone_rules.max_chars_neutral"),
+                 (lambda conf: conf["tone_rules"].__setitem__("joke_words", []),
+                  "tone_rules.joke_words"),
+                 (lambda conf: conf["tone_rules"].__setitem__("joke_words", ["哈哈", ""]),
+                  "tone_rules.joke_words"),
+                 (lambda conf: conf["tone_rules"].__setitem__("question_chars", " "),
+                  "tone_rules.question_chars"),
+                 (lambda conf: conf["tone_rules"].pop("ban_joke_note"), "tone_rules.ban_joke_note"),
+                 (lambda conf: conf["tone_rules"].pop("rules_note"), "tone_rules.rules_note"))
+        for mutate, needle in cases:
+            conf = conversation.load_assembly()
+            mutate(conf)
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn(needle, str(caught.exception),
+                          "数据坏在 %s 时没有指名报错：%s" % (needle, caught.exception))
+
+
+class ConversationEventTest(unittest.TestCase):
+    """事件接进装配（本轮加的）：识别 → 投心 → 落账，一路上都不许进提示词。
+
+    判据：
+    1. **夸**：「你真厉害」（私聊）→ event.kind=praise、applied=True，而且心那边的心情读数
+       （mood.read 这一份公开读数，不读私有文件）比调用前**高**——投递真的推了心。
+    2. **冷落**：最近三轮她的回话都是「嗯」（用 recent 那本账造出来）→ 这一轮 event.kind=cold、
+       applied=True、心情下行。窗口凑不满就是不判——不拿一轮当三轮。
+    3. **中性**：「今天下午三点开会」→ event.kind=""（没识别出）、applied=False、reason 非空；
+       账本上**仍然有一行**——"什么都没发生"与"被心拒了"在账上分得开。
+    4. **被骂两套口径同结论**：带脏话的一句 → event.kind=insult，且**同一轮**的心判决给出
+       insulted-today（engage 的硬门）；交回去的 EngageInput.insulted_today 也是同一个布尔。
+    5. **mode**：每轮账本行都带 mode；直接调 answer(mode="proactive") 的行是 proactive，
+       不给 / 给个别的值一律回落 passive（口径在 events 那一侧，本层不另判）。
+    6. **一个字都不进提示词**：抓 system，账上那句 note 与命中的词一个都不出现，
+       装配也不因为多了一件事而多一节（order / sections 一位不动）。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        patches = mock.patch.dict(os.environ, {
+            "QQAGENT_HOME": str(self.tmp / "home"),          # 事件账落 <home>/organs/mind
+            "HEART_ROOT": str(self.tmp / "heart"),           # 心：事件真的推进这里
+            "MOUTH_TRACE_DIR": str(self.tmp / "trace"),
+        })
+        patches.start()
+        self.addCleanup(patches.stop)
+        target = self.tmp / "soul"
+        shutil.copytree(str(SOUL_FIXTURES / "valid"), str(target))
+        self.store = load_soul(target)
+        self.brain = BrainStore(self.tmp / "brain")
+
+    def _answer(self, text: str = QUESTION, reply: str = SENTENCE, *, captured: list = None,
+                **extra):
+        return conversation.answer(text, "主人", store=self.store, brain=self.brain,
+                                   now=_at(5), transport=_transport(reply, captured),
+                                   config=CONFIG, env=ENV, **extra)
+
+    def _mood_now(self, at: str = "") -> float:
+        """心那边的公开读数（mood.read 的 now）：测试不读 mood.json 这种私有文件。"""
+        return mood.read(now=at or _at(5))["now"]
+
+    def _round_reply(self, reply: str, at: str) -> None:
+        """往 recent 那本账里造一轮（她的回话就是 reply）：冷落窗口数的是她那侧。"""
+        recent.append({"ts": at, "who": "主人", "said": "随便说点什么", "reply": reply,
+                       "msg_id": ""}, cap=conversation.load_assembly()["recent"]["cap"])
+
+    # —— 1) 夸 ————————————————————————————————
+
+    def test_praise_is_applied_and_lifts_the_mood(self):
+        before = self._mood_now()
+        got = self._answer("你真厉害", scene="private")
+        self.assertEqual("praise", got["event"]["kind"], "夸没识别出来：%r" % (got["event"],))
+        self.assertTrue(got["event"]["applied"], "心没接住：%r" % (got["event"],))
+        after = self._mood_now()
+        self.assertGreater(after, before, "夸了却没上行：%r → %r" % (before, after))
+        row = events.rows()[-1]
+        self.assertEqual("praise", row["kind"])
+        self.assertTrue(row["applied"])
+
+    # —— 2) 冷落（窗口判据）————————————————————————————
+
+    def test_three_bare_replies_make_the_next_round_cold_and_push_the_mood_down(self):
+        for index, at in enumerate((_at(1), _at(2), _at(3)), 1):
+            self._round_reply("嗯", at)
+        before = self._mood_now()
+        got = self._answer("嗯", scene="private")
+        self.assertEqual("cold", got["event"]["kind"],
+                         "三轮都是「嗯」该判冷落：%r" % (got["event"],))
+        self.assertTrue(got["event"]["applied"], "心没接住：%r" % (got["event"],))
+        after = self._mood_now()
+        self.assertLess(after, before, "冷落却没下行：%r → %r" % (before, after))
+
+    def test_two_bare_replies_are_not_enough_for_the_window(self):
+        """窗口凑不满就不判（不拿一轮当 N 轮）：两轮「嗯」之后这一轮还是没事件。"""
+        for at in (_at(2), _at(3)):
+            self._round_reply("嗯", at)
+        got = self._answer("嗯", scene="private")
+        self.assertEqual("", got["event"]["kind"], "窗口没满却判了冷落：%r" % (got["event"],))
+        self.assertFalse(got["event"]["applied"])
+
+    # —— 3) 中性 ————————————————————————————————
+
+    def test_a_neutral_round_writes_one_row_and_says_why(self):
+        got = self._answer("今天下午三点开会", scene="private")
+        self.assertEqual("", got["event"]["kind"], "中性闲聊不该识别出事件：%r" % (got["event"],))
+        self.assertFalse(got["event"]["applied"])
+        self.assertTrue(got["event"]["reason"], "没识别出也要说清为什么（reason 不许空）")
+        rows = events.rows()
+        self.assertEqual(1, len(rows), "没识别出也要落一行：%r" % (rows,))
+        self.assertEqual("", rows[0]["kind"])
+        self.assertFalse(rows[0]["applied"])
+        self.assertTrue(rows[0]["reason"])
+
+    # —— 4) 被骂：两套口径同结论 ————————————————————————
+
+    def test_a_curse_word_is_insult_and_the_gate_says_insulted(self):
+        got = self._answer("你这个废物，给我滚开", scene="private")
+        self.assertEqual("insult", got["event"]["kind"],
+                         "被骂没识别出来：%r" % (got["event"],))
+        self.assertEqual(heart_model.REASON_INSULTED, got["heart"]["engage"]["reason"],
+                         "同一轮的心判决没走被骂那道硬门：%r" % (got["heart"]["engage"],))
+        self.assertIs(True, got["_gate_input"].insulted_today,
+                      "交给出站闸的那份输入没带上同一个布尔")
+
+    # —— 5) mode ————————————————————————————————
+
+    def test_every_row_carries_the_mode_of_its_round(self):
+        passive = self._answer()
+        self.assertEqual("passive", passive["event"]["mode"], "缺省该是 passive")
+        self.assertEqual("passive", events.rows()[-1]["mode"])
+        proactive = self._answer(mode="proactive")
+        self.assertEqual("proactive", proactive["event"]["mode"])
+        self.assertEqual("proactive", events.rows()[-1]["mode"])
+        wrong = self._answer(mode="随口写的值")
+        self.assertEqual("passive", wrong["event"]["mode"], "非法值要回落 passive")
+        self.assertEqual("passive", events.rows()[-1]["mode"])
+
+    # —— 6) 不进提示词 ————————————————————————————————
+
+    def test_the_event_never_reaches_the_prompt_and_adds_no_section(self):
+        capture = []
+        got = self._answer("你真厉害", scene="private", captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        row = events.rows()[-1]
+        self.assertEqual("praise", row["kind"])
+        self.assertNotIn(row["note"], system, "事件账上的依据进了提示词：%r" % (row["note"],))
+        self.assertNotIn("词表命中", system, "识别口径漏进了提示词")
+        self.assertNotIn("evidence", system, "evidence 那一栏漏进了提示词")
+        for key in ("event", "note", "evidence"):
+            self.assertNotIn(key, got["assembly"]["order"], "装配多了一节：%r" % (key,))
+            self.assertNotIn(key, [one["key"] for one in got["assembly"]["sections"]])
 
 
 if __name__ == "__main__":

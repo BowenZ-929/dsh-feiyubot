@@ -44,8 +44,13 @@ from organs.brain import model as brain_model
 from organs.home import anchors as home_anchors
 from organs.home import cards
 from organs.home import residents as home_residents
+from organs.heart import energy
+from organs.heart import gate as heart_gate
+from organs.heart import model as heart_model
+from organs.heart import mood
 from organs.heart import refuse as heart_refuse
-from organs.mind import conversation, llm, recent, usage
+from organs.heart import store as heart_store
+from organs.mind import conversation, events, llm, recent, usage
 from organs.mouth import address as mouth_address
 from organs.mouth import audit as mouth_audit
 from organs.mouth import refusal as mouth_refusal
@@ -105,9 +110,20 @@ REWRITE_KEYS = {"status", "why", "from", "to"}
 CLAUSES = json.loads((MOUTH_DATA / "clauses.json").read_text(encoding="utf-8"))["clauses"]
 ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
+#: 一个确定在白天的时刻（夜里窗口按这个串自己的小时判，跑在哪个时区都同一个结论）：
+#: 出站闸那两道硬门里夜里排在前面，要真造出 SILENT 就得避开它。
+DAYTIME = "2026-11-06T12:00:00+00:00"
+
 CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate", "audit",
+                 # 核·识别这一轮的读数（本轮加的）：五键冻结，/chat 原样透出、不重组。
+                 "event",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
-                 "guard", "memory", "addressed", "borrow", "refusal", "audience_held"}
+                 "guard", "memory", "addressed", "borrow", "refusal", "audience_held",
+                 # 嘴这一格（本轮加的）：四个旋钮落到这一轮的实话，页面可读。
+                 "tone",
+                 # 出站闸那四格（门只回答发不发）：send / reason / level 是门的答案，
+                 # limits 交给嘴——四格不论发不发都在，形状不随状态变。
+                 "send", "reason", "level", "limits"}
 AUDIT_KEYS = {"decision", "kind", "card_id", "overlap"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
 ACTION_KEYS = {"pool", "rule", "quota"}
@@ -326,6 +342,59 @@ class ChatApiTest(unittest.TestCase):
         text = json.dumps(heart, ensure_ascii=False)
         self.assertEqual([], [ch for ch in text if ch.isdigit()],
                          "心的回包里有数字：%s" % text)
+
+    def test_the_tone_block_carries_the_four_knobs_to_the_page(self):
+        """回包那一格 tone：档位、软度、上限、两个开关、截没截、心接上没有——与装配同一个数。
+
+        心这一轮是真接上的（不是「未接入」）：装配把 mood / energy / offset / engage 都交给了嘴，
+        heart_source 里得看得见它们；max_chars 必须与 assembly.reply_budget.chars 是同一个数
+        （提示词说的和手里截的是一个口径）。
+        """
+        status, payload = self._send()
+        self.assertEqual(200, status)
+        tone = payload["tone"]
+        for key in ("tier", "label", "softness", "max_chars", "no_question", "ban_joke",
+                    "truncated", "heart_source"):
+            self.assertIn(key, tone, "tone 少了 %s：%r" % (key, tone))
+        self.assertEqual(payload["assembly"]["reply_budget"]["chars"], tone["max_chars"],
+                         "回包的上限与装配那一格不是一个数")
+        self.assertIn("已接入", tone["heart_source"], "心没真接进嘴：%r" % (tone["heart_source"],))
+        self.assertIn("mood=", tone["heart_source"])
+        self.assertIn("energy=", tone["heart_source"])
+        self.assertIn("engage=", tone["heart_source"])
+        for key in ("no_question", "ban_joke", "truncated"):
+            self.assertIsInstance(tone[key], bool, "%s 不是真假值：%r" % (key, tone[key]))
+        self.assertIsInstance(tone["softness"], (int, float))
+        self.assertTrue(str(tone["label"] or "").strip(), "语气档标签是空的")
+
+    def test_a_cold_mood_round_narrows_the_budget_over_http(self):
+        """心情凉那一轮：/chat 上的上限真的收紧，账本上落一行「为什么收紧」。
+
+        心状态直接写文件（与 _double_low 同一种写法）：心情 20（0.2，低档），精力 80 不动——
+        双低会判 SILENT、整轮被出站闸拦下，那不是这一条要验的路。
+        """
+        at = DAYTIME
+        self._heart_root_write(mood.MOOD_FILE,
+                               {"now": 20.0, "baseline": 60.0, "updated_at": at})
+        self._heart_root_write(energy.ENERGY_FILE,
+                               {"value": 80.0, "updated_at": at, "tier": "一般"})
+        with mock.patch.object(brain_model, "now_iso", lambda: at):
+            status, payload = self._send()
+        self.assertEqual(200, status)
+        rules = conversation.load_assembly()["tone_rules"]
+        tier_chars = payload["assembly"]["reply_budget"]["tier_chars"]
+        self.assertEqual(min(tier_chars, rules["max_chars_low"]), payload["tone"]["max_chars"],
+                         "心情凉了上限却没收紧")
+        self.assertTrue(payload["tone"]["ban_joke"], "心情凉却没禁玩笑")
+        rows = conversation.read_tone_log()
+        self.assertEqual(1, len(rows), "一轮该落一行账：%r" % (rows,))
+        self.assertEqual(payload["tone"]["max_chars"], rows[-1]["max_chars"])
+        self.assertTrue(rows[-1]["ban_joke"])
+        self.assertEqual(payload["tone"]["heart_source"], rows[-1]["heart_source"])
+
+    def _heart_root_write(self, name: str, row) -> None:
+        """往临时心根写一份状态文件（tier 之类缺的栏由器官自己补，不在这里手搓）。"""
+        write_json(self._heart_root() / name, row)
 
     def test_gate_pass_and_dropped_are_both_reachable(self):
         status, passed = self._send()
@@ -830,6 +899,13 @@ class ChatApiTest(unittest.TestCase):
             self.assertIn(part["rewrite"]["status"], ("not-tried", "failed"),
                           "这一轮一次重写请求都不发：没命中就是 not-tried，命中就是留原话的 failed")
         self.assertEqual([], capture, "连重写那一次也没发")
+        # 这一轮没有装配、没有 EngageInput：出站闸这一关如实写「没判」，四格照给（不许缩水成缺键）
+        self.assertEqual(chat.OUTBOUND_UNJUDGED, gate["outbound"]["status"])
+        self.assertTrue(gate["outbound"]["why"])
+        self.assertIs(True, payload["send"], "门没判不等于不发")
+        self.assertIsNone(payload["level"])
+        self.assertIsNone(payload["reason"])
+        self.assertEqual({}, payload["limits"])
 
     def test_the_same_question_outside_the_cooldown_answers_normally(self):
         """同一句、不在冷却里：照常装配与调模型（一次），refusal 节如实写「没在冷却」。"""
@@ -1898,6 +1974,173 @@ class ChatApiTest(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertIn(chat.SEGMENT_BROKEN.split("%s")[0], payload["message"])
                 self.assertEqual([], capture, "坏形状也发了模型请求")
+
+    # —— 出站闸：这一轮到底发不发（本轮加的） ————————————
+
+    def _heart_root(self) -> Path:
+        root = Path(os.environ["HEART_ROOT"])
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _gate_rows(self) -> list:
+        """心·gate 的出站账本（一行一判，发也写、不发也写）。"""
+        return heart_store.read_jsonl(self._heart_root() / heart_gate.LOG_FILE)
+
+    def _double_low(self, at: str) -> None:
+        """把心压到双低（心情 10、精力 10）：/chat 上真能造出 SILENT 的唯一来路。
+
+        装配这一层给的意图恒是被动（conversation._engage → INTENT_PASSIVE），夜里那一道
+        因此只判「少说」；要「不说」只能走双低。两个状态文件都写在这一刻，精力就不结算。
+        """
+        write_json(self._heart_root() / mood.MOOD_FILE,
+                   {"now": 10.0, "baseline": 10.0, "updated_at": at})
+        write_json(self._heart_root() / energy.ENERGY_FILE,
+                   {"value": 10.0, "updated_at": at, "tier": "累"})
+
+    def test_a_double_low_heart_silences_the_round_and_says_why(self):
+        """心情与精力双低 → 门判 SILENT：一泡都不发、reply 空、send=false，账上多一行。
+
+        门只回答发不发：这里断言的是「她这句没出去」与「门说了为什么」，
+        怎么想的（heart.engage）与怎么说的一概不动。
+        """
+        # 双低与夜间是两道**硬门**，门取先列的那一道定态（夜里排在前面，被动回复只判「少说」）。
+        # 所以这一刻必须钉在一个确定是白天的时刻，否则这一轮判出来的会是 night 而不是双低。
+        with mock.patch.object(brain_model, "now_iso", lambda: DAYTIME):
+            self._double_low(DAYTIME)
+            before = len(self._gate_rows())
+            status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["chunks"], "她这轮不想说：一泡都不该发")
+        self.assertEqual("", payload["reply"], "没发出去的话不许留在 reply 里")
+        self.assertIs(False, payload["send"])
+        self.assertEqual(heart_gate.LEVEL_ENGAGE, payload["level"], "双低是人级拦的")
+        self.assertEqual(heart_model.REASON_DOUBLE_LOW, payload["reason"])
+        rows = self._gate_rows()
+        self.assertEqual(before + 1, len(rows), "门发也写、不发也写：这一轮该多一行")
+        row = rows[-1]
+        self.assertEqual(False, row["send"])
+        self.assertEqual(heart_gate.LEVEL_ENGAGE, row["level"])
+        self.assertEqual(heart_model.STATE_SILENT, row["state"])
+        self.assertEqual(heart_model.REASON_DOUBLE_LOW, row["reason"])
+        self.assertIsNone(row["group"], "私聊不写群号")
+        self.assertNotIn("_gate_input", payload, "私有键漏进了回包")
+
+    def test_the_group_quota_stops_the_third_line_in_the_same_group(self):
+        """同一个群每小时 2 条（窗口 60 分）→ 第三条被群级拦下；换一个群照样有额度。"""
+        write_json(self._heart_root() / heart_gate.CONFIG_FILE,
+                   {"group_quota_per_hour": 2, "group_window_min": 60})
+        group = {"scene": brain_model.SCENE_GROUP, "where": {"groupId": "88776655"}}
+        for index in range(2):
+            status, payload = self._post(dict(group, text="第 %d 句" % index),
+                                         _body("第 %d 句的回话，碗我放桌上了。" % index))
+            self.assertEqual(200, status)
+            self.assertTrue(payload["chunks"], "配额内的这一轮该发：%r" % (payload["reason"],))
+            self.assertIs(True, payload["send"])
+        status, payload = self._post(dict(group, text="第三句"),
+                                     _body("第三句的回话，碗我放桌上了。"))
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["chunks"], "同群第三条该被群配额拦下")
+        self.assertEqual("", payload["reply"])
+        self.assertIs(False, payload["send"])
+        self.assertEqual(heart_gate.LEVEL_GROUP, payload["level"])
+        self.assertEqual(heart_gate.REASON_GROUP_QUOTA, payload["reason"])
+        row = self._gate_rows()[-1]
+        self.assertEqual(group["where"]["groupId"], row["group"])
+        self.assertEqual(2, row["quota_used"], "拦下这一行的用量该是窗口里已有的那两条")
+        self.assertEqual(heart_gate.REASON_GROUP_QUOTA, row["reason"])
+        other = {"scene": brain_model.SCENE_GROUP, "where": {"groupId": "11223344"}}
+        status, payload = self._post(dict(other, text="新群里问一句"),
+                                     _body("新群里我照常说，碗我放桌上了。"))
+        self.assertEqual(200, status)
+        self.assertTrue(payload["chunks"], "换一个群该有额度")
+        self.assertIs(True, payload["send"])
+        self.assertEqual(other["where"]["groupId"], self._gate_rows()[-1]["group"])
+        # 没有 where 就退到老字段 body["group"]；场合不是 group 就一律私聊（哪怕 body 里塞了群号）
+        status, payload = self._post({"scene": brain_model.SCENE_GROUP, "group": "55667788",
+                                      "text": "老字段那一问"},
+                                     _body("老字段我也照常说，碗我放桌上了。"))
+        self.assertEqual(200, status)
+        self.assertTrue(payload["chunks"])
+        self.assertEqual("55667788", self._gate_rows()[-1]["group"], "没有 where 该退到老字段 group")
+        status, payload = self._post({"scene": brain_model.SCENE_PRIVATE, "group": "88776655",
+                                      "text": "私聊里带了个群号"},
+                                     _body("私聊里带群号也还是私聊，碗我放桌上了。"))
+        self.assertEqual(200, status)
+        self.assertTrue(payload["chunks"], "带群号的私聊仍是私聊：不许被群配额拦下")
+        self.assertIsNone(self._gate_rows()[-1]["group"], "场合不是 group 就不占群额度")
+
+    def test_private_rounds_never_touch_the_group_window(self):
+        """私聊 12 轮：每一轮都发；group_window.json 一个字节都不出现（group=None 不占不写）。"""
+        for index in range(12):
+            status, payload = self._post({"text": "第 %d 句" % index},
+                                         _body("第 %d 句的回话，碗我放桌上了。" % index))
+            self.assertEqual(200, status)
+            self.assertIs(True, payload["send"], "私聊第 %d 轮该发" % index)
+            self.assertTrue(payload["chunks"], "私聊第 %d 轮该有话说：%r" % (index, payload["reason"]))
+            self.assertIsNone(self._gate_rows()[-1]["group"], "私聊不写群号")
+        self.assertFalse((self._heart_root() / heart_gate.WINDOW_FILE).exists(),
+                         "私聊不占不写：群窗账一个字节都不该出现")
+
+    def test_the_private_key_never_reaches_the_response(self):
+        """装配交回的私有键只在核里过一手：回包里没有它，而且整份回包是能序列化的 JSON。"""
+        status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertNotIn("_gate_input", payload, "私有键漏进了回包")
+        json.dumps(payload, ensure_ascii=False, sort_keys=True)   # 带对象就抛 TypeError
+
+    def test_a_missing_engage_input_is_reported_not_silently_ignored(self):
+        """拿不到 EngageInput（装配没交出来）→ 照常发 + 一行 WARNING + gate 一节写明未判。"""
+        transport = _body(LONG_REPLY)
+        stack = self._answer(transport)
+        with stack:
+            inner = conversation.answer
+
+            def stripped(text, who="", **kw):
+                got = inner(text, who, **kw)
+                got.pop("_gate_input", None)          # 装配那一头没交出来
+                return got
+
+            with mock.patch.object(conversation, "answer", stripped):
+                with self.assertLogs(chat.LOGGER_NAME, level="WARNING") as caught:
+                    status, payload = api.handle("POST", "/chat", {"text": QUESTION},
+                                                 self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertTrue(any("出站闸未判" in line for line in caught.output),
+                        "门缺席要响一声：%r" % (caught.output,))
+        self.assertTrue(payload["chunks"], "门缺席不该让她开不了口")
+        self.assertIs(True, payload["send"])
+        section = payload["gate"]["outbound"]
+        self.assertEqual(chat.OUTBOUND_UNJUDGED, section["status"], "回包里要如实说这一关没判")
+        self.assertTrue(section["why"], "没判也要说清为什么")
+        self.assertNotIn("_gate_input", payload)
+
+    # —— 事件（核·识别）：/chat 触发的这一轮是 passive ——————————
+
+    def test_the_event_rides_along_and_the_row_says_passive(self):
+        """「你真厉害」走真链路：回包 event 五键原样透出、账本行 mode=passive。
+
+        判据三件：① 识别与投递真的跑了（kind=praise、applied=True、心情上行）；
+        ② /chat 是人发消息触发的 → 这一轮落账的 mode 必须是 "passive"（她自己开口那条路
+        不经过本文件）；③ 账上的依据（note）一个字都不许进提示词。
+        """
+        self.brain.ingest(who="3425635473", text=MEMORY_TEXT)
+        capture = []
+        before = mood.read()["now"]
+        status, payload = self._post({"text": "你真厉害", "scene": "private"},
+                                     _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        event = payload["event"]
+        self.assertEqual({"kind", "who", "applied", "reason", "mode"}, set(event),
+                         "回包 event 的五个键对外冻结：%r" % (event,))
+        self.assertEqual("praise", event["kind"], "夸没识别出来：%r" % (event,))
+        self.assertTrue(event["applied"], "心没接住：%r" % (event,))
+        self.assertEqual("passive", event["mode"], "/chat 触发的这一轮是 passive")
+        self.assertGreater(mood.read()["now"], before, "夸了却没上行")
+        row = events.rows()[-1]
+        self.assertEqual("praise", row["kind"])
+        self.assertEqual("passive", row["mode"], "账上那一行不是这一轮落下的")
+        self.assertNotIn(row["note"], capture[0]["messages"][0]["content"],
+                         "事件账上的依据进了提示词：%r" % (row["note"],))
 
 
 if __name__ == "__main__":
