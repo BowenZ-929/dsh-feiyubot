@@ -11,7 +11,7 @@ class QuoteNoteTest(unittest.TestCase):
     def test_unclear_note_empty_recalls_quote_only(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.ingest("主人", "他说明天上午九点做手术", note="", unclear=True,
+        store.ingest("3425635473", "他说明天上午九点做手术", note="", unclear=True,
                      ts="2026-11-03T10:00:00+00:00")
         result = store.recall("手术", now_ts="2026-11-03T10:05:00+00:00")
         self.assertTrue(result["has_material"])
@@ -24,7 +24,7 @@ class QuoteNoteTest(unittest.TestCase):
     def test_quote_and_note_distinguishable_and_testimony_only_quote(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.ingest("主人", "这顿我请", note="她以为这顿该他请",
+        store.ingest("3425635473", "这顿我请", note="她以为这顿该他请",
                      ts="2026-11-03T10:00:00+00:00")
         result = store.recall("这顿", now_ts="2026-11-03T10:05:00+00:00")
         item = result["items"][0]
@@ -37,7 +37,7 @@ class QuoteNoteTest(unittest.TestCase):
     def test_old_text_only_rows_read_as_quote_without_note(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.import_rows([{"id": "1000101", "who": "主人",
+        store.import_rows([{"id": "1000101", "who": "3425635473",
                             "ts": "2026-11-02T10:00:00+00:00",
                             "text": "旧数据只有 text", "source": "today"}])
         rows = store.longterm_active_entries()
@@ -50,7 +50,7 @@ class QuoteNoteTest(unittest.TestCase):
     def test_edit_note_keeps_quote_verbatim_and_logs_history(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "他说明天上午九点做手术",
+        result = ingest(store, "3425635473", "他说明天上午九点做手术",
                         note="旧理解", ts="2026-11-03T10:00:00+00:00")
         entry_id = result["entry"]["id"]
         edited = store.edit_note(entry_id, "panel", "新理解")

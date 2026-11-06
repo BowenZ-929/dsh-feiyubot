@@ -12,7 +12,7 @@ class MigrationSourceTest(unittest.TestCase):
     def test_migrated_quote_marks_old_home_and_is_not_testimony(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.import_rows([{"id": "1000201", "who": "主人",
+        store.import_rows([{"id": "1000201", "who": "3425635473",
                             "ts": "2026-11-02T10:00:00+00:00",
                             "text": "旧家摘要：他喜欢猫", "source_type": "迁移",
                             "source": "today"}])
@@ -23,7 +23,7 @@ class MigrationSourceTest(unittest.TestCase):
     def test_migrated_empty_quote_marks_no_original(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.import_rows([{"id": "1000202", "who": "主人",
+        store.import_rows([{"id": "1000202", "who": "3425635473",
                             "ts": "2026-11-02T10:00:00+00:00",
                             "quote": "", "source_type": "迁移", "source": "today"}])
         rows = store.longterm_active_entries()
@@ -40,7 +40,7 @@ class MigrationSourceTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         with self.assertRaises(BrainReadError):
-            store.import_rows([{"id": "1000203", "who": "主人",
+            store.import_rows([{"id": "1000203", "who": "3425635473",
                                 "ts": "2026-11-02T10:00:00+00:00",
                                 "text": "未知来源", "source_type": "外星",
                                 "source": "today"}])
@@ -51,7 +51,7 @@ class SelfSideTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         # 第一轮：他问，她答
-        ingest(store, "小明", "你昨天去哪了", "2026-11-03T10:00:00+00:00")
+        ingest(store, "123456789", "你昨天去哪了", "2026-11-03T10:00:00+00:00")
         ingest(store, "她说", "我昨天去了医院", "2026-11-03T10:01:00+00:00",
                side=SIDE_SELF)
         # 第二三轮：连问同一件事，recalled 里不许出现她的回话

@@ -11,11 +11,11 @@ class EdgesTest(unittest.TestCase):
     def test_neighbors_of_event_node_include_person_and_topic(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "我妈住院了", "2026-11-03T10:00:00+00:00")
+        result = ingest(store, "3425635473", "我妈住院了", "2026-11-03T10:00:00+00:00")
         entry_id = result["entry"]["id"]
         neighbors = store.neighbors(entry_id)["neighbors"]
         labels = [n["label"] for n in neighbors]
-        self.assertIn("主人", labels)
+        self.assertIn("3425635473", labels)
         self.assertIn("医院", labels)
         for n in neighbors:
             self.assertTrue(n["ts"])
@@ -24,7 +24,7 @@ class EdgesTest(unittest.TestCase):
     def test_edges_do_not_dangle_after_forget(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "我妈住院了", "2026-11-03T10:00:00+00:00")
+        result = ingest(store, "3425635473", "我妈住院了", "2026-11-03T10:00:00+00:00")
         entry_id = result["entry"]["id"]
         store.forget(entry_id, ts="2026-11-03T10:05:00+00:00")
         neighbors = store.neighbors(entry_id)["neighbors"]

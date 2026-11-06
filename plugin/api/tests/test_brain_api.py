@@ -93,21 +93,21 @@ class BrainApiTest(unittest.TestCase):
         self.assertEqual(500, self._call("GET", "/brain/tiers")[0])
 
     def test_card_patch_whitelist_and_familiarity_rejected(self):
-        self.brain.ingest("主人", "我妈住院了")
-        status, payload = self._call("PATCH", "/brain/people/主人/card",
+        self.brain.ingest("3425635473", "我妈住院了")
+        status, payload = self._call("PATCH", "/brain/people/3425635473/card",
                                      {"actor": "panel", "fields": {"称呼": "老板", "雷点": ["别提工作"]}})
         self.assertEqual(200, status, payload)
         self.assertEqual(2, len(payload["history_lines"]))
         self.assertEqual("老板", payload["card"]["display"])
-        self.assertEqual(400, self._call("PATCH", "/brain/people/主人/card",
+        self.assertEqual(400, self._call("PATCH", "/brain/people/3425635473/card",
                                          {"actor": "panel", "fields": {"熟稔": 99}})[0])
-        self.assertEqual(400, self._call("PATCH", "/brain/people/主人/card",
+        self.assertEqual(400, self._call("PATCH", "/brain/people/3425635473/card",
                                          {"actor": "panel", "fields": {"爱好": ["猫"]}})[0])
-        self.assertEqual(404, self._call("GET", "/brain/people/不存在/card")[0])
-        self.assertEqual(405, self._call("POST", "/brain/people/主人/card", {})[0])
+        self.assertEqual(404, self._call("GET", "/brain/people/999999999/card")[0])
+        self.assertEqual(405, self._call("POST", "/brain/people/3425635473/card", {})[0])
 
     def test_today_and_people_annotate_retention_and_memories_ts(self):
-        self.brain.ingest("主人", "我妈住院了")
+        self.brain.ingest("3425635473", "我妈住院了")
         status, payload = self._call("GET", "/brain/today")
         self.assertEqual(200, status)
         self.assertIn("retention", payload["entries"][0])

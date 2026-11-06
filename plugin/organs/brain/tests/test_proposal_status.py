@@ -101,9 +101,9 @@ class MarkProposalTest(unittest.TestCase):
         """新提案写入时 status 缺省不带：run_night 的产物形状不动。"""
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        ingest(store, "主人", "你今天有点不理人", "2026-11-03T10:00:00+00:00")
-        ingest(store, "朋友", "怎么又冷淡了", "2026-11-03T10:02:00+00:00")
-        ingest(store, "主人", "对生人也别不理", "2026-11-03T10:04:00+00:00")
+        ingest(store, "3425635473", "你今天有点不理人", "2026-11-03T10:00:00+00:00")
+        ingest(store, "567890123", "怎么又冷淡了", "2026-11-03T10:02:00+00:00")
+        ingest(store, "3425635473", "对生人也别不理", "2026-11-03T10:04:00+00:00")
         night = store.run_night("2026-11-04T05:00:00+00:00")
         self.assertTrue(night["proposals"])
         for proposal in night["proposals"]:

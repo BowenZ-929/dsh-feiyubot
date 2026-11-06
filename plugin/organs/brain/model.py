@@ -1,6 +1,8 @@
 """脑的参数与默认值：数值一律是默认值，不是验收线（docs/plan.md §2）。"""
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -58,6 +60,15 @@ def status_writer_report() -> list:
                      "writer": writer,
                      "wired": writer is not None})
     return rows
+
+# who 主键必须是平台+数字号（如 aiocqhttp:3425635473 或裸 3425635473）。
+# 昵称不是身份：同一个人在多个群用不同昵称，按名字建卡会把他建成三个人。
+WHO_RE = re.compile(r"^([a-z0-9]+:)?\d{5,15}$")
+
+
+def valid_who(who: str) -> bool:
+    return bool(WHO_RE.match(who or ""))
+
 
 # 人名录不建卡的占位 who：不知道是谁 ≠ 有一个人叫"人"
 PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知")

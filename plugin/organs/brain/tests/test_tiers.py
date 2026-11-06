@@ -12,7 +12,7 @@ class TiersTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         for index in range(65):
-            ingest(store, "群友%d" % index,
+            ingest(store, "9900%02d" % index,
                    "第 %d 句：这是一段足够长的原文，用来证明薄索引里不放全文" % index,
                    "2026-11-03T12:00:00+00:00")
         rows = store.hot_rows()
@@ -35,7 +35,7 @@ class TiersTest(unittest.TestCase):
         # 每次 65 条 → 降级 20 条 → 约 3 行热；三次后热超过 4 行触发挤掉
         for batch in range(3):
             for index in range(65):
-                ingest(store, "群友%d-%d" % (batch, index), "第 %d-%d 句" % (batch, index),
+                ingest(store, "9%02d%02d" % (batch, index), "第 %d-%d 句" % (batch, index),
                        "2026-11-03T%02d:%02d:00+00:00" % (12 + batch, index % 60))
             store.today_entries("2026-11-03T%02d:30:00+00:00" % (12 + batch))
         evictions = store.evictions()

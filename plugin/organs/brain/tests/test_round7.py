@@ -20,17 +20,16 @@ class PeopleBlockTest(unittest.TestCase):
     def test_normal_person_creates_card(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.interact("小明", ts="2026-11-03T10:00:00+00:00")
+        store.interact("123456789", ts="2026-11-03T10:00:00+00:00")
         self.assertEqual(1, len(store.people_list("2026-11-03T10:01:00+00:00")))
 
-    def test_self_interact_logs_warn(self):
+    def test_self_nickname_is_rejected_not_card(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            store.interact("江迟", ts="2026-11-03T10:00:00+00:00")
-        self.assertTrue(any("不是通讯录里的人" in str(w.message) for w in caught),
-                        "她自己的自称要记一条 warn")
+        result = store.interact("江迟", ts="2026-11-03T10:00:00+00:00")
+        self.assertFalse(result["ok"])
+        self.assertIn("昵称不是身份", result["message"])
+        self.assertEqual([], store.people_list("2026-11-03T10:01:00+00:00"))
 
     def test_empty_who_ingest_still_records_memory_as_placeholder(self):
         store, tmp = fresh_store()
@@ -46,7 +45,7 @@ class PeopleBlockTest(unittest.TestCase):
         data = {"people": {
             "人": {"id": "人", "display": "人", "interactions": {}},
             "江迟": {"id": "江迟", "display": "江迟", "interactions": {}},
-            "小明": {"id": "小明", "display": "小明", "interactions": {}},
+            "123456789": {"id": "123456789", "display": "123456789", "interactions": {}},
         }}
         (store.root / "people.json").write_text(
             json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -54,7 +53,7 @@ class PeopleBlockTest(unittest.TestCase):
         self.assertEqual(["人", "江迟"], result["removed"])
         self.assertTrue(result["backup"])
         remaining = store._people_data()["people"]
-        self.assertEqual(["小明"], list(remaining), "真卡不许动")
+        self.assertEqual(["123456789"], list(remaining), "真卡不许动")
 
 
 if __name__ == "__main__":

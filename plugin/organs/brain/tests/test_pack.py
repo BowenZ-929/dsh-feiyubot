@@ -9,7 +9,7 @@ from organs.brain.model import PackLimits
 
 def _candidate(cid: str, source: str, text: str, score: float = 1.0,
                kind: str = "fact") -> dict:
-    return {"id": cid, "source": source, "kind": kind, "who": "主人",
+    return {"id": cid, "source": source, "kind": kind, "who": "3425635473",
             "ts": "2026-11-03T10:00:00+00:00", "text": text, "score": score}
 
 

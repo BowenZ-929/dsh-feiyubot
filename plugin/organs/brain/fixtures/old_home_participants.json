@@ -1,0 +1,92 @@
+[
+  {
+    "sender_id": "3425635473",
+    "count": 16,
+    "nicknames": [
+      "老大（可以叫主人）",
+      "主人"
+    ]
+  },
+  {
+    "sender_id": "970782150",
+    "count": 105,
+    "nicknames": [
+      "Ben Brode",
+      "canxueqq",
+      "张云鹏"
+    ]
+  },
+  {
+    "sender_id": "1065049258",
+    "count": 91,
+    "nicknames": [
+      "What is love?"
+    ]
+  },
+  {
+    "sender_id": "714361287",
+    "count": 89,
+    "nicknames": [
+      "触，杜的"
+    ]
+  },
+  {
+    "sender_id": "3275916838",
+    "count": 43,
+    "nicknames": [
+      "白"
+    ]
+  },
+  {
+    "sender_id": "1403520919",
+    "count": 37,
+    "nicknames": [
+      "王炜杰"
+    ]
+  },
+  {
+    "sender_id": "1002259419",
+    "count": 27,
+    "nicknames": [
+      "Tedsicg",
+      "终末地"
+    ]
+  },
+  {
+    "sender_id": "2284938721",
+    "count": 319,
+    "nicknames": [
+      "bot"
+    ],
+    "is_bot": true
+  },
+  {
+    "sender_id": "astrbot",
+    "count": 42,
+    "nicknames": [
+      "astrbot"
+    ],
+    "is_bot": true
+  },
+  {
+    "sender_id": "2398539930",
+    "count": 10,
+    "nicknames": [
+      "低篇1"
+    ]
+  },
+  {
+    "sender_id": "248900410",
+    "count": 7,
+    "nicknames": [
+      "低篇2"
+    ]
+  },
+  {
+    "sender_id": "1056283825",
+    "count": 7,
+    "nicknames": [
+      "低篇3"
+    ]
+  }
+]

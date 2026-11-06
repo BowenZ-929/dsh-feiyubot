@@ -17,7 +17,7 @@ class ZeroWriteTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         # 今日条目，词表能盖住（医院），不会进候选池；未换日、未超 60、无到期
-        ingest(store, "主人", "我妈住院了", "2026-11-03T10:00:00+00:00")
+        ingest(store, "3425635473", "我妈住院了", "2026-11-03T10:00:00+00:00")
         before = _mtimes(store)
         for _ in range(10):
             store.recall("我妈", now_ts="2026-11-03T10:05:00+00:00")
@@ -30,7 +30,7 @@ class TopicCandidateTest(unittest.TestCase):
     def test_recalled_unknown_text_enters_pool_and_promotes_into_table(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.import_rows([{"id": "1000101", "who": "主人",
+        store.import_rows([{"id": "1000101", "who": "3425635473",
                             "ts": "2026-11-02T10:00:00+00:00",
                             "text": "我今天去了一趟新开的书店", "source": "today"}])
         store.recall("书店", now_ts="2026-11-03T12:00:00+00:00")
@@ -42,7 +42,7 @@ class TopicCandidateTest(unittest.TestCase):
         self.assertTrue(promoted["ok"])
         self.assertEqual([], store.topic_candidates())
         # 收进词表后，新消息能提取出这个话题
-        result = ingest(store, "主人", "我今天去了一趟新开的书店",
+        result = ingest(store, "3425635473", "我今天去了一趟新开的书店",
                         "2026-11-03T12:05:00+00:00")
         topics = store._topics()
         self.assertIn("书店", topics)

@@ -14,7 +14,7 @@ class StatusFilterTest(unittest.TestCase):
         """验收①：先复现一条已退役记忆出现在回想里，再让它消失。"""
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "我换新工作了", "2026-11-03T10:00:00+00:00")
+        result = ingest(store, "3425635473", "我换新工作了", "2026-11-03T10:00:00+00:00")
         entry_id = result["entry"]["id"]
         before = store.recall("新工作", now_ts="2026-11-03T10:01:00+00:00")
         self.assertTrue(before["has_material"], "改前必须能复现它出现在回想里")
@@ -52,9 +52,9 @@ class CredibilityTest(unittest.TestCase):
         """验收③：来源类型亲历/日程模拟；虚构只作谈资、不作证词。"""
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.ingest("主人", "我去买菜了", ts="2026-11-03T10:00:00+00:00",
+        store.ingest("3425635473", "我去买菜了", ts="2026-11-03T10:00:00+00:00",
                      source_type="日程模拟")
-        store.ingest("主人", "我换了新工作", ts="2026-11-03T10:15:00+00:00",
+        store.ingest("3425635473", "我换了新工作", ts="2026-11-03T10:15:00+00:00",
                      source_type="亲历")
         result = store.recall("买菜", now_ts="2026-11-03T10:16:00+00:00")
         self.assertTrue(result["has_material"])
@@ -67,9 +67,9 @@ class CredibilityTest(unittest.TestCase):
     def test_scheduled_ranks_after_lived(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        store.ingest("主人", "我去买菜了", ts="2026-11-03T10:00:00+00:00",
+        store.ingest("3425635473", "我去买菜了", ts="2026-11-03T10:00:00+00:00",
                      source_type="日程模拟")
-        store.ingest("主人", "我去买菜的路上遇到你", ts="2026-11-03T10:15:00+00:00",
+        store.ingest("3425635473", "我去买菜的路上遇到你", ts="2026-11-03T10:15:00+00:00",
                      source_type="亲历")
         result = store.recall("买菜", now_ts="2026-11-03T10:16:00+00:00")
         sources = [item["source_type"] for item in result["items"]]
@@ -82,8 +82,8 @@ class EvidenceKeyTest(unittest.TestCase):
         """验收④：回想每条带 evidence_key，无出处显式标「无记录背书」。"""
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        lived = store.ingest("主人", "我换了新工作", ts="2026-11-03T10:00:00+00:00")
-        store.ingest("主人", "我去买菜了", ts="2026-11-03T10:15:00+00:00",
+        lived = store.ingest("3425635473", "我换了新工作", ts="2026-11-03T10:00:00+00:00")
+        store.ingest("3425635473", "我去买菜了", ts="2026-11-03T10:15:00+00:00",
                      source_type="日程模拟")
         item = store.recall("新工作", now_ts="2026-11-03T10:16:00+00:00")["items"][0]
         self.assertEqual(lived["entry"]["id"], item["evidence_key"])
@@ -102,7 +102,7 @@ class Pack3000Test(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         for index in range(5):
             text = ("重点内容%d" % index) + ("字" * 590)   # 每条约 600 字，共 3000 字量级
-            store.ingest("群友%d" % index, text,
+            store.ingest("9900%02d" % index, text,
                          ts="2026-11-03T10:%02d:00+00:00" % index)
         result = store.recall("重点", now_ts="2026-11-03T10:06:00+00:00")
         self.assertTrue(result["has_material"])
@@ -123,7 +123,7 @@ class BackfillTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         result = store.import_rows([
-            {"id": "old-1", "ts": "2026-11-01T10:00:00+00:00", "who": "主人",
+            {"id": "old-1", "ts": "2026-11-01T10:00:00+00:00", "who": "3425635473",
              "text": "旧数据一条", "source": "today"},
         ])
         self.assertEqual(1, result["imported"])

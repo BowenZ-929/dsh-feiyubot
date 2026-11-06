@@ -15,7 +15,7 @@ class RetentionTest(unittest.TestCase):
     def test_three_states_recall_then_forget_then_cold_lookup(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "我妈住院了，最近常去医院",
+        result = ingest(store, "3425635473", "我妈住院了，最近常去医院",
                         "2026-10-01T10:00:00+00:00")
         entry_id = result["entry"]["id"]
         # 状态一：今天能想起

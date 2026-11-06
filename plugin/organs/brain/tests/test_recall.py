@@ -10,17 +10,17 @@ class RecallTest(unittest.TestCase):
     def test_recall_today_literal_hit_with_source(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        ingest(store, "主人", "你今天有点不理人", "2026-11-03T10:00:00+00:00")
+        ingest(store, "3425635473", "你今天有点不理人", "2026-11-03T10:00:00+00:00")
         result = store.recall("今天不理人", now_ts="2026-11-03T10:01:00+00:00")
         self.assertTrue(result["has_material"])
         self.assertEqual(1, len(result["items"]))
         self.assertEqual("today", result["items"][0]["source"])
-        self.assertEqual("主人", result["items"][0]["who"])
+        self.assertEqual("3425635473", result["items"][0]["who"])
 
     def test_recall_past_finds_original_text_in_longterm(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        ingest(store, "主人", "我妈住院了", "2026-11-03T10:00:00+00:00")
+        ingest(store, "3425635473", "我妈住院了", "2026-11-03T10:00:00+00:00")
         result = store.recall("以前说过什么我妈", now_ts="2026-11-04T05:00:00+00:00")
         self.assertTrue(result["has_material"])
         self.assertEqual("longterm", result["items"][0]["source"])
@@ -53,7 +53,7 @@ class RecallTest(unittest.TestCase):
     def test_forget_marks_status_and_drops_from_recall(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "我妈住院了", "2026-11-03T10:00:00+00:00")
+        result = ingest(store, "3425635473", "我妈住院了", "2026-11-03T10:00:00+00:00")
         entry_id = result["entry"]["id"]
         self.assertEqual("active", result["entry"]["status"])
         store.forget(entry_id, ts="2026-11-03T10:05:00+00:00")

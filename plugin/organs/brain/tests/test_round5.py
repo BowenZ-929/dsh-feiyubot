@@ -52,7 +52,7 @@ class UsageLedgerTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         for index in range(65):
-            ingest(store, "群友%d" % index,
+            ingest(store, "9900%02d" % index,
                    "第 %d 句：这是一段足够长的原文，用来证明薄索引里不放全文" % index,
                    "2026-11-03T12:00:00+00:00")
         store.recall("第 0 句", now_ts="2026-11-03T13:00:00+00:00")
@@ -96,7 +96,7 @@ class RegressionTests(unittest.TestCase):
     def test_bug_retired_memory_not_in_recall(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        result = ingest(store, "主人", "我买了个新耳机", "2026-11-03T10:00:00+00:00")
+        result = ingest(store, "3425635473", "我买了个新耳机", "2026-11-03T10:00:00+00:00")
         store.retire(result["entry"]["id"], ts="2026-11-03T10:01:00+00:00")
         self.assertFalse(store.recall("新耳机", now_ts="2026-11-03T10:02:00+00:00")["has_material"])
 
@@ -116,9 +116,9 @@ class RegressionTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         soul = load(copy_fixture("valid", tmp.name))
         brain = BrainStore(Path(tmp.name) / "brain")
-        brain.ingest("主人", "在吗")
+        brain.ingest("3425635473", "在吗")
         status, payload = api.handle(
-            "GET", "/brain/people/%E4%B8%BB%E4%BA%BA/card", None, soul, brain=brain)
+            "GET", "/brain/people/3425635473/card", None, soul, brain=brain)
         self.assertEqual(200, status, payload)
 
     def test_bug_empty_array_not_collapsed_to_zero(self):
@@ -130,8 +130,8 @@ class RegressionTests(unittest.TestCase):
     def test_bug_duplicate_edges_not_created(self):
         from organs.brain import edges as edges_mod
         graph = {"nodes": {}, "edges": []}
-        edges_mod.add_event_edges(graph, "m1", "主人", ["医院"], "2026-11-03T10:00:00+00:00")
-        edges_mod.add_event_edges(graph, "m1", "主人", ["医院"], "2026-11-03T10:00:00+00:00")
+        edges_mod.add_event_edges(graph, "m1", "3425635473", ["医院"], "2026-11-03T10:00:00+00:00")
+        edges_mod.add_event_edges(graph, "m1", "3425635473", ["医院"], "2026-11-03T10:00:00+00:00")
         ids = [e["id"] for e in graph["edges"]]
         self.assertEqual(len(ids), len(set(ids)), "同一条边不许重复建")
 

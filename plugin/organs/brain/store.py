@@ -28,7 +28,7 @@ from .model import (ALPHA_DEFAULT, AUDIENCE_PARTIES, AUDIENCE_TYPES,
                     SCENE_PRIVATE, SCENE_TYPES, SCENE_UNKNOWN, SIDE_OTHER,
                     SIDE_SELF, SIDE_TYPES, SOURCE_LIVED, SOURCE_SCHEDULED,
                     SOURCE_TYPES, STATUS_ACTIVE, STATUS_ARCHIVED,
-                    STATUS_STALE, day_key, limits, now_iso)
+                    STATUS_STALE, day_key, limits, now_iso, valid_who)
 
 TODAY_FILE = "today.json"
 LONGTERM_FILE = "longterm.jsonl"
@@ -715,7 +715,8 @@ class BrainStore:
                source_type: str = SOURCE_LIVED, alpha: int = ALPHA_DEFAULT,
                beta: int = BETA_DEFAULT, note: Optional[str] = None,
                unclear: bool = False, side: str = SIDE_OTHER,
-               scene: Optional[str] = None, audience: Optional[str] = None) -> Dict[str, Any]:
+               scene: Optional[str] = None, audience: Optional[str] = None,
+               is_bot: bool = False) -> Dict[str, Any]:
         """一条消息进：今日追加或合并一条 + 人名录认人更新。
 
         text 就是 quote（对方原话）；note 是她的理解，可为空——空 note 是正常状态。
@@ -729,6 +730,9 @@ class BrainStore:
             who = who or "她说"
         elif not who:
             who = "人"   # 来源不明：记忆照记，who 记成占位符"人"，但人名录不建卡
+        elif who not in PLACEHOLDER_WHOS and not valid_who(who):
+            return _reject("昵称不是身份：%s——同一个人在多个群用不同昵称，"
+                           "请传平台+数字号（如 aiocqhttp:3425635473）" % who)
         if not text:
             return _reject("text 不能为空")
         if source_type not in SOURCE_TYPES:
@@ -788,7 +792,8 @@ class BrainStore:
         if side == SIDE_SELF:
             person = {"skipped": True, "reason": "self-side"}
         else:
-            person = self.interact(who, display=display, ts=ts, text=text)
+            person = self.interact(who, display=display, ts=ts, text=text,
+                                   is_bot=is_bot)
         return {"ok": True, "merged": merged, "entry": dict(entries[-1]),
                 "archived_count": len(archived), "person": person}
 
@@ -985,7 +990,8 @@ class BrainStore:
 
     def interact(self, who: str, display: Optional[str] = None,
                  ts: Optional[str] = None,
-                 text: Optional[str] = None) -> Dict[str, Any]:
+                 text: Optional[str] = None,
+                 is_bot: bool = False) -> Dict[str, Any]:
         """通道消息认人：建档 / 更新别名与最近互动 / 累计次数与聊过的话题。
 
         只建真发过言的人；占位符与她的自称不建卡（_blocked_who 守卫）。
@@ -995,6 +1001,12 @@ class BrainStore:
         if not who:
             return {"ok": True, "skipped": True, "reason": "placeholder",
                     "who": who, "ts": ts}
+        if is_bot:
+            return {"ok": True, "skipped": True, "reason": "bot",
+                    "who": who, "ts": ts}
+        if who not in PLACEHOLDER_WHOS and not valid_who(who):
+            return _reject("昵称不是身份：%s——同一个人在多个群用不同昵称，"
+                           "请传平台+数字号（如 aiocqhttp:3425635473）" % who)
         blocked = self._blocked_who(who)
         if blocked:
             import warnings
