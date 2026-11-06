@@ -36,6 +36,7 @@ from organs.heart import engage as engage_module
 from organs.heart import model as heart_model
 from organs.heart import mood as mood_module
 from organs.heart import events as events_module
+from organs.heart import gate as gate_module
 from organs.heart import intent as intent_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
@@ -49,7 +50,8 @@ REAL_CARD = PLUGIN / "organs" / "heart" / "data" / "baseline-card.json"
 
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending", "/heart/sleep", "/heart/refusals", "/heart/proactive")
+                "/heart/pending", "/heart/sleep", "/heart/refusals", "/heart/proactive",
+                "/heart/gate")
 
 # 固定时刻：断言不看"现在几点"。09:00 / 23:00 分别避开与落进夜间窗口（23-8）。
 T0 = "2026-11-05T09:00:00+09:00"
@@ -1019,6 +1021,113 @@ class ProactiveRoute(HeartApiTest):
             self.assertEqual(405, status, method)
             self.assertIn("只收 GET", payload["message"])
             self.assertIn("/heart/proactive", payload["message"])
+            self.assertIn("人不能改心", payload["message"])
+
+
+class GateRouteIsAReadOnlyJudgement(HeartApiTest):
+    """出站闸的只读判读：与 /heart/engage 同一份门输入，两本账一个字节都不动。
+
+    判据（人定）：端点只回答「现在真发，门会怎么判」——查询不是发生。所以它必须
+    贴得出「调它前后 gate_log.jsonl 与 group_window.json 逐字节不变」，也不能替
+    真正的 gate() 占掉一格群额度。
+    """
+
+    def _seed_a_send(self, group: str = "群A", now: str = T0) -> None:
+        """先用真的 gate() 造一条「她说了」的账：门的写路径只走它自己。"""
+        gate_module.gate(
+            engage_module.EngageInput(
+                mood_now=60.0, energy=80.0, familiarity=2.0, today_count=0,
+                intent=heart_model.INTENT_PASSIVE, now=now),
+            group=group, root=self.root, now=now)
+
+    def test_gate_returns_peek_plus_the_readonly_shell(self) -> None:
+        status, payload = self.get("/heart/gate", group="群A", now=T0)
+        self.assertEqual(200, status, payload)
+        for key in ("send", "state", "reason", "hits", "level", "limits", "quota",
+                    "window_min", "ok", "readonly", "agent", "status"):
+            self.assertIn(key, payload, "出站闸少了 %s" % key)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readonly"])
+        self.assertEqual("heart", payload["agent"])
+        self.assertEqual("已接入", payload["status"])
+        self.assertIn(payload["state"], heart_model.STATES)
+
+    def test_gate_writes_neither_ledger(self) -> None:
+        self._seed_a_send()
+        log = self.root / gate_module.LOG_FILE
+        window = self.root / gate_module.WINDOW_FILE
+        before = (log.read_bytes(), window.read_bytes())
+        for _ in range(3):
+            status, payload = self.get("/heart/gate", group="群A", now=T0)
+            self.assertEqual(200, status, payload)
+            self.assertTrue(payload["send"], "群窗里只有 1/6，还发得出去")
+            # peek 报的是「这一判真发之后」的用量（1 + 这一格 = 2），与 gate 的返回同一个数；
+            # 但那一格并没有真占：群账在下面逐字节不变，连调三次也还是 2。
+            self.assertEqual(2, payload["quota"]["used"], "只读口不占额度")
+        self.assertEqual(before, (log.read_bytes(), window.read_bytes()),
+                         "调它前后 gate_log 与 group_window 逐字节不变（sha 不变）")
+        self.assertEqual(1, len(store_module.read_jsonl(log)), "只读口不写账")
+        self.assertEqual(1, len(json.loads(window.read_text(encoding="utf-8"))["群A"]),
+                         "群窗里还是只有真正发过的那一格")
+
+    def test_gate_reports_a_full_group_without_adding_a_stamp(self) -> None:
+        for index in range(6):
+            self._seed_a_send(now=_stamp(5, 9, index))
+        window = self.root / gate_module.WINDOW_FILE
+        before = window.read_bytes()
+        status, payload = self.get("/heart/gate", group="群A", now=_stamp(5, 9, 10))
+        self.assertEqual(200, status, payload)
+        self.assertFalse(payload["send"])
+        self.assertEqual("group", payload["level"], "放行的是人级，拦下的是群级")
+        self.assertEqual(gate_module.REASON_GROUP_QUOTA, payload["reason"])
+        self.assertEqual({"used": 6, "limit": 6, "left": 0}, payload["quota"])
+        self.assertEqual(before, window.read_bytes(), "只读口不占额度")
+
+    def test_gate_at_night_proactive_is_silent_and_writes_nothing(self) -> None:
+        status, payload = self.get("/heart/gate", intent="proactive", now=_stamp(5, 23))
+        self.assertEqual(200, status, payload)
+        self.assertFalse(payload["send"], "夜里主动开口：这一轮不发")
+        self.assertEqual("engage", payload["level"])
+        self.assertEqual(heart_model.REASON_NIGHT, payload["reason"])
+        self.assertIn(heart_model.REASON_NIGHT, payload["hits"])
+        self.assertFalse((self.root / gate_module.LOG_FILE).exists(),
+                         "只读口不写账：账是发生了才写的")
+
+    def test_gate_without_a_group_reports_no_quota_usage(self) -> None:
+        status, payload = self.get("/heart/gate", now=T0)
+        self.assertEqual(200, status, payload)
+        self.assertEqual({"used": 0, "limit": 6, "left": 6}, payload["quota"],
+                         "私聊不占配额：used 恒为 0，limit 照给")
+        self.assertFalse((self.root / gate_module.WINDOW_FILE).exists(),
+                         "私聊连群账都不写")
+
+    def test_gate_judges_with_the_same_input_as_engage(self) -> None:
+        brain = _WarmBrain()
+        combos = ({"intent": "passive", "now": T0},
+                  {"intent": "proactive", "now": _stamp(5, 23)},
+                  {"intent": "proactive", "insulted": "1", "now": T0})
+        for combo in combos:
+            status, verdict = self.get("/heart/engage", brain=brain, **combo)
+            self.assertEqual(200, status, verdict)
+            status, read = self.get("/heart/gate", brain=brain, **combo)
+            self.assertEqual(200, status, read)
+            self.assertEqual(verdict["state"], read["state"],
+                             "干跑与出站闸的门输入必须是同一个数：%r" % (combo,))
+            self.assertEqual(verdict["reason"], read["reason"])
+            self.assertEqual(list(verdict["hits"]), read["hits"])
+
+    def test_gate_rejects_an_unknown_intent(self) -> None:
+        status, payload = self.get("/heart/gate", intent="shout", now=T0)
+        self.assertEqual(400, status, payload)
+        self.assertIn("intent 只认", payload["message"])
+        self.assertFalse(payload["ok"])
+
+    def test_write_methods_are_405_with_the_heart_wording(self) -> None:
+        for method in ("POST", "PUT", "DELETE"):
+            status, payload = api.handle(method, "/heart/gate", {}, None)
+            self.assertEqual(405, status, method)
+            self.assertIn("只收 GET", payload["message"])
+            self.assertIn("/heart/gate", payload["message"])
             self.assertIn("人不能改心", payload["message"])
 
 

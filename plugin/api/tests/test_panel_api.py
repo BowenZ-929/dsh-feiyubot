@@ -73,6 +73,8 @@ REQUIRED_ROUTES = (
     ("GET", "/heart/refusals"),
     # 第六轮接线段：/heart/proactive 把「主动开口之后有没有人理」搬上端点（谁加路由谁登记）
     ("GET", "/heart/proactive"),
+    # 第七轮接线段：/heart/gate 把出站闸的只读判读搬上端点（人级在前、群级在后）
+    ("GET", "/heart/gate"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
@@ -354,6 +356,16 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual("GET", core.heart_api.HEART_ROUTES["/heart/proactive"])
         self.assertEqual("GET", api.ROUTES["/heart/proactive"])
         self.assertIn(("GET", "/heart/proactive"), REQUIRED_ROUTES)
+
+    def test_gate_route_is_registered_in_both_tables(self):
+        """谁加路由谁登记：出站闸的只读判读走同一条口径（只读、405 也按它判）。
+
+        这条线的判据是「查询不是发生」：端点必须贴得出「调它前后两本账逐字节不变」，
+        所以它只能是 GET；两张表都登记，谁也删不掉半张门票。
+        """
+        self.assertEqual("GET", core.heart_api.HEART_ROUTES["/heart/gate"])
+        self.assertEqual("GET", api.ROUTES["/heart/gate"])
+        self.assertIn(("GET", "/heart/gate"), REQUIRED_ROUTES)
 
     def test_route_table_partitions_into_soul_brain_and_readonly_pages(self):
         """按前缀分组断言，不写死条数：别处加端点这里不该红，写错归属才该红。

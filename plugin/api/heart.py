@@ -1,12 +1,15 @@
-"""心的十二条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
+"""心的十三条只读端点：把 organs/heart 的读数原样搬到 HTTP 上，一个字节都不写。
 
 判据（architecture §9.2：心与脑只能看）：
-- 十二条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
+- 十三条路由全是 GET；写方法在 core.handle 里就被 405 挡掉，永远到不了这里。
 - 合成只有一处：/heart/effective 的三块（mood / axes / voice）由
   organs/heart/effective.py 出；/heart/overview 的 effective 块、/heart/mood 的
   两个数与档位词、/heart/engage 的 mood_now 都从那里取，本模块不自己换算档位。
 - 本模块只读：不调 apply_event / settle_day / apply_burst / apply_long_reply /
   apply_daily / settle_week，也不调 decide_and_log——/heart/engage 是干跑。
+- /heart/gate 走 gate.peek（不是 gate）：同样的判断，但不写 gate_log.jsonl、不占
+  群滑窗那一格。闸门本身由调用方（通道）在真发之前调 gate()——端点只是"问她会不会发"，
+  查询不是发生。
 - 数值只留内部：/heart 与 /heart/baseline 的文本走 card.render_text，只出档位词。
   六轴完整（2026-11-06 人定稿）：`pending` 永远是空列表，但这个键保留，
   面板与测试都在读。
@@ -25,12 +28,13 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from organs.heart import card as card_module
 from organs.heart import effective as effective_module
 from organs.heart import energy as energy_module
 from organs.heart import engage as engage_module
+from organs.heart import gate as gate_module
 from organs.heart import intent as intent_module
 from organs.heart import model as heart_model
 from organs.heart import mood as mood_module
@@ -56,6 +60,8 @@ HEART_ROUTES = {
     "/heart/sleep": "GET",
     "/heart/refusals": "GET",
     "/heart/proactive": "GET",
+    # 出站闸的只读判读：人级（三态）→ 群级（滑窗），回答「现在真发，门会不会拦」。
+    "/heart/gate": "GET",
 }
 
 # /heart/offset 每轴对外只承诺这四个键；offset 模块以后多出来的键原样透传。
@@ -463,18 +469,26 @@ def _proactive_route(params: Mapping[str, str]) -> Result:
     return 200, payload
 
 
-def _engage(params: Mapping[str, str], brain: Any) -> Result:
-    """/heart/engage：干跑一次判决——只调 engage.decide，不写日志、不说话。
+def _intent_param(params: Mapping[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    """查询串里的 intent：认就返回 (意图, None)，不认就返回 (None, 一句人话)。
 
-    门的输入走 EngageInput.from_effective：mood_now 与 /heart/effective 的 mood.now
-    是同一个数（面板说「还行」而她闭嘴这类分叉因此不可能发生）。
+    判决与出站闸共用同一条校验——两个端点认的意图表不许分叉。
     """
-    root, now = _root(params), _now(params)
     intent = str((params or {}).get("intent") or heart_model.INTENT_PASSIVE).strip()
     if intent not in heart_model.INTENTS:
-        return 400, {"ok": False, "dry_run": True,
-                     "message": "intent 只认 %s，收到 %r"
-                                % ("、".join(heart_model.INTENTS), intent)}
+        return None, ("intent 只认 %s，收到 %r"
+                      % ("、".join(heart_model.INTENTS), intent))
+    return intent, None
+
+
+def _judgement(params: Mapping[str, str], brain: Any, intent: str) -> Any:
+    """门的输入：mood 走 effective、精力按睡眠账结算、窗口 / 排序 / 静音都是现算的读数。
+
+    /heart/engage（干跑判决）与 /heart/gate（出站闸的只读判读）共用这一份：
+    两个端点的门输入必须是同一个数，否则一处说「她这轮不想说」、另一处放行。
+    返回 (EngageInput, who, root, now)。
+    """
+    root, now = _root(params), _now(params)
     who = _who(params)
     interrupted = (params or {}).get("interrupted") or None
     # 熟稔与今日条数只从脑的公开读数来；没有脑就是 0 / 0，绝不抛。
@@ -508,15 +522,46 @@ def _engage(params: Mapping[str, str], brain: Any) -> Result:
         insulted_today=_flag(params, "insulted"),
         last_interrupted_at=str(interrupted) if interrupted else None,
     )
+    return judgement, who, root, now
+
+
+def _engage(params: Mapping[str, str], brain: Any) -> Result:
+    """/heart/engage：干跑一次判决——只调 engage.decide，不写日志、不说话。
+
+    门的输入走 _judgement（与 /heart/gate 同一份）：mood_now 与 /heart/effective 的
+    mood.now 是同一个数（面板说「还行」而她闭嘴这类分叉因此不可能发生）。
+    """
+    intent, error = _intent_param(params)
+    if error:
+        return 400, {"ok": False, "dry_run": True, "message": error}
+    judgement, who, _root_path, _now_value = _judgement(params, brain, intent)
     payload = dict(engage_module.decide(judgement))
     payload["dry_run"] = True
     payload["who"] = who
     return 200, payload
 
 
+def _gate_route(params: Mapping[str, str], brain: Any) -> Result:
+    """/heart/gate：出站闸的只读判读——「现在真发，门会怎么判」。
+
+    只调 gate.peek：**不写 gate_log.jsonl、不占群滑窗那一格**（调它前后两本账的
+    sha 不变）。人级（engage 三态）在前、群级（滑窗）在后，level 说清是哪一层拦的：
+    "engage" / "group" / None（放行）。
+    """
+    intent, error = _intent_param(params)
+    if error:
+        return 400, {"ok": False, "readonly": True, "message": error}
+    judgement, _who_value, root, now = _judgement(params, brain, intent)
+    payload = dict(gate_module.peek(judgement, group=(params or {}).get("group"),
+                                    root=root, now=now))
+    payload.update({"ok": True, "readonly": True, "agent": "heart",
+                    "status": STATUS_CONNECTED})
+    return 200, payload
+
+
 def dispatch(route: str, params: Mapping[str, str],
              store: Any = None, brain: Any = None) -> Result:
-    """心的十二条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
+    """心的十三条只读端点；store 不用（心各模块自带默认根），brain 只喂 engage 与意图排序。
 
     只收 ValueError 这一种：查询串里的时间戳坏了一个（now / interrupted）就走 400，
     把坏值原样带出来——失败必须响，但响成一条能读的 400，不是一条 traceback。
@@ -545,6 +590,8 @@ def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Resul
         return _offset(params)
     if route == "/heart/engage":
         return _engage(params, brain)
+    if route == "/heart/gate":
+        return _gate_route(params, brain)
     if route == "/heart/effective":
         return _effective_route(params)
     if route == "/heart/pending":
