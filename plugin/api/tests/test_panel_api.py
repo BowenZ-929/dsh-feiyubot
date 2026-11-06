@@ -89,7 +89,8 @@ REQUIRED_ROUTES = (
     ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
     ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
     ("GET", "/home/anchors"), ("POST", "/home/anchors/append"),
-    ("POST", "/home/consume"), ("POST", "/home/progress"), ("POST", "/home/write"),
+    ("POST", "/home/consume"), ("POST", "/home/progress"), ("POST", "/home/ingest"),
+    ("POST", "/home/write"),
     # 核自报身份（2026-11-05）：跑的是哪一版、什么时候起的、源码有没有在它脚下被改过。
     ("GET", "/healthz"),
     # 脑线新落的两条只读端点（2026-11-05，四档列表与冷仓分页）：先在这儿认下来，
@@ -101,6 +102,9 @@ REQUIRED_ROUTES = (
     ("GET", "/day/log"), ("GET", "/day/schedule"), ("POST", "/day/schedule/draw"),
     ("GET", "/day/pending"), ("POST", "/day/deliver"), ("POST", "/day/ack"),
     ("POST", "/day/reconcile"),
+    # 日子线第五波：主动开口那一类（读账 / 动念 / 结算回执）
+    ("GET", "/day/proactive"), ("POST", "/day/proactive/consider"),
+    ("POST", "/day/proactive/outcome"),
 )
 # 有必填查询参数的 GET：空 query 时必须是 400（不是 200，也不许崩）——缺哪个参数就得在 message 里点名。
 # 以后加带必填参数的端点，放进这一组；别把它学成 skip（skip 掉就没人守「缺参要响」了）。
@@ -393,7 +397,7 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
         self.assertEqual({"/home/write", "/home/anchors/append", "/home/consume",
-                          "/home/progress"},
+                          "/home/progress", "/home/ingest"},
                          {path for path in family if api.ROUTES[path] == "POST"},
                          "家四条写路由：/home/write、/home/anchors/append、/home/consume、"
                          "/home/progress")
@@ -408,7 +412,7 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(core.day_api.DAY_ROUTES), day,
                          "日子的路由就是 DAY_ROUTES 那一张表")
         self.assertEqual({"GET", "POST"}, {api.ROUTES[path] for path in day},
-                         "日子只有四条只读 + 六条手工触发（写方法错了一律 405）")
+                         "日子只有五条只读 + 八条手工触发（写方法错了一律 405）")
         self.assertEqual(set(core.chat_api.CHAT_ROUTES), chat,
                          "说话的路由就是 CHAT_ROUTES 那一张表")
         self.assertEqual({"POST"}, {api.ROUTES[path] for path in chat},

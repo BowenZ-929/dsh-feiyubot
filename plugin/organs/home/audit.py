@@ -83,7 +83,8 @@ def _entry_from_row(row: Dict[str, Any]) -> Optional[Entry]:
 
 
 def append_entry(root=None, *, role: str, by: str, room: str, name: str,
-                 chars: int, bytes: int, ok: bool = True, code: str = CODE_OK) -> Entry:
+                 chars: int, bytes: int, ok: bool = True, code: str = CODE_OK,
+                 extra: Optional[Dict[str, Any]] = None) -> Entry:
     """追加一行并立刻刷高水位。谁、哪间、何时、多大四项缺一项就不写——空账比没账更坏。"""
     for label, value in (("role", role), ("by", by), ("room", room), ("name", name)):
         if not isinstance(value, str) or not value.strip():
@@ -103,7 +104,13 @@ def append_entry(root=None, *, role: str, by: str, room: str, name: str,
     at = datetime.now().astimezone().isoformat(timespec="seconds")
     entry = Entry(seq=seq, at=at, role=role, by=by, room=room, name=name,
                   chars=int(chars), bytes=int(bytes), ok=bool(ok), code=str(code))
-    lines = append_line(path, entry.as_row())
+    row = entry.as_row()
+    if extra:
+        # 批量入档这类动作一行要带上「批／篇数／快照sha／脚本」，不改既有四项，只在其后追加。
+        for key, value in dict(extra).items():
+            if key not in row:
+                row[key] = value
+    lines = append_line(path, row)
     _write_mark(root, lines, seq, at)
     return entry
 

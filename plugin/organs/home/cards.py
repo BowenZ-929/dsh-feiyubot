@@ -123,10 +123,13 @@ def _read_room_rows(home: Path, room_name: str) -> Tuple[List[Dict[str, Any]], i
     """一间房的全部行：房级 + 各格子合起来。折叠、挑件、查重都吃这一份。"""
     rows: List[Dict[str, Any]] = []
     bad = 0
-    for _shelf, path in _index_paths(home, room_name):
+    for shelf, path in _index_paths(home, room_name):
         part, part_bad = _read_index(path)
         bad += part_bad
-        rows.extend(part)
+        for row in part:
+            if isinstance(row, dict) and shelf is not None:
+                row = dict(row, shelf=shelf)
+            rows.append(row)
     return rows, bad
 
 
@@ -240,12 +243,18 @@ def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
         if kind == "梦":
             _need(params, "dream_of", kind)
             params["source_type"] = "梦"
+        # 旧账本（from_old_home）不受「一天一张」约束：那是搬迁，不是她今天写的。
+        if params.get("from_old_home"):
+            return params
         # 一天一张靠幂等：同一天再写就拒，并说清「今天已经写过了」。
+        # 只跟她**自己写的**那几篇比——旧账本同一天有好几篇是合法的，她当天再写一张也允许并存。
         for _shelf, path in _index_paths(home, room_name):
             rows, _bad = _read_index(path)
             for card in fold(rows):
+                stored = card.get("params") or {}
                 if card.get("kind") == kind and not card.get("consumed") \
-                        and str((card.get("params") or {}).get("date")) == date:
+                        and not stored.get("from_old_home") \
+                        and str(stored.get("date")) == date:
                     raise CardError("DATE_ALREADY_WRITTEN",
                                     {"kind": kind, "date": date,
                                      "card_id": card.get("card_id")},
@@ -475,6 +484,70 @@ def _event_target(card: Dict[str, Any], items: List[Dict[str, Any]],
     return matches[0] if len(matches) == 1 else None
 
 
+BATCH_KIND = "批量入档"
+
+
+def ingest_batch(root=None, *, role: str, by: str, batch: str, script: str = "",
+                 snapshot_sha: str = "", cards_in: Optional[List[Dict[str, Any]]] = None,
+                 note: str = "") -> dict:
+    """**批量入档**：给旧账本用的合法入口。一个批次只落**一行**审计，但**不许没有行**。
+
+    为什么不能走 append_cards：它一张卡一行审计，343 篇就是 343 行流水，把账淹了。
+    这里反过来——先过门（整批按一批算），逐篇只落卡，最后落**一行汇总审计**：
+    `kind=批量入档 / 批 / 篇数 / 快照sha / 脚本 / at`。少写行可以，没有行不行。
+
+    内容形状只做最小校验（kind 在白名单、有名字、params 是对象）：
+    旧账本的字数与日期不该按「她自己今天写的那张」那把尺子量。
+    """
+    if not isinstance(cards_in, list) or not cards_in:
+        raise CardError("BAD_ARGUMENT", {"batch": batch}, "批量入档要给一个非空的 cards 列表")
+    if not isinstance(batch, str) or not batch.strip():
+        raise CardError("BAD_ARGUMENT", {"batch": batch}, "批量入档要给一个批次名（批）")
+    home = store_module.home_root(root)
+
+    prepared: List[Tuple[Dict[str, Any], str, str]] = []
+    rooms_touched: Dict[str, int] = {}
+    for raw in cards_in:
+        if not isinstance(raw, dict):
+            raise CardError("BAD_CARD", {"card": raw}, "卡必须是字典")
+        kind = raw.get("kind")
+        if kind not in CARD_KINDS:
+            raise CardError("BAD_KIND", {"kind": kind}, "kind 只能是：%s" % "、".join(CARD_KINDS))
+        room = _target_room(raw.get("room") or "")
+        name = raw.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise CardError("BAD_NAME", {"room": room.name}, "卡上必须有一个名字")
+        params = raw.get("params") or {}
+        if not isinstance(params, dict):
+            raise CardError("BAD_CARD", {"params": params}, "params 要是对象")
+        access.check_path_shape(room.name, name)
+        rooms_touched[room.name] = rooms_touched.get(room.name, 0) + 1
+        prepared.append((raw, room.name, kind))
+
+    for room_name in rooms_touched:
+        access.check_ingest(role=role, room=room_name, name="%s.jsonl" % batch)
+
+    written: List[Dict[str, Any]] = []
+    for raw, room_name, kind in prepared:
+        shelf, path = _shelf_path(home, room_name, kind)
+        store_module.ensure_dir(path.parent)
+        card = _new_card(raw, role=role, by=by, room_name=room_name,
+                         seq=_line_count(path) + 1, prefix=shelf)
+        store_module.append_line(path, card)
+        written.append(card)
+
+    rooms = sorted(rooms_touched)
+    entry = audit.append_entry(
+        root=root, role=role, by=by, room=rooms[0] if len(rooms) == 1 else "、".join(rooms),
+        name="%s:%s" % (BATCH_KIND, batch), chars=0, bytes=0,
+        extra={"kind": BATCH_KIND, "批": batch, "篇数": len(written),
+               "快照sha": snapshot_sha, "脚本": script, "note": note})
+    return {"room": rooms, "batch": batch, "count": len(written),
+            "cards": [{"card_id": card["card_id"], "shelf": card.get("shelf"),
+                       "name": card["name"]} for card in written],
+            "audit": entry}
+
+
 def _pick_target(folded: List[Dict[str, Any]], *, card_id: Optional[str],
                  name: Optional[str], room_name: str) -> Dict[str, Any]:
     """从折好的卡片里挑出「就是这一件」。挑不准就响亮报，**不猜**。
@@ -697,12 +770,27 @@ def _verify(card: Dict[str, Any], file_path: Path) -> str:
     return suffix
 
 
-def read_item(root=None, *, room: str, name: str) -> dict:
-    """读一件东西：先找到卡，再对着盘重验一遍，验过了才交正文。"""
+def read_item(root=None, *, room: str, name: str,
+              shelf: Optional[str] = None) -> dict:
+    """读一件东西：先找到卡，再交正文。**会进格子**——抽屉里的日记与人设卡都在各自的格子里。
+
+    只给 (room, name) 时在整间房（房级 + 各格子）里找；给 shelf 就只翻那一格。
+    正文优先取卡上的 `params.text`（旧账本搬来的日记正文就存在卡里，没有外部文件），
+    没有才回落到 `path` 指向的外部文件并重验 sha／字节。
+    """
     target = _target_room(room)
     home = store_module.home_root(root)
-    rows, bad = _read_index(_index_path(home, target.name))
-    items = fold(rows)
+    if shelf:
+        path = home / target.name / shelf / INDEX_NAME
+        if not path.exists():
+            raise CardError("SHELF_NOT_FOUND", {"room": target.name, "shelf": shelf},
+                            "%s 里没有这个格子：%r" % (target.name, shelf))
+        rows, bad = _read_index(path)
+        items = fold([dict(row, shelf=shelf) if isinstance(row, dict) else row
+                      for row in rows])
+    else:
+        rows, bad = _read_room_rows(home, target.name)
+        items = fold(rows)
 
     card = None
     for item in items:
@@ -718,7 +806,20 @@ def read_item(root=None, *, room: str, name: str) -> dict:
         raise CardError("CARD_NOT_FOUND", {"room": target.name, "name": name},
                         "%s 里没有这张卡：%r" % (target.name, name))
 
-    base = {"card": card, "room": target.name, "bad_lines": bad}
+    base = {"card": card, "room": target.name, "shelf": card.get("shelf"),
+            "bad_lines": bad}
+    inline = (card.get("params") or {}).get("text")
+    if isinstance(inline, str) and inline:
+        # 正文就在卡上（旧账本搬来的日记）。这不是「编内容」——它是这张卡自己的正文。
+        lines = inline.splitlines()
+        body = "\n".join(lines[:access.READ_MAX_LINES])
+        truncated = len(lines) > access.READ_MAX_LINES or len(body) > access.READ_MAX_CHARS
+        if len(body) > access.READ_MAX_CHARS:
+            body = body[:access.READ_MAX_CHARS]
+        base.update({"path": card.get("path"), "body": body, "external": False,
+                     "verified": True, "truncated": truncated,
+                     "lines": len(lines), "chars": len(body)})
+        return base
     if not card.get("path"):
         base.update({"path": None, "body": None, "external": True, "verified": False,
                      "truncated": False, "lines": 0, "chars": 0})

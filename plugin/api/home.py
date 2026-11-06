@@ -47,6 +47,7 @@ HOME_ROUTES = {
     "/home/anchors/append": "POST",
     "/home/consume": "POST",
     "/home/progress": "POST",
+    "/home/ingest": "POST",
     "/home/write": "POST",
 }
 AGENT = "home"
@@ -147,6 +148,8 @@ def _handle(route: str, params: Mapping[str, str], root: Any,
         return _consume(root, body)
     if route == "/home/progress":
         return _progress(root, body)
+    if route == "/home/ingest":
+        return _ingest(root, body)
     return _warehouse(root)
 
 
@@ -257,7 +260,8 @@ def _read(root: Any, params: Mapping[str, str]) -> Result:
     if room is None or name is None:
         raise _BadArgument("/home/read 要给 room 与 name（name 可以给卡名或 card_id）")
     payload: Dict[str, Any] = {"ok": True, "readonly": True, "agent": AGENT}
-    payload.update(cards.read_item(root, room=room, name=name))
+    payload.update(cards.read_item(root, room=room, name=name,
+                                   shelf=_text(params, "shelf")))
     if payload.get("body") is None:
         payload["note"] = "body=null：这张卡没有可读的正文（纯说明卡，或原件不是 md／jsonl）。" \
                           "家只记路径与指纹，不搬本体——这里不编一段内容出来。"
@@ -547,6 +551,31 @@ def _consume(root: Any, body: Optional[Dict[str, Any]]) -> Result:
         "card": outcome["card"], "target": outcome["target"],
         "audit": _rows([outcome["audit"]])[0],
     }
+
+
+def _ingest(root: Any, body: Optional[Dict[str, Any]]) -> Result:
+    """POST /home/ingest：批量入档（旧账本）。一个批次只落**一行**汇总审计，但不许没有行。"""
+    if not isinstance(body, dict):
+        raise _BadArgument("POST /home/ingest 的 body 要是一个对象："
+                           "{\"role\",\"by\",\"batch\",\"script\",\"snapshot_sha\",\"cards\"}")
+    role = _clean(body.get("role"))
+    by = _clean(body.get("by"))
+    batch = _clean(body.get("batch"))
+    if role is None:
+        raise _BadArgument("body 要给 role（agent／organ／human）")
+    if by is None:
+        raise _BadArgument("body 要给 by（谁入的档，会记进审计）")
+    if batch is None:
+        raise _BadArgument("body 要给 batch（批次名，例如 old-home-diaries）")
+    outcome = cards.ingest_batch(root, role=role, by=by, batch=batch,
+                                 script=_clean(body.get("script")) or "",
+                                 snapshot_sha=_clean(body.get("snapshot_sha")) or "",
+                                 cards_in=body.get("cards"),
+                                 note=_clean(body.get("note")) or "")
+    return 200, {"ok": True, "readonly": False, "agent": AGENT,
+                 "batch": outcome["batch"], "count": outcome["count"],
+                 "rooms": outcome["room"], "cards": outcome["cards"],
+                 "audit": _rows([outcome["audit"]])[0]}
 
 
 def _progress(root: Any, body: Optional[Dict[str, Any]]) -> Result:

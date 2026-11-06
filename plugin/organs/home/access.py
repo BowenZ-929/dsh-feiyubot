@@ -397,6 +397,27 @@ def check_consume(*, role: str, room: str, name: str, root=None,
                limit=limits.consumes_per_room_per_day)
 
 
+INGEST_ROLES: tuple = ("human",)
+
+
+def check_ingest(*, role: str, room: str, name: str, kind: Optional[str] = None) -> None:
+    """**入档**：给旧账本用的第三道判定，只认人发起（搬迁、交接）。
+
+    它不冒充「她写的」——role 必须是 human，审计里照实记 by；也不因此放宽门一：
+    它只判「房名在十间 + 路径形状」，不判该房能否放物件（入档落的是格子里的卡，不是物件）。
+    把入档塞进 check_write 会更糟：那等于要么让 人 能伪造她的日记，要么让迁移绕开所有判定。
+    """
+    if role not in INGEST_ROLES:
+        raise _deny("INGEST_ROLE_REFUSED", "入档只由人发起：role=%r" % (role,), 0, 1, 1,
+                    role=role, allowed=list(INGEST_ROLES))
+    try:
+        found = find(room)
+    except RoomMiss as miss:
+        raise _deny("ROOM_MISS", str(miss), 0, len(ROOM_NAMES), 1,
+                    room=room, nearest=miss.nearest)
+    check_path_shape(found.name, name)
+
+
 def check_read(*, room: str, name: str, lines: int, chars: int) -> None:
     """读侧只判「读得动」：房名、路径形状、一次读多少。读不看白名单——她能写哪几间，与她或别人能读什么无关。"""
     try:
