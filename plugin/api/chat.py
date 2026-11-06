@@ -29,13 +29,18 @@ inject=None，如实记 audit-unavailable（不是通过）。重写那一步这
 去拒比不拒更糟。
 
 **闸在 /chat 生效（这一轮加的）**：answer() 返回之后、组装响应之前，逐泡再过一遍闸
-（条款 → 动作括注 → 内容重复 → 复述审计），命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里
+（条款 → 动作配额 → 动作括注 → 内容重复 → 冒充做过 → 复述审计），命中就改一次、改不了就弃那一泡；弃掉的泡从 chunks 里
 删掉，剩下的重算 send_at，全被弃掉就是 chunks=[]、reply=""（每一泡弃言各记一行弃言账）。所以
 gate 节除了既有的 decision / hit / drops，还逐泡交代 parts / in_parts / out_parts / blocked / note。
 判据一个都不在本文件：条款、复述审计、动作括注、内容重复全部经 warehouse.load 读；
 「她最近几条回话」只读 mind 的 recent_turns.jsonl，取最近几轮的条数同样从 repeat.json 里读。
 **动作配额也从装配传进闸**：answer() 回包的 action.quota.blocked 为真就传 forbid、为假传 allow；
 装配里没有这一项就是 None（闸记 quota_status=not-checked）——没标不是 allow，不许猜。
+**动作账（这一轮加的）也从回包传进闸**：claims 那一关（冒充做过，魂的红线 bounds.no-fake-doing
+的出口）要的是「这一轮真发生过的动作」，见 _actions()：回包里没有这一格就是空清单 []（现在还没有
+手与家的动作账，这一轮确实什么都没做，该判冒充），给了清单就原样交下去，形状读不动才是 None
+（闸记 claim_status=not-checked——**拿不到不是没做过**，猜一个空清单顶上就是替她编账）。
+这一关的处置与别的判据不同：改不动就删掉那一句、剩下的话继续发，删完只剩空白才弃这一泡。
 
 **出站闸在 /chat 生效（这一轮加的）**：这是「她这轮到底说不说」的那道门（organs/heart/gate.py），
 排在最后一步：拒绝判完、扣留读数收好之后才问它。输入不在这里造——answer() 用私有键 "_gate_input"
@@ -181,8 +186,10 @@ from organs.mouth import action_note, address, audit, borrow, cooldown, drops
 from organs.mouth import gate, refusal, repeat, warehouse
 from organs.mouth.pace import fill as pace_fill          # 节奏：与装配同一个函数，不另造一套
 from organs.mouth.split import split as split_text       # 切分：包里的 split 是函数名，这里直接点模块
+from organs.mouth import kin as kin_rules               # 认亲：谁是主人由号定，不由话定（判据在 data/kin.json）
 from organs.mouth import quota as quota_rules          # 参数名就叫 quota，模块用别名进来免得被挡住
 from organs.mouth import rewrite as rewrite_rules      # 参数名就叫 rewrite，模块用别名进来免得被挡住
+from organs.mouth import style as style_rules          # 目标长度与句末标点：判据在 data/style_target.json
 from organs.mouth.gate import ClauseBroken
 
 from .core import Result
@@ -237,7 +244,8 @@ GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（�
              "另带这一泡的几样「判没判」读数：audit 是复述审计（status 不是 ok 就是没比过；"
              "skipped 是「对方要她重复／引用、这一关只记账没判废」，此时 hit 照旧带着）、"
              "action_status 是动作括注、repeat_status 是内容重复（skipped-by-request 是「对方要她"
-             "再说一遍、这一关只记账没判废」）、quota_status 是动作配额、fatal_status 是红线这一关"
+             "再说一遍、这一关只记账没判废」）、quota_status 是动作配额、claim_status 是冒充做过"
+             "（not-checked 是这一轮没拿到动作账、这一关没跑）、fatal_status 是红线这一关"
              "（not-checked 都是这一关没跑，不是通过）、fatal 是踩上的那一类红线（没踩就是 null），"
              "以及 kept_after_rewrite 是「改过一次还是命中、按原话发了」（true 时这一泡没被丢掉），"
              "加上 rewrite 是这一泡的重写读数"
@@ -335,13 +343,16 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     # 冷却先问一次心：在冷却里就整轮短路，模型一次都不调（见 _cooled_payload 的说明）。
     cooled = _cooling_state(text)
     if cooled["cooling"]:
-        return 200, _cooled_payload(cooled, text, store, history, _who(body))
+        return 200, _cooled_payload(cooled, text, store, history, _who(body),
+                                    scope=scene["scope"],
+                                    known=_known(brain, _who(body)))
     try:
         # mode 原样交给装配：passive 是人发消息触发的，proactive 是她自己开口（由头在 seed）。
         # 装配按 seed 给不给决定走哪条路（prompt.proactive / INTENT_PROACTIVE / 只有她那句），
         # 这一层只负责认字段与翻状态码。
         payload = conversation.answer(
             text, who=_who(body), scene=place, segment=segment, mode=mode,
+            aliases=_aliases_of(body),
             seed=seed if mode == events.MODE_PROACTIVE else None,
             reason=_reason_of(body) if mode == events.MODE_PROACTIVE else None,
             store=store, brain=brain)
@@ -355,7 +366,8 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     sent = _send_flag(payload)                 # 只认 payload["send"]（门说发不发）；缺了或不是布尔当场抛
     _address_round(payload, text, brain, _who(body))
     boundary = _audience_round(payload, text, _who(body), scene["scope"], sent=sent)
-    _gate_round(payload, text, store, history)
+    _gate_round(payload, text, store, history, scope=scene["scope"], who=_who(body),
+                known=_known(brain, _who(body)))
     # 八股闸排在出站闸之后，它也可能把这一轮的话整句吞掉：门说发、闸吞了，对方还是没听到。
     # 所以「出没出门」到这一步才定（_went_out 是唯一那处判据），边界话那条的投递也搬到这里。
     judged = boundary["judged"]
@@ -856,10 +868,173 @@ def _word(template: str, where: str, **fields: Any) -> str:
         raise refusal.RefusalBroken("的 %s 这句填不出来：%s" % (where, exc)) from None
 
 
+# —— 长度与句末标点（style）：过闸之前先把「形」修一遍 ————————————————
+
+# 两层都在 organs/mouth/style.py 判，判据全在 organs/mouth/data/style_target.json：逐泡的目标长度
+# （按场景 × tone 档）、整段的句末「。」比例。这里只负责接线：哪一段交给谁改、改完的整段怎么
+# 重新切回泡。整段的三件套形状**不在这一层判**（见下面 REPLY_SCOPE 那段说明）。
+
+#: 数据里标了 scope=reply 的条款是「按整条回复判」的（三件套那种跨得上泡边界的形状）。
+#: **这一层不判它**：装配那一步（organs/mind/conversation.py 的 _through_mouth）已经拿整句过了
+#: 一遍闸，命中就弃；这里再判一遍是同一句话判两次，而那一层连重写器都没有——多一层不会更好。
+REPLY_SCOPE = "reply"
+
+#: 回包 gate.style.status 的取值：ok=两层都真判了；not-checked=读不动/没跑，不许当成通过
+STYLE_OK = "ok"
+STYLE_NOT_CHECKED = "not-checked"
+
+STYLE_NO_TIER_NOTE = ("这一轮没拿到语气档（回包里 tone.tier 缺了，或它不是整数）：长度与句末标点"
+                      "这两层都没跑——**档位不许猜**：猜一个顶上，账本上就再也分不清这一句是拿"
+                      "哪一套区间判的。")
+STYLE_NOTE = ("过闸之前先修形：逐泡对目标长度（超了改一次、改不动放行并记账）、整段对句末「。」"
+              "比例（少于数据里的最少句数不判）。两层判据都在 "
+              "organs/mouth/data/style_target.json，本层不写死一个数。")
+
+
+def _tone_tier(payload: Mapping[str, Any]) -> Optional[int]:
+    """这一轮的语气档（tone.tier，1..4）：拿不到就是 None——长度这一层宁可没跑，也不猜一个档。"""
+    one = payload.get("tone")
+    value = one.get("tier") if isinstance(one, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _reply_cap(payload: Mapping[str, Any]) -> Optional[int]:
+    """核给这一轮的字数上限（reply_budget.chars）；没给就 None（那一泡拿自己的字数当上限）。"""
+    one = payload.get("reply_budget")
+    value = one.get("chars") if isinstance(one, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _style_sink(lo: Any = None, hi: Any = None) -> Callable[[str, str], None]:
+    """长度/标点这一层的记账：走 style.record（与 /mouth/gate 同一本 style.jsonl，吃 MOUTH_TRACE_DIR）。
+
+    给了目标区间就多带一列 target：账本上一眼看得见这一句是拿 12-32 判的，还是拿旧那套判的。
+    """
+    trace = style_rules.path_of()
+
+    def sink(decision: str, reason: str) -> None:
+        target = (lo, hi) if lo is not None and hi is not None else None
+        style_rules.record(trace, decision, reason, datetime.now(), target=target)
+
+    return sink
+
+
+def _style_rewriter(kind: str, *, table: Mapping[str, Any], books: Mapping[str, Any],
+                    facts: Mapping[str, Any]) -> Callable[[str], str]:
+    """造这一层的 rewrite（text -> text）：指令按数据里的模板拼、走同一份 transport，改不动就抛。
+
+    两句指令（把这一句说短 / 把那一段的句号收掉）都在 style_target.json 的 prompt 节，这里一个词
+    都不写。拿回来的新稿先过 style.accept（非空、与原文不同、原文里的数字一个都不许丢），
+    过了才交给上一层；长度与句号率是不是真合格，由 apply / stops 拿数据自己重算。
+
+    「改短」那一档还多一条（accept 的 must_shorten）：改回来比原文还长的不算改过——不拦这一条，
+    一次没改好的重写会把一泡撑成三泡，后面的闸跟着一连串误判。
+    """
+    def rewrite(body: str) -> str:
+        said = _ask_model(style_rules.prompt(kind, body, table=table,
+                                             **dict(facts, chars=len(body))),
+                          books["rewrite"])
+        ok, why = style_rules.accept(body, said, table=table, must_shorten=(kind == "length"))
+        if not ok:
+            raise rewrite_rules.Unrewritable(why)
+        return said
+
+    return rewrite
+
+
+def _length_row(counted: Any) -> Dict[str, Any]:
+    """一泡的长度读数（进 gate.parts[*].style）。"""
+    return {"decision": counted.decision, "scene": counted.scene,
+            "target_lo": counted.target_lo, "target_hi": counted.target_hi,
+            "chars": counted.chars, "rewrites": counted.rewrites,
+            "over_hard_cap": counted.over_hard_cap, "reason": counted.reason}
+
+
+def _stop_row(counted: Any) -> Dict[str, Any]:
+    """整段的句末标点读数（进 gate.style.stopped）：judged=false 是「句数不够、没判」，不是通过。"""
+    return {"decision": counted.decision, "judged": counted.judged,
+            "sentences": counted.sentences, "stopped": counted.stopped,
+            "ratio": counted.ratio, "ceiling": counted.ceiling,
+            "min_sentences": counted.min_sentences, "mark": counted.mark,
+            "rewrites": counted.rewrites, "reason": counted.reason}
+
+
+def _resplit(said: str, who: str) -> List[Dict[str, Any]]:
+    """整段被改过之后重新切一次泡：与装配 / 边界话 / 冷却那一轮同一个拼法（split + pace）。"""
+    policy = warehouse.load("policy")
+    batch = pace_fill(split_text(said, policy, warehouse.load("action_note")), policy,
+                      "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
+    return [{"text": part.text, "gap_before": part.gap_before, "send_at": part.send_at}
+            for part in batch.parts]
+
+
+def _style_round(chunks: List[Dict[str, Any]], *, payload: Mapping[str, Any],
+                 books: Mapping[str, Any], assembled: bool, scope: Optional[str],
+                 who: str) -> Dict[str, Any]:
+    """这一轮先把「形」修一遍：逐泡长度 → 整段句末句号率。
+
+    返回 {"chunks": 最终那几泡, "rows": 与之一一对应的长度读数, "changed": 有没有动过字,
+    "section": 进回包 gate.style 那一节}。整段被改过就重新切泡（与装配同一个拼法），切完按泡
+    重算一遍长度读数——**同一次回复里不再往外发第二次请求**：改一次就是一次。
+
+    场景（私聊 / 群聊）从 /chat 的 scope 来，档位从回包的 tone.tier 来，上限从 reply_budget.chars
+    来：三个都是这一轮已经有的读数，不在这里另算一遍。拿不到档位就整层不跑并如实记 no-tier。
+    """
+    table = warehouse.load("style_target")
+    tier = _tone_tier(payload)
+    cap = _reply_cap(payload)
+    original = "".join(str(one.get("text") or "") for one in chunks)
+    if tier is None:
+        return {"chunks": chunks, "rows": [None for _ in chunks], "changed": False,
+                "section": {"status": STYLE_NOT_CHECKED, "note": STYLE_NO_TIER_NOTE}}
+    info = style_rules.describe(tier, table=table, scene=scope)
+    lo, hi = int(info["lo"]), int(info["hi"])
+    facts = {"lo": lo, "hi": hi, "scene": info["label"], "tier": info["tier"]}
+    len_sink = _style_sink(lo, hi)
+    rows: List[Any] = []
+    texts: List[str] = []
+    for one in chunks:
+        body = str(one.get("text") or "")
+        rewrite = (_style_rewriter("length", table=table, books=books, facts=facts)
+                   if assembled else None)
+        counted = style_rules.apply(body, tier, len(body) if cap is None else cap,
+                                    table=table, rewrite=rewrite, sink=len_sink, scene=scope)
+        texts.append(counted.text)
+        rows.append(_length_row(counted))
+    reply = "".join(texts)
+    probed = style_rules.stops(reply, table=table)
+    stop_facts = {"mark": probed.mark, "stopped": probed.stopped,
+                  "sentences": probed.sentences, "ratio": round(probed.ratio * 100, 1)}
+    stop_rewrite = (_style_rewriter("stops", table=table, books=books, facts=stop_facts)
+                    if assembled else None)
+    marks = style_rules.stops(reply, table=table, rewrite=stop_rewrite, sink=_style_sink())
+    after = marks.text
+    if after != reply:
+        chunks = _resplit(after, who)
+        rows = []
+        for one in chunks:
+            body = str(one.get("text") or "")
+            rows.append(_length_row(style_rules.apply(
+                body, tier, len(body) if cap is None else cap, table=table, scene=scope)))
+    else:
+        chunks = [dict(one, text=body) for one, body in zip(chunks, texts)]
+    return {"chunks": chunks, "rows": rows, "changed": after != original,
+            "section": {"status": STYLE_OK, "note": STYLE_NOTE, "scene": info["scene"],
+                        "scene_label": info["label"], "tier": info["tier"], "cap": cap,
+                        "target": "%d-%d" % (lo, hi), "p90": info["p90"],
+                        "stopped": _stop_row(marks)}}
+
+
 # —— 闸：逐泡过一遍，结果落回返回体 ————————————————
 
 def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
-                history: Optional[List[str]], *, assembled: bool = True) -> None:
+                history: Optional[List[str]], *, assembled: bool = True,
+                scope: Optional[str] = None, who: str = "",
+                known: Optional[bool] = None) -> None:
     """answer() 之后、交出去之前：把 chunks 里的每一泡单独过一遍闸，结论就地写回 payload。
 
     assembled 标的是「这一轮有没有装配」：冷却那一轮（_cooled_payload）是 False，于是
@@ -870,7 +1045,8 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
 
     六件事：
 
-    - **逐泡过闸**：每一泡各调一次 gate.enforce（条款 → 动作括注 → 内容重复 → 复述审计）。注入的
+    - **逐泡过闸**：每一泡各调一次 gate.enforce（条款 → 动作配额 → 动作括注 → 内容重复 →
+      冒充做过 → 复述审计）。注入的
       原文、最近几轮、判据表都是同一份——同一轮里的几泡是同一句话切出来的，凭什么两样看待。
     - **命中先改一次，不再命中即弃**（这一轮接上的）：命中之后把「她的原话 + 命中的那一条 + 一句
       人话原因」交给模型改一次（走 answer() 同一个 transport，带 data/rewrite.json 的 budget_ms
@@ -895,8 +1071,14 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
       改不了就不发这句，也不拿她的沉默去兜一次没人做过的检查之外的东西。
 
     动作配额（这一轮补的）也在这条路上：装配标了这一轮不许写动作就给闸 forbid、标了放行给 allow、
-    没标给 None（闸记 not-checked，**没标不是 allow**）。配额命中是闸里唯一一条不丢整句的路——
+    没标给 None（闸记 not-checked，**没标不是 allow**）。配额命中是闸里两条不丢整句的路之一——
     它把动作行剥掉、正文接着过其余判据，于是这一泡是 rewritten 而不是 dropped，text 换成剥完的正文。
+
+    动作账（这一轮接的）同一条路：_actions(payload) 取这一轮真发生过的动作交给「冒充做过」那一关，
+    没给这一格就是 []（这一轮什么都没做，该判冒充）、给了清单就交下去、形状读不动才是 None
+    （闸记 claim_status=not-checked）。它原来那句「我这就去画」改不掉时，闸**删掉那一句**、剩下的
+    正文接着过其余判据，于是这一泡是 rewritten（salvaged=true、text 是删剩下的正文），删完只剩
+    空白才是 dropped——谎只长在那一句里，别的话照发。
 
     gate 节既不新增顶层键，也不丢既有键：decision / hit / drops 是 answer() 给的那一份（页面与既有
     断言都在读它），这里追加 parts / in_parts / out_parts / blocked / quota / note；被闸改过时
@@ -904,6 +1086,8 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
     """
     chunks = [dict(one) for one in (payload.get("chunks") or [])]
     quota = _quota(payload)
+    actions = _actions(payload)
+    recalled = _recalled(payload)
     section = dict(payload.get("gate") or {})
     section.update({"parts": [], "in_parts": len(chunks), "out_parts": 0,
                     "blocked": [], "quota": quota,
@@ -918,6 +1102,7 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
         inject = _inject(asked, payload, store, books["audit"]) if assembled else None
     except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, gate.ClauseBroken,
             audit.AuditBroken, action_note.ActionBroken, repeat.RepeatBroken,
+            kin_rules.KinBroken,
             OSError, ValueError, KeyError, TypeError) as exc:
         LOG.warning("POST /chat 过闸没成：%s", exc)
         _not_gated(payload, exc)
@@ -932,21 +1117,41 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
         drops.record(trace, clause_id, reason, datetime.now())
         recorded.append(clause_id)
 
+    # 长度与句末标点先修一遍形，再逐泡过闸：闸判的是**要发出去的那些字**，不是修之前的。
+    # 这一层读不动（数据坏/缺件）不吞掉这一轮：话照发，回包如实记 not-checked——它是目标，
+    # 不是红线；「没跑」与「合格」照样分得开。
+    try:
+        shaped = _style_round(chunks, payload=payload, books=books, assembled=assembled,
+                              scope=scope, who=who)
+    except (style_rules.StyleBroken, warehouse.WarehouseMiss,
+            warehouse.WarehouseBroken, OSError) as exc:
+        LOG.warning("POST /chat 长度/标点这一层没跑成：%s", exc)
+        shaped = {"chunks": chunks, "rows": [None for _ in chunks], "changed": False,
+                  "section": {"status": STYLE_NOT_CHECKED,
+                              "note": "长度与句末标点这一层没跑（%s：%s）：话照发，"
+                                      "但这是「改不了」，不是「合格」。" % (type(exc).__name__, exc)}}
+    chunks = shaped["chunks"]
+    section["style"] = shaped["section"]
+
     parts: List[Dict[str, Any]] = []
     kept: List[Dict[str, Any]] = []
     blocked: List[str] = []
-    changed = False
+    changed = bool(shaped["changed"])
     for index, chunk in enumerate(chunks):
         rewritten = _outcome()
         rewrite_one = (_rewriter(chunk["text"], asked=asked, books=books, inject=inject,
-                                 recent=history, quota=quota, outcome=rewritten)
+                                 recent=history, quota=quota, actions=actions,
+                                 recalled=recalled, outcome=rewritten, known=known)
                        if assembled else _frozen_rewriter(books["rewrite"], rewritten))
         verdict = gate.enforce(
             chunk["text"], books["clauses"], rewrite_one,
             sink, inject=inject, policy=books["audit"],
             action=books["action"], recent=history,
             repeat_table=books["repeat"], quota=quota,
-            asked=asked, keep_unrewritten=True, fatal=books["fatal"])
+            asked=asked, keep_unrewritten=True, fatal=books["fatal"],
+            actions=actions, claim=books["claim"],
+            recalled=recalled, fabricate=books["fabricate"],
+            kin=books["kin"], known=known)
         parts.append({"i": index, "decision": verdict.decision,
                       "hits": [_hit_row(one) for one in verdict.hits],
                       "reason": verdict.reason,
@@ -955,10 +1160,14 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
                       "action_status": verdict.action_status,
                       "repeat_status": verdict.repeat_status,
                       "quota_status": verdict.quota_status,
+                      "claim_status": verdict.claim_status,
+                      "kin_status": verdict.kin_status,
+                      "fabricate_status": verdict.fabricate_status,
                       "fatal": _fatal_row(verdict.fatal),
                       "fatal_status": verdict.fatal_status,
                       "kept_after_rewrite": bool(verdict.kept_after_rewrite),
-                      "rewrite": rewritten})
+                      "rewrite": rewritten,
+                      "style": shaped["rows"][index]})
         if verdict.decision == "pass":
             kept.append({"text": chunk["text"], "gap_before": chunk["gap_before"]})
             continue
@@ -1044,7 +1253,9 @@ def _cooling_state(asked: str) -> Dict[str, Any]:
 
 
 def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
-                    history: Optional[List[str]], who: str) -> Dict[str, Any]:
+                    history: Optional[List[str]], who: str,
+                    scope: Optional[str] = None,
+                    known: Optional[bool] = None) -> Dict[str, Any]:
     """冷却里那一轮的回包：**不调模型、不投事件**，把那一句拒绝切好、过闸、交出去。
 
     为什么这么短路：
@@ -1075,7 +1286,8 @@ def _cooled_payload(state: Mapping[str, Any], asked: str, store: Any,
         "refusal": _cooled_section(state),
         "audience_held": [],               # 冷却那一轮没有装配、没有 recalled：没人可剔，这一格在
     }
-    _gate_round(payload, asked, store, history, assembled=False)
+    _gate_round(payload, asked, store, history, assembled=False, scope=scope, who=who,
+                known=known)
     # 冷却这一轮没有装配、没有 EngageInput：出站闸无从判，四格照给并如实说「没判」。
     _unjudged(payload, "冷却那一轮没有装配、没有 EngageInput")
     return payload
@@ -1143,8 +1355,9 @@ def _outcome() -> Dict[str, Any]:
 
 
 def _rewriter(original: str, *, asked: str, books: Mapping[str, Any], inject: Any,
-              recent: Optional[List[str]], quota: Optional[str],
-              outcome: Dict[str, Any]) -> Callable[[str], str]:
+              recent: Optional[List[str]], quota: Optional[str], actions: Any,
+              outcome: Dict[str, Any], recalled: Any = None,
+              known: Optional[bool] = None) -> Callable[[str], str]:
     """造这一泡的 rewrite（text -> text）：把命中的那一条交给模型改一次，改不动就抛 Unrewritable。
 
     闸只在命中之后才调它，所以没命中的那泡一次模型请求都不发。要改的是哪一条由 gate.check 现问：
@@ -1162,7 +1375,9 @@ def _rewriter(original: str, *, asked: str, books: Mapping[str, Any], inject: An
         hit = gate.check(body, books["clauses"], inject=inject, policy=books["audit"],
                          action=books["action"], recent=recent,
                          repeat_table=books["repeat"], quota=quota, asked=asked,
-                         fatal=books["fatal"])
+                         fatal=books["fatal"], actions=actions, claim=books["claim"],
+                         recalled=recalled, fabricate=books.get("fabricate"),
+                         kin=books.get("kin"), known=known)
         before = rewrite_rules.excerpt(body, table)
         try:
             said = _ask_model(rewrite_rules.prompt(body, hit, table), table)
@@ -1230,7 +1445,7 @@ def _bounded(call: Callable[[], str], seconds: float) -> str:
 
 
 def _books() -> Dict[str, Any]:
-    """这一轮过闸用的六份判据，全部经 warehouse 读——api 里不写死一条条款、一个数。
+    """这一轮过闸用的八份判据，全部经 warehouse 读——api 里不写死一条条款、一个数。
 
     条数（rounds）与小数位（round_digits）也在数据里：前者是她最近几条回话的窗口，后者与
     pace.fill 算 send_at 用的是同一个数，重排时才不会跟切分那一处对不上。缺件坏件照实抛，
@@ -1248,6 +1463,9 @@ def _books() -> Dict[str, Any]:
         "audit": warehouse.load("audit"),
         "fatal": warehouse.load("fatal"),
         "action": warehouse.load("action_note"),
+        "claim": warehouse.load("claim"),
+        "kin": warehouse.load("kin"),
+        "fabricate": warehouse.load("fabricate"),
         "repeat": repeat_book,
         "rewrite": warehouse.load("rewrite"),
         "digits": int(policy["pace"]["round_digits"]),
@@ -1255,6 +1473,52 @@ def _books() -> Dict[str, Any]:
         # 只报这儿读过的：称呼表是装配那一步读的，这一层不替它记账（报一份没读过的，读数就是编的）。
         "sources": {"clauses.json": clauses_book, "policy.json": policy},
     }
+
+
+def _actions(payload: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """这一轮真发生过的动作账：交给闸里「冒充做过」那一关，**拿不到与给了空是两件事**。
+
+    取值只有一条路：answer() 回包顶层的 actions（手与家那一侧真做过的事，一项一份带 verb 的
+    键值表）。三种情形三种结论：
+
+    - **没有这一格 → []**：现在还没有手与家的动作账，这一轮确实一件事都没做——那就该判冒充。
+      「账本还不存在」不是「判不了」：把它当成 None，这一关就永远不跑，红线等于没接。
+    - **给了清单 → 原样交下去**（空清单也是清单：账上空着，照样判冒充）——闸只认字，不在这里
+      改形状；形状坏了由闸那边的 claim 当场抛 ClaimBroken，照实变成「整轮弃掉」。
+    - **给了别的形状（读不动）→ None**：**拿不到**，闸记 claim_status=not-checked，不判冒充、
+      也不声称判过。猜一个空清单顶上，等于替她记一笔「什么都没做」——那是编出来的账。
+    """
+    if "actions" not in payload:
+        return []
+    book = payload.get("actions")
+    if isinstance(book, (list, tuple)):
+        return [dict(one) if isinstance(one, Mapping) else one for one in book]
+    return None
+
+
+def _recalled(payload: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """这一轮真的想起来的记忆：交给闸里「编记忆」那一关，**拿不到与一条都没想起来是两件事**。
+
+    取值只有一条路：answer() 回包顶层的 recalled（脑召回的那几条，一项一份带 text / source /
+    source_type / retellable 的键值表）。三种情形三种结论：
+
+    - **没有这一格 → None**：这一轮没有装配（冷却那一轮，装配那一步压根没跑），**拿不到**这一轮
+      想起来的是什么——闸记 fabricate_status=not-checked，不判、也不声称判过。猜成空清单顶上，等于
+      替她作证「一条都没想起来」：她引用的细节明明是召回来的，也会被当成编的。
+    - **给了清单 → 原样交下去**（空清单也是清单：这一轮确实一条都没想起来，出现「引用标记 + 具体
+      细节」就该判编记忆）——闸只认字，不在这里改形状；形状坏了由闸那边的 fabricate 当场抛
+      FabricateBroken，照实变成「整轮弃掉」。
+    - **给了别的形状（读不动）→ None**：同上，拿不到就不判，也不猜。
+
+    与 _actions 的差别只在一处：动作账那一条把「没有这一格」当成空账（那一轮确实什么都没做），
+    而记忆这一条把「没有这一格」当成拿不到——没装配不等于她没想起什么，这两件事不能混。
+    """
+    if "recalled" not in payload:
+        return None
+    book = payload.get("recalled")
+    if isinstance(book, (list, tuple)):
+        return [dict(one) if isinstance(one, Mapping) else one for one in book]
+    return None
 
 
 def _quota(payload: Mapping[str, Any]) -> Optional[str]:
@@ -1666,12 +1930,68 @@ def _segment_state(body: Any) -> Tuple[Optional[List[Tuple[str, str]]], Optional
         return None, SEGMENT_BROKEN % exc
 
 
+WHO_ID_KEY = "id"                       # 对象形状里只有这一格是身份（QQ 号），别的都是别名
+WHO_ALIAS_KEYS = ("nickname", "card")   # 别名：QQ 昵称 + 群名片（顺序即登记顺序，昵称在前）
+
+
 def _who(body: Any) -> str:
-    """这一轮是谁在说话：可选，没给就是空串（装配那边按生人档算称呼）。"""
-    if not isinstance(body, dict):
+    """这一轮是谁在说话：可选，认不出就是空串（装配那边按生人档算称呼）。
+
+    认两种形状，**两种都过脑的口径**（organs/brain/model.py 的 valid_who）：
+      · 字符串（老调用）：原样，但昵称不是身份——不合法就交回空串；
+      · 对象（通道真发的形状 {"id": 3425635473, "nickname": "…", "card": "…"}）：只认 id 那一格，
+        int 转成裸数字串（不加前缀，脑的 WHO_RE 本来就收裸号），再同一个口径过一遍。
+    其余形状（数字 / 数组 / 对象里没 id / id 不是号）一律空串：**不猜也不抛**——
+    认不出「是谁」就按生人档说话，比把她的话记到一个猜出来的人名下要好。
+    """
+    raw = body.get("who") if isinstance(body, Mapping) else None
+    if isinstance(raw, Mapping):
+        raw = raw.get(WHO_ID_KEY)
+        if isinstance(raw, bool):          # bool 是 int 的子类，True 不是「1 号」
+            return ""
+        if isinstance(raw, int):
+            raw = str(raw)                 # 裸数字：#3425635473 / 3425635473 都不加，只去掉类型
+    if not isinstance(raw, str):
         return ""
-    raw = body.get("who")
-    return raw.strip() if isinstance(raw, str) else ""
+    who = raw.strip()
+    return who if brain_model.valid_who(who) else ""
+
+
+def _known(brain: Any, who: str) -> Optional[bool]:
+    """这一轮这个号在不在人名录里：交给闸的认亲那一关，**判不了就说判不了**。
+
+    三种形状，各是一种结论，一个都不许含糊：
+    - True：人名录里有这张卡——熟人，他爱怎么叫就怎么叫，认亲那一关一律放行；
+    - False：名录读得动、里面没有这个号——陌生号，回复里出现只有熟人才能触发的称呼或记忆复述就要判；
+    - None：**判不了**。who 为空（认不出是谁）、脑没接、或脑自己坏了都算这一种：这一关不跑，
+      闸记 kin_status="not-checked"，不判、也不声称判过。猜成 True 这一关就永远放行，猜成 False
+      就凭一个读错的格子把熟人当生人拦下来——两种猜法都比「如实说没查」难查。
+    """
+    if brain is None or not who:
+        return None
+    try:
+        return brain.lookup(who) is not None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        LOG.warning("POST /chat 查这个号在不在人名录里没成（who=%s）：%s", who, exc)
+        return None
+
+
+def _aliases_of(body: Any) -> List[str]:
+    """who 那个对象里带的昵称 / 群名片：**只是别名，不是身份**，所以单独一格交给装配。
+
+    只认非空字符串，去重保序；字符串形状的 who 没有别名（那是老调用，只有身份没有名片），
+    认不出身份（_who 空）或形状坏了也一律空表——不猜也不抛。这一格只进人名录的别名表，
+    不改身份、不写记忆条。
+    """
+    raw = body.get("who") if isinstance(body, Mapping) else None
+    if not isinstance(raw, Mapping) or not _who(body):
+        return []                          # 认不出是谁就没有别名：别名跟着身份走
+    names: List[str] = []
+    for key in WHO_ALIAS_KEYS:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() not in names:
+            names.append(value.strip())
+    return names
 
 
 def _mode_of(body: Any) -> str:

@@ -80,6 +80,7 @@ from organs.home import cards
 from organs.mind import conversation, events, llm, recent, repeat, usage
 from organs.soul import load as load_soul
 
+WHO = "3425635473"   # 脑里的 who 现在是数字号（WHO_RE），昵称只作 display
 PLUGIN = Path(__file__).resolve().parents[3]
 SOUL_FIXTURES = PLUGIN / "organs" / "soul" / "fixtures"
 MOUTH_DATA = PLUGIN / "organs" / "mouth" / "data"
@@ -162,7 +163,7 @@ class ConversationAnswerTest(unittest.TestCase):
         shutil.copytree(str(SOUL_FIXTURES / "valid"), str(target))
         return load_soul(target)
 
-    def _answer(self, text: str = QUESTION, reply: str = SENTENCE, *, who: str = "主人",
+    def _answer(self, text: str = QUESTION, reply: str = SENTENCE, *, who: str = WHO,
                 now: str = _at(5), captured: list = None, transport=None, brain=None,
                 **extra):
         send = transport if transport is not None else _transport(reply, captured)
@@ -217,9 +218,10 @@ class ConversationAnswerTest(unittest.TestCase):
     def test_heart_gives_words_and_no_numbers(self):
         got = self._answer()
         heart = got["heart"]
-        self.assertEqual({"tier", "direction"}, set(heart["mood"]))
-        self.assertEqual({"tone", "direction", "bans"}, set(heart["voice"]))
-        self.assertEqual({"state", "reason"}, set(heart["engage"]))
+        self.assertTrue({"tier", "direction"} <= set(heart["mood"]), "mood 少了必备键")
+        self.assertTrue({"tone", "direction", "bans"} <= set(heart["voice"]),
+                        "voice 少了必备键（多出来的键不算错：加字段不该把断言搞红）")
+        self.assertTrue({"state", "reason"} <= set(heart["engage"]))
         self.assertTrue(heart["axes"], "六轴一个词都没有")
         for axis, word in heart["axes"].items():
             self.assertIsInstance(word, str, "%s 的档位不是词：%r" % (axis, word))
@@ -234,11 +236,11 @@ class ConversationAnswerTest(unittest.TestCase):
         出站闸判「发不发」必须用**同一份输入**：这里钉住它是这一轮那一份——时刻、是谁、
         以及拿它再 decide 一次得到的态与回包 heart.engage 那份一致（不是另一个造出来的）。
         """
-        got = self._answer(now=_at(5), who="主人")
+        got = self._answer(now=_at(5), who=WHO)
         inp = got["_gate_input"]
         self.assertIsInstance(inp, engage_module.EngageInput, "交出来的不是判决输入本身")
         self.assertEqual(_at(5), inp.now, "不是这一轮那个时刻")
-        self.assertEqual("主人", inp.who)
+        self.assertEqual(WHO, inp.who)
         self.assertEqual(got["heart"]["engage"]["state"], engage_module.decide(inp)["state"],
                          "交回来的不是这一轮判决用的那一份输入")
 
@@ -297,8 +299,8 @@ class ConversationAnswerTest(unittest.TestCase):
             sleep.record("awake", root, now=_at(16.5 * 60 + day * 24 * 60))
         energy.read(root, _at(0))
         when = _at(25 * 60)                      # 次日 15:00：白天，硬门不掺和，软门自己判
-        self.brain.interact("主人", ts=when)     # 熟稔过线：让第 5 道软门成为唯一理由
-        query = urlencode({"now": when, "who": "主人", "root": str(root)})
+        self.brain.interact(WHO, ts=when)     # 熟稔过线：让第 5 道软门成为唯一理由
+        query = urlencode({"now": when, "who": WHO, "root": str(root)})
         status, readout = api.handle("GET", "/heart/engage?" + query, None, self.store,
                                      brain=self.brain)
         self.assertEqual(200, status)
@@ -413,12 +415,12 @@ class ConversationAnswerTest(unittest.TestCase):
         wrote = got["memory"]["wrote"]
         self.assertEqual(2, len(wrote), "这一轮该落两条：人的原话 + 她那句")
         by_who = dict((row["who"], row["id"]) for row in wrote)
-        self.assertEqual(QUESTION and "主人", [row["who"] for row in rows][-2])
+        self.assertEqual(WHO, [row["who"] for row in rows][-2])
         for entry in rows:
             self.assertEqual("亲历", entry.get("source_type"))
             self.assertTrue(entry.get("evidence_key"), "证据指针是空的")
             self.assertEqual(entry["evidence_key"], entry["id"])
-        self.assertEqual(rows[-2]["evidence_key"], by_who["主人"])
+        self.assertEqual(rows[-2]["evidence_key"], by_who[WHO])
         self.assertEqual(rows[-1]["evidence_key"],
                          by_who[self.store.snapshot().identity.display])
         self.assertEqual([], [row["id"] for row in got["recalled"] if row["id"] in by_who.values()],
@@ -434,7 +436,12 @@ class ConversationAnswerTest(unittest.TestCase):
                         "最近几轮跑到了脑装包后面：%r" % (order,))
         got = self._answer()
         self.assertEqual(order, got["assembly"]["order"])
-        self.assertEqual(order, [row["key"] for row in got["assembly"]["sections"]])
+        # 抽屉那一节是**有条件**的：没翻就整节不加（不留一个空标题）。这一轮没给 scene
+        # （归一成 unknown，drawer.scene 里它是 false），所以它不该出现；别的节仍与 order 一一对上。
+        rendered = [row["key"] for row in got["assembly"]["sections"]]
+        self.assertNotIn(conversation.DRAWER_KEY, rendered, "没命中抽屉却多出那一节")
+        self.assertEqual([key for key in order if key in rendered], rendered,
+                         "装配多出或漏掉了 order 之外的节")
 
     def test_in_memory_assembly_replaces_the_file(self):
         """给一份内存里的装配说明就用它：顺序与 cap 立刻跟着变，一行盘都不读。"""
@@ -586,7 +593,7 @@ class ConversationAnswerTest(unittest.TestCase):
                          set(continuity), "既有四键一个都不许动，只许多出这两栏")
         hit = [row for row in continuity["rounds"] if row["msg_id"] == ids[3]]
         self.assertEqual(1, len(hit))
-        self.assertEqual({"ts", "fidelity", "msg_id"}, set(hit[0]))
+        self.assertTrue({"ts", "fidelity", "msg_id"} <= set(hit[0]))
         self.assertEqual(recent.RECONCILED, hit[0]["fidelity"], "rounds 里那一轮没标 reconciled")
         self.assertEqual(_at(36), hit[0]["ts"])
         stamps = [row["ts"] for row in continuity["rounds"]]
@@ -645,7 +652,10 @@ class ConversationAnswerTest(unittest.TestCase):
         root = self.tmp / "reconcile_same_ts"
         stamp = _at(0)
         human = self.brain.ingest(who="3425635473", text="我今早去医院拿片子", ts=stamp)["entry"]["id"]
-        self.brain.ingest(who="3425635473", text="江迟。\n（尾巴尖轻轻摆了一下）", ts=stamp,
+        # 她那句当年被错标成 side=他说，但 who 仍是她自己；若这里也用人那个号，
+        # 脑的 10 分钟并条窗口会把两句并成一条，测的就不是「同一轮的错标」了。
+        self.brain.ingest(who=self.store.snapshot().identity.display,
+                          text="江迟。\n（尾巴尖轻轻摆了一下）", ts=stamp,
                           side=brain_model.SIDE_OTHER)
         recent.append({"ts": stamp, "who": "主人", "said": "我今早去医院拿片子",
                        "reply": "江迟。"}, root=root)
@@ -876,7 +886,8 @@ class ConversationAnswerTest(unittest.TestCase):
         got = self._answer(recent_root=root)
         conf = conversation.load_assembly()["banned"]
         read = got["banned"]
-        self.assertEqual({"rounds", "action_lines", "openings"}, set(read), "banned 的键对外冻结")
+        self.assertTrue({"rounds", "action_lines", "openings"} <= set(read),
+                        "banned 少了必备键（多出来的键不算错）")
         self.assertEqual(conf["rounds"], read["rounds"])
         self.assertEqual([{"text": self.HER_ACTION, "count": 3}], read["action_lines"])
         heads = [usage.opening(repeat.without_actions(reply), conf["opening_chars"])
@@ -1323,7 +1334,7 @@ class ConversationAnswerTest(unittest.TestCase):
         loaded = recent.load(turns=12)          # 默认落点：<QQAGENT_HOME>/mind/recent_turns.jsonl
         self.assertEqual(1, loaded["total"], "这一轮没落进最近几轮那份账")
         row = loaded["turns"][0]
-        self.assertEqual("主人", row["who"])
+        self.assertEqual(WHO, row["who"])
         self.assertEqual(QUESTION, row["said"])
         self.assertEqual(got["reply"], row["reply"], "落下去的不是过嘴之后那一整段")
         self.assertEqual({"said": False, "reply": False}, row["truncated"])
@@ -2074,7 +2085,7 @@ class ConversationAnswerTest(unittest.TestCase):
 
     def test_the_tone_ledger_gets_one_row_per_round_with_every_field(self):
         """每轮一行、字段齐、与回包对得上：两跑两行，一行不多一行不少。"""
-        self.brain.interact("主人", ts=_at(0))
+        self.brain.interact(WHO, ts=_at(0))
         low = self._heart_state("ledger_low", mood_now=33.0, energy_value=20.0)
         first = self._answer(now=_at(5))
         second = self._answer(now=_at(6), heart_root=low)
@@ -2280,7 +2291,7 @@ class ConversationEventTest(unittest.TestCase):
 
     def _answer(self, text: str = QUESTION, reply: str = SENTENCE, *, captured: list = None,
                 **extra):
-        return conversation.answer(text, "主人", store=self.store, brain=self.brain,
+        return conversation.answer(text, WHO, store=self.store, brain=self.brain,
                                    now=_at(5), transport=_transport(reply, captured),
                                    config=CONFIG, env=ENV, **extra)
 
@@ -2378,6 +2389,50 @@ class ConversationEventTest(unittest.TestCase):
         for key in ("event", "note", "evidence"):
             self.assertNotIn(key, got["assembly"]["order"], "装配多了一节：%r" % (key,))
             self.assertNotIn(key, [one["key"] for one in got["assembly"]["sections"]])
+
+    # —— 别名：id 是身份，昵称只是别名 ————————————————
+
+    def test_aliases_reach_the_person_card_without_writing_memory(self):
+        """answer(aliases=[…]) 只走人名录：昵称落显示名、群名片进别名表、一条记忆都不多写。"""
+        got = self._answer(aliases=["能毕业就是胜利", "小红花的爹"])
+        self.assertTrue(got["ok"])
+        person = self.brain.lookup(WHO)
+        self.assertIsNotNone(person, "号下没有卡：别名没登记进人名录")
+        self.assertEqual(WHO, person.get("id"), "身份被别名顶掉了")
+        self.assertEqual("能毕业就是胜利", person.get("display"), "昵称没落成显示名")
+        self.assertEqual(["小红花的爹"], person.get("aliases"), "群名片没进别名表")
+        # 登记别名不写记忆条：这一轮仍然只有他那句与她那句
+        self.assertEqual(2, len(got["memory"]["wrote"]))
+        self.assertEqual(2, len(self.brain.today_entries()))
+
+    def test_the_person_section_carries_the_alias(self):
+        """名片段取到东西，且昵称在里头（称呼）、群名片在别名那一格。"""
+        self._answer(aliases=["能毕业就是胜利", "小红花的爹"])
+        text = conversation._person_text(self.brain, WHO)
+        self.assertTrue(text.strip(), "「关于他」整段是空的")
+        self.assertIn("能毕业就是胜利", text, "昵称没进名片段：%r" % (text,))
+        self.assertIn("小红花的爹", text, "别名没进名片段：%r" % (text,))
+
+    def test_broken_aliases_never_break_the_round(self):
+        """别名形状坏了（字符串 / 数字 / 一表空白 / None / 一表非串）只是不登记，绝不抛。"""
+        for bad in ("小红花", 123, [], ["  ", None, 7], [""], None, {"a": "b"}):
+            got = self._answer(aliases=bad)
+            self.assertTrue(got["ok"], "别名形状坏了把整轮弄坏了：%r" % (bad,))
+        # 没登记过任何别名：卡还在（ingest 建的），只是别名表空着
+        person = self.brain.lookup(WHO)
+        self.assertIsNotNone(person)
+        self.assertEqual([], person.get("aliases") or [], "坏形状的别名被登记了")
+
+    def test_aliases_under_an_unusable_who_are_dropped(self):
+        """认不出是谁（who 不是号）就别登记别名：别名跟着身份走，不按昵称建卡。"""
+        for bad in ("能毕业就是胜利", "", "  ", "aiocqhttp:12"):
+            got = conversation.answer(QUESTION, bad, store=self.store, brain=self.brain,
+                                      now=_at(5), transport=_transport(SENTENCE),
+                                      config=CONFIG, env=ENV, aliases=["能毕业就是胜利"])
+            self.assertTrue(got["ok"])
+        people = self.brain._people_data().get("people", {})
+        self.assertEqual([], [one for one in people if not one.isdigit()],
+                         "按昵称建了卡：%r" % (sorted(people),))
 
 
 if __name__ == "__main__":

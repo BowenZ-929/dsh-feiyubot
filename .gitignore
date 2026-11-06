@@ -60,3 +60,6 @@ plugin/organs/day/data/*
 plugin/organs/mouth/trace/
 
 # 心：自己目录里的 .gitignore 管自己（卡与说明入库，跑出来的状态不入库）。
+
+# 旧语料导出：她的私人聊天记录，永不入库
+plugin/organs/mind/bench/data/legacy.jsonl

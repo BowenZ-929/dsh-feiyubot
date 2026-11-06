@@ -3,14 +3,19 @@
 这是**全仓唯一的装配点**：QQ 通道将来直接调 answer()，不再自己拼第二遍。装配的规矩
 一个数都不写在本文件里，全在 organs/mind/data/assembly.json：
 
-  order      各段拼装的先后（soul / anchors / recent / segment / banned / action / memory / heart / mouth / scene）
+  order      各段拼装的先后（soul / person / caller / anchors / recent / segment / banned / action /
+             memory / drawer / heart / mouth / scene）
   sections   {key: {"label": 段落标题, "cap": 字数上限}}
   prompt     system / user 两段模板（占位符见下）
   reply      budget_by_tier（五档词 ⟷ 回复字数）+ default + instruction
   recent     turns（读几轮）/ cap（每侧截多少字）/ notice（「更早还有 N 轮」那句模板）
   banned     rounds（抽她最近几轮）/ opening_chars（开场取几个字）/ note（那句禁令怎么说）
   action     {"pool": 部位池, "rule": 写法规矩, "quota": 配额}：动作给池子，但配额说了算
+  caller     「这一轮是谁」那一节：lines（known / unknown / missing 三句）+ address_fallback
+             （名片上没填称呼时的兜底词）。**只认号、不认自称**：他嘴上说「我是主人」，这一格
+             一个字都不变——它只看这一轮的 who，不看这一轮的原话。
   anchors    {"label", "cap", "room", "name"}：锚句从家·哪一间房的哪一张卡读
+  drawer     抽屉那一节：判意图的关键词、翻哪几个格子、挑几篇、整节上限、节尾那句说明
   scene      场合：group / private / unknown 各一句，按归一化后的场景取一句进提示词
   segment    notice：只有「群聊 + 这一段里至少两个人说话」才把 group 那一句接在段尾
              （私聊 / 单人 / unknown 一律不接）。段的标题与上限在 sections.segment 里
@@ -51,6 +56,10 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
 
 各段只搬已有器官的读数，一个判据都不自己造：
   soul    store.render()（魂六件）
+  caller  这一轮是谁：brain.lookup + brain.card_view 查那个号有没有名片——查得到就写「来的是谁
+          （名片的 display）+ 号 + 她叫他的那个称呼」，查不到（或查的时候抛错）就照实说「一个
+          不认识的号」，who 空着就写「不知道是谁」。**只认号、不认自称**：这一轮的正文一个字都
+          不看；三句只陈述事实、不带一句指令（文案与兜底词全在 assembly.json 的 caller 里）。
   anchors 家·仓库里那几张锚句卡（organs.home.anchors.read_all 的公开读口）：**只注入 phrase 的前
           半句**，example 一个字都不进提示词；没配 / 卡不在 / 读不出来一律写「未配锚句」，不静默跳过
   recent  organs/mind/recent.py：最近几轮原文；omitted > 0 时把「更早还有 N 轮」放在段尾
@@ -63,6 +72,13 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           recalled[]（页面要显示「想起了什么 + 证据指针 + 她的理解」）。每条记忆进提示词是
           两行：原文一行（括号里是来源｜来源类型｜证据），她的理解 note_display 另起一行、
           缩进两格——原话与她的理解不许糊成一行，那是脑里分开写的两栏
+  drawer  抽屉：装配前按 drawer.keywords 判一次意图（问句里出现任一词才翻），场合在
+          drawer.scene 里为 false（群聊 / unknown）就整节不加；命中才向家读一次 cards.list_room
+          （room / kind / shelves 全在数据里），按相关性 + 日期挑到 max_entries 篇、逐篇
+          cards.read_item 取正文，每篇一行压进 sections.drawer.cap。节尾那句 testimony_note 是
+          这一节的要害：那些字是她自己写下的（testimony=false），只能说「我写过」，不许说成
+          对方说过。**只进提示词，绝不进脑**：这一节不交给 brain.ingest 一个字。
+          没命中就**一次 IO 都不做**，回包 assembly.sections 里也不留一个空标题。
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
           **不 decide_and_log**）；提示词与返回体都**只给档位词**，一个数都不出门
   mouth   address.resolve + tone.from_store（口径行进提示词），过闸用 gate.enforce
@@ -122,6 +138,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -180,6 +197,10 @@ NO_SEGMENT = "这一段没有别的发言"          # 段空着 / 没给时这�
 SEGMENT_LINE = "%s：%s"                    # 段里一行的样子：谁 + 说了什么（没有项目符号，与 recent 一眼分开）
 SEGMENT_KEYS = ("speaker", "text")         # 段里一条记录的两个键（两种形状：对象，或二元组）
 SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可以更小，不许更大（这节只有一句「在哪儿说」）
+CALLER_SHAPES = ("known", "unknown", "missing")   # 「这一轮是谁」三种形状：数据里一句都不许缺
+DRAWER_KEY = "drawer"                     # 抽屉那一节在 order / sections 里的键（空着就整节不加）
+LINE_JOIN = "\n"                          # 抽屉每篇一行、行与行之间的分隔（也用来隔开节尾那句说明）
+WORD_JOIN = " "                           # 正文里的换行压成空格：一篇只占一行，行首才认得出日期
 TONE_LOG = "tone_log.jsonl"               # 语气账的文件名（落在 <器官目录>/mind 下，只追加）
 # 每轮那一行的字段（冻结，人事后照这个核对）：四个旋钮落到哪儿、心与嘴各在哪一档、软度与称呼。
 # address 也在里面：心情凉的那一轮不强制改称呼，所以事后要看得见她当时叫的是什么。
@@ -273,6 +294,18 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         raise ValueError("reply.instruction 要一段字：%s" % where)
     banned_conf = _check_banned(data.get("banned"), where)
     action_conf = _check_action(data.get("action"), where)
+    drawer_conf = _check_drawer(data.get("drawer"), where)
+    caller_conf = _check_caller(data.get("caller"), where, "caller" in checked)
+    # 同一格不许有两份数：drawer.cap / drawer.label 与 sections.drawer 说的是同一节。
+    # 两处不等就当场报——人改了其中一处，另一处悄悄把这一节截掉，查起来比报错难十倍。
+    if drawer_conf is not None and DRAWER_KEY in checked:
+        section = checked[DRAWER_KEY]
+        if section["cap"] != drawer_conf["cap"] or section["label"] != drawer_conf["label"]:
+            raise ValueError(
+                "drawer.cap / drawer.label 要与 sections.drawer 一致：现在 sections 是 %r/%d，"
+                "drawer 是 %r/%d（%s）"
+                % (section["label"], section["cap"], drawer_conf["label"],
+                   drawer_conf["cap"], where))
     # 禁令窗口必须比配额窗口长一轮：配额放行的那一轮，禁令里得还看得见它——
     # 否则同一条动作会在「配额刚好重置」的那一轮重生（两个窗口同时把它挤出去）。
     want = action_conf["quota"]["window"] + 1
@@ -297,9 +330,106 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
         "action": action_conf,
         "anchors": _check_anchors(data.get("anchors"), where),
         "scene": _check_scene(data.get("scene"), where),
+        # 「这一轮是谁」那一节：order 里有它就要给三句，缺一句等于在数据之外补一份默认话。
+        "caller": caller_conf,
         "segment": _check_segment(data.get("segment"), where, "segment" in checked),
+        # 抽屉可以没有（缺这一块 = 不翻，不是每轮翻）：None 往下传，装配那一层照它判。
+        "drawer": drawer_conf,
         "tone_rules": _check_tone_rules(data.get("tone_rules"), where),
     }
+
+
+def _check_drawer(spec: Any, where: str) -> Optional[Dict[str, Any]]:
+    """抽屉那一格：**可以没有**（没有就是「不翻」），写了就要写全。
+
+    这里一个中文词都没有：关键词、格子名、行模板、月份词、节尾那句说明全在数据里。
+    「有没有写全」当场报——少了哪个键，这一轮要么白翻一次抽屉，要么在提示词里拼出一节
+    半截的旧事，两种都比报错难查。cap 与 label 还要与 sections.drawer 对得上：一处写 300、
+    一处写 200，人改的到底是哪一处就说不清了。
+    """
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError("drawer 要一份对象（keywords / shelves / scene / cap / label …）：%s" % where)
+    clean: Dict[str, Any] = {}
+    enabled = spec.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("drawer.enabled 要么 true 要么 false（缺省不是「翻」）：%s" % where)
+    clean["enabled"] = enabled
+    keywords = spec.get("keywords")
+    if not isinstance(keywords, list) or not keywords:
+        raise ValueError("drawer.keywords 要一份非空的关键词表（问句里出现任一个才翻）：%s" % where)
+    clean_keywords: List[str] = []
+    for word in keywords:
+        if not isinstance(word, str) or not word.strip():
+            raise ValueError("drawer.keywords 里有空词：%s" % where)
+        clean_keywords.append(word.strip())
+    clean["keywords"] = clean_keywords
+    for name in ("max_entries", "cap", "list_limit", "date_chars", "line_chars",
+                 "topic_min_chars"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("drawer.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    for name in ("label", "kind", "room", "testimony_note", "note"):
+        text = spec.get(name)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("drawer.%s 要一段非空的字：%s" % (name, where))
+        clean[name] = text.strip()
+    line = spec.get("line")
+    if not isinstance(line, str) or line.count("%s") != 2:
+        raise ValueError("drawer.line 要一行模板、且正好两个 %%s（日期 + 正文）：%s" % where)
+    clean["line"] = line
+    more = spec.get("more")
+    if not isinstance(more, str):
+        raise ValueError("drawer.more 要一段字（省略号，可以空）：%s" % where)
+    clean["more"] = more
+    pattern = spec.get("date_pattern")
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ValueError("drawer.date_pattern 要一条正则（name 前几个字像不像日期）：%s" % where)
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError("drawer.date_pattern 不是正则：%s：%s" % (pattern, exc)) from exc
+    clean["date_pattern"] = pattern
+    scene = spec.get("scene")
+    if not isinstance(scene, dict):
+        raise ValueError("drawer.scene 要一份 {场景: 翻不翻} 的表：%s" % where)
+    clean_scene: Dict[str, bool] = {}
+    for name in brain_model.SCENE_TYPES:
+        value = scene.get(name)
+        if not isinstance(value, bool):
+            raise ValueError("drawer.scene.%s 要么 true 要么 false（全是 false 就是不翻）：%s"
+                             % (name, where))
+        clean_scene[name] = value
+    clean["scene"] = clean_scene
+    shelves = spec.get("shelves")
+    if not isinstance(shelves, dict):
+        raise ValueError("drawer.shelves 要一份 {场景: [允许翻的格子]} 的表：%s" % where)
+    clean_shelves: Dict[str, List[str]] = {}
+    for name in brain_model.SCENE_TYPES:
+        value = shelves.get(name)
+        if not isinstance(value, list) or not value:
+            raise ValueError("drawer.shelves.%s 要一份非空的格子名列表：%s" % (name, where))
+        rows: List[str] = []
+        for shelf in value:
+            if not isinstance(shelf, str) or not shelf.strip():
+                raise ValueError("drawer.shelves.%s 里有空格子名：%s" % (name, where))
+            rows.append(shelf.strip())
+        clean_shelves[name] = rows
+    clean["shelves"] = clean_shelves
+    months = spec.get("month_words")
+    if not isinstance(months, dict) or not months:
+        raise ValueError("drawer.month_words 要一份 {月份: 那个月的说法} 的表：%s" % where)
+    clean_months: Dict[str, str] = {}
+    for month, word in months.items():
+        if not isinstance(month, str) or not month.strip().isdigit():
+            raise ValueError("drawer.month_words 的键要是月份数字：%r（%s）" % (month, where))
+        if not isinstance(word, str) or not word.strip():
+            raise ValueError("drawer.month_words.%s 要一段非空的字：%s" % (month, where))
+        clean_months[str(int(month.strip()))] = word.strip()
+    clean["month_words"] = clean_months
+    return clean
 
 
 def _check_tone_rules(spec: Any, where: str) -> Dict[str, Any]:
@@ -549,6 +679,36 @@ def _check_guard(spec: Any, where: str) -> Dict[str, Any]:
     return clean
 
 
+def _check_caller(spec: Any, where: str, wanted: bool) -> Optional[Dict[str, Any]]:
+    """「这一轮是谁」那一格：**可以没有**（没有就不加这一节），写了就要三种形状各一句。
+
+    三句的名字是这一层的判据（known / unknown / missing），不是场景名，所以不跟着
+    brain_model.SCENE_TYPES 走；缺一句就当场报——补一句默认话，等于在数据之外又造了一处
+    「来的是谁」的真源。address_fallback 也必须在数据里：名片上没填称呼时用哪个词，
+    是文案，不许在代码里写死一个「你」。
+    """
+    if spec is None:
+        if wanted:
+            raise ValueError("order 里有 caller，装配说明却缺 caller（三句话）：%s" % where)
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError("caller 要一份对象（lines 三句 + address_fallback）：%s" % where)
+    lines = spec.get("lines")
+    if not isinstance(lines, dict):
+        raise ValueError("caller.lines 要一份 {形状: 一句话} 的表：%s" % where)
+    clean: Dict[str, str] = {}
+    for name in CALLER_SHAPES:
+        text = lines.get(name)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("caller.lines.%s 要一句非空的话：%s" % (name, where))
+        clean[name] = text.strip()
+    fallback = spec.get("address_fallback")
+    if not isinstance(fallback, str) or not fallback.strip():
+        raise ValueError("caller.address_fallback 要一个非空的称呼词（名片上没填时用它）：%s"
+                         % where)
+    return {"lines": clean, "address_fallback": fallback.strip()}
+
+
 def _check_scene(spec: Any, where: str) -> Dict[str, Any]:
     """场合那一格：三个场景各一句话，一句都不许缺。
 
@@ -669,7 +829,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
            now: Optional[str] = None,
            transport: Optional[Any] = None, config: Optional[Mapping[str, Any]] = None,
            env: Optional[Mapping[str, str]] = None,
-           assembly: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+           assembly: Optional[Mapping[str, Any]] = None,
+           aliases: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """装配一轮并说出口：返回页面要的那份成功体；模型这边的失败原样上抛（由 api 翻译）。
 
     store / brain 是底线：没有魂就没有底色，没有记忆就不开口——这里当场报，不假装说了一轮。
@@ -679,6 +840,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
     usage_root：口癖账的落点（None → <器官目录>/mind/anchor_usage.jsonl）。
     assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
+    aliases：通道顺手发来的**别名**（QQ 昵称、群名片那一类），只登记进人名录的别名表：
+    id 才是身份（who 一个字节都不动），别名不改身份、不写记忆条、不进提示词。没给就是空（老调用
+    一字不改）。它只做人名册的登记——**这一层不拿它认人**：回想、落脑、称呼仍只按 who 走。
     scene：这是什么场合（group / private / unknown，取值以 organs/brain/model.py 的 SCENE_* 为准）。
     缺省 / 空白 / 非法一律 unknown，**不猜成私聊**——猜错就是把私事说出去了。它一路往下走三处：
     装配加一段「场合」（文本来自 assembly.json 的 scene.lines）、落脑时写进那一条的 scene 栏、
@@ -724,7 +888,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
       retellable?,retell_note?}]（后两栏只在脑给了的时候带）/ heart{mood{tier,direction},
       voice{tone,direction,bans}, axes{轴: 档位词}, engage{state,reason}}
       / gate{decision, hit{clause_id,reason}|null, drops{today}} /
-      assembly{order, sections[{key,chars,cap}], reply_budget{key,tier,chars,tier_chars}} /
+      assembly{order, sections[{key,chars,cap}]（抽屉那一节另带 count：这一轮真放了几篇）,
+      reply_budget{key,tier,chars,tier_chars}} /
       tone{tier,label,softness,max_chars,no_question,ban_joke,truncated,heart_source}
       （四个旋钮落到这一轮的实话：max_chars 是硬截用的那个数，truncated 说截了没有） /
       continuity{turns_loaded, omitted, notice, reconciled, rounds[{ts,fidelity,msg_id}]} /
@@ -772,6 +937,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     at = now if isinstance(now, str) and now else brain_model.now_iso()
     # 场合先归一化：后面三处（装配 / 落脑 / 回想）都只认这一个值，不各自再判一遍。
     where = _scene_value(scene)
+    # 别名先登记（排在读人名录之前）：这一轮的称呼与「关于他」因此当场看得到昵称 / 群名片，
+    # 不是下一轮才生效。**只登记别名**——身份还是 who，记忆条一条都不写（见 _register_aliases）。
+    _register_aliases(brain, who, aliases)
 
     # 0) 最近几轮先读、先对账：脑里记了、这份账上却没落的轮，**这一轮就得看见**。
     #    这一读必须排在 recall 之前——recall 会按它自己的钟顺手换日（换日就把「今日在役」
@@ -839,11 +1007,18 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 3) 嘴：称呼 → 语气档（口径行进提示词）。心的四样读数**真传进去**：心情凉得能压住话长、
     #    精力低得能收紧口径，softness 才不是一句空话（口径行的 heart_source 也从「未接入」变实话）。
     heart_read = _heart_readings(mood_read, energy_read, offsets, judgement)
+    # 2.5) 抽屉：装配前判一次意图，命中才向家取 2–3 篇旧事（没命中一次 IO 都不做）。
+    #      放在 memory 之后、heart 之前（order 里也是这个位置）：旧事比当下记忆远一档。
+    #      旧事正文**只进提示词**：这一节不交给 brain.ingest 一个字。
+    drawer_read, drawer_text = _drawer(conf, said, where)
     voice = _voice(store, brain, who, heart_read)
     # 四个旋钮：判据全在 assembly.json 的 tone_rules 里，这一层只照着判，一个阈值都不带。
     knobs = _knobs(conf["tone_rules"], heart_read, judgement, mode)
     mouth_text = _mouth_text(voice, knobs, conf["tone_rules"])
     person_text = _person_text(brain, who)
+    # 「这一轮是谁」：恒在（三种之一），只看号、不看这一轮的原话——她认下「我是主人」时，
+    # 手里得先有一句反证材料：号是号，自称是自称。
+    caller_text = _caller_text(conf, brain, who)
 
     # 4) 提示词与回复预算
     tier = heart_words["mood"]["tier"]
@@ -859,16 +1034,24 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     contents = {"soul": soul_text, "anchors": anchor_text, "recent": recent_text,
                 "segment": _segment_text(rows, conf, where),
                 "banned": banned_text, "action": action_text,
-                "memory": memory_text, "heart": heart_text, "mouth": mouth_text,
-                "person": person_text, "scene": _scene_text(conf, where)}
+                "memory": memory_text, "drawer": drawer_text,
+                "heart": heart_text, "mouth": mouth_text,
+                "person": person_text, "caller": caller_text,
+                "scene": _scene_text(conf, where)}
     blocks: List[str] = []
     sections: List[Dict[str, Any]] = []
     for key in conf["order"]:
         spec = conf["sections"][key]
         body = contents.get(key, "")
+        # 抽屉没翻就是**一节都不加**：不留一个只有标题的空节（她会以为旧事是空的）。
+        if key == DRAWER_KEY and not body:
+            continue
         clipped = body if len(body) <= spec["cap"] else body[:spec["cap"]]
         blocks.append("[%s]\n%s" % (spec["label"], clipped))
-        sections.append({"key": key, "chars": len(clipped), "cap": spec["cap"]})
+        row = {"key": key, "chars": len(clipped), "cap": spec["cap"]}
+        if key == DRAWER_KEY:
+            row["count"] = drawer_read["count"]      # 这一轮真放进几篇（页面照它显示）
+        sections.append(row)
     # 主动那一轮换的是**整份模板**（prompt.proactive：由头与理由都进提示词），user 那一问是空串
     # ——没有对方的话，就没有可替换的 {text}。两态只差模板与那一问，装配出来的几段一模一样。
     values = {"sections": "\n\n".join(blocks), "reply_budget": str(max_chars),
@@ -1513,6 +1696,195 @@ def _scene_text(conf: Mapping[str, Any], scene: str) -> str:
     return str(conf["scene"]["lines"].get(scene) or "")
 
 
+def _drawer_due(spec: Mapping[str, Any], said: str, scene: str) -> bool:
+    """装配前判一次意图：关键词命中、且这个场合允许翻——两条都成立才去家里读。
+
+    判在这两处之外一个字节都不读：没命中就一次 IO 都不做（不 list、不 read），这一节也就
+    压根不进提示词。被动与主动（她自己开口那一轮，由头就是这一问）用的是同一把尺子。
+    """
+    if not spec.get("enabled"):
+        return False
+    if not spec["scene"].get(scene):
+        return False
+    return any(word in said for word in spec["keywords"])
+
+
+def _drawer_rows(spec: Mapping[str, Any], scene: str) -> List[Mapping[str, Any]]:
+    """家·抽屉的清单：一格一次 list_room，只读，一个字都不写回去。
+
+    读不出来（没这间房 / 没这一格 / 格子坏行）就跳过那一格、回空表：这一节不加，
+    整轮照旧说得出口——旧事读不到，不该把她这一轮也拖哑。
+    """
+    rows: List[Mapping[str, Any]] = []
+    seen = set()
+    for shelf in spec["shelves"].get(scene) or []:
+        try:
+            got = cards.list_room(room=spec["room"], shelf=shelf, limit=spec["list_limit"])
+        except (cards.CardError, home_access.AccessDenied, home_store.StoreError, OSError):
+            LOGGER.warning("抽屉那一格没读出来（%s/%s）：这一轮不加那一节", spec["room"], shelf)
+            continue
+        for item in got.get("items") or []:
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("kind") != spec["kind"] or (item.get("shelf") or "") != shelf:
+                continue
+            key = str(item.get("card_id") or item.get("name") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(item)
+    return rows
+
+
+def _drawer_date(item: Mapping[str, Any], spec: Mapping[str, Any]) -> str:
+    """这一篇的行首日期：name 前 date_chars 字像日期就用它，不像就退回 at 前那几个字。"""
+    size = spec["date_chars"]
+    head = str(item.get("name") or "")[:size]
+    if re.match(spec["date_pattern"], head):
+        return head
+    return str(item.get("at") or "")[:size]
+
+
+def _drawer_month(date: str, spec: Mapping[str, Any]) -> str:
+    """日期落在哪个月、那个月的说法是什么（说法表在 drawer.month_words，缺这个月就空串）。"""
+    piece = date[5:7] if len(date) >= 7 else ""
+    if not piece.isdigit():
+        return ""
+    return str(spec["month_words"].get(str(int(piece))) or "")
+
+
+def _drawer_share(said: str, text: str, size: int) -> bool:
+    """这段字与问句有没有连续 size 字重合（逐段滑一遍；分词要另一份词表，这里不造）。"""
+    if len(text) < size:
+        return False
+    for start in range(0, len(text) - size + 1):
+        if text[start:start + size] in said:
+            return True
+    return False
+
+
+def _drawer_topic(item: Mapping[str, Any], date: str, spec: Mapping[str, Any], said: str) -> bool:
+    """相关性：时间词（那个月的说法）整词命中，或 name / at / note 与问句连续重合若干字。
+
+    「若干」是 drawer.topic_min_chars，本文件一个数都不写。
+    """
+    month = _drawer_month(date, spec)
+    if month and month in said:
+        return True
+    size = spec["topic_min_chars"]
+    for piece in (str(item.get("name") or ""), str(item.get("at") or ""),
+                  str(item.get("note") or "")):
+        if _drawer_share(said, piece, size):
+            return True
+    return False
+
+
+def _drawer_pick(items: Sequence[Mapping[str, Any]], spec: Mapping[str, Any],
+                 said: str) -> List[Tuple[Mapping[str, Any], str]]:
+    """挑哪几篇：先筛出写得出日期的，再按「相关优先、同档里日期从新到旧」排，取前 max_entries。
+
+    两条判据写在这里、常数在数据里：相关性见 _drawer_topic；日期一栏用 name / at 的行首
+    那十个字（YYYY-MM-DD 按字面比就是按日先后比）。没有相关项时，整份清单就是纯日期倒序。
+    """
+    rows: List[Tuple[bool, str, Mapping[str, Any]]] = []
+    for item in items:
+        date = _drawer_date(item, spec)
+        if not date:
+            continue
+        rows.append((_drawer_topic(item, date, spec, said), date, item))
+    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [(item, date) for _topic, date, item in rows[:spec["max_entries"]]]
+
+
+def _drawer_body(item: Mapping[str, Any], spec: Mapping[str, Any]) -> str:
+    """这一篇的正文：走家的公开读口 read_item（一篇一次）。读不出来就空串，这一篇不放。
+
+    正文里的换行压成空格：一篇只占一行，行首才认得出日期；也免得把整节劈成好几段。
+    """
+    name = str(item.get("name") or "") or str(item.get("card_id") or "")
+    try:
+        got = cards.read_item(room=spec["room"], name=name)
+    except (cards.CardError, home_access.AccessDenied, home_store.StoreError, OSError):
+        LOGGER.warning("抽屉里这一篇没读出来：%s", name)
+        return ""
+    return WORD_JOIN.join(str(got.get("body") or "").split())
+
+
+def _drawer_whole(text: str, room: int, ends: str) -> str:
+    """掐到 room 字以内、且在句末收尾：整段优先，一句都凑不齐就一个字都不给（半句不如不给）。
+
+    句末字符表来自 tone_rules.sentence_end_chars（与硬截回话那一层同一份），代码里没有标点。
+    """
+    if room <= 0:
+        return ""
+    cut = -1
+    for end in ends:
+        at = text.rfind(end, 0, room)
+        if at > cut:
+            cut = at
+    return text[:cut + 1] if cut >= 0 else ""
+
+
+def _drawer_excerpt(body: str, allow: int, spec: Mapping[str, Any],
+                    ends: str) -> Tuple[str, bool]:
+    """一篇正文压进 allow 字：整段放得下就整段，放不下就截到整句再接 more。
+
+    返回 (字, 截没截)；截不出整句就是空串——那一种情况这一篇不放，不硬截半个词。
+    """
+    if len(body) <= allow:
+        return body, False
+    piece = _drawer_whole(body, allow - len(spec["more"]), ends)
+    if not piece:
+        return "", True
+    return piece + spec["more"], True
+
+
+def _drawer(conf: Mapping[str, Any], said: str, scene: str) -> Tuple[Dict[str, Any], str]:
+    """抽屉这一节：装配前判一次意图，命中才向家取 2–3 篇旧事，整节压进 sections.drawer.cap。
+
+    次序（挑法是这一节的判据，常数全在 assembly.json 的 drawer 里）：
+      1. _drawer_due 判意图与场合——不成立直接回空串，**一次 IO 都不做**；
+      2. list_room 按 room / kind / shelves 筛出她要的那一类，相关性优先、再按日期从新到旧取
+         max_entries 篇（见 _drawer_pick）；
+      3. 逐篇 read_item 取正文，每篇一行（行模板 drawer.line：行首日期 + 正文）；
+      4. 节尾接 drawer.testimony_note：那些是她自己写下的，只能说「我写过」。
+    整节（含那句说明）用 len 量的总字数 ≤ cap：放不下的那篇这一次就不放。
+    回包那一格只带 key 与 count——正文进提示词，**不进长期记忆**。
+    """
+    blank: Dict[str, Any] = {"key": DRAWER_KEY, "count": 0}
+    spec = conf.get("drawer")
+    if not isinstance(spec, Mapping) or not _drawer_due(spec, said, scene):
+        return blank, ""
+    picked = _drawer_pick(_drawer_rows(spec, scene), spec, said)
+    if not picked:
+        return blank, ""
+    ends = str(conf["tone_rules"]["sentence_end_chars"])
+    note = spec["testimony_note"]
+    # 节尾那句说明先占位：它是这一节的要害，被 cap 锯掉就等于没写这一句。
+    budget = spec["cap"] - len(note) - len(LINE_JOIN)
+    lines: List[str] = []
+    used = 0
+    for item, date in picked:
+        body = _drawer_body(item, spec)
+        if not body:
+            continue
+        head = spec["line"] % (date, "")
+        sep = len(LINE_JOIN) if lines else 0
+        room = budget - used - sep - len(head)
+        if room <= 0:
+            break
+        piece, _cut = _drawer_excerpt(body, min(spec["line_chars"], room), spec, ends)
+        if not piece:
+            continue
+        line = spec["line"] % (date, piece)
+        lines.append(line)
+        used += sep + len(line)
+    if not lines:
+        return blank, ""
+    body_text = LINE_JOIN.join(lines) + LINE_JOIN + note
+    return {"key": DRAWER_KEY, "count": len(lines)}, body_text
+
+
 def _recall(brain: Any, said: str, who: str, scene: Optional[str] = None
             ) -> Tuple[List[Dict[str, Any]], str]:
     """脑装包：既进提示词，也原样进返回体（页面要显示「想起了什么 + 证据指针」）。
@@ -1644,6 +2016,85 @@ def _engage(heart_root: Any, at: str, eff: Mapping[str, Any],
     return inp, engage_module.decide(inp)
 
 
+def _register_aliases(brain: Any, who: str, aliases: Any) -> None:
+    """把通道给的昵称 / 群名片登记进人名录当**别名**：id 是身份，昵称只是别名。
+
+    只调脑的公开口：lookup（有没有这张卡）/ interact（建档，第一条别名落 display）/
+    add_alias（已有的卡再补一条）。本层**不新开存储、不改身份、不写记忆条**——这里一个字都不进
+    ingest，别名不是记忆。
+
+    坏形状（who 不是号、aliases 不是串、一串空白）、脑拒了、脑自己坏了，一律记一行 WARNING 就过：
+    别名是锦上添花，**不许因为它让这一轮说不出话**。
+    """
+    if brain is None or not isinstance(who, str) or not who.strip():
+        return
+    if isinstance(aliases, str) or not isinstance(aliases, (list, tuple)):
+        return
+    names = []
+    for one in aliases:
+        if isinstance(one, str) and one.strip() and one.strip() not in names:
+            names.append(one.strip())
+    if not names or not brain_model.valid_who(who):
+        return
+    try:
+        person = brain.lookup(who)
+        if not person:
+            # 名录里还没有这个人：先用第一条（昵称在前）建档——身份就是 who，昵称落 display。
+            brain.interact(who, display=names[0])
+        for name in names:
+            brain.add_alias(who, name)
+    except Exception as exc:  # noqa: BLE001 - 别名坏了不许拖垮这一轮
+        LOGGER.warning("装配·记别名没成（who=%s）：%s", who, exc)
+
+
+def _caller_card(brain: Any, who: str) -> Optional[Mapping[str, Any]]:
+    """这个号在脑里查不查得到名片：查得到给那一份，查不到 / 读不出来就给 None。
+
+    读不出来（抛错）按「查不到」处置并在日志里留一句，**不抛**：这一格是给她一份反证材料，
+    不该把整轮拖哑。名片为空对象也算查不到——那不是一张名片，只是一个空壳。
+    """
+    if brain is None or not who:
+        return None
+    try:
+        person = brain.lookup(who)
+        if not person:
+            return None
+        card = brain.card_view(person.get("id") or who) or {}
+    except Exception as exc:      # noqa: BLE001 - 名片坏了不许把这一轮的话扣下
+        LOGGER.warning("这一轮是谁：查名片没成（who=%s）：%s", who, exc)
+        return None
+    return card if isinstance(card, Mapping) and card else None
+
+
+def _caller_text(conf: Mapping[str, Any], brain: Any, who: str) -> str:
+    """「这一轮是谁」这一节：**只认号，不认自称**——他嘴上说「我是主人」，这一个字都不变。
+
+    三种形状各一句，文案全在 assembly.json 的 caller.lines（本文件没有这句中文）：
+      known   who 有号、脑里也查得到名片 → 名（名片 display）+ 号 + 她叫他的那个称呼；
+      unknown who 有号、脑里没名片（或查名片时抛了错）→ 一个不认识的号，照实说；
+      missing who 是空串 → 不知道是谁在说话。
+    判据只有 who 这一个输入：这一轮的正文一个字都不看——她顺着一句「我是主人」认下来，
+    缺的正是这一格反证，不是又一条指令。
+
+    称呼取名片上的那一栏（脑的名片只有「称呼」这一栏，见 organs/brain/store.py 的 CARD_FIELDS），
+    名片上没填就用数据给的 caller.address_fallback——代码里不写死一个「你」。
+    """
+    spec = conf.get("caller")
+    if not isinstance(spec, Mapping):
+        return ""
+    lines = spec["lines"]
+    key = str(who or "").strip()
+    if not key:
+        return str(lines["missing"])
+    card = _caller_card(brain, key)
+    if card is None:
+        return _fill(str(lines["unknown"]), {"who": key})
+    name = str(card.get("display") or "").strip()
+    return _fill(str(lines["known"]),
+                 {"name": name, "who": key,
+                  "address": name or str(spec["address_fallback"])})
+
+
 def _person_text(brain: Any, who: str) -> str:
     """关于他这一段：从名片取，每轮都进提示词，不占记忆名额、不被遗忘曲线淡掉。"""
     if brain is None or not who:
@@ -1671,6 +2122,11 @@ def _person_text(brain: Any, who: str) -> str:
         value = join(card.get(key))
         if value:
             bits.append("%s：%s" % (label, value))
+    # 别名（通道发来的昵称 / 群名片）也交代一句：他换过叫法，她知道那是同一个人。
+    # 名片上没有这一栏，所以取的是人名录那条（lookup 的 aliases），不另造一份存储。
+    alias_text = join(person.get("aliases"))
+    if alias_text:
+        bits.append("别名：%s" % alias_text)
     return "｜".join(bits)
 
 def _heart_words(eff: Mapping[str, Any], judgement: Mapping[str, Any]) -> Dict[str, Any]:

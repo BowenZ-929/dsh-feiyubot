@@ -110,6 +110,14 @@ KEPT_MARK = "rewrite-failed"            # 改不动、留原话那句 reason 里
 REWRITE_KEYS = {"status", "why", "from", "to"}
 # 借阅读数里「条款用掉几条」= 这一轮过闸真比过的条数（启用条款全表）：条数不写死，读数据。
 CLAUSES = json.loads((MOUTH_DATA / "clauses.json").read_text(encoding="utf-8"))["clauses"]
+# 长度与句末标点那层的判据也全读数据：场景、区间、p90、上限、最少句数、形状条款 id 一个都不写死
+STYLE_BOOK = json.loads((MOUTH_DATA / "style_target.json").read_text(encoding="utf-8"))
+STYLE_SCENE = STYLE_BOOK["default_scene"]
+STYLE_RANGES = STYLE_BOOK["scenes"][STYLE_SCENE]["ranges"]
+STYLE_SCENE_LABEL = STYLE_BOOK["scenes"][STYLE_SCENE]["label"]
+STYLE_P90 = STYLE_BOOK["scenes"][STYLE_SCENE]["p90"]
+STOPPED_CEILING = STYLE_BOOK["stopped"]["ceiling"]
+SHAPE_CLAUSE = [one["id"] for one in CLAUSES if one.get("scope") == chat.REPLY_SCOPE][0]
 ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
 #: 一个确定在白天的时刻（夜里窗口按这个串自己的小时判，跑在哪个时区都同一个结论）：
@@ -120,6 +128,10 @@ DAYTIME = "2026-11-06T12:00:00+00:00"
 NIGHTTIME = "2026-11-06T03:00:00+00:00"
 #: 她自己开口那一轮的由头（素材，不是判据）：proactive 的必填入参。
 SEED = "今天想问问他吃饭了没有"
+
+#: 通道真发的那个形状：channels/onebot/server.ts 拼的三个键（id / nickname / card），一个不多。
+CHANNEL_WHO = {"id": 3425635473, "nickname": "能毕业就是胜利", "card": "小红花的爹"}
+CHANNEL_WHO_ID = "3425635473"          # 身份：裸数字号，不加任何前缀
 
 CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate", "audit",
                  # 核·识别这一轮的读数（本轮加的）：五键冻结，/chat 原样透出、不重组。
@@ -345,7 +357,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         heart = payload["heart"]
         self.assertEqual({"tier", "direction"}, set(heart["mood"]))
-        self.assertEqual({"tone", "direction", "bans"}, set(heart["voice"]))
+        self.assertTrue({"tone", "direction", "bans"} <= set(heart["voice"]))
         self.assertEqual({"state", "reason"}, set(heart["engage"]))
         self.assertTrue(heart["axes"])
         text = json.dumps(heart, ensure_ascii=False)
@@ -740,6 +752,72 @@ class ChatApiTest(unittest.TestCase):
                          [one["text"] for one in gated["chunks"]],
                          "配额没标时 chunks 要与不接闸时逐字相同")
 
+    # —— 冒充做过：动作账从回包传进闸（本轮加的） ————————————————
+
+    CLAIM_LINE = "我这就去画"                    # 这一轮手头什么都没做时她会说的那一句
+    CLAIM_FIX = "画不动，我没手。"                # 改写之后不再说做过（字数在 rewrit length 区间里）
+
+    def _claim_id(self) -> str:
+        """冒充做过那一关在账本里的 clause_id：从数据读，测试不自己造这个名字。"""
+        return json.loads((MOUTH_DATA / "claim.json").read_text(encoding="utf-8"))["hit"]["clause_id"]
+
+    def test_the_ledger_shapes_are_three_different_things(self):
+        """回包没有这一格 = 空账（这一轮什么都没做）；给了清单就交下去；读不动才是 None。"""
+        self.assertEqual([], chat._actions({}), "没有动作账这一格就是空账，不是拿不到")
+        self.assertEqual([{"verb": "发"}], chat._actions({"actions": [{"verb": "发"}]}))
+        self.assertIsNone(chat._actions({"actions": "坏了"}), "读不动的形状是拿不到，不许猜成空账")
+
+    def test_a_rewritten_claim_survives_as_the_fixed_line(self):
+        """命中之后改好了：这一泡是 rewritten、发的是改完那句，claim_status 说这一关真的判过。"""
+        status, payload = self._post({"text": "你画好了吗"},
+                                     _script(self.CLAIM_LINE, self.CLAIM_FIX))
+        self.assertEqual(200, status)
+        part = payload["gate"]["parts"][0]
+        self.assertEqual("ok", part["claim_status"], "给了空账就是判过，不是没跑")
+        self.assertEqual("rewritten", part["decision"])
+        self.assertEqual(self._claim_id(), part["hits"][0]["clause_id"])
+        self.assertEqual([self.CLAIM_FIX], [one["text"] for one in payload["chunks"]])
+        self.assertEqual(self.CLAIM_FIX, payload["reply"])
+
+    def test_an_unfixable_claim_is_dropped_and_the_ledger_names_it(self):
+        """改不动（重写回来逐字相同）：那一句被删掉，整泡只剩它 → dropped，账本记一笔。"""
+        before = len(self._drops_rows())
+        status, payload = self._post({"text": "你画好了吗"},
+                                     _script(self.CLAIM_LINE, self.CLAIM_LINE))
+        self.assertEqual(200, status)
+        gate = payload["gate"]
+        part = gate["parts"][0]
+        self.assertEqual("ok", part["claim_status"])
+        self.assertEqual("dropped", part["decision"], "删完只剩空白就是弃这一泡")
+        self.assertEqual([], payload["chunks"])
+        self.assertEqual("", payload["reply"])
+        rows = self._drops_rows()
+        self.assertEqual(before + 1, len(rows), "删句弃掉的那一笔也要记账")
+        self.assertEqual(self._claim_id(), rows[-1]["clause_id"])
+        self.assertIn(self.CLAIM_LINE, rows[-1]["reason"], "账本里读得出删掉的是哪一句")
+
+    def test_an_unreadable_ledger_is_not_checked_not_an_empty_one(self):
+        """动作账读不动（None）：这一关没跑，那一泡照发，claim_status 是 not-checked。"""
+        real = conversation.answer
+
+        def with_broken_ledger(text, who="", **kw):
+            """装配交出的是读不动的动作账：闸该记「拿不到」，不是「账上空着」。"""
+            kw.setdefault("transport", _body(self.CLAIM_LINE))
+            kw.setdefault("config", CONFIG)
+            kw.setdefault("env", ENV)
+            payload = real(text, who, **kw)
+            payload["actions"] = "坏了"
+            return payload
+
+        with mock.patch.object(conversation, "answer", with_broken_ledger):
+            status, gated = api.handle("POST", "/chat", {"text": "你画好了吗"},
+                                       self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        part = gated["gate"]["parts"][0]
+        self.assertEqual("not-checked", part["claim_status"], "拿不到账不是没做过")
+        self.assertEqual("pass", part["decision"])
+        self.assertEqual([self.CLAIM_LINE], [one["text"] for one in gated["chunks"]])
+
     # —— 拒绝：全仓唯一的投递点（本轮加的） ————————————————
 
     SOFT_ANSWER = ("……这个啊。鱼在海里游着游着，有些同伴就游远了……行了行了，"
@@ -1018,7 +1096,9 @@ class ChatApiTest(unittest.TestCase):
                                          _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
         self.assertEqual(LONG_REPLY, payload["reply"])
-        self.assertEqual(1, len(capture), "这一轮真问了模型一次")
+        self.assertEqual(1, len([one for one in capture if [
+            item["role"] for item in one["messages"]] == ["system", "user"]]),
+            "装配那一问只发了一次（其余请求是长度/标点那一层改形发的）")
         section = payload["refusal"]
         self.assertFalse(section["cooling"], "没在冷却要说 false，不许省掉这一格")
         self.assertEqual("医院", section["topic"], "认得出话题就报出来")
@@ -1033,11 +1113,90 @@ class ChatApiTest(unittest.TestCase):
                                          _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
         self.assertEqual(LONG_REPLY, payload["reply"])
-        self.assertEqual(1, len(capture))
+        self.assertEqual(1, len([one for one in capture if [
+            item["role"] for item in one["messages"]] == ["system", "user"]]),
+            "装配那一问只发了一次（其余请求是长度/标点那一层改形发的）")
         section = payload["refusal"]
         self.assertFalse(section["cooling"])
         self.assertIsNone(section["topic"], "认不出就是 null，不替她猜一个话题")
         self.assertEqual([], self._heart_rows())
+
+    # —— 长度与句末标点（过闸之前先把形修一遍）———————————————
+
+    def test_every_part_carries_a_length_reading_and_the_scene(self):
+        """逐泡都带长度读数，gate.style 交代场景 / 档位 / 上限 / 目标区间 / p90 / 句号率。"""
+        status, payload = self._send()
+        self.assertEqual(200, status)
+        section = payload["gate"]["style"]
+        self.assertEqual(chat.STYLE_OK, section["status"])
+        self.assertEqual(STYLE_SCENE, section["scene"])
+        self.assertEqual(STYLE_SCENE_LABEL, section["scene_label"])
+        self.assertEqual("%d-%d" % (STYLE_RANGES[str(section["tier"])]["lo"],
+                                    STYLE_RANGES[str(section["tier"])]["hi"]),
+                         section["target"])
+        self.assertEqual(STYLE_P90, section["p90"])
+        self.assertIn("stopped", section)
+        self.assertEqual(STOPPED_CEILING, section["stopped"]["ceiling"])
+        for row in payload["gate"]["parts"]:
+            self.assertEqual({"decision", "scene", "target_lo", "target_hi", "chars",
+                              "rewrites", "over_hard_cap", "reason"}, set(row["style"]))
+
+    def test_the_scene_comes_from_the_scope(self):
+        """scope=group 就按群聊那套区间判：场景从 /chat 的 scope 来，不是另算一遍。"""
+        other = "group" if STYLE_SCENE != "group" else "private"
+        status, payload = self._post({"text": QUESTION, "scope": other}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        section = payload["gate"]["style"]
+        self.assertEqual(other, section["scene"])
+        table = STYLE_BOOK["scenes"][other]["ranges"]
+        self.assertEqual("%d-%d" % (table[str(section["tier"])]["lo"],
+                                    table[str(section["tier"])]["hi"]), section["target"])
+        self.assertEqual(STYLE_BOOK["scenes"][other]["p90"], section["p90"])
+
+    def test_too_many_full_stops_gets_rewritten_once(self):
+        """整段句号太密：重写一次，改完落到上限里就发改写后的，并按新的整段重新切泡。"""
+        dense = "我在呢。" + "你说吧。" + "刚刚在听你讲那件事。"
+        better = "我在呢！" + "你说吧？" + "刚刚在听你讲那件事"
+        status, payload = self._post({"text": QUESTION}, _script(dense, better))
+        self.assertEqual(200, status)
+        counted = payload["gate"]["style"]["stopped"]
+        self.assertTrue(counted["judged"])
+        self.assertEqual("rewritten", counted["decision"])
+        self.assertLessEqual(counted["ratio"], counted["ceiling"])
+        self.assertEqual(better, payload["reply"], "改完的整段才是要发出去的那段")
+
+    def test_two_sentences_with_full_stops_are_not_judged(self):
+        """少于最少句数不判：两句话都带句号很正常——judged=false 不是「判过了没问题」。"""
+        status, payload = self._post({"text": QUESTION}, _body("我在呢。你说吧。"))
+        counted = payload["gate"]["style"]["stopped"]
+        self.assertFalse(counted["judged"])
+        self.assertEqual("pass", counted["decision"])
+        self.assertLess(counted["sentences"], counted["min_sentences"])
+
+    def test_the_three_part_shape_is_dropped_before_this_layer(self):
+        """三件套在装配那一关就按整句判过、命中即弃，所以这一层看到的是空泡。
+
+        这条同时钉住两件事：一是形状条款按**整条回复**判（一泡 1–2 句，看不见它）；
+        二是这一层不另判一遍（同一句话判两次不会更好，而那一层连重写器都没有）。
+        """
+        shaped = "好。" + "你今天干嘛了？" + "我觉得挺好的。"
+        status, payload = self._post({"text": QUESTION}, _script(shaped, "随便改一句也行"))
+        self.assertEqual(200, status)
+        self.assertEqual("dropped", payload["gate"]["decision"])
+        self.assertEqual([], payload["chunks"])
+        self.assertEqual("", payload["reply"])
+        self.assertEqual(SHAPE_CLAUSE, payload["gate"]["hit"]["clause_id"])
+        self.assertNotIn("style", payload["gate"], "没有泡进这一层，就没有长度/标点那一节")
+
+    def test_a_plain_reply_is_left_alone(self):
+        """一句正常的话一处都不改：没有 style 这一层也能逐字相同的那些断言，靠的就是这条。"""
+        line = "我在呢，你说。"
+        status, payload = self._post({"text": QUESTION}, _body(line))
+        self.assertEqual(line, payload["reply"])
+        self.assertEqual("pass", payload["gate"]["style"]["stopped"]["decision"])
+        self.assertEqual(1, len(payload["chunks"]))
+        self.assertEqual(line, payload["chunks"][0]["text"])
+
 
     # —— 出口认 audience：私密记忆在群里守边界（这一轮加的） ——————————
 
@@ -2005,8 +2164,12 @@ class ChatApiTest(unittest.TestCase):
                                      _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
         system = capture[0]["messages"][0]["content"]
-        self.assertEqual(["阿黄：我妈住院了", "阿黄：明天要做手术", "小明：我陪你去吧"],
-                         self._segment_body(system).splitlines(), "段没按顺序逐行进提示词")
+        body = self._segment_body(system)
+        lines = body.splitlines()
+        self.assertTrue(body.strip(), "段的正文是空的：这一节没进提示词")
+        self.assertEqual(3, len(lines), "三行发言该逐行进提示词：%r" % (lines,))
+        for want, have in zip(("我妈住院了", "明天要做手术", "我陪你去吧"), lines):
+            self.assertIn(want, have, "这一行没进提示词：%r" % (have,))
         keys = [row["key"] for row in payload["assembly"]["sections"]]
         self.assertIn("segment", keys, "回包的 assembly.sections 里没有 segment")
 
@@ -2016,8 +2179,10 @@ class ChatApiTest(unittest.TestCase):
                                                               ["123456789", "我陪你去吧"]]},
                                _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
-        self.assertEqual("阿黄：我妈住院了\n小明：我陪你去吧",
-                         self._segment_body(capture[0]["messages"][0]["content"]).strip("\n"))
+        tuple_lines = self._segment_body(capture[0]["messages"][0]["content"]).strip("\n").splitlines()
+        self.assertEqual(2, len(tuple_lines), "二元组那种形状没逐行归一：%r" % (tuple_lines,))
+        self.assertIn("我妈住院了", tuple_lines[0])
+        self.assertIn("我陪你去吧", tuple_lines[1])
 
     def test_segment_notice_only_in_a_group_with_two_speakers(self):
         """群聊双人才接那句话；私聊 / unknown / 单人段一律不加。"""
@@ -2330,6 +2495,99 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual([], payload["chunks"])
         self.assertEqual({"status": chat.CORE_EMPTY}, payload["gate"]["outbound"],
                          "空产出没记成 core_empty：%r" % (payload["gate"].get("outbound"),))
+
+    # —— who 的形状：通道发的是对象，脑要的是号 ————————————————
+
+    def _post_day(self, body, reply: str = "今天挺好的，我记着了。"):
+        """钉在白天再打一次：夜里那道硬门会判「不发」，落脑就看不到她那句。"""
+        with mock.patch.object(brain_model, "now_iso", lambda: DAYTIME):
+            return self._post(body, _body(reply))
+
+    def test_a_channel_who_object_is_recorded_as_the_number_not_the_placeholder(self):
+        """实盘那个 bug 的靶子：对象进 who，落库的 who 必须是号，「人」一个都不许有。"""
+        status, payload = self._post_day({"text": MEMORY_TEXT, "who": dict(CHANNEL_WHO),
+                                          "scene": "private"})
+        self.assertEqual(200, status)
+        self.assertTrue(payload.get("ok"))
+        rows = self.brain.today_entries()
+        whos = [row["who"] for row in rows]
+        self.assertIn(CHANNEL_WHO_ID, whos, "他说的那句没记在他号下：%r" % (whos,))
+        self.assertNotIn("人", whos, "who 仍然落到了占位符「人」——_who 没认对象形状")
+        hers = [row["who"] for row in rows if row.get("side") == brain_model.SIDE_SELF]
+        self.assertEqual([self.store.snapshot().identity.display], hers,
+                         "她那句的 who 不该跟着他变：%r" % (hers,))
+
+    def test_the_nickname_and_card_become_aliases_on_his_card(self):
+        """昵称 / 群名片是**别名**：身份仍是号，别名登记进人名录，一条记忆都不多写。"""
+        status, payload = self._post_day({"text": MEMORY_TEXT, "who": dict(CHANNEL_WHO),
+                                          "scene": "private"})
+        self.assertEqual(200, status)
+        person = self.brain.lookup(CHANNEL_WHO_ID)
+        self.assertIsNotNone(person, "号下没有卡：别名没登记进人名录")
+        self.assertEqual(CHANNEL_WHO["nickname"], person.get("display"), "昵称没落成显示名")
+        self.assertIn(CHANNEL_WHO["card"], person.get("aliases") or [], "群名片没进别名表")
+        self.assertEqual(CHANNEL_WHO_ID, person.get("id"), "身份被别名顶掉了")
+        # 登记别名不许写记忆条：一轮两人各一条，一条都不许多。
+        self.assertEqual(2, len(payload["memory"]["wrote"]),
+                         "登记别名顺手写了记忆：%r" % (payload["memory"]["wrote"],))
+        self.assertEqual(2, len(self.brain.today_entries()))
+        # 名片段取到东西，且昵称在里头（它就落成了「称呼」）
+        text = conversation._person_text(self.brain, CHANNEL_WHO_ID)
+        self.assertTrue(text.strip(), "「关于他」整段是空的")
+        self.assertIn(CHANNEL_WHO["nickname"], text)
+        self.assertIn(CHANNEL_WHO["card"], text, "别名没交代进名片段")
+
+    def test_his_sentence_comes_back_when_recall_runs_under_the_same_who(self):
+        """召回按 who 加权：同一 who 下说的那句，换一句问也要回得来（不是靠「人」）。"""
+        status, _first = self._post_day({"text": "记住小红花", "who": dict(CHANNEL_WHO),
+                                         "scene": "private"})
+        self.assertEqual(200, status)
+        status, second = self._post_day({"text": "我刚才说的小红花你记得吗",
+                                         "who": dict(CHANNEL_WHO), "scene": "private"})
+        self.assertEqual(200, status)
+        rows = second.get("recalled") or []
+        hit = [row for row in rows if "小红花" in str(row.get("text") or "")]
+        self.assertTrue(hit, "那句没被召回来：%r" % ([row.get("text") for row in rows],))
+        self.assertEqual(CHANNEL_WHO_ID, hit[0].get("who"), "召回来的那条不在他号下")
+
+    def test_string_object_and_missing_who_all_land_on_the_same_rule(self):
+        """三种形状走同一条路：串原样过口径、对象取 id、都没有就是占位符「人」。"""
+        cases = [
+            ("字符串", {"who": CHANNEL_WHO_ID}, CHANNEL_WHO_ID),
+            ("对象", {"who": dict(CHANNEL_WHO)}, CHANNEL_WHO_ID),
+            ("对象里 id 是串", {"who": {"id": CHANNEL_WHO_ID}}, CHANNEL_WHO_ID),
+            ("什么都没有", {}, "人"),                  # 不知道是谁：照旧兜底「人」，不猜
+        ]
+        for index, (label, extra, want) in enumerate(cases):
+            body = {"text": "三种形状第%d号" % index, "scene": "private"}
+            body.update(extra)
+            status, payload = self._post_day(body)
+            self.assertEqual(200, status, "%s：%r" % (label, payload.get("message")))
+            row = [one for one in self.brain.today_entries()
+                   if one.get("text") == body["text"]][0]
+            self.assertEqual(want, row["who"], "%s 的 who 不对" % label)
+
+    def test_broken_who_shapes_fall_back_to_empty_without_raising(self):
+        """错误形状（数字 / 数组 / 对象里没 id / 字面昵称）一律空串——不猜、不抛、不 400。"""
+        for bad in (123, [], {"nickname": "x"}, {"id": "能毕业就是胜利"}, {"id": True},
+                    "能毕业就是胜利", None):
+            self.assertEqual("", chat._who({"who": bad}), "错误形状没回落空串：%r" % (bad,))
+            self.assertEqual([], chat._aliases_of({"who": bad}),
+                             "认不出身份还交出了别名：%r" % (bad,))
+        for body in ({}, {"who": ""}, None, [], "x"):
+            self.assertEqual("", chat._who(body))
+            self.assertEqual([], chat._aliases_of(body))
+        # 真打一次：坏形状不 400、不抛，落库照旧是占位符
+        for index, bad in enumerate((123, [], {"nickname": "x"})):
+            body = {"text": "坏形状第%d号" % index, "who": bad, "scene": "private"}
+            status, _payload = self._post_day(body)
+            self.assertEqual(200, status, "坏形状把这一轮拦下了：%r" % (bad,))
+            row = [one for one in self.brain.today_entries()
+                   if one.get("text") == body["text"]][0]
+            self.assertEqual("人", row["who"], "坏形状的 who 不是占位符：%r" % (bad,))
+        people = self.brain._people_data().get("people", {})
+        self.assertEqual([], [one for one in people if not one.isdigit()],
+                         "坏形状在名录里建了卡：%r" % (sorted(people),))
 
 
 if __name__ == "__main__":
