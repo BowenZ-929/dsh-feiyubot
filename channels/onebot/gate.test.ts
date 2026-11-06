@@ -84,7 +84,7 @@ test("账行：字段固定、顺序固定、缺省一律 null", () => {
   assert.equal(row.note, "");
 });
 
-test("账：追加写会自动建 .state/，同一份账新开实例仍认得出重复（模拟重启）", () => {
+test("账：追加写会自动建目录，同一份账新开实例仍认得出重复（模拟重启）", () => {
   const path = freshLedgerPath();
   const warns: string[] = [];
   const clock = () => new Date("2026-01-01T00:00:00.000Z");

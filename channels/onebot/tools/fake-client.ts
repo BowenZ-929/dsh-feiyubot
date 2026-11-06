@@ -8,7 +8,7 @@
 // 用法：
 //   node channels/onebot/tools/fake-client.ts
 //   node channels/onebot/tools/fake-client.ts --events event.private.text.json --wait 3000
-//   node channels/onebot/tools/fake-client.ts --url ws://127.0.0.1:6200/ws --interval 800 --wait 4000
+//   node channels/onebot/tools/fake-client.ts --url ws://127.0.0.1:6299/ws --interval 800 --wait 4000
 //
 // 不听话的几种：
 //   --ack-status <ok|failed>   应答里的 status，默认 ok
@@ -40,7 +40,7 @@ if (flag("help")) {
       "fake-client.ts —— 假协议端（也是不听话的协议端）",
       "",
       "基础参数（默认值即老行为）：",
-      "  --url <ws url>       默认 ws://127.0.0.1:6200/ws",
+      "  --url <ws url>       默认 ws://127.0.0.1:6299/ws",
       "  --events <a,b,c>     fixture 文件名或绝对路径，逗号分隔；默认三个 fixture",
       "  --interval <ms>      事件之间的间隔，默认 800",
       "  --wait <ms>          发完停留多久再断开，默认 4000（0 = 常驻）",
@@ -63,7 +63,7 @@ if (flag("help")) {
   process.exit(0);
 }
 
-const url = arg("url", "ws://127.0.0.1:6200/ws");
+const url = arg("url", "ws://127.0.0.1:6299/ws");
 const events = arg("events", DEFAULT_EVENTS.join(",")).split(",").filter((name) => name.length > 0);
 const intervalMs = Number(arg("interval", "800"));
 const dwellMs = Number(arg("wait", "4000"));

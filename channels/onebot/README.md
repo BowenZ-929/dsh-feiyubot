@@ -519,13 +519,13 @@ node channels/onebot/tools/drill.ts --expect-mode send --reconnect    # 再加�
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--expect-mode silent\|send` | `silent` | 通道应有模式，决定跑哪组断言 |
-| `--url <ws url>` | `ws://127.0.0.1:6200/ws` | 通道地址 |
+| `--url <ws url>` | `ws://127.0.0.1:6299/ws` | 通道地址（**演练专用端口**，见 M8） |
 | `--group <id>` | **每次新造**（M4 起每群 1 小时配额，写死一个群会让一小时内的第二遍演练被 `quota_exceeded` 挡住） | 群号 |
 | `--private` + `--user <id>` | `3000000003` | 改跑私聊事件 |
 | `--wait <ms>` | `8000` | 每个观察窗口。**窗口内不早退**，所以必须盖住整批节奏（`send_at` 首泡到末泡 + ack 往返） |
 | `--fail-retcode <n>` | 无 | 收到 action 就回 `retcode=<n>` 的失败 ack |
 | `--reconnect` | 关 | 中间断开 1s 重连，再投第三次 |
-| `--ledger <path>` | `channels/onebot/.state/ledger.jsonl` | 账文件；必须和通道写的是同一个 |
+| `--ledger <path>` | `/tmp/ch-drill/ledger.jsonl` | 账文件；必须和通道写的是同一个（**演练自己的，不是生产账本**） |
 | `--once` | 关 | 只跑第一条断言（A 或 B），不跑去重、重连、旧账重投、在飞重投 |
 | `--no-inflight` | 关 | 不跑断言 F（不想让 drill 在通道里制造在飞并发时） |
 | `--channel-log <path>` | 无 | 通道的 stdout 文件；给了就真数 `plan` 行（F4），不给按 echo 请求号唯一反推 |
@@ -841,119 +841,10 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 | 时机 | tier | deadline |
 | --- | --- | --- |
 | 开批（上一条已取走） | `privateOpen` | `min(now + 3500, firstAt + 8000)` |
-| 续发 | `continuing` | `min(now + 3500, firstAt + 8000)` |
+## 清理演练目录（人工，脚本不许代劳）
 
-# M7 定向门：群里「要不要回」终于有判据
+`/tmp/ch-drill` **不自动清理**——默认删数据正是这轮要治的病。要清就自己敲：
 
-M7 之前群里是零判据：只要有人说话她就接（27 条里 12 条没点名也接）。M7 加一道**定向门**：
-先按一串便宜的判据判断「这条到底是不是在叫她」，判不出来才去问核（核那一次调用同时就是生成回复的那次，不额外多调）。
-
-## 管线（钉死，本轮最容易做错的地方）
-
+```bash
+rm -rf /tmp/ch-drill        # 只清演练自己的目录；生产账本不在清理范围
 ```
-mode 门 → 第一层布尔链 → 第二层(a)(b) 便宜判 → burst 阀 → 配额(charge) → 调核 → 第二层(c) recalled
-        → 没定向就 refund + no_mention（不发） → 三道上限 → runBatch → 决策账一行
-```
-
-- **定向的**（@ / 引用她 / 私聊）：`mode → 定向过 → burst → charge → core → limits → send`。
-- **非定向**（(a)(b) 没中）：`mode → burst → charge → core → (c) → 不过则 refund + no_mention`。
-- 「先拦再调」仍然成立：配额满了连核都不调；(c) 用的就是生成回复那一次核调用。
-- `silent` 不扣配额，但**照样走完定向门与调核**（门是唯一变量：账要能回答「她本来会不会说」）。
-  定向门拦下的那一轮在 silent 下**不会**产生 `blocked` 行——本来就不会说的话，没有「想发什么」可记。
-
-## 第一层：布尔链（顺序：命令 > 定向 > 纯表情/纯图）
-
-| 判据 | 结论 |
-| --- | --- |
-| 去掉行首空白后以 `/` 或 `／` 开头 | **不过**，`command`（人话「没回：那是一条命令」） |
-| 私聊 | **过**，`rule=private`（私聊不做第二层判定） |
-| 群里被 @ 她（`mentionedSelf`；`@全体` 不算） | **过**，`rule=at` |
-| 引用的是**她自己发过的**消息（`replyToId` 命中「她说过的话」集合） | **过**，`rule=quote` |
-| 纯表情包（`isSticker`） | **不过**，`sticker`（「没回：只发了个表情」） |
-| 纯图片无字（`isBareImage`） | **不过**，`media_only`（「没回：只发了张图」） |
-
-**一条「@ 她的命令」仍算命令不过**——命令优先于定向，这是刻意的：`/xxx` 归命令处理，不该触发闲聊回复。
-
-## 第二层：只对未定向的群消息
-
-- **(a) 问号 + 人称**：句子里出现 `questionMarks` 里的任一个（`？ ? 吗 呢`）**且**出现 `personWords` 里的任一个
-  （`你 您 你们 江迟 她`）→ 过，`rule=question+person`。
-- **(b) 外号**：全文命中 `nicknames`（`小肥鱼 哦鲸鲸 本鱼 大肥鱼`）→ 过，`rule=nickname`。
-- **(c) 核记得**：核回包 `recalled` 里的**最高 score** ≥ `recalledMinScore` → 过，`rule=recalled`，
-  并把那个分数记进决策账（`machine.direct.score`）。
-- 全都没中 → `no_mention`（「没回：没叫我」）。**没定向的群消息默认不回**。
-
-### `recalledMinScore` 是占位值
-
-现在是 **0.75**，**未经任何数据校准**——手上没有真实核的 recalled 分数分布。
-选它的理由只有两条：正余弦类相似度里 0.75 大致是「同一件事」的下沿；而且它比 0.8 松一点，
-宁可在校准前多放几条进来、也别把真叫她的话拦死。
-决策账把每次的 `machine.direct.score` 都记下来，就是为了**以后拿真数据重新校准这个数**。
-它不是「概率门控」，没有贝叶斯、没有置信度——就是一个阈值比较。
-
-## 第三层：两道阀
-
-| 阀 | 判据 | 记账 |
-| --- | --- | --- |
-| burst | 同一会话距**上次真正发出**不足 `burstMs`（5000ms）→ 压掉 | `burst_guard`（「没回：刚说过，别连发」） |
-| 配额 | 1 小时 / 群 6 条，`mentionCanExceed=false`（**@ 也计、不能突破**） | `quota_exceeded` |
-
-- burst 窗口**按会话各算**（群是群、私聊是私聊）；`silent` 不更新这个时刻（没发出去就不算说过）。
-- burst 只在「本来要回」的那条路上判（定向的、或非定向但要等 (c) 的）——它挡的是连发，不是判断。
-
-## `data/gate.json`（键名冻结，系数只此一份）
-
-```json
-{ "commandPrefixes": ["/", "／"],
-  "questionMarks": ["？", "?", "吗", "呢"],
-  "personWords": ["你", "您", "你们", "江迟", "她"],
-  "nicknames": ["小肥鱼", "哦鲸鲸", "本鱼", "大肥鱼"],
-  "burstMs": 5000,
-  "recalledMinScore": 0.75 }
-```
-
-代码里不许出现第二个数字：`direct.ts` 只做判定，词表与阈值全部注入（`--gate <path>` 只注入**路径**，
-演练用它给 G1–G19 一份 `burstMs=0` 的临时表，因为那些用例测的不是这道阀）。
-
-## 决策账的 `machine.direct`
-
-```json
-"direct": { "rule": "at", "score": null }              // 定向通过（private / at / quote）
-"direct": { "rule": "recalled", "score": 0.91 }        // 非定向通过（question+person / nickname / recalled）
-"direct": { "rule": null, "score": 0.2 }               // 被门拦下（调过核就记 top score）
-"direct": { "rule": null, "score": null }              // 被门拦下（压根没调核）
-```
-
-新增 `reason_code`：`command` / `sticker` / `media_only` / `burst_guard`（都在 `policy.reasonCodes` 白名单里，
-人话在 `decide.ts`）。`no_mention` 沿用。**ledger 行 schema 一个字没加**：这些理由全在决策账。
-
-## 判据（人拍的，写死在这里）
-
-1. **没定向的群消息默认不回**——这是看场合，不是冷淡。
-2. **@ 也计额度**：被 @ 不是无限通行证（`mentionCanExceed=false`，**覆盖** M4 的「@ 可突破」）。
-3. 以后要上小模型，**只替换第二层**；第一层与两道阀不动。
-
-## 演练：G20（在 `--batch` 里，用真实 gate.json）
-
-10 条群消息：@她 ×2、点名问 ×2、无定向闲聊 ×5、外号 ×1，其中**恰好 1 条**定向落在上一次发出后 5 秒内：
-
-| 断言 | 它在验什么 |
-| --- | --- |
-| G20a | 定向层放行 5 条（2 @ + 2 点名问 + 1 外号），10 行决策账 `direct.rule` 序列可读 |
-| G20b | burst 压掉 1 条（`reason=burst_guard`） |
-| G20c | 实际发出 4 条（4 个 action 帧） |
-| G20d | 5 条无定向闲聊全部 `no_mention`，且 `direct.score=0.2`（核的 recalled 真被比过） |
-| G20e/f/g | 命令 → `command`、纯表情 → `sticker`、纯图无字 → `media_only` |
-| G20h | 打满 6 次后第 7 条是 @ 她 → 仍 `quota_exceeded`（@ 不是通行证） |
-
-## 已知边界
-
-1. **A–F 组需要一个会回 `recalled` 的核**：drill 的 fixture 是「在吗」（没有称人词/外号），
-   所以它靠 (c) 放行；核不回 recalled 时它会被 `no_mention` 挡下——**那是新口径的正常结果**，
-   不是回归。drill 自带的假核默认回 `recalled [{score:0.9}]`，带 `LOWRECALL` 标记的回 0.2。
-2. **一段多句时，判词用整段原话拼接**（`meta.texts.join("")`）：只要这一段里有一条 @ 她 / 引用她，
-   整段就算定向；命令前缀按「这一段最后一条」的开始字符判。
-3. **burst 时刻只存内存**：进程重启后第一次不会再被「刚说过」压住（账里查得到，但这道阀不追求跨重启一致）。
-4. **定向门拦下的轮次在 ledger 里没有结论行**（只有 `batched`）：理由全在决策账，这是 M4 就定下的分工。
-5. **`replyToId` 只认 `reply` 段的 `id`**：协议端若把引用塞在 CQ 码或别的字段里，这里读不到——
-   读不到就按「没引用」处理（宁可少搭一句，也不误判成引用她）。

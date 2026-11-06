@@ -19,7 +19,7 @@
 import WebSocket from "ws";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
@@ -29,7 +29,11 @@ import { loadGateWords } from "../direct.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(HERE, "..", "fixtures");
-const DEFAULT_LEDGER = resolve(HERE, "..", ".state", "ledger.jsonl");
+// M8 隔离：演练的默认值全部指向自己的端口与自己的状态目录。
+// 生产端口与生产账本目录演练一个字节都不许碰（这条由 hygiene.test.ts 守门）。
+const DRILL_PORT = 6299;
+const DRILL_STATE = "/tmp/ch-drill";
+const DRILL_URL = "ws://127.0.0.1:" + DRILL_PORT + "/ws";
 
 const now = (): string => new Date().toISOString();
 const say = (message: string): void => console.log(now() + " [drill] " + message);
@@ -54,6 +58,8 @@ export type Config = {
   batch: boolean;
   // G14 组（POST /say 主动开口）：同样自成一体，默认不跑，免得影响既有 40 条节奏。
   say: boolean;
+  // 演练自己的状态目录（账 / 决策账 / 配额 / own 全在里面）。默认 /tmp/ch-drill。
+  state: string;
   decisions: string;
   help: boolean;
 };
@@ -72,13 +78,15 @@ const has = (argv: string[], name: string): boolean => argv.includes("--" + name
 const freshGroupId = (): number => 700_000_000 + ((Date.now() % 1_000_000) * 100 + (process.pid % 100));
 
 export const parseConfig = (argv: string[]): Config => {
+  // 状态目录先定：ledger / decisions 的默认值都挂在它下面。
+  const state = raw(argv, "state") ?? DRILL_STATE;
   const expectRaw = raw(argv, "expect-mode") ?? "silent";
   const expectMode = expectRaw === "send" ? "send" : "silent";
   const privateMode = has(argv, "private");
   const failRetcodeRaw = raw(argv, "fail-retcode");
   const failRetcode = failRetcodeRaw === undefined ? null : Number(failRetcodeRaw);
   return {
-    url: raw(argv, "url") ?? "ws://127.0.0.1:6200/ws",
+    url: raw(argv, "url") ?? DRILL_URL,
     expectMode,
     scene: privateMode ? "private" : "group",
     groupId: Number(raw(argv, "group") ?? String(freshGroupId())),
@@ -86,7 +94,7 @@ export const parseConfig = (argv: string[]): Config => {
     wait: Number(raw(argv, "wait") ?? "8000"),
     failRetcode: failRetcode !== null && Number.isFinite(failRetcode) ? failRetcode : null,
     reconnect: has(argv, "reconnect"),
-    ledger: raw(argv, "ledger") ?? DEFAULT_LEDGER,
+    ledger: raw(argv, "ledger") ?? join(state, "ledger.jsonl"),
     once: has(argv, "once"),
     // 断言 F 默认跑；--no-inflight 关掉（不想让 drill 在通道里制造在飞并发时用）。
     inflight: !has(argv, "no-inflight"),
@@ -95,7 +103,8 @@ export const parseConfig = (argv: string[]): Config => {
     // G 组（合批）自成一体：自己起假核 + 通道，不碰 --url 上那个。
     batch: has(argv, "batch"),
     say: has(argv, "say"),
-    decisions: raw(argv, "decisions") ?? DEFAULT_DECISIONS,
+    state,
+    decisions: raw(argv, "decisions") ?? join(state, "decisions.jsonl"),
     help: has(argv, "help"),
   };
 };
@@ -106,14 +115,15 @@ export const printHelp = (): void => {
     "",
     "参数：",
     "  --expect-mode silent|send  通道应有的模式（决定跑哪组断言），默认 silent",
-    "  --url <ws url>             通道地址，默认 ws://127.0.0.1:6200/ws",
+    "  --url <ws url>             通道地址，默认 ws://127.0.0.1:6299/ws（演练专用端口）",
+    "  --state <dir>              演练自己的状态目录，默认 /tmp/ch-drill（账/决策账/配额/own 都在里面）",
     "  --group <id>               群号（群消息的目标），默认每次新造（M4 有每群 1 小时配额）",
     "  --user <id>                私聊对象 QQ 号，默认 3000000003",
     "  --private                  改跑私聊事件（用的是 fixtures/event.private.text.json 的结构）",
     "  --wait <ms>                每个观察窗口的毫秒数，默认 8000；窗口内不早退",
     "  --fail-retcode <n>         收到 action 就回 retcode=<n> 的失败 ack，断言账里 kind=failed 且 retcode=n",
     "  --reconnect                中间断开 1s 再重连，把同一 messageId 投第三次，断言仍不出站且 dup 再 +1",
-    "  --ledger <path>            账文件，默认 channels/onebot/.state/ledger.jsonl",
+    "  --ledger <path>            账文件，默认 <state>/ledger.jsonl",
     "  --once                     只跑第一条断言（不跑去重、重连、旧账重投、在飞窗口重投）",
     "                             断言 E 自动跑：拿账里早已存在的 key 重投，验去重认盘不认内存",
     "                             断言 F 自动跑（仅 send）：第一批还没发完就重投，验认领是同步占位",
@@ -121,7 +131,7 @@ export const printHelp = (): void => {
     "  --channel-log <path>       通道的 stdout 文件；给了就真数 plan 行（F4），不给按 echo 请求号反推",
     "  --batch                    只跑 G 组（合批）：drill 自己起假核 + 独用端口的通道，不碰 --url 上那个",
     "  --say                      只跑 G14 组（POST /say 主动开口），自己起通道，不调核",
-    "  --decisions <path>         G 组读的决策账，默认 channels/onebot/.state/decisions.jsonl",
+    "  --decisions <path>         G 组读的决策账，默认 <state>/decisions.jsonl",
     "  --help                     打印这段说明",
     "",
     "退出码：全 PASS 为 0，任何一条 FAIL 或连不上为 1。",
@@ -407,14 +417,13 @@ const printTable = (): boolean => {
 // 所以它自己起一个假核 + 一个独用端口的通道，跑完就关。这是 drill 里唯一会起进程的地方。
 const CHANNEL_DIR = resolve(HERE, "..");
 const SERVER_PATH = resolve(CHANNEL_DIR, "server.ts");
-const DEFAULT_DECISIONS = resolve(CHANNEL_DIR, ".state", "decisions.jsonl");
-const QUOTA_PATH = resolve(CHANNEL_DIR, ".state", "quota.json");
-
-// 配额文件里这个群还剩几条时间戳：G11/G12 用它证明「refund 真退回去了 / silent 根本没扣」。
-const quotaStamps = (groupId: number): number[] => {
-  if (!existsSync(QUOTA_PATH)) return [];
+// 配额文件跟着 --state 走：演练自己的目录，绝不读生产账本。
+const quotaStamps = (state: string, groupId: number): number[] => {
+  const path = join(state, "quota.json");
+  if (!existsSync(path)) return [];
   try {
-    const state = JSON.parse(readFileSync(QUOTA_PATH, "utf8")) as { groups?: Record<string, unknown> };
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { groups?: Record<string, unknown> };
+    const state = parsed;
     const list = state.groups?.["group:" + groupId];
     return Array.isArray(list) ? list.filter((item): item is number => typeof item === "number") : [];
   } catch {
@@ -611,6 +620,14 @@ const freePort = async (): Promise<number> =>
     });
   });
 
+// 端口是不是空的：自己去 bind 一下（能 bind 就说明没人监听）。
+const portFree = (port: number): Promise<boolean> =>
+  new Promise<boolean>((resolveProbe) => {
+    const probe = createNetServer();
+    probe.once("error", () => resolveProbe(false));
+    probe.listen(port, "127.0.0.1", () => probe.close(() => resolveProbe(true)));
+  });
+
 const portIsOpen = (port: number): Promise<boolean> =>
   new Promise<boolean>((resolveProbe) => {
     const dialer = netDial({ port, host: "127.0.0.1" });
@@ -628,11 +645,24 @@ const portIsOpen = (port: number): Promise<boolean> =>
 
 type Channel = { port: number; url: string; dump: () => string; stop: () => Promise<void> };
 
-// 起一个独用端口的通道：不抢线上那个 6200，也不受线上通道影响。
-const startChannel = async (coreUrl: string, mode: "send" | "silent", gatePath?: string): Promise<Channel> => {
+// 起一个独用端口的通道：不抢生产端口，也不受线上通道影响（状态目录一律用 --state 传下去）。
+const startChannel = async (
+  coreUrl: string,
+  mode: "send" | "silent",
+  stateDir: string,
+  gatePath?: string,
+): Promise<Channel> => {
   let lastDump = "";
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const port = await freePort();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    // 人拍的口径：演练一律 --port 6299。所以**先试 DRILL_PORT**；
+    // 只有它被占（或者这一轮起失败了）才回退到空闲端口，并打一行说明——绝不悄悄换端口。
+    let port = DRILL_PORT;
+    if (attempt > 0) {
+      port = await freePort();
+    } else if (!(await portFree(DRILL_PORT))) {
+      port = await freePort();
+      say(DRILL_PORT + " 被占，演练改用 " + port);
+    }
     const child: ChildProcess = spawn(
       process.execPath,
       [
@@ -641,6 +671,8 @@ const startChannel = async (coreUrl: string, mode: "send" | "silent", gatePath?:
         coreUrl,
         "--port",
         String(port),
+        "--state",
+        stateDir,
         // G1–G19 不测 burst 阀：给一份 burstMs=0 的临时词表（系数仍从文件读，路径注入）。
         ...(gatePath === undefined ? [] : ["--gate", gatePath]),
       ],
@@ -754,7 +786,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
   const realGate = loadGateWords();
   const fastGatePath = resolve(tmpdir(), `onebot-gate-fast-${process.pid}.json`);
   writeFileSync(fastGatePath, `${JSON.stringify({ ...realGate, burstMs: 0 })}\n`, "utf8");
-  let channel = await startChannel(core.url, "send", fastGatePath);
+  let channel = await startChannel(core.url, "send", config.state, fastGatePath);
   say("G 组：假核 " + core.url + "，通道 " + channel.url + "（mode=send）");
   ackEnabled = true;
   socket = await connect(channel.url);
@@ -1352,7 +1384,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, index + 1, 8000);
         await sleep(120);
       }
-      const afterSilent = quotaStamps(groupId);
+      const afterSilent = quotaStamps(config.state, groupId);
       add("G11a", "6 段 send:false 之后该群配额仍是 0 条（refund 生效）", afterSilent.length === 0, "配额 " + afterSilent.length + " 条");
 
       // 第 7 段正常回包：配额没被白占，必须真的出手。
@@ -1363,7 +1395,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 7, 8000);
       await sleep(400);
       const seventhActions = actionsSince(startSeventh).length;
-      const afterSeventh = quotaStamps(groupId);
+      const afterSeventh = quotaStamps(config.state, groupId);
       add(
         "G11b",
         "第 7 段真的出手（配额只被它自己占了一次）",
@@ -1394,7 +1426,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         "G11c",
         "对照组：6 次真出手之后第 7 次 quota_exceeded 且不出手",
         refusedActions === 0 && lastRow?.machine?.reason_code === "quota_exceeded",
-        "action " + refusedActions + " 个，末行 " + String(lastRow?.machine?.reason_code) + "，配额 " + quotaStamps(groupId).length + " 条",
+        "action " + refusedActions + " 个，末行 " + String(lastRow?.machine?.reason_code) + "，配额 " + quotaStamps(config.state, groupId).length + " 条",
       );
     }
 
@@ -1473,7 +1505,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const mine = rowsFor(readRowsFile(config.ledger), "mid:" + messageId);
       const outboundFail = mine.filter((row) => row.kind === "uncertain" || row.kind === "failed" || row.kind === "unsent");
       const decision = rows[rows.length - 1];
-      const stamps = quotaStamps(groupId);
+      const stamps = quotaStamps(config.state, groupId);
       add("G13a", "出站全败（sent=0）后该群配额仍是 0 条（退还生效）", stamps.length === 0, "配额 " + stamps.length + " 条");
       add(
         "G13b",
@@ -1507,15 +1539,15 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       add(
         "G13d",
         "对照组：正常 ack 的那段配额 1 条（出手过就不退）",
-        controlActions === 1 && quotaStamps(controlGroup).length === 1,
-        "action " + controlActions + " 个，配额 " + quotaStamps(controlGroup).length + " 条",
+        controlActions === 1 && quotaStamps(config.state, controlGroup).length === 1,
+        "action " + controlActions + " 个，配额 " + quotaStamps(config.state, controlGroup).length + " 条",
       );
     }
 
     // ---- G7：silent → 一条 action 都不出，决策账 silent_mode + 账里 blocked ----
     {
       await channel.stop();
-      channel = await startChannel(core.url, "silent", fastGatePath);
+      channel = await startChannel(core.url, "silent", config.state, fastGatePath);
       ackEnabled = false;
       try {
         socket.close();
@@ -1559,7 +1591,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const hits = hitsOf(groupId);
       const actionCount = actionsSince(start).length;
       const blockedRows = rowsFor(readRowsFile(config.ledger), "mid:" + messageId).filter((row) => row.kind === "blocked");
-      const stamps = quotaStamps(groupId);
+      const stamps = quotaStamps(config.state, groupId);
       const lastRow = rows[rows.length - 1];
       add("G12a", "silent 仍然调核 1 次（门是唯一变量）", hits.length === 1, "调核 " + hits.length + " 次");
       add("G12b", "silent：0 个 action 帧", actionCount === 0, "收到 " + actionCount + " 个 action 帧");
@@ -1580,7 +1612,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
     // ---- G20：定向门（第一层 / 第二层 / 两道阀），用**真实** data/gate.json（burstMs=5000） ----
     {
       await channel.stop();
-      channel = await startChannel(core.url, "send");
+      channel = await startChannel(core.url, "send", config.state);
       ackEnabled = true;
       try {
         socket.close();
@@ -1747,7 +1779,7 @@ const runSaySuite = async (config: Config): Promise<void> => {
   const policy = loadPolicy();
   const defaultReplies = policy.outbound.defaultReplies;
   const perGroupMax = policy.quota.perGroupMax;
-  let channel = await startChannel("http://127.0.0.1:1", "send");
+  let channel = await startChannel("http://127.0.0.1:1", "send", config.state);
   ackEnabled = true;
   socket = await connect(channel.url);
   const sayUrl = (): string => "http://127.0.0.1:" + channel.port + "/say";
@@ -1908,7 +1940,7 @@ const runSaySuite = async (config: Config): Promise<void> => {
     // ---- G14b：silent（换一条 silent 通道） ----
     {
       await channel.stop();
-      channel = await startChannel("http://127.0.0.1:1", "silent");
+      channel = await startChannel("http://127.0.0.1:1", "silent", config.state);
       ackEnabled = false;
       try {
         socket.close();

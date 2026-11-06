@@ -9,7 +9,8 @@
 // 解析不在这里重写：一律走 M0 已验收的 parse.ts；合批 / 渲染 / 上限 / 配额 / 决策账都是现成模块，这里只接线。
 import WebSocket, { WebSocketServer } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, join } from "node:path";
+import { accessSync, constants, mkdirSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEvent, type ParsedEvent, type Where } from "./parse.ts";
 import { LEDGER_RELATIVE_PATH, Ledger, dedupKey, dedupNote, readMode, sceneOf, targetOf, type Scene } from "./gate.ts";
@@ -42,11 +43,6 @@ import { OWN_IDS_RELATIVE_PATH, OwnIds } from "./own-ids.ts";
 const HOST = "127.0.0.1";
 const WS_PATH = "/ws";
 const HERE = dirname(fileURLToPath(import.meta.url));
-const LEDGER_PATH = join(HERE, LEDGER_RELATIVE_PATH);
-// 决策账与配额状态跟账同一个目录：一本讲「发了什么」，一本讲「为什么没发」，一本讲「这个小时说了几次」。
-const DECISIONS_PATH = join(HERE, DECISIONS_RELATIVE_PATH);
-const QUOTA_PATH = join(HERE, QUOTA_RELATIVE_PATH);
-const OWN_PATH = join(HERE, OWN_IDS_RELATIVE_PATH);
 
 const now = (): string => new Date().toISOString();
 const log = (tag: string, message: string): void => {
@@ -78,6 +74,24 @@ const CORE_TIMEOUT = readCoreTimeout(
 // 线上就是 data/gate.json，系数一个都没写进代码（只注入路径）。
 const GATE_PATH = argOf("--gate", join(HERE, "data", "gate.json"));
 
+// --state <dir>：账本 / 决策账 / 配额 / 「她说过的话」四个文件全由它派生。
+// 不传 = 模块同级的 .state（与生产行为完全一致，start.command 不用改）。
+// 传了却不合法（缺值 / 建不出来 / 不可写）→ 打一行就以 1 退出，绝不静默落回生产目录。
+const STATE_GIVEN = process.argv.includes("--state");
+const STATE_RAW = argOf("--state", "");
+const STATE_DIR = STATE_GIVEN
+  ? STATE_RAW.trim().length === 0
+    ? ""
+    : isAbsolute(STATE_RAW)
+      ? STATE_RAW
+      : resolve(STATE_RAW)
+  : join(HERE, ".state");
+const LEDGER_PATH = join(STATE_DIR, "ledger.jsonl");
+// 决策账与配额状态跟账同一个目录：一本讲「发了什么」，一本讲「为什么没发」，一本讲「这个小时说了几次」。
+const DECISIONS_PATH = join(STATE_DIR, "decisions.jsonl");
+const QUOTA_PATH = join(STATE_DIR, "quota.json");
+const OWN_PATH = join(STATE_DIR, "own.json");
+
 const describeWho = (event: ParsedEvent): string => {
   const parts = [String(event.who.id)];
   if (event.who.card) parts.push(`名片=${event.who.card}`);
@@ -97,6 +111,21 @@ log("gate", gate.mode === "send" ? "mode=send（会真发出去）" : "mode=sile
 
 // 账是全进程一份：去重集合在启动时就把历史读进来，重连和重启都不重发。
 const ledger = new Ledger({ path: LEDGER_PATH, onWarn: (message) => log("warn", message) });
+
+// --state 的合法性：缺值一律退；给了 --core 才去建目录并试写（M1 仍然一个字节都不落到盘上）。
+if (STATE_GIVEN && STATE_DIR === "") {
+  log("error", "--state= 缺值：不静默落回生产目录，进程退出");
+  process.stdout.write("", () => process.exit(1));
+}
+if (CORE_URL && STATE_DIR !== "") {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    accessSync(STATE_DIR, constants.W_OK);
+  } catch (error) {
+    log("error", `--state 用不了（${STATE_DIR}）：${(error as Error).message}，进程退出`);
+    process.stdout.write("", () => process.exit(1));
+  }
+}
 
 // M4 的几件东西只在给了 --core 时才有：M1 不许建 .state，也不许写任何账（读盘不是写盘，但没必要读）。
 let policy: Policy | null = null;
