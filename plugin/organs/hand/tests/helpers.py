@@ -16,7 +16,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from organs.home import cards as home_cards
 from organs.home import residents as home_residents
+from organs.home import rooms as home_rooms
 from organs.hand import store
+
+#: 家的门读的那份配置（可写哪几间）。
+ACCESS_NAME = "access.json"
 
 #: 固定的「现在」：用例不看本机时钟，也就不会半夜跑挂。
 NOW = "2026-11-06T09:00:00+09:00"
@@ -92,6 +96,41 @@ def register_asset(root: Any, path: Any, by: str = "测试") -> Dict[str, Any]:
     """把一张图登记进家·仓库（只记指针）。家的写口只有一个：residents.register_asset。"""
     return home_residents.register_asset(root=home_root(root), by=by, path=str(path),
                                          note="测试用")
+
+
+def make_home(root: Any) -> Path:
+    """临时家根：房表里的每一间都建出来，再放一份 access.json（家的门要读它）。
+
+    可写的那几间**从家的房表取**（`rooms.DEFAULT_WRITABLE`），不在这里另抄一串房名。
+    """
+    home = home_root(root)
+    for name in home_rooms.ROOM_NAMES:
+        (home / name).mkdir(parents=True, exist_ok=True)
+    (home / ACCESS_NAME).write_text(
+        json.dumps({"version": 1, "writable": sorted(home_rooms.DEFAULT_WRITABLE)}),
+        encoding="utf-8")
+    return home
+
+
+def shelf_dir(root: Any, kind: str) -> Path:
+    """抽屉里那一格的目录（房名与格子名都从家取）。"""
+    return home_root(root) / home_cards.SHELF_ROOM / kind
+
+
+def register_portrait(root: Any, name: str, data: bytes = IMAGE_BYTES,
+                      kind: str = home_residents.ARTWORK_KIND) -> Path:
+    """照家的真写法登记一张**抽屉**卡：卡上只记指针（image_path + sha256 + bytes）。
+
+    工作台上那张 `register_artwork` 是画到一半的工作稿，不进抽屉——要演「她的真图在抽屉里」，
+    得走家的 `cards.append_cards`（与实盘里 自画像-1 那张同一个口）。
+    """
+    image = make_image(shelf_dir(root, kind), name, data)
+    home_cards.append_cards(
+        root=home_root(root), role="human", by="人",
+        cards=[{"room": home_cards.SHELF_ROOM, "kind": kind, "name": name,
+                "params": {"image_path": str(image), "sha256": sha256_of(data),
+                           "bytes": len(data)}}])
+    return image
 
 
 def warehouse(root: Any) -> List[Dict[str, Any]]:

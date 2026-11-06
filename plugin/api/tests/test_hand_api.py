@@ -30,6 +30,7 @@ from api import core as api_core
 from api import hand as hand_api
 from organs.hand import actions
 from organs.hand import permit as hand_permit
+from organs.hand import whitelist as hand_whitelist
 
 PLUGIN = Path(__file__).resolve().parents[2]
 
@@ -110,16 +111,34 @@ class SnapshotTest(HandApiTest):
         status, payload = self.get("/hand", who=WHO, now=NOW, root=self.root)
         self.assertEqual(200, status)
         self.assertTrue(payload["ok"])
-        self.assertEqual(["add_task", "complete_task", "send_image", "draw"], payload["actions"])
-        self.assertEqual({"add_task", "complete_task", "send_image", "draw"}, set(payload["risk"]))
+        self.assertEqual(["add_task", "complete_task", "send_image", "draw", "set_style"],
+                         payload["actions"])
+        self.assertEqual({"add_task", "complete_task", "send_image", "draw", "set_style"},
+                         set(payload["risk"]))
         for level in payload["risk"].values():
             self.assertIn(level, hand_permit.RISK_LEVELS)
         self.assertEqual({"add_task": False, "complete_task": False,
-                          "send_image": False, "draw": False}, payload["needs_grant"])
+                          "send_image": False, "draw": False, "set_style": False},
+                         payload["needs_grant"])
         self.assertEqual(WHO, payload["who"])
         self.assertEqual({"limit": LIMIT, "used": 2, "remaining": LIMIT - 2,
                           "source": "live"}, payload["quota"])
         self.assertTrue(payload["limits_note"])
+
+    def test_style_keys_are_the_two_writable_knobs_with_their_ranges(self):
+        """/hand 多一格 style_keys：`set_style` 能改哪两样、各自能写多少。
+
+        范围的真源在手的 whitelist.STYLE_KEYS（手按它判）；本层只是把它搬上只读面，
+        所以这里对着**手的常量**比，而不是对着这个文件里另抄的一份。
+        """
+        status, payload = self.get("/hand", who=WHO, now=NOW, root=self.root)
+        self.assertEqual(200, status)
+        self.assertEqual({"chunks_per_reply": [1, 3], "max_chars": [10, 80]},
+                         payload["style_keys"])
+        self.assertEqual({name: list(bounds)
+                          for name, bounds in hand_whitelist.STYLE_KEYS.items()},
+                         payload["style_keys"], "不许在这个文件里另抄一份范围")
+        json.dumps(payload, ensure_ascii=False)     # 两种形状都得能出成 JSON
 
     def test_needs_grant_and_risk_follow_the_permit_table(self):
         """快照里的风险档与授权栏都是从 permit 派生的，不是本层抄一份常量。"""

@@ -7,7 +7,10 @@
     python3 -m organs.hand.cli permit --action add_task --root /tmp/hand
     python3 -m organs.hand.cli status --root /tmp/hand
     python3 -m organs.hand.cli send-image --scene 客厅 --target 阿禾 --name 参考图.png --root /tmp/hand
+    python3 -m organs.hand.cli send-image --scene 客厅 --target 阿禾 --utterance "给我看你的自画像" --root /tmp/hand
     python3 -m organs.hand.cli draw --description "一只在窗台上打盹的猫" --scene 客厅 --target 阿禾 --root /tmp/hand
+    python3 -m organs.hand.cli set-style --utterance "一句话说完，别分开发" --root /tmp/hand
+    python3 -m organs.hand.cli set-style --key max_chars --value 30 --root /tmp/hand
 
 `--root` 指到**手自己的实盘目录**（家的目录按兄弟目录换算），所以冒烟永远指临时根，
 仓里的 home/ 一个字节都不动。`--at` 指定「现在」（带偏移的 ISO），让演示不看本机时钟。
@@ -21,7 +24,8 @@ from typing import Any, Dict, Optional, Sequence
 
 from . import actions, ledger, permit, quota, store, whitelist
 
-COMMANDS = ("add", "complete", "due", "ledger", "permit", "status", "send-image", "draw")
+COMMANDS = ("add", "complete", "due", "ledger", "permit", "status", "send-image", "draw",
+            "set-style")
 
 
 def _base(state: str, action: str, code: str, say: str, who: str,
@@ -42,12 +46,18 @@ def _cmd_complete(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _cmd_send_image(args: argparse.Namespace) -> Dict[str, Any]:
     return actions.send_image(who=args.who, scene=args.scene, target=args.target,
-                              path=args.path, name=args.name, now=args.at, root=args.root)
+                              path=args.path, name=args.name, utterance=args.utterance,
+                              now=args.at, root=args.root)
 
 
 def _cmd_draw(args: argparse.Namespace) -> Dict[str, Any]:
     return actions.draw(who=args.who, description=args.description, scene=args.scene,
                         target=args.target, now=args.at, root=args.root)
+
+
+def _cmd_set_style(args: argparse.Namespace) -> Dict[str, Any]:
+    return actions.set_style(who=args.who, key=args.key, value=args.value,
+                             utterance=args.utterance, now=args.at, root=args.root)
 
 
 def _cmd_due(args: argparse.Namespace) -> Dict[str, Any]:
@@ -91,13 +101,13 @@ def _cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
 
 HANDLERS = {"add": _cmd_add, "complete": _cmd_complete, "due": _cmd_due,
             "ledger": _cmd_ledger, "permit": _cmd_permit, "status": _cmd_status,
-            "send-image": _cmd_send_image, "draw": _cmd_draw}
+            "send-image": _cmd_send_image, "draw": _cmd_draw, "set-style": _cmd_set_style}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m organs.hand.cli",
-        description="手：四个动作 + 三层许可 + 一本只增的手账。每条命令打一行 JSON。")
+        description="手：五个动作 + 三层许可 + 一本只增的手账。每条命令打一行 JSON。")
     parser.add_argument("cmd", choices=COMMANDS)
     parser.add_argument("--who", default="1000xxxx", help="谁在动（回执里的 who）")
     parser.add_argument("--title", default=None, help="add：任务名（家的路径形状要过）")
@@ -110,8 +120,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", default=None,
                         help="send-image／draw：群号或 QQ 号（数字；出站时是 JSON 数字）")
     parser.add_argument("--path", default=None, help="send-image：图的绝对路径（与 --name 二选一）")
-    parser.add_argument("--name", default=None, help="send-image：图在家·仓库里的名字（与 --path 二选一）")
+    parser.add_argument("--name", default=None,
+                        help="send-image：图在家的名字（与 --path 二选一；也可以只给 --utterance）")
     parser.add_argument("--description", default=None, help="draw：画什么")
+    parser.add_argument("--key", default=None,
+                        help="set-style：只认 chunks_per_reply（1–3）或 max_chars（10–80）")
+    parser.add_argument("--value", default=None, help="set-style：那一个旋钮要改成几（整数）")
+    parser.add_argument("--utterance", default=None,
+                        help="send-image：她那句话（给我看你的自画像）；"
+                             "set-style：她那句话（一句话说完 / 说短点 / 一次别超20字）")
     parser.add_argument("--at", default=None, help="指定「现在」（带偏移的 ISO），演示用")
     parser.add_argument("--root", default=None, help="临时实盘根（手自己的目录），默认走 organ_dir")
     parser.add_argument("--limit", type=int, default=None,

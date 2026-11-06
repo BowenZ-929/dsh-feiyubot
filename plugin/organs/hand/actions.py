@@ -1,13 +1,20 @@
-"""四个动作 + 一个只读查询：把「做成一件事」做成能断言的回执。
+"""五个动作 + 一个只读查询：把「做成一件事」做成能断言的回执。
 
 统一信封（api 与面板就按这个读，**八键与三态冻结**）：
     {"state": "done"|"refused"|"failed", "action", "code", "say", "who",
      "card_id": str|None, "detail": {...}, "ledger_id": str|None}
 
-码表冻结：refused ∈ {ACTION_NOT_ALLOWED, GRANT_REQUIRED, QUOTA_EXCEEDED, MISSING_DUE}；
-failed ∈ {HOME_WRITE_FAILED, LEDGER_WRITE_FAILED,
+码表冻结：refused ∈ {ACTION_NOT_ALLOWED, GRANT_REQUIRED, QUOTA_EXCEEDED, MISSING_DUE,
+          STYLE_NOT_UNDERSTOOD, IMAGE_NOT_UNDERSTOOD, KEY_NOT_ALLOWED, VALUE_OUT_OF_RANGE}；
+failed ∈ {HOME_WRITE_FAILED, HOME_READ_FAILED, LEDGER_WRITE_FAILED,
           IMAGE_NOT_FOUND, DRAW_UNAVAILABLE, DRAW_FAILED,
           CHANNEL_UNREACHABLE, SEND_FAILED, CHANNEL_BLOCKED}；成功 code="OK"。
+（本批新增的三个 refused 码都归 `set_style`：没听懂／改的不是「怎么说话」／数越界。三件事
+面板要分得开——「没听懂」再问一句就行，「不在这里」是换个说法也没用，「越界」是把范围说给她。
+另加一个 failed 码 HOME_READ_FAILED：改口吻之前要先读出旧值，**读不出来就不动手**——
+拿不到旧值还硬写，账上那句「原来是什么」就成了编的。）
+本批再加一个 refused 码 IMAGE_NOT_UNDERSTOOD：句子里认不出「想看哪张图」就反问——它是**没听懂**，
+不是**图没找着**（`IMAGE_NOT_FOUND` 是「听懂了、家里没有」）：两件事面板要分得开。）
 **「她拒绝」不许写成 failed**——拒绝是她的判断，失败是系统没办成，两件事面板要分得开。
 **「没发出去」也不许写成 done**：发图与画图都只认通道的 ok && sent>0，人话里带通道给的数与理由码，
 手自己从不声明「发过了」。
@@ -28,11 +35,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from organs.home import access as home_access
+from organs.home import add_preference as home_add_preference
 from organs.home import cards as home_cards
+from organs.home import preference_of as home_preference_of
 from organs.home import residents as home_residents
 from organs.home import store as home_store
 
-from . import assets, channel, ledger, permit, quota, store, timelang
+from . import assets, channel, imgphrase, ledger, permit, quota, store, stylelang, timelang, whitelist
 from . import draw as draw_client
 
 #: 手替她动家：家的口径里 organ 不过白名单门（那是给 agent 的），但仍过路径形状与日额度。
@@ -263,7 +272,9 @@ DRAW_FAILED_SAY = "画是画了，但一张能用的都没有，我没落盘"
 DRAW_LAND_FAILED_SAY = "画是画了，但没落到我的盘上，这次不算做成"
 DRAW_REGISTER_FAILED_SAY = "画出来了、也落盘了，但没登记进仓库，这次不算做成"
 SEND_BOTH_SAY = "给了一个路径又给了一个名字：二选一，我不替你挑"
-SEND_NEITHER_SAY = "既没给图在哪、也没给它在仓库里叫什么：说一个我才知道发哪张"
+SEND_NEITHER_SAY = "既没给图在哪、也没给名字、也没说想看哪张：说一个我才知道发哪张"
+SEND_MIXED_SAY = "给了话又直接给了图或名字：说一样就够了，我不替你挑"
+SEND_WHICH_SAY = "你想看哪张图？说个名字给我（比如「自画像」）"
 TARGET_SAY = "发给谁得是群号或 QQ 号（数字）"
 SCENE_SAY = "场景只认 group（群）或 private（私聊）"
 
@@ -370,32 +381,39 @@ def _fields_failed(*, who: str, action: str, params: Dict[str, Any], now: Any, r
                            "scene": scene, "target": target})
 
 
-def _resolve_image(*, path: Any, name: Any, root) -> Dict[str, Any]:
-    """图从哪来：给绝对路径，或给家·仓库里的名字——**二选一，不自作主张**。
+def _resolve_image(*, path: Any, name: Any, utterance: Any, root) -> Dict[str, Any]:
+    """图从哪来：给绝对路径、给名字、给她那句话解出来的名字——**三样只许一样**，不自作主张。
 
-    从仓库取时**只取指针**（路径与指纹），图的本体一个字节都不复制。
+    从家里取时**只取指针**（路径与指纹），图的本体一个字节都不复制；`source` 报的是
+    **命中的那一间房**（房名从 `find_asset` 来，手里不写房名）。
     """
     given_text = "" if path is None else str(path).strip()
     named = "" if name is None else str(name).strip()
+    said = "" if utterance is None else str(utterance).strip()
     if given_text and named:
         return _bad_argument(SEND_BOTH_SAY, "BOTH_PATH_AND_NAME")
-    if not given_text and not named:
+    if said and (given_text or named):
+        # 话与直给不是一回事：两个都给就等于让我替她挑，所以码另起一个，别混进 BOTH_PATH_AND_NAME。
+        return _bad_argument(SEND_MIXED_SAY, "UTTERANCE_AND_SOURCE")
+    if not (given_text or named or said):
         return _bad_argument(SEND_NEITHER_SAY, "NEITHER_PATH_NOR_NAME")
 
+    named = named or said          # 话已经由 imgphrase 解成了一个名字，往下走同一条路
     if named:
         try:
-            found = assets.find_asset(name=str(name), root=root)
+            found = assets.find_asset(name=str(named), root=root)
         except (home_cards.CardError, home_store.StoreError, OSError) as exc:
             origin = _origin_of(exc)
-            return _not_found("仓库没读出来（%s），图也就没找着" % origin, origin)
+            return _not_found("家里没读出来（%s），图也就没找着" % origin, origin)
         if not found["found"]:
-            return _not_found("仓库里没有叫「%s」的素材卡或借阅条" % named, str(found["reason"]))
+            return _not_found("家里没有叫「%s」的图" % named, str(found["reason"]))
         if not found["exists"]:
-            return _not_found("仓库里那张「%s」记的路径不在了：%s"
+            return _not_found("家里那张「%s」记的路径不在了：%s"
                               % (named, found["path"]), str(found["reason"]), found["path"])
         return {"ok": True, "code": "OK", "path": found["path"], "sha256": found["sha256"],
                 "name": named, "card_id": found["card_id"], "kind": found["kind"],
-                "bytes": found["bytes"], "source": "仓库"}
+                "bytes": found["bytes"], "source": found["room"],
+                "picked_reason": found["picked_reason"], "room": found["room"]}
 
     given = Path(given_text)
     if not given.is_absolute():
@@ -410,23 +428,38 @@ def _resolve_image(*, path: Any, name: Any, root) -> Dict[str, Any]:
         return _not_found("这个文件读不出来：%s（%s）" % (given_text, origin), origin, given_text)
     return {"ok": True, "code": "OK", "path": str(given), "sha256": digest,
             "name": given.name, "card_id": None, "kind": None, "source": "路径",
-            "bytes": given.stat().st_size}
+            "bytes": given.stat().st_size, "picked_reason": None, "room": None}
 
 
 def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any = None,
-               now: Any = None, root=None) -> Dict[str, Any]:
-    """把一张图交给通道发出去：图从家·仓库取（只取指针），或直接给绝对路径。
+               utterance: Any = None, now: Any = None, root=None) -> Dict[str, Any]:
+    """把一张图交给通道发出去：图从家里取（只取指针），或直接给绝对路径。
+
+    `utterance` 是**可选**的名字来源：给了就走 imgphrase 那张短语表，解出名字再照旧去家里找。
+    解不出就**反问**（refused/IMAGE_NOT_UNDERSTOOD，零写入），不猜、不拿整句话当文件名——
+    「没听懂」和「图没找着」是两件事（同 stylelang 那条口径）。
 
     **手自己绝不声明「发过了」**：只有通道回 `ok == true` 且 `sent > 0` 才记 done，
     人话里带通道给的 sent 与理由码；sent=0、连不上、回的东西不对劲，一律 failed。
     """
     started = time.monotonic()
-    params: Dict[str, Any] = {"scene": scene, "target": target, "path": path, "name": name}
+    params: Dict[str, Any] = {"scene": scene, "target": target, "path": path, "name": name,
+                              "utterance": utterance}
     permitted = permit.check("send_image", who=who, now=now, root=root)
     if not permitted["allowed"]:
         return _refuse(who=who, action="send_image", params=params, now=now, root=root,
                        started=started, code=str(permitted["code"]), say=permitted["say"],
                        detail=permitted["detail"])
+
+    said = "" if utterance is None else str(utterance).strip()
+    wanted_name = None
+    if said:
+        wanted_name = imgphrase.parse(utterance)
+        if wanted_name is None:
+            # 认不出就反问：这是「没听懂」，不是「图没找着」，所以走 refused、一个字都不写。
+            return _refuse(who=who, action="send_image", params=params, now=now, root=root,
+                           started=started, code="IMAGE_NOT_UNDERSTOOD", say=SEND_WHICH_SAY,
+                           detail={"stage": "understand", "utterance": utterance})
 
     ledger_id, failure = _begin(who=who, action="send_image", params=params, now=now,
                                 root=root, started=started)
@@ -439,14 +472,15 @@ def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any
                               started=started, ledger_id=ledger_id, problem=problem,
                               scene=scene, target=target)
 
-    resolved = _resolve_image(path=path, name=name, root=root)
+    resolved = _resolve_image(path=path, name=name, utterance=wanted_name, root=root)
     if not resolved["ok"]:
         return _settle(who=who, action="send_image", params=params, now=now, root=root,
                        started=started, ledger_id=ledger_id, state="failed",
                        code=str(resolved["code"]), say=str(resolved["say"]),
                        origin=str(resolved["origin"]),
                        detail={"stage": "resolve", "reason": resolved["origin"],
-                               "path": resolved.get("path"), "name": name})
+                               "path": resolved.get("path"), "name": name,
+                               "utterance": utterance, "wanted": wanted_name})
 
     outcome = channel.say_image(scene=scene_value, target=target_value, path=resolved["path"],
                                 name=resolved["name"])
@@ -457,6 +491,8 @@ def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any
                               "sent": outcome.get("sent"),
                               "reason_code": outcome.get("reason_code"),
                               "source": resolved["source"],
+                              "source_room": resolved["room"],
+                              "picked_reason": resolved["picked_reason"],
                               "source_card_id": resolved["card_id"],
                               "channel_url": outcome.get("url"),
                               "http": outcome.get("http"), "error": outcome.get("error")}
@@ -565,6 +601,204 @@ def draw(*, who: str, description: Any, scene: Any, target: Any, now: Any = None
                    say="画出来了、但没发出去：%s" % _send_tail(outcome),
                    origin=_send_origin(outcome), card_id=card_id,
                    detail=dict(detail, card=_card_brief(card)))
+
+
+# ---- 怎么说话：只改旋钮，不改她是谁（set_style） ---------------------------
+# 与其它动作同一条流：三层闸 → 先落 reserved 再动手 → 结果行写不进就改判 failed。
+# 不一样的只有「改什么」：不落新卡、不发明文，只往家·名片盒的偏好卡上再追加一行。
+# 还有一条只有它有的顺序：**动手前先读出旧值**——账上那句「原来是什么」得是真读来的。
+
+STYLE_NOT_UNDERSTOOD_SAY = "你想让我怎么说话？短一点，还是一句话说完？"
+STYLE_READ_FAILED_SAY = "没读出你现在的口径，我就没动它"
+#: 每个旋钮的人话叫法。与 whitelist.STYLE_KEYS 一一对应（加旋钮忘了改这里，用例会红）。
+STYLE_LABELS = {"chunks_per_reply": "一泡几句", "max_chars": "一次几个字"}
+#: 结果行额外记的账目（并进 params：账仍是「一行一动作」，不另加第九格）。
+STYLE_ACCOUNTING: Tuple[str, ...] = ("key", "value", "old", "old_source", "card_id",
+                                     "who", "target_who", "source")
+
+
+def _style_keys_say(key: Any) -> str:
+    """KEY_NOT_ALLOWED 的人话：点名能改的那两样，并**明说「改她是谁」不在这里**。
+
+    范围从 whitelist.STYLE_KEYS 里取，不在这里抄第二份——加旋钮时这句话跟着变。
+    """
+    parts = ["%s（%s，%d–%d）" % (name, STYLE_LABELS.get(name, name), low, high)
+             for name, (low, high) in whitelist.STYLE_KEYS.items()]
+    return ("只能改这两样：%s——「改她是谁」（身份／人设／名字／魂）不在这里，收到 %r"
+            % ("、".join(parts), key))
+
+
+def _style_done_say(key: str, value: int, old: Any, old_source: str) -> str:
+    """改成什么了、原来是什么：原来没有就直说「以前没设过」，不拿默认值冒充旧值。"""
+    label = STYLE_LABELS.get(key, key)
+    if old_source == "live" and old == value:
+        return "记住了：%s 还是 %s（你要的就是现在这样，我又记了一行）" % (label, value)
+    if old_source == "live" and old is not None:
+        return "记住了：%s 从 %s 改成 %s（想改回去再说一句就行）" % (label, old, value)
+    return "记住了：%s 是 %s（以前没设过，这是第一次）" % (label, value)
+
+
+def _style_int(value: Any) -> Optional[int]:
+    """旋钮的数值收口：int 收、纯数字串转 int、**其余一律 None（不猜）**。
+
+    为什么收纯数字串：命令行 `--value` 天生是字符串（`set-style --value 20`），面板给的是数字，
+    同一个数有两种形状——无损转换不算猜，不转就等于「命令行永远改不了口径」。
+    为什么拒 bool 与浮点：bool 是 int 的子类（True 会悄悄变成 1），20.5 收成 20 是替她把话说窄了；
+    这两种都是「看起来像数」的猜测，宁可回一句范围让她再说一遍。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            try:
+                return int(text)
+            except ValueError:      # 全角／上标数字：isdigit 为真但 int() 不认
+                return None
+    return None
+
+
+def _style_target(*, key: Any, value: Any,
+                  utterance: Any) -> Tuple[Optional[Dict[str, Any]],
+                                           Optional[Dict[str, Any]]]:
+    """这次要改哪一格 → (目标, 问题)。两条入口二选一，认不出就反问、**一个字都不写**。
+
+    两条都给时按 utterance 办：她说出口的那句话就是这次请求，面板上的旋钮是上一次的读数。
+    """
+    said = utterance if isinstance(utterance, str) else ""
+    if said.strip():
+        parsed = stylelang.parse(said)
+        if parsed is None:
+            return None, {"code": "STYLE_NOT_UNDERSTOOD", "say": STYLE_NOT_UNDERSTOOD_SAY,
+                          "reason": "unreadable"}
+        got_key, got_value = parsed
+        return {"key": got_key, "value": got_value, "source": "utterance"}, None
+    if key is None and value is None:
+        return None, {"code": "STYLE_NOT_UNDERSTOOD", "say": STYLE_NOT_UNDERSTOOD_SAY,
+                      "reason": "nothing_given"}
+    return {"key": key, "value": value, "source": "direct"}, None
+
+
+def _pref_read(who: str, home) -> Dict[str, Any]:
+    """读这个人的偏好卡：**没有卡就是 {}**（不补 0、不补默认值，家那边同一条口径）。
+
+    这是与家之间的一处薄适配：家换参数形状时只改这一行，动作层不看它怎么拼。
+    """
+    return dict(home_preference_of(root=home, who=who) or {})
+
+
+def _pref_write(who: str, key: str, value: int, *, before: Dict[str, Any], home,
+                at: Any) -> Dict[str, Any]:
+    """改一个旋钮，**把另一个旋钮现在的值一起带上**——一行就是「这个人此刻的整份口径」。
+
+    为什么不是只写这一格：家的 fold 取追加顺序**最新那一行**、不再把两行合并
+    （organs/home/residents.py:_fold_prefs）。只写一格的话，上一次设的另一个旋钮会被这一行
+    整份盖没——她说「说短点」再「一句话说完」，前者就白说了。所以另一格从刚读到的旧值里带上；
+    没设过就是 None（家把 None 当「这次没说」，不补 0、不补默认值）。
+
+    写法照本模块既有的动作：手替她动手（role=organ），by 记让她改的那个人。第二处薄适配。
+    """
+    knobs: Dict[str, Any] = {name: before.get(name) for name in whitelist.STYLE_KEYS
+                             if name != key}
+    knobs[key] = value
+    return dict(home_add_preference(root=home, role=ROLE, by=who, who=who, at=at,
+                                   **knobs) or {})
+
+
+def set_style(*, who: str, key: Any = None, value: Any = None, utterance: Any = None,
+              now: Any = None, root=None) -> Dict[str, Any]:
+    """改「她怎么说话」：两个旋钮写进家·名片盒的偏好卡，账上记清谁改的、改成什么、原来是什么。
+
+    三条判据：
+    1. 可写的 key **恰两个**（whitelist.STYLE_KEYS）。别的 key——尤其「身份／人设／名字／魂」
+       这一类——一律 KEY_NOT_ALLOWED，人话里明说「改她是谁不在这里」。
+    2. utterance 走 stylelang 那张短语表，认不出就 STYLE_NOT_UNDERSTOOD 反问，**零写入**。
+    3. 先落 reserved → 读旧值 → 让家追加一行 → 结果行写不进就改判 failed（照旧口径）。
+    """
+    started = time.monotonic()
+    params: Dict[str, Any] = {"key": key, "value": value, "utterance": utterance}
+    permitted = permit.check("set_style", who=who, now=now, root=root)
+    if not permitted["allowed"]:
+        return _refuse(who=who, action="set_style", params=params, now=now, root=root,
+                       started=started, code=str(permitted["code"]), say=permitted["say"],
+                       detail=permitted["detail"])
+
+    target, problem = _style_target(key=key, value=value, utterance=utterance)
+    if problem is not None:
+        return _refuse(who=who, action="set_style", params=params, now=now, root=root,
+                       started=started, code=str(problem["code"]), say=str(problem["say"]),
+                       detail={"stage": "understand", "reason": problem["reason"],
+                               "key": key, "value": value, "utterance": utterance})
+
+    style_key = target["key"]
+    bounds = whitelist.style_range(style_key)
+    if bounds is None:
+        # 身份类不是「没听懂」：换个说法也没用，所以码要落在 KEY_NOT_ALLOWED 上。
+        return _refuse(who=who, action="set_style", params=params, now=now, root=root,
+                       started=started, code="KEY_NOT_ALLOWED", say=_style_keys_say(style_key),
+                       detail={"stage": "understand",
+                               "reason": "identity" if stylelang.is_identity(style_key)
+                                         else "key_not_allowed",
+                               "key": style_key, "allowed": sorted(whitelist.STYLE_KEYS)})
+
+    number = _style_int(target["value"])
+    low, high = bounds
+    if number is None or not low <= number <= high:
+        return _refuse(who=who, action="set_style", params=params, now=now, root=root,
+                       started=started, code="VALUE_OUT_OF_RANGE",
+                       say="%s 只收 %d–%d 的整数（收到 %r）——今天没改"
+                           % (style_key, low, high, target["value"]),
+                       detail={"stage": "understand",
+                               "reason": "not_an_int" if number is None else "out_of_range",
+                               "key": style_key, "value": target["value"],
+                               "range": [low, high]})
+
+    ledger_id, failure = _begin(who=who, action="set_style", params=params, now=now, root=root,
+                                started=started)
+    if failure is not None:
+        return failure
+
+    home = store.home_root(root)
+    try:
+        before = _pref_read(who, home)
+    except _HOME_ERRORS as exc:
+        # 旧值读不出来就**不写**：账上「原来是什么」绝不能是编的。
+        origin = _origin_of(exc)
+        return _settle(who=who, action="set_style", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code="HOME_READ_FAILED", say=STYLE_READ_FAILED_SAY, origin=origin,
+                       detail={"stage": "read_preference", "home": origin, "key": style_key})
+
+    old = before.get(style_key)
+    old_source = "live" if old is not None else "default"
+    card_id = str(before.get("card_id") or "") or None
+
+    try:
+        written = _pref_write(who, style_key, number, before=before, home=home,
+                              at=store.now_iso(now))
+    except _HOME_ERRORS as exc:
+        origin = _origin_of(exc)
+        return _settle(who=who, action="set_style", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code="HOME_WRITE_FAILED", say=HOME_FAILED_SAY, origin=origin,
+                       detail={"stage": "write_preference", "home": origin, "key": style_key,
+                               "value": number, "old": old, "old_source": old_source,
+                               "card_id": card_id})
+
+    written_card_id = str(written.get("card_id") or "") or card_id
+    detail: Dict[str, Any] = {"key": style_key, "value": number, "old": old,
+                              "old_source": old_source, "card_id": written_card_id,
+                              "who": who, "target_who": who, "source": target["source"],
+                              "utterance": utterance, "range": [low, high]}
+    params = _accounting(params, detail, STYLE_ACCOUNTING)
+    return _attach_quota(
+        _settle(who=who, action="set_style", params=params, now=now, root=root,
+                started=started, ledger_id=ledger_id, state="done", code="OK",
+                say=_style_done_say(style_key, number, old, old_source),
+                card_id=written_card_id, detail=detail),
+        who=who, now=now, root=root)
 
 
 def due(now: Any = None, root=None) -> list:

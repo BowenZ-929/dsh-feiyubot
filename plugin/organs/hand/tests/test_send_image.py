@@ -13,12 +13,15 @@
 """
 from __future__ import annotations
 
+import inspect
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from organs.home import cards as home_cards
+from organs.home import residents as home_residents
 from organs.hand import actions, channel, ledger
 
 from . import helpers
@@ -273,7 +276,7 @@ class NotFoundTest(BaseCase):
         self.assertEqual([], srv.records, "图都没找着，一个请求都不该发")
         rows = helpers.ledger_lines(self.root)
         self.assertEqual(["reserved", "failed"], [row["state"] for row in rows])
-        self.assertEqual("NAME_NOT_IN_WAREHOUSE", rows[-1]["origin"])
+        self.assertEqual("NAME_NOT_IN_HOME", rows[-1]["origin"])
 
     def test_warehouse_card_whose_file_is_gone_is_not_found(self):
         image = helpers.make_image(self.assets, "会消失.png")
@@ -333,6 +336,75 @@ class GateTest(BaseCase):
         self.assertFalse(permit.needs_grant("send_image"))
         self.assertEqual("CHANNEL_BLOCKED", channel.CHANNEL_BLOCKED)
         self.assertEqual(("group", "private"), channel.SCENES)
+
+
+class UtteranceTest(BaseCase):
+    """她那句话是**可选**的名字来源：解得出就去家里找，解不出就反问（不猜、不拿整句当文件名）。"""
+
+    def setUp(self):
+        super().setUp()
+        helpers.make_home(self.root)
+        self.portrait = helpers.register_portrait(self.root, "江迟-人设卡.jpg")
+
+    def test_utterance_pulls_the_drawer_portrait_and_posts_the_original_file(self):
+        with self.channel(sent=1, channel_id="msg-7") as srv:
+            self.use(srv)
+            out = actions.send_image(who=WHO, scene="group", target=GROUP,
+                                     utterance="给我看你的自画像", now=helpers.NOW,
+                                     root=self.root)
+
+        self.assertEqual("done", out["state"], out)
+        self.assertEqual("msg-7", out["detail"]["channel_id"])
+        self.assertEqual("shelf_latest", out["detail"]["picked_reason"])
+        self.assertEqual(home_cards.SHELF_ROOM, out["detail"]["source_room"])
+        self.assertEqual(str(self.portrait), out["detail"]["path"],
+                         "path 必须是抽屉里那张原文件")
+        chunk = srv.records[0]["body"]["chunks"][0]["image"]
+        self.assertTrue(chunk["file"].endswith("江迟-人设卡.jpg"), chunk["file"])
+        self.assertTrue(self.portrait.is_file(), "只取指针：图还在原地")
+        self.assertEqual(helpers.sha256_of(helpers.IMAGE_BYTES), out["detail"]["sha256"])
+
+    def test_unknown_utterance_is_refused_with_a_question_not_a_guess(self):
+        with self.channel() as srv:
+            self.use(srv)
+            out = actions.send_image(who=WHO, scene="group", target=GROUP,
+                                     utterance="今天天气不错", now=helpers.NOW, root=self.root)
+
+        self.assertEqual("refused", out["state"])
+        self.assertEqual("IMAGE_NOT_UNDERSTOOD", out["code"])
+        self.assertIn("哪张图", out["say"])
+        self.assertEqual([], srv.records, "没听懂就别发，也别去家里瞎找")
+        self.assertEqual(["reserved", "refused"],
+                         [row["state"] for row in helpers.ledger_lines(self.root)])
+
+    def test_a_name_that_is_not_in_home_is_not_found_in_plain_words(self):
+        with self.channel() as srv:
+            self.use(srv)
+            out = actions.send_image(who=WHO, scene="group", target=GROUP, name="不存在的图",
+                                     now=helpers.NOW, root=self.root)
+
+        self.assertEqual("failed", out["state"])
+        self.assertEqual("IMAGE_NOT_FOUND", out["code"])
+        self.assertIn("图没找着", out["say"])
+        self.assertEqual("NAME_NOT_IN_HOME", helpers.ledger_lines(self.root)[-1]["origin"])
+        self.assertEqual([], srv.records)
+
+    def test_utterance_together_with_a_direct_source_is_a_bad_argument(self):
+        for extra in ({"name": "江迟-人设卡.jpg"}, {"path": str(self.portrait)}):
+            with self.subTest(extra=extra):
+                out = actions.send_image(who=WHO, scene="group", target=GROUP,
+                                         utterance="给我看你的自画像", now=helpers.NOW,
+                                         root=self.root, **extra)
+                self.assertEqual("failed", out["state"])
+                self.assertEqual("BAD_ARGUMENT", out["code"])
+                self.assertEqual("UTTERANCE_AND_SOURCE",
+                                 helpers.ledger_lines(self.root)[-1]["origin"])
+
+    def test_the_keyword_is_optional_and_backward_compatible(self):
+        params = inspect.signature(actions.send_image).parameters
+        self.assertEqual(("who", "scene", "target", "path", "name", "utterance", "now", "root"),
+                         tuple(params), "新键只加一个，位置在 name 后面")
+        self.assertIsNone(params["utterance"].default, "默认 None：老调用一个字都不用改")
 
 
 if __name__ == "__main__":
