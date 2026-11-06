@@ -7,8 +7,9 @@
   两个数与档位词、/heart/engage 的 mood_now 都从那里取，本模块不自己换算档位。
 - 本模块只读：不调 apply_event / settle_day / apply_burst / apply_long_reply /
   apply_daily / settle_week，也不调 decide_and_log——/heart/engage 是干跑。
-- 数值只留内部：/heart 与 /heart/baseline 的文本走 card.render_text，只出档位词；
-  待定两轴（耐心 / 记性）显式 pending、标灰、跳过注入，不写 0。
+- 数值只留内部：/heart 与 /heart/baseline 的文本走 card.render_text，只出档位词。
+  六轴完整（2026-11-06 人定稿）：`pending` 永远是空列表，但这个键保留，
+  面板与测试都在读。
 - 坏卡不是错误页：卡坏了如实报 status="拒载" + ok=False + issues（每条带 code），
   HTTP 仍然 200——页面要能显示，500 等于把"她没载入"藏起来。
 - root 只做测试用覆盖：只接受绝对路径且存在的目录，其余忽略并 WARN（不许被查询串
@@ -232,7 +233,7 @@ def _effective_readout(root: Optional[Path], now: Optional[str],
 
 
 def _pending() -> List[str]:
-    """待定两轴：跳过注入、面板标灰，不写数也不写 0。"""
+    """要跳过注入的轴名册：六轴完整之后恒为空表（键保留，面板与测试都在读）。"""
     return list(heart_model.PENDING_AXES)
 
 
@@ -282,7 +283,8 @@ def _baseline_payload(root: Optional[Path], now: Optional[str]) -> Dict[str, Any
         "agent": "heart",
         "baseline": base["baseline"],
         "render": base["render"],
-        # pending 一直是"待定两轴名单"，第三轮念头层不改它的意思（老键不换义）：
+        # pending 一直是"要跳过注入的轴名册"，第三轮念头层不改它的意思（老键不换义）；
+        # 六轴完整之后它恒为空表，但这一栏照发：
         # 念头块另开一个键叫 thoughts（见 _overview）——外层是块、块里的列表也叫
         # thoughts，两层各归各的，不共用一个名字。
         "pending": _pending(),
@@ -329,7 +331,7 @@ def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
     payload["offset"] = offset_module.overview(root, now)
     payload["effective"] = _effective_readout(root, now, mood_read)
     # 念头块与事件窗口：两块都是纯读（pending.overview 不落笔、window_signal 现算）。
-    # 块名 thoughts（不叫 pending：pending 是待定轴名单，老键不换义）。
+    # 块名 thoughts（不叫 pending：pending 是轴名册、现恒为空表，老键不换义）。
     payload["thoughts"] = pending_module.overview(root, now)
     payload["window"] = engage_module.window_signal(root, now)
     # 意图排序块：与 /heart/engage 送进第 5 道软门的是同一份 rank（同一个上下文），
@@ -344,7 +346,7 @@ def _overview(params: Mapping[str, str], brain: Any = None) -> Result:
 
 
 def _baseline_route(params: Mapping[str, str]) -> Result:
-    """/heart/baseline：六轴档位词 + 待定名单，数值一步都不出门。"""
+    """/heart/baseline：六轴档位词 + pending 名册（恒为空表），数值一步都不出门。"""
     root, now = _root(params), _now(params)
     return 200, _baseline_payload(root, now)
 

@@ -35,6 +35,8 @@ LIVE_PAIRS: Dict[str, Tuple[int, int]] = {
     "心疼": (22, 24),
     "想黏人": (33, 35),
     "怕失去": (44, 46),
+    "耐心": (55, 57),
+    "记性": (66, 68),
 }
 
 
@@ -44,11 +46,8 @@ def card_data(overrides: Optional[Dict[str, Tuple[int, int]]] = None) -> Dict[st
     pairs.update(overrides or {})
     axes = []
     for axis_id in model.AXES:
-        if axis_id in model.PENDING_AXES:
-            axes.append({"id": axis_id, "pending": True})
-        else:
-            inner, shown = pairs[axis_id]
-            axes.append({"id": axis_id, "inner": inner, "shown": shown})
+        inner, shown = pairs[axis_id]
+        axes.append({"id": axis_id, "inner": inner, "shown": shown})
     return {"scale": {"min": 0, "max": 100}, "axes": axes}
 
 

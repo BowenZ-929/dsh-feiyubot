@@ -8,7 +8,8 @@
   CardError，绝不补默认值（补默认值等于给基线多加一个写者）。
 - 数值只留内部：进文本的只有档位词，render_text() 的输出里不许出现
   任何阿拉伯数字 0-9。
-- 待定轴（耐心 / 记性）显式 pending：跳过注入、面板标灰，不写数、不写 0。
+- 六轴完整（2026-11-06 人定稿）：六轴都有 inner / shown，都有五档词与低档禁令；
+  不再有 pending 轴这一状态，view()["pending"] 因此恒为空表（键保留，面板与测试都读它）。
 - 尺子归属：mood 的两把尺（3h / 7d）与 offset 的尺（6h / 4h）各在各的模块，
   本模块一把都不用、一把都不借。
 
@@ -39,9 +40,8 @@ AXIS_MISSING = "axis-missing"
 AXIS_UNPAIRED = "axis-unpaired"
 AXIS_NOT_INT = "axis-not-int"
 AXIS_OUT_OF_RANGE = "axis-out-of-range"
+#: 六轴完整之后，任何一根轴带 pending: true 都是坏卡——不再有 pending 轴这一状态。
 AXIS_PAIRED_BUT_PENDING = "axis-paired-but-pending"
-AXIS_PENDING_FLAG_MISSING = "axis-pending-flag-missing"
-PENDING_HAS_VALUES = "pending-has-values"
 
 
 def _issue(code: str, axis: str, message: str) -> Dict[str, str]:
@@ -77,7 +77,7 @@ class CardError(Exception):
 
 @dataclass(frozen=True)
 class Axis:
-    """一根轴：待定轴没有数值，成对轴 inner / shown 都在。"""
+    """一根轴：六轴都成对，inner / shown 都在；pending 恒为 False（历史机制，留给坏卡拒载）。"""
 
     id: str
     inner: Optional[int] = None
@@ -87,7 +87,7 @@ class Axis:
 
 @dataclass(frozen=True)
 class Card:
-    """整卡：六轴的字典 + 成对/待定名单 + 刻度。"""
+    """整卡：六轴的字典 + 成对名单 + 刻度（pending 名册保留，六轴完整后恒为空）。"""
 
     axes: Dict[str, Axis]
     paired: Tuple[str, ...]
@@ -125,24 +125,15 @@ def _check_axes_list(data: Dict[str, Any]) -> List[Any]:
 
 def _check_entry(axis_id: str, entry: Dict[str, Any],
                  scale_min: int, scale_max: int) -> List[Dict[str, str]]:
-    """单轴校验：待定轴查标记与"不许带数"，成对轴查配对 / 整数 / 值域。"""
-    issues: List[Dict[str, str]] = []
-    pending_flag = entry.get("pending") is True
-    if axis_id in model.PENDING_AXES:
-        if not pending_flag:
-            issues.append(_issue(AXIS_PENDING_FLAG_MISSING, axis_id,
-                                 "待定轴必须显式写 pending: true"))
-            return issues
-        for key in ("inner", "shown"):
-            if key in entry and entry[key] is not None:
-                issues.append(_issue(PENDING_HAS_VALUES, axis_id,
-                                     "待定轴带 %s：待定轴不许有数值" % key))
-                break
-        return issues
+    """单轴校验：六轴都成对——查配对 / 整数 / 值域，带 pending: true 一律拒载。
 
-    if pending_flag:
+    PENDING_AXES 那一支随 2026-11-06 的定稿一起删了：六轴各有数之后，
+    还能出现 pending 轴只可能是有人把补齐的轴标回 pending，那本身就是坏卡，见下面第一条。
+    """
+    issues: List[Dict[str, str]] = []
+    if entry.get("pending") is True:
         issues.append(_issue(AXIS_PAIRED_BUT_PENDING, axis_id,
-                             "成对轴不许标 pending: true"))
+                             "六轴完整，任何轴都不许再标 pending: true"))
         return issues
     for key in ("inner", "shown"):
         if key not in entry or entry[key] is None:
@@ -258,13 +249,16 @@ def tier_of(value: int, scale_min: int, scale_max: int) -> int:
     return tier
 
 
-# 档位词：每个成对轴五个词，一档最低、五档最高，词面贴轴义。
-# 待定轴没有档位词——没有 inner/shown 就没有档，查询返回 None。
+# 档位词：六轴各五个词，一档最低、五档最高、中间档一律「一般」，词面贴轴义。
+# 六轴完整（2026-11-06 人定稿）——少写一轴就是那句「None」回到 render_text 里，
+# 所以 set(TIER_WORDS) == set(model.AXES) 有一条机器守卫钉着。
 TIER_WORDS: Dict[str, Tuple[str, ...]] = {
     "服气": ("顶得凶", "不太服", "一般", "挺服", "特别服"),
     "心疼": ("冷", "淡", "一般", "心疼", "特别心疼"),
     "想黏人": ("拒人", "淡着", "一般", "黏", "很黏"),
     "怕失去": ("稳", "不动", "一般", "怕", "很怕"),
+    "耐心": ("没耐性", "有点急", "一般", "有耐心", "特别有耐心"),
+    "记性": ("转身就忘", "记不住", "一般", "记得住", "过目不忘"),
 }
 
 # 档位禁令：每一档配一句"这档时不许干什么"，随档位单调，不进魂。
@@ -283,11 +277,19 @@ TIER_BANS: Dict[str, Dict[int, str]] = {
     "怕失去": {
         1: "怕失去低档时不许主动提「分开」（默认值，可调）",
     },
+    "耐心": {
+        1: "没耐性时不许连问三次以上（默认值，可调）",
+        2: "没耐性时不许连问三次以上（默认值，可调）",
+    },
+    "记性": {
+        1: "记性低档时不许硬说「我记得」——问一遍比编一句强（默认值，可调）",
+        2: "记性低档时不许硬说「我记得」——问一遍比编一句强（默认值，可调）",
+    },
 }
 
 
 def tier_word(axis_id: str, tier: int) -> Optional[str]:
-    """查档位词：待定轴 / 未知轴 / 越界档一律返回 None，绝不造词。"""
+    """查档位词：未知轴 / 越界档一律返回 None，绝不造词（六轴都在表里，真卡不会落空）。"""
     words = TIER_WORDS.get(axis_id)
     if not words:
         return None
@@ -328,7 +330,10 @@ def render_text(card: Card, offsets: Optional[Dict[str, float]] = None) -> str:
 
 
 def view(card: Card, offsets: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-    """给面板 / API 的结构化读数：档位词 + 待定轴标灰，数值留内部。"""
+    """给面板 / API 的结构化读数：档位词，数值留内部。
+
+    六轴完整之后 pending 恒为空表，但键不许删——面板与既有读法都读它。
+    """
     extra = offsets or {}
     loaded: List[str] = []
     pending: List[Dict[str, Any]] = []

@@ -138,9 +138,9 @@ class EightReadonlyRoutes(HeartApiTest):
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["readonly"])
             self.assertEqual("heart", payload["agent"])
-            # 老键不换义：pending 仍是待定两轴名单（与上一轮逐字一致），也没有同义的
-            # 第二个键；念头块叫 thoughts（外层块、块里的列表同名，两层各归各的）。
-            self.assertEqual(["耐心", "记性"], payload["pending"])
+            # 老键不换义：pending 仍是那把「要跳过注入的轴名册」，六轴完整之后它是空列表，
+            # 也没有同义的第二个键；念头块叫 thoughts（外层块、块里的列表同名，两层各归各的）。
+            self.assertEqual([], payload["pending"])
             self.assertNotIn("pending_axes", payload, "不许留同义的第二把钥匙")
             self.assertEqual([], payload["issues"])
             # 念头块与窗口块：与 /heart/pending、engage 的 signal 是同一份（同一个纯读）
@@ -151,25 +151,27 @@ class EightReadonlyRoutes(HeartApiTest):
             for key in ("weight", "consecutive_ignored", "rows", "window_min"):
                 self.assertIn(key, payload["window"], "%s 的 window 少了 %s" % (route, key))
 
-    def test_baseline_is_tier_wordsonly_with_pending_axes_greyed(self):
+    def test_baseline_is_tier_wordsonly_over_all_six_axes(self):
         status, payload = self.get("/heart/baseline", now=T0)
         self.assertEqual(200, status)
-        # /heart/baseline 的 pending 也是那份名单（老键不换义），念头块不在这条端点上
-        self.assertEqual(["耐心", "记性"], payload["pending"])
+        # /heart/baseline 的 pending 是同一把名册（老键不换义）：六轴完整之后为空，念头块不在
+        # 这条端点上
+        self.assertEqual([], payload["pending"])
         self.assertNotIn("thoughts", payload, "baseline 只给档位与名单，不给念头块")
         view = payload["baseline"]
-        self.assertEqual(list(heart_model.PAIRED_AXES), view["loaded"])
-        self.assertEqual([{"axis": axis, "greyed": True} for axis in heart_model.PENDING_AXES],
-                         view["pending"])
+        self.assertEqual([], view["pending"], "pending 这个键留着，且恒为空表")
+        self.assertEqual(list(heart_model.AXES), view["loaded"])
+        self.assertEqual(set(heart_model.AXES), set(view["tiers"]), "六轴都出档位词")
         for axis, row in view["tiers"].items():
-            self.assertIn(axis, heart_model.PAIRED_AXES)
-            self.assertTrue(row["inner_word"])
-            self.assertTrue(row["shown_word"])
-        # 待定轴标灰、跳过注入：文本里不许出现 0-9，也不许给它们编档位词
+            self.assertIn(axis, heart_model.AXES)
+            self.assertTrue(row["inner_word"], axis)
+            self.assertTrue(row["shown_word"], axis)
+        # 六轴都出词：文本里不许出现 0-9，六条也一行不缺
         self.assertIsNone(re.search(r"[0-9]", payload["render"]), payload["render"])
-        for axis in heart_model.PENDING_AXES:
-            self.assertNotIn(axis, view["tiers"])
-            self.assertIn(axis, payload["render"])
+        self.assertNotIn("None", payload["render"])
+        for axis in heart_model.AXES:
+            self.assertIn(axis, view["tiers"])
+            self.assertIn("- %s：" % axis, payload["render"])
 
     def test_mood_route_returns_read_plus_trajectory(self):
         status, payload = self.get("/heart/mood", now=T0)
@@ -209,9 +211,9 @@ class BadCardIsNotASuccess(HeartApiTest):
             "axes": [
                 {"id": "服气", "inner": 90, "shown": 20},
                 {"id": "心疼", "inner": 70, "shown": 60},
-                # 「想黏人」「怕失去」故意缺；待定两轴照规矩写 pending
-                {"id": "耐心", "pending": True},
-                {"id": "记性", "pending": True},
+                # 「想黏人」「怕失去」故意缺；耐心 / 记性 六轴完整之后照规矩带数
+                {"id": "耐心", "inner": 72, "shown": 52},
+                {"id": "记性", "inner": 78, "shown": 60},
             ],
         }, ensure_ascii=False), encoding="utf-8")
 
@@ -365,10 +367,7 @@ class EffectiveIsTheSingleSource(HeartApiTest):
         self.assertIsInstance(payload["voice"]["bans"], list)
 
         self.assertEqual(set(heart_model.AXES), set(payload["axes"]), "六轴都要在")
-        for axis in heart_model.PENDING_AXES:
-            self.assertEqual({"greyed": True}, payload["axes"][axis],
-                             "待定轴标灰且不含数值")
-        for axis in heart_model.PAIRED_AXES:
+        for axis in heart_model.AXES:
             self.assertEqual(
                 {"inner_value", "shown_value", "inner_tier", "shown_tier",
                  "inner_word", "shown_word", "offset", "greyed"},
@@ -423,7 +422,7 @@ class OffsetRoute(HeartApiTest):
         status, payload = self.get("/heart/offset", now=T0)
         self.assertEqual(200, status)
         self.assertEqual({"axes", "as_of"}, set(payload))
-        self.assertEqual(set(heart_model.AXES), set(payload["axes"]), "六轴都要在（含待定两轴）")
+        self.assertEqual(set(heart_model.AXES), set(payload["axes"]), "六轴都要在（六轴完整）")
         for axis, row in payload["axes"].items():
             for key in ("value", "decayed_value", "day_delta", "clamped"):
                 self.assertIn(key, row, "%s 少了 %s" % (axis, key))

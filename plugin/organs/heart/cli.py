@@ -48,25 +48,24 @@ def _root_note(root: Path) -> None:
     print("  数据根（临时目录）：%s" % root)
 
 
-# ---- card：六轴档位 + 待定两轴标灰 + 拒载一张坏卡 --------------------------
+# ---- card：六轴档位词逐行 + 拒载一张坏卡 ---------------------------------
 
 
 def demo_card(root: Path) -> None:
-    """四对轴读成档位词、两轴标灰、再拿一张缺轴坏卡当场拒载。"""
+    """六轴逐行读成档位词、pending 恒为空表，再拿一张缺轴坏卡当场拒载。"""
     _root_note(root)
     # 播种：出厂 seed 料拷进临时根——这一行就是 SEED_CARD_PATH 的唯一用途。
     (root / card_module.CARD_FILE).write_bytes(card_module.SEED_CARD_PATH.read_bytes())
     card = card_module.load_card(root / card_module.CARD_FILE)
     view = card_module.view(card)
-    print("  载入四对轴：%s" % "、".join(view["loaded"]))
+    print("  载入六轴：%s" % "、".join(view["loaded"]))
     for axis in view["loaded"]:
         row = view["tiers"][axis]
         print("    %-4s 心里 %s（第 %d 档） / 面上 %s（第 %d 档）"
               % (axis, row["inner_word"], row["inner_tier"],
                  row["shown_word"], row["shown_tier"]))
-    print("  待定两轴（greyed=True，跳过注入，不写数也不写 0）：")
-    for item in view["pending"]:
-        print("    %-4s greyed=%s" % (item["axis"], item["greyed"]))
+    print("  pending（六轴完整、恒为空表；键保留，面板与测试都读它）：%r"
+          % (view["pending"],))
     print("  档位词文本（render_text：只讲档位，不含阿拉伯数字）：")
     for line in card_module.render_text(card).splitlines():
         print("    " + line)
@@ -76,8 +75,8 @@ def demo_card(root: Path) -> None:
         "axes": [
             {"id": "服气", "inner": 90, "shown": 20},
             {"id": "心疼", "inner": 70, "shown": 60},
-            {"id": "耐心", "pending": True},
-            {"id": "记性", "pending": True},
+            {"id": "耐心", "label": "耐心", "inner": 72, "shown": 52},
+            {"id": "记性", "label": "记性", "inner": 78, "shown": 60},
         ],
     }
     bad_path = root / "bad-card.json"

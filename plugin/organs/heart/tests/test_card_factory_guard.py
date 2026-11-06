@@ -1,9 +1,13 @@
 """出厂卡守卫：实盘是真源、出厂是 seed；**结构丢了就是被削**，数值不同是正常。
 
+六轴完整（2026-11-06 人定稿）之后的新状态：`_handoff.pending` 是空数组、六轴都带数。
+
 只比结构，不比数：
-- `_handoff` 深比较相等、`status` 相等、`scale` 相等；
-- `axes` 的 id 顺序相同；每轴该有的键**存在性**相同——成对轴有 label/inner/shown，
-  待定轴有 pending: true；
+- `_handoff` **逐字深比较相等**（两张卡记的是同一件事，一句话写差就是描述与实现不一致）；
+  另外把 `_handoff.pending` 单独拎出来钉一次：**必须是空数组**——这是「无 pending 轴」的
+  机器证据，不是「没有这一栏」也不是还留着一两个轴名；
+- `status` 相等、`scale` 相等；
+- `axes` 的 id 顺序相同；六轴都含 label/inner/shown，且**都不许带 pending**；
 - inner/shown 的**数值允许不同**：实盘是人调过的，与 seed 不一样是常态。
 
 出厂卡只读：所有「把它改坏」的用例都改临时拷贝（`card.SEED_CARD_PATH` 被 patch 指过去），
@@ -19,17 +23,15 @@ from pathlib import Path
 from typing import Any, Dict, List
 from unittest import mock
 
-from organs.heart import card, model
+from organs.heart import card
 
 #: 仓里那张出厂卡的**真实**位置：写死成模块常量，任何 patch 都改不到它，
 #: 只用来拷副本、以及在用例收尾时复核「它没被写过」。
 FACTORY_CARD_PATH = Path(__file__).resolve().parents[1] / "data" / card.CARD_FILE
 
-#: 每类轴该有的键（只查存在性，不查值）。
-REQUIRED_KEYS = {
-    "paired": ("label", "inner", "shown"),
-    "pending": ("label", "pending"),
-}
+#: 每根轴该有的键（只查存在性，不查值）——六轴一视同仁，不再分「成对 / pending」两类。
+REQUIRED_KEYS = ("label", "inner", "shown")
+
 
 
 def sha256_of(path: Any) -> str:
@@ -46,9 +48,7 @@ def _read_json(path: Any) -> Dict[str, Any]:
 def structure_problems(seed: Dict[str, Any], live: Dict[str, Any]) -> List[str]:
     """列出厂卡相对实盘的**结构**差异；空列表 = 结构一致（数值不同不算问题）。"""
     problems: List[str] = []
-    if seed.get("_handoff") != live.get("_handoff"):
-        problems.append("_handoff 不一致：出厂是 %r，实盘是 %r"
-                        % (seed.get("_handoff"), live.get("_handoff")))
+    problems.extend(_handoff_problems(seed.get("_handoff"), live.get("_handoff")))
     if seed.get("status") != live.get("status"):
         problems.append("status 不一致：出厂是 %r，实盘是 %r"
                         % (seed.get("status"), live.get("status")))
@@ -73,12 +73,28 @@ def structure_problems(seed: Dict[str, Any], live: Dict[str, Any]) -> List[str]:
         if missing or extra:
             problems.append("轴 %r 的键不一致：出厂少 %r、多 %r（实盘键 %r）"
                             % (axis_id, missing, extra, sorted(live_keys)))
-        kind = "pending" if axis_id in model.PENDING_AXES else "paired"
-        for key in REQUIRED_KEYS[kind]:
+        for key in REQUIRED_KEYS:
             if key not in entry:
                 problems.append("轴 %r 少了 %r —— 结构被削" % (axis_id, key))
-        if kind == "pending" and entry.get("pending") is not True:
-            problems.append("待定轴 %r 的 pending 不是 true：%r" % (axis_id, entry.get("pending")))
+        if "pending" in entry or "pending" in live_entry:
+            problems.append("轴 %r 带了 pending：六轴完整之后不许再有 pending 轴" % axis_id)
+    return problems
+
+
+def _handoff_problems(seed: Any, live: Any) -> List[str]:
+    """`_handoff`：逐字深比较相等；`pending` 另钉一次空数组。
+
+    不给「人写注记」开口子——两张卡记的是同一件事，verdict 写差一个字就该红。
+    pending 单拎出来是因为它是**这次定稿的关键状态**：得是空数组，
+    不是「没有这一栏」也不是还留着一两个轴名。
+    """
+    problems: List[str] = []
+    if seed != live:
+        problems.append("_handoff 不一致：出厂是 %r，实盘是 %r" % (seed, live))
+    for side, data in (("出厂", seed), ("实盘", live)):
+        pending = data.get("pending") if isinstance(data, dict) else None
+        if not isinstance(pending, list) or pending:
+            problems.append("%s的 _handoff.pending 不是空数组：%r" % (side, pending))
     return problems
 
 
@@ -169,26 +185,64 @@ class FactoryCardGuardTest(unittest.TestCase):
         print("\n守卫红的那次（缺 _handoff）：%s" % message.splitlines()[0])
         self.assertIn("_handoff", message)
 
-    def test_guard_catches_missing_label_or_pending_flag(self) -> None:
-        """删 label / 把 pending: true 改没 → 守卫必须红。"""
+    def test_guard_catches_missing_label(self) -> None:
+        """删 label → 守卫必须红（六轴各有 label/inner/shown，少一个就是被削）。"""
+        copy = self._sandbox_seed()
+        self._point_seed_at(copy)
+        self._rewrite(copy, lambda data: self._axis(data, "服气").pop("label"))
+        with self.assertRaises(AssertionError) as caught:
+            self._assert_factory_matches_live()
+        message = str(caught.exception)
+        print("\n守卫红的那次（缺 label）：%s" % message.splitlines()[0])
+        self.assertIn("label", message)
 
-        def drop_label(data: Dict[str, Any]) -> None:
-            self._axis(data, "服气").pop("label")
+    def test_guard_catches_pending_list_not_empty(self) -> None:
+        """`_handoff.pending` 从空数组改回 ["耐心"] → 守卫必须红。
 
-        def drop_pending(data: Dict[str, Any]) -> None:
-            self._axis(data, "耐心").pop("pending")
+        这条证明守卫**真的在认「零 pending」这个状态**，不是只要有这一栏就放行。
+        """
+        copy = self._sandbox_seed()
+        self._point_seed_at(copy)
 
-        for name, mutate, expect in (("缺 label", drop_label, "label"),
-                                     ("pending 没了", drop_pending, "pending")):
-            with self.subTest(case=name):
-                copy = self._sandbox_seed()
-                self._point_seed_at(copy)
-                self._rewrite(copy, mutate)
-                with self.assertRaises(AssertionError) as caught:
-                    self._assert_factory_matches_live()
-                message = str(caught.exception)
-                print("\n守卫红的那次（%s）：%s" % (name, message.splitlines()[0]))
-                self.assertIn(expect, message)
+        def put_back_pending(data: Dict[str, Any]) -> None:
+            data["_handoff"]["pending"] = ["耐心"]
+
+        self._rewrite(copy, put_back_pending)
+        with self.assertRaises(AssertionError) as caught:
+            self._assert_factory_matches_live()
+        message = str(caught.exception)
+        print("\n守卫红的那次（pending 非空）：%s" % message.splitlines()[0])
+        self.assertIn("pending", message)
+
+    def test_guard_catches_verdict_typo(self) -> None:
+        """`_handoff.verdict` 改一个字 → 守卫必须红（深比较真的在比字）。"""
+        copy = self._sandbox_seed()
+        self._point_seed_at(copy)
+
+        def typo(data: Dict[str, Any]) -> None:
+            data["_handoff"]["verdict"] = data["_handoff"]["verdict"].replace("完整", "完备")
+
+        self._rewrite(copy, typo)
+        with self.assertRaises(AssertionError) as caught:
+            self._assert_factory_matches_live()
+        message = str(caught.exception)
+        print("\n守卫红的那次（verdict 改一个字）：%s" % message.splitlines()[0])
+        self.assertIn("_handoff", message)
+
+    def test_guard_catches_axis_pending_flag(self) -> None:
+        """把补齐的耐心标回 pending: true → 守卫必须红（六轴不许有 pending 轴）。"""
+        copy = self._sandbox_seed()
+        self._point_seed_at(copy)
+
+        def mark_pending(data: Dict[str, Any]) -> None:
+            self._axis(data, "耐心")["pending"] = True
+
+        self._rewrite(copy, mark_pending)
+        with self.assertRaises(AssertionError) as caught:
+            self._assert_factory_matches_live()
+        message = str(caught.exception)
+        print("\n守卫红的那次（轴标 pending）：%s" % message.splitlines()[0])
+        self.assertIn("pending", message)
 
 
 if __name__ == "__main__":

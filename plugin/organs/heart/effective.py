@@ -20,7 +20,7 @@ now 参数收下但不使用——它由调用方对齐 mood / offset 的读数�
 
 - "mood"：{"now", "baseline", "tier", "direction"}；
 - "axes"：{轴: {"inner_value","shown_value","inner_tier","shown_tier",
-  "inner_word","shown_word","offset","greyed"}}——待定轴只有 {"greyed": True}，
+  "inner_word","shown_word","offset","greyed"}}——无数的轴只有 {"greyed": True}，
   不含数值（更不写 0）；
 - "voice"：{"tone", "direction", "bans"}——tone 就是 mood 那一档的词（嘴读它定冷热），
   bans 是六轴里按生效档位命中的禁令句。
@@ -80,7 +80,8 @@ def _offset_values(offset: Any) -> Dict[str, float]:
 def _axis_row(card_obj: card_module.Card, axis_id: str, deltas: Dict[str, float]) -> Dict[str, Any]:
     """一轴：卡里的 inner/shown 加上该轴偏移，再向 card 要档与词。
 
-    待定轴没有值也没有档：只回 {"greyed": True}，不写数、不写 0。
+    没有值的轴没有档：只回 {"greyed": True}，不写数、不写 0
+    （六轴完整之后走不到这条分支：任何轴都必带 inner/shown）。
     """
     axis = card_obj.axes[axis_id]
     if axis.pending:
@@ -186,7 +187,7 @@ def render_text(card_obj: card_module.Card, offsets: Any = None) -> str:
     lines: List[str] = ["性格基线（只讲档位，不讲数字）："]
     for axis_id, row in axis_rows(card_obj, offsets).items():
         if row.get("greyed"):
-            lines.append("- %s：待定（跳过注入）。" % axis_id)
+            lines.append("- %s：无数据（跳过注入）。" % axis_id)
             continue
         lines.append("- %s：心里%s，面上%s。" % (
             axis_id, row["inner_word"], row["shown_word"]))

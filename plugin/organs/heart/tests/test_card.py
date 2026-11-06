@@ -21,8 +21,8 @@ def good_card() -> Dict[str, Any]:
             {"id": "心疼", "inner": 85, "shown": 40},
             {"id": "想黏人", "inner": 70, "shown": 30},
             {"id": "怕失去", "inner": 78, "shown": 15},
-            {"id": "耐心", "pending": True},
-            {"id": "记性", "pending": True},
+            {"id": "耐心", "inner": 72, "shown": 52},
+            {"id": "记性", "inner": 78, "shown": 60},
         ],
     }
 
@@ -54,41 +54,50 @@ class CardLoadTest(unittest.TestCase):
 
     # ---- 真卡 ---------------------------------------------------------
 
-    def test_real_card_loads_with_four_paired_and_two_pending(self):
+    def test_real_card_loads_with_all_six_paired(self):
         real = card.load_card(card.SEED_CARD_PATH)
+        self.assertEqual(model.AXES, model.PAIRED_AXES, "六轴都成对（2026-11-06 人定稿）")
+        self.assertEqual((), model.PENDING_AXES)
         self.assertEqual(real.paired, model.PAIRED_AXES)
-        self.assertEqual(real.pending, model.PENDING_AXES)
+        self.assertEqual(real.pending, ())
         self.assertEqual((real.scale_min, real.scale_max), (0, 100))
-        for axis_id in model.PAIRED_AXES:
+        for axis_id in model.AXES:
             axis = real.axes[axis_id]
             self.assertFalse(axis.pending, axis_id)
-            self.assertIsInstance(axis.inner, int)
-            self.assertIsInstance(axis.shown, int)
-            self.assertTrue(0 <= axis.inner <= 100)
-            self.assertTrue(0 <= axis.shown <= 100)
-        for axis_id in model.PENDING_AXES:
-            axis = real.axes[axis_id]
-            self.assertTrue(axis.pending, axis_id)
-            self.assertIsNone(axis.inner, "待定轴不许有 inner")
-            self.assertIsNone(axis.shown, "待定轴不许有 shown")
+            self.assertIsInstance(axis.inner, int, axis_id)
+            self.assertIsInstance(axis.shown, int, axis_id)
+            self.assertTrue(0 <= axis.inner <= 100, axis_id)
+            self.assertTrue(0 <= axis.shown <= 100, axis_id)
+        self.assertEqual((72, 52), (real.axes["耐心"].inner, real.axes["耐心"].shown))
+        self.assertEqual((78, 60), (real.axes["记性"].inner, real.axes["记性"].shown))
 
-    def test_real_card_keeps_handoff_block_and_matches_docs(self):
+    def test_real_card_keeps_handoff_block_and_axes_order_of_docs(self):
+        """整卡迁入的证据：_handoff 段还在、轴序没变；数可以随人定稿变，结构不行。
+
+        docs 那份是 2026-11-03 迁入那一刻的历史快照，**不再逐字节跟随**——
+        2026-11-06 人定稿把耐心/记性补了数，两份的 sha 本来就该分叉。
+        """
         data = helpers.read_json_file(card.SEED_CARD_PATH)
-        self.assertIn("_handoff", data, "整卡迁入：_handoff 段要原样留着")
         docs = Path(card.__file__).resolve().parents[3] / "docs" / "organs" / "soul" / "baseline-card-handoff.json"
-        self.assertEqual(sha256_of(card.SEED_CARD_PATH), sha256_of(docs),
-                         "搬过来的卡必须与 docs 那份逐字节一致")
+        original = helpers.read_json_file(docs)
+        self.assertIn("_handoff", data, "整卡迁入：_handoff 段要原样留着")
+        self.assertEqual(set(original["_handoff"]), set(data["_handoff"]), "_handoff 的键不许丢")
+        self.assertEqual([], data["_handoff"]["pending"], "_handoff.pending 已清成空表")
+        self.assertEqual([entry["id"] for entry in original["axes"]],
+                         [entry["id"] for entry in data["axes"]],
+                         "轴序是迁入时定下的，不许改")
+        self.assertEqual(list(model.AXES), [entry["id"] for entry in data["axes"]])
 
-    def test_view_marks_pending_greyed_and_lists_tier_words(self):
+    def test_view_covers_all_six_axes_and_pending_is_empty(self):
         loaded = card.load_card(card.SEED_CARD_PATH)
         view = card.view(loaded)
-        self.assertEqual(len(view["pending"]), 2)
-        for row in view["pending"]:
-            self.assertTrue(row["greyed"])
-            self.assertIn(row["axis"], model.PENDING_AXES)
-        self.assertNotIn("耐心", view["tiers"], "待定轴不进 tiers，面板直接标灰")
-        self.assertEqual(set(view["tiers"]), set(model.PAIRED_AXES))
-        self.assertEqual(set(view["loaded"]), set(model.PAIRED_AXES))
+        self.assertIn("pending", view, "pending 这个键不许删：面板与既有读法都读它")
+        self.assertEqual([], view["pending"], "六轴完整之后没有一根轴落在 pending 里")
+        self.assertEqual(set(view["tiers"]), set(model.AXES))
+        self.assertEqual(set(view["loaded"]), set(model.AXES))
+        for axis_id in model.AXES:
+            self.assertIsNotNone(view["tiers"][axis_id]["inner_word"], axis_id)
+            self.assertIsNotNone(view["tiers"][axis_id]["shown_word"], axis_id)
         self.assertEqual(view["scale"], {"min": 0, "max": 100})
         for axis_id, row in view["tiers"].items():
             self.assertTrue(1 <= row["inner_tier"] <= model.TIER_COUNT, axis_id)
@@ -99,31 +108,33 @@ class CardLoadTest(unittest.TestCase):
         self.assertEqual(view["tiers"]["服气"]["shown_word"], "顶得凶")
         self.assertEqual(view["tiers"]["想黏人"]["shown_word"], "淡着")
 
-    def test_tier_words_five_each_and_pending_has_none(self):
-        for axis_id in model.PAIRED_AXES:
+    def test_tier_words_five_each_for_all_six_axes(self):
+        for axis_id in model.AXES:
             words = card.TIER_WORDS[axis_id]
             self.assertEqual(len(words), model.TIER_COUNT, axis_id)
             self.assertEqual(len(set(words)), model.TIER_COUNT, "档位词不许重复")
+            self.assertEqual("一般", words[2], "%s 的中间档必须是「一般」" % axis_id)
             self.assertEqual(card.tier_word(axis_id, 1), words[0])
             self.assertEqual(card.tier_word(axis_id, 5), words[4])
         self.assertEqual(card.TIER_WORDS["想黏人"][1], "淡着")
-        for axis_id in model.PENDING_AXES:
-            self.assertNotIn(axis_id, card.TIER_WORDS)
-            for tier in range(1, model.TIER_COUNT + 1):
-                self.assertIsNone(card.tier_word(axis_id, tier), "待定轴没有档位词")
+        self.assertEqual(card.TIER_WORDS["耐心"], ("没耐性", "有点急", "一般", "有耐心", "特别有耐心"))
+        self.assertEqual(card.TIER_WORDS["记性"], ("转身就忘", "记不住", "一般", "记得住", "过目不忘"))
         self.assertIsNone(card.tier_word("不存在的轴", 1))
+        self.assertIsNone(card.tier_word("服气", 0))
+        self.assertIsNone(card.tier_word("服气", model.TIER_COUNT + 1))
 
-    def test_tier_bans_cover_every_paired_axis_and_are_adjustable(self):
+    def test_tier_bans_cover_every_axis_and_are_adjustable(self):
         self.assertEqual(card.TIER_BANS["想黏人"][1], "黏人低档时不许连发三条以上（默认值，可调）")
         self.assertEqual(card.TIER_BANS["想黏人"][2], "黏人低档时不许连发三条以上（默认值，可调）")
-        for axis_id in model.PAIRED_AXES:
+        for axis_id in model.AXES:
             bans = card.TIER_BANS[axis_id]
             self.assertTrue(bans, "%s 要有一条禁令" % axis_id)
             for tier, text in bans.items():
-                self.assertTrue(1 <= tier <= model.TIER_COUNT)
+                self.assertTrue(1 <= tier <= model.TIER_COUNT, axis_id)
                 self.assertIn("默认值，可调", text)
-        for axis_id in model.PENDING_AXES:
-            self.assertNotIn(axis_id, card.TIER_BANS, "待定轴没有档位就没有禁令")
+        self.assertEqual(card.TIER_BANS["耐心"][1], "没耐性时不许连问三次以上（默认值，可调）")
+        self.assertEqual(card.TIER_BANS["记性"][1],
+                         "记性低档时不许硬说「我记得」——问一遍比编一句强（默认值，可调）")
 
     def test_tier_of_splits_scale_evenly(self):
         self.assertEqual(card.tier_of(0, 0, 100), 1)
@@ -140,8 +151,6 @@ class CardLoadTest(unittest.TestCase):
         loaded = card.load_card(card.SEED_CARD_PATH)
         text = card.render_text(loaded)
         self.assertFalse(any(ch.isdigit() for ch in text), "渲染文本里不许出现 0-9：%r" % text)
-        self.assertIn("待定", text)
-        self.assertIn("跳过注入", text)
         self.assertIn("特别服", text)
         self.assertIn("顶得凶", text)
         hits = [word for words in card.TIER_WORDS.values() for word in words if word in text]
@@ -152,8 +161,8 @@ class CardLoadTest(unittest.TestCase):
         text = card.render_text(loaded, {"想黏人": 1.5, "服气": -0.5})
         self.assertFalse(any(ch.isdigit() for ch in text))
         self.assertIn("黏人低档时不许连发三条以上", text)
-        for axis_id in model.PENDING_AXES:
-            self.assertIn("%s：待定" % axis_id, text)
+        for axis_id in model.AXES:
+            self.assertIn("- %s：" % axis_id, text, "六轴一起渲染，加了偏移也不许掉轴")
 
     # ---- 坏卡 ---------------------------------------------------------
 
@@ -188,10 +197,6 @@ class CardLoadTest(unittest.TestCase):
         out_of_range["axes"][3]["shown"] = 200
         cases.append(("超 scale", out_of_range, card.AXIS_OUT_OF_RANGE))
 
-        pending_with_values = good_card()
-        pending_with_values["axes"][4]["inner"] = 50
-        cases.append(("待定轴带数", pending_with_values, card.PENDING_HAS_VALUES))
-
         duplicate = good_card()
         duplicate["axes"].append({"id": "服气", "inner": 10, "shown": 10})
         cases.append(("轴重复", duplicate, card.AXIS_DUPLICATE))
@@ -202,11 +207,16 @@ class CardLoadTest(unittest.TestCase):
 
         paired_pending = good_card()
         paired_pending["axes"][0] = {"id": "服气", "pending": True}
-        cases.append(("成对轴标待定", paired_pending, card.AXIS_PAIRED_BUT_PENDING))
+        cases.append(("轴标了 pending", paired_pending, card.AXIS_PAIRED_BUT_PENDING))
 
-        pending_flag_missing = good_card()
-        pending_flag_missing["axes"][4] = {"id": "耐心"}
-        cases.append(("待定轴没写 pending", pending_flag_missing, card.AXIS_PENDING_FLAG_MISSING))
+        # 耐心 / 记性 已经补齐：有人把轴标回 pending（哪怕数还在）就是坏卡，不是「跳过注入」。
+        back_to_pending = good_card()
+        back_to_pending["axes"][4]["pending"] = True
+        cases.append(("补齐的耐心标回 pending", back_to_pending, card.AXIS_PAIRED_BUT_PENDING))
+
+        missing_patience_shown = good_card()
+        missing_patience_shown["axes"][4].pop("shown")
+        cases.append(("耐心缺 shown", missing_patience_shown, card.AXIS_UNPAIRED))
 
         no_scale = good_card()
         no_scale.pop("scale")
@@ -273,4 +283,38 @@ class CardLoadTest(unittest.TestCase):
         self.assertEqual(set(loaded.axes), set(model.AXES))
         self.assertEqual(loaded.axes["想黏人"].inner, 70)
         self.assertEqual(loaded.axes["想黏人"].shown, 30)
-        self.assertEqual(card.render_text(loaded).count("待定"), 2)
+        self.assertEqual((), loaded.pending)
+        self.assertEqual(6, card.render_text(loaded).count("\n- "))
+
+
+class SixAxesAreWhole(unittest.TestCase):
+    """六轴完整（2026-11-06 人定稿）的机器守卫：谁少写一轴，这里当场红。
+
+    这两条是补上的正面断言——原来只有「pending 轴标灰」那一侧的断言，于是
+    `render_text` 里出现「心里None，面上None」都没人管：查不到词就是 None，
+    而 None 不是「没有断言失败」，它是一行贴到面板上的假话。
+    """
+
+    def setUp(self) -> None:
+        self.card = card.load_card(card.SEED_CARD_PATH)
+
+    def test_render_text_has_all_six_axis_lines_and_no_none(self):
+        text = card.render_text(self.card)
+        lines = text.splitlines()
+        for axis_id in model.AXES:
+            self.assertTrue(any(line.startswith("- %s：" % axis_id) for line in lines),
+                            "%s 这一行不许缺，也不许折在别人的行里" % axis_id)
+        self.assertEqual(len(model.AXES), text.count("\n- "), "六条一行不缺、也不许多")
+        self.assertNotIn("None", text, "档位词查不到就会渲成 None：词表少了一轴")
+
+    def test_tier_words_and_bans_cover_every_axis(self):
+        self.assertEqual(set(model.AXES), set(card.TIER_WORDS), "词表少了一轴")
+        self.assertEqual(set(model.AXES), set(card.TIER_BANS), "禁令表少了一轴")
+        for axis_id in model.AXES:
+            words = card.TIER_WORDS[axis_id]
+            self.assertEqual(model.TIER_COUNT, len(words), "%s 的档位词不是五个" % axis_id)
+            self.assertEqual("一般", words[2], "%s 的中间档不是「一般」" % axis_id)
+            for tier in range(1, model.TIER_COUNT + 1):
+                self.assertIsNotNone(card.tier_word(axis_id, tier),
+                                     "%s 第 %s 档没有词" % (axis_id, tier))
+            self.assertTrue(card.TIER_BANS[axis_id], "%s 一条禁令都没有" % axis_id)

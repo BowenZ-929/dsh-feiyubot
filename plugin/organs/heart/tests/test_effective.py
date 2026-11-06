@@ -5,7 +5,7 @@
   闭嘴」。所以本文件第一条断言就是三方相等：organ 的 effective_state、/heart/effective、
   /heart/engage 的 readouts.mood_now 必须是**同一个数**；只比两方不算数。
 - 档界只在 mood / card 里：本模块一个数字都不重写，也不做任何时间衰减。
-- 待定轴标灰、跳过注入、不写数（更不写 0）。
+- 六轴完整（2026-11-06 人定稿）：六轴都有 inner/shown 与档位词，没有一根标灰。
 - render_text 与 card.render_text 逐字相同，且输出里 0-9 一个都没有。
 
 说明：本文件 import 了 api（organs → api 的唯一一处），因为「三处取值一致」这句判据
@@ -172,14 +172,17 @@ class AxesComeFromCardPlusOffset(EffectiveBase):
             self.assertEqual(0.0, state["axes"]["服气"]["offset"], repr(offsets))
             self.assertEqual(card.axes["服气"].inner, state["axes"]["服气"]["inner_value"])
 
-    def test_pending_axes_are_greyed_and_carry_no_numbers(self):
+    def test_all_six_axes_carry_numbers_and_words(self):
         state = effective_module.effective_state(60, 60, card_obj=self.card())
-        for axis in heart_model.PENDING_AXES:
-            self.assertEqual({"greyed": True}, state["axes"][axis],
-                             "待定轴只许标灰，不许带数值（更不许写 0）")
+        self.assertEqual(set(heart_model.AXES), set(state["axes"]))
+        for axis in heart_model.AXES:
+            row = state["axes"][axis]
+            self.assertFalse(row["greyed"], axis)
             for key in ("inner_value", "shown_value", "inner_tier", "shown_tier",
                         "inner_word", "shown_word", "offset"):
-                self.assertNotIn(key, state["axes"][axis])
+                self.assertIn(key, row, "%s 少了 %s" % (axis, key))
+            self.assertIsNotNone(row["inner_word"], axis)
+            self.assertIsNotNone(row["shown_word"], axis)
 
 
 class VoiceBans(EffectiveBase):
@@ -201,13 +204,14 @@ class VoiceBans(EffectiveBase):
             self.assertIsNone(re.search(r"[0-9]", ban), ban)
 
     def test_no_ban_means_an_empty_list(self):
-        """把四轴都推到不命中禁令的档：bans 就是空表，不是 None、不是「无」。"""
+        """没命中就没有禁令：bans 是空表，不是 None、不是「无」。"""
         state = effective_module.effective_state(60, 60, card_obj=self.card())
         self.assertIsInstance(state["voice"]["bans"], list)
-        rows = effective_module.axis_rows(self.card())
-        self.assertEqual([], effective_module._all_bans(
-            dict((axis, row) for axis, row in rows.items() if row.get("greyed"))),
-            "待定轴不出禁令")
+        self.assertEqual([], effective_module._all_bans({}), "六轴都没命中时不许凭空造禁令")
+        # 真卡的耐心是第四档（有耐心），禁令只写 1–2 档 → 这一轴确实一条都不出
+        row = effective_module.axis_rows(self.card())["耐心"]
+        self.assertEqual(4, row["inner_tier"])
+        self.assertEqual([], effective_module._axis_bans("耐心", row))
 
 
 class BadCardStillRaises(EffectiveBase):
@@ -230,11 +234,10 @@ class RootIsADataDirectory(EffectiveBase):
         self.assertEqual(29.0, state["mood"]["now"])
         self.assertEqual({"tone", "direction", "bans"}, set(state["voice"]))
         self.assertEqual(list(heart_model.AXES), list(state["axes"]))
-        for axis in heart_model.PAIRED_AXES:
+        for axis in heart_model.AXES:
             self.assertFalse(state["axes"][axis]["greyed"], axis)
             self.assertTrue(state["axes"][axis]["inner_word"], axis)
-        for axis in heart_model.PENDING_AXES:
-            self.assertEqual({"greyed": True}, state["axes"][axis], axis)
+            self.assertTrue(state["axes"][axis]["shown_word"], axis)
         self.assertEqual(state["mood"]["tier"], state["voice"]["tone"])
 
     def test_card_path_takes_the_directory_then_a_file(self):
@@ -268,12 +271,15 @@ class RenderTextIsUnchanged(EffectiveBase):
             self.assertEqual(card_module.render_text(card, offsets),
                              effective_module.render_text(card, offsets), repr(offsets))
 
-    def test_render_text_has_no_digits_and_keeps_pending_lines(self):
+    def test_render_text_has_no_digits_and_all_six_lines(self):
         text = card_module.render_text(self.card())
         self.assertIsNone(re.search(r"[0-9]", text), text)
-        for axis in heart_model.PENDING_AXES:
-            self.assertIn("- %s：待定（跳过注入）。" % axis, text)
-        self.assertEqual(2, text.count("待定（跳过注入）"))
+        lines = text.splitlines()
+        for axis in heart_model.AXES:
+            self.assertTrue(any(line.startswith("- %s：" % axis) for line in lines),
+                            "%s 这一行不许缺" % axis)
+        self.assertEqual(len(heart_model.AXES), text.count("\n- "), "六条一行不缺")
+        self.assertNotIn("None", text, "查不到档位词就会渲成 None")
 
 
 class NoDecayAndNoSecondRuler(EffectiveBase):
