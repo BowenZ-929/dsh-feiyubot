@@ -35,6 +35,8 @@ export type ParsedEvent = {
   // 下面几个字段是给合批用的结论，不在合批里重读消息：同一件事只判一次。
   // atTargets 留着原始 qq（"all" 也在里面），排障时要能一眼看出这条 @ 的是谁。
   atTargets: string[];
+  // 「这条是在回复哪条」：reply 段的 data.id。M7 用它判「引用的是不是她自己说过的话」。
+  replyToId: number | null;
   mentionedSelf: boolean;
   mentionedAll: boolean;
   hasTextSegment: boolean;
@@ -177,6 +179,7 @@ export const parseEvent = (raw: unknown): ParseResult => {
   const texts: string[] = [];
   const images: ImageSummary[] = [];
   const atTargets: string[] = [];
+  let replyToId: number | null = null;
   let hasTextSegment = false;
   let stickerSegments = 0;
   for (const segment of value.message) {
@@ -189,6 +192,11 @@ export const parseEvent = (raw: unknown): ParseResult => {
     if (segment.type === "at") {
       const qq = asText(data.qq);
       if (qq !== undefined) atTargets.push(qq);
+    }
+    // 引用只认 reply 段的 id；一条消息里有多个 reply 段时以最后一个为准（协议端不会这么发）。
+    if (segment.type === "reply") {
+      const id = asId(data.id);
+      if (id !== undefined) replyToId = id;
     }
     if (segment.type === "face" || segment.type === "mface") stickerSegments += 1;
   }
@@ -215,6 +223,7 @@ export const parseEvent = (raw: unknown): ParseResult => {
     hasImage: images.length > 0,
     images,
     atTargets,
+    replyToId,
     mentionedSelf,
     mentionedAll,
     hasTextSegment,

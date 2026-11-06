@@ -24,6 +24,10 @@ const policy = {
       "core_empty",
       "replaced_too_long",
       "no_mention",
+      "command",
+      "sticker",
+      "media_only",
+      "burst_guard",
     ],
   },
 };
@@ -67,6 +71,7 @@ test("决策：每批恰好一行，字段顺序固定", () => {
     "reason",
     "source",
     "gate",
+    "direct",
   ]);
   assert.deepEqual(Object.keys(row.machine.batch), ["id", "msgs", "waited_ms", "tier", "at"]);
   assert.equal(row.kind, "decision");
@@ -233,6 +238,26 @@ test("决策：machine.gate 缺省是 null（账里必须看得见 \"gate\":null
     () => makeDecision(input({ gate: "hit" as unknown as Record<string, unknown> }), "t", policy.decide.reasonCodes),
     /machine.gate 必须是 JSON 对象或 null/,
   );
+});
+
+test("决策：machine.direct 缺省是「没判据」，给了就原样进账", () => {
+  const plain = makeDecision(input(), "t", policy.decide.reasonCodes);
+  assert.deepEqual(plain.machine.direct, { rule: null, score: null });
+
+  const directed = makeDecision(input({ direct: { rule: "recalled", score: 0.82 } }), "t", policy.decide.reasonCodes);
+  assert.deepEqual(directed.machine.direct, { rule: "recalled", score: 0.82 });
+
+  // 拦下时 rule=null，但 score 若已调核就照记（以后靠它校准阈值）
+  const blocked = makeDecision(input({ direct: { rule: null, score: 0.2 } }), "t", policy.decide.reasonCodes);
+  assert.deepEqual(blocked.machine.direct, { rule: null, score: 0.2 });
+
+  // 垃圾值一律收敛成 null，绝不把字符串/对象写进账
+  const janky = makeDecision(
+    input({ direct: { rule: 42 as unknown as string, score: "0.9" as unknown as number } }),
+    "t",
+    policy.decide.reasonCodes,
+  );
+  assert.deepEqual(janky.machine.direct, { rule: null, score: null });
 });
 
 test("决策：source 必须显式区分入站与主动开口，缺省是 inbound", () => {

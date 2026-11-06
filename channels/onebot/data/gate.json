@@ -1,0 +1,27 @@
+{
+  "commandPrefixes": [
+    "/",
+    "／"
+  ],
+  "questionMarks": [
+    "？",
+    "?",
+    "吗",
+    "呢"
+  ],
+  "personWords": [
+    "你",
+    "您",
+    "你们",
+    "江迟",
+    "她"
+  ],
+  "nicknames": [
+    "小肥鱼",
+    "哦鲸鲸",
+    "本鱼",
+    "大肥鱼"
+  ],
+  "burstMs": 5000,
+  "recalledMinScore": 0.75
+}

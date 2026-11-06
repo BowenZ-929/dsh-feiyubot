@@ -17,13 +17,15 @@
 // --wait 是「一个观察窗口」的毫秒数：窗口内不早退，才能真的断言「一个 action 都没有」。
 // 发送模式下窗口必须盖住整批节奏（send_at 的首泡到末泡），默认 8000ms 够 [0,1.6,3.2] 这种排布。
 import WebSocket from "ws";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
 import { connect as netDial, createServer as createNetServer } from "node:net";
 import { loadPolicy } from "../policy.ts";
+import { loadGateWords } from "../direct.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(HERE, "..", "fixtures");
@@ -433,6 +435,8 @@ const GATE_NONE = "GATENONE";
 const GATE_BAD_STR = "GATEBADSTR";
 const GATE_BAD_ARR = "GATEBADARR";
 const GATE_BAD_NULL = "GATEBADNULL";
+// M7：这条消息让假核回一个很低的 recalled 分（低于 recalledMinScore）——用来验 (c) 门。
+const LOW_RECALL_MARK = "LOWRECALL";
 
 const gateHitSummary = {
   at: "2026-11-06T05:00:00.000Z",
@@ -547,21 +551,6 @@ const waitForTargetDecisionRows = async (
   return rows;
 };
 
-const waitForDecisionRows = async (
-  path: string,
-  sinceWall: number,
-  want: number,
-  ms: number,
-): Promise<DecisionRow[]> => {
-  const deadline = Date.now() + ms;
-  let rows = decisionRowsSince(path, sinceWall);
-  while (rows.length < want && Date.now() < deadline) {
-    await sleep(50);
-    rows = decisionRowsSince(path, sinceWall);
-  }
-  return rows;
-};
-
 type FakeCore = { url: string; hits: CoreHit[]; close: () => Promise<void> };
 
 // 假核：记录每一具请求体（G 组的证据主要来自这里），并按消息里有没有 LONG_MARK 决定回多长。
@@ -592,7 +581,11 @@ const startFakeCore = async (): Promise<FakeCore> => {
               : { ok: true, chunks: [{ text: "在的", gap_before: 0, send_at: 0 }] };
       // 闸判摘要只在打了标记时挂上去：没标记的回包连 gate 这个键都不该有（那才是「没进闸」）。
       const summary = gateSummaryFor(text);
-      const payload = summary === undefined ? base : { ...base, gate: { summary } };
+      // M7：默认让核「记得」这条（recalled 0.9 ≥ 阈值），老用例才会被 (c) 放行；
+      // 带 LOW_RECALL_MARK 的回 0.2（低于阈值）——G20 的无定向闲聊靠它落在 no_mention。
+      const recalled = { ok: true, recalled: [{ id: "mem-1", score: text.includes(LOW_RECALL_MARK) ? 0.2 : 0.9 }] };
+      const withGate = summary === undefined ? base : { ...base, gate: { summary } };
+      const payload = { ...withGate, ...recalled };
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(payload));
     });
@@ -636,13 +629,21 @@ const portIsOpen = (port: number): Promise<boolean> =>
 type Channel = { port: number; url: string; dump: () => string; stop: () => Promise<void> };
 
 // 起一个独用端口的通道：不抢线上那个 6200，也不受线上通道影响。
-const startChannel = async (coreUrl: string, mode: "send" | "silent"): Promise<Channel> => {
+const startChannel = async (coreUrl: string, mode: "send" | "silent", gatePath?: string): Promise<Channel> => {
   let lastDump = "";
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const port = await freePort();
     const child: ChildProcess = spawn(
       process.execPath,
-      [SERVER_PATH, "--core", coreUrl, "--port", String(port)],
+      [
+        SERVER_PATH,
+        "--core",
+        coreUrl,
+        "--port",
+        String(port),
+        // G1–G19 不测 burst 阀：给一份 burstMs=0 的临时词表（系数仍从文件读，路径注入）。
+        ...(gatePath === undefined ? [] : ["--gate", gatePath]),
+      ],
       { cwd: CHANNEL_DIR, env: { ...process.env, QQAGENT_CHANNEL_MODE: mode }, stdio: ["ignore", "pipe", "pipe"] },
     );
     let dump = "";
@@ -748,7 +749,12 @@ const runBatchSuite = async (config: Config): Promise<void> => {
   const defaultReplies = policy.outbound.defaultReplies;
 
   const core = await startFakeCore();
-  let channel = await startChannel(core.url, "send");
+  // G1–G19 测的是合批 / 配额 / 上限 / 闸判摘要，不是 M7 的 burst 阀：
+  // 给它们一份 burstMs=0 的临时词表（系数仍从文件读，只注入路径）。G20 用真的 data/gate.json。
+  const realGate = loadGateWords();
+  const fastGatePath = resolve(tmpdir(), `onebot-gate-fast-${process.pid}.json`);
+  writeFileSync(fastGatePath, `${JSON.stringify({ ...realGate, burstMs: 0 })}\n`, "utf8");
+  let channel = await startChannel(core.url, "send", fastGatePath);
   say("G 组：假核 " + core.url + "，通道 " + channel.url + "（mode=send）");
   ackEnabled = true;
   socket = await connect(channel.url);
@@ -804,7 +810,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       post(groupId, SPEAKER_A, "同人第 2 句");
       await sleep(G1_CONTINUE_GAP_MS);
       post(groupId, SPEAKER_A, "同人第 3 句");
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 14000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 14000);
       await sleep(500);
       const hits = hitsOf(groupId);
       const speakers = speakersOf(hits[0]?.body);
@@ -850,7 +856,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         post(groupId, plan[i], "交替第 " + (i + 1) + " 条");
         if (i < plan.length - 1) await sleep(300);
       }
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 10000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 10000);
       await sleep(500);
       const hits = hitsOf(groupId);
       const speakers = speakersOf(hits[0]?.body);
@@ -912,7 +918,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       add("G3d", "每段 speaker 序列 = A | B,A | B,A | B（段间不串人）", speakerPlan === wantSpeakers, speakerPlan);
 
       // 墙钟：batch.at / msgs[].at 现在都是真时间，能和决策行的 ts 直接对表（不再是 1970 年）。
-      const stamps = decisionRowsSince(config.decisions, caseStart).map((row) => ({
+      const stamps = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart).map((row) => ({
         ts: Date.parse(String(row.ts)),
         at: Date.parse(String(row.machine?.batch?.at ?? "")),
       }));
@@ -964,7 +970,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         post(groupId, plan[i], "换人第 " + (i + 1) + " 条");
         if (i < plan.length - 1) await sleep(1000);
       }
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 12000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 12000);
       await sleep(600);
       const hits = hitsOf(groupId);
       const speakers = speakersOf(hits[0]?.body);
@@ -1022,7 +1028,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         postPrivate(userId, "私聊第 " + (i + 1) + " 句");
         if (i < 2) await sleep(3000);
       }
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 16000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "user:" + userId, caseStart, 1, 16000);
       await sleep(700);
       const hits = hitsOfPrivate(userId);
       const actions = actionsSince(start);
@@ -1057,7 +1063,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const soloFrames = framesSince(soloStart);
       const soloIndex = soloFrames.findIndex(isActionFrame);
       const soloLatency = soloIndex >= 0 ? frameTimes[soloStart + soloIndex] - soloSent : -1;
-      const soloRows = await waitForDecisionRows(config.decisions, soloSent, 1, 9000);
+      const soloRows = await waitForTargetDecisionRows(config.decisions, "user:" + solo, soloSent, 1, 9000);
       await sleep(400);
       add(
         "G16d",
@@ -1079,7 +1085,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const frames = framesSince(start);
       const index = frames.findIndex(isActionFrame);
       const latency = index >= 0 ? frameTimes[start + index] - sent : -1;
-      const rows = await waitForDecisionRows(config.decisions, sent, 1, 5000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, sent, 1, 5000);
       add(
         "G4",
         "@ 到出手 ≤1000ms（+ 送核/下发余量 200ms，等待上限本身是 mentionCapMs=1000）",
@@ -1147,7 +1153,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         actions.length === 1 && defaultReplies.includes(text) && Array.from(text).length <= policy.outbound.maxChars,
         "发出 " + actions.length + " 条，text=" + JSON.stringify(text) + " 长度=" + Array.from(text).length,
       );
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 5000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 5000);
       const last = rows[rows.length - 1];
       add(
         "G6b",
@@ -1164,7 +1170,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const caseStart = Date.now();
       const start = mark();
       const messageId = post(groupId, SPEAKER_A, "不想说就直说 " + SILENT_MARK);
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 8000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 8000);
       await sleep(1200);
       const actions = actionsSince(start);
       const mine = rowsFor(readRowsFile(config.ledger), "mid:" + messageId);
@@ -1199,7 +1205,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const caseStart = Date.now();
       const start = mark();
       const messageId = post(groupId, SPEAKER_A, "憋回去了 " + EMPTY_MARK);
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 8000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 8000);
       await sleep(900);
       const mine = rowsFor(readRowsFile(config.ledger), "mid:" + messageId);
       const emptyRows = mine.filter((row) => row.kind === "empty");
@@ -1405,10 +1411,11 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       post(groupA, SPEAKER_A, "A 群第 2 句");
       await sleep(150);
       post(groupB, SPEAKER_B, "B 群第 2 句");
-      const bothTargets = (): DecisionRow[] =>
-        decisionRowsSince(config.decisions, caseStart).filter(
-          (row) => row.machine?.target === "group:" + groupA || row.machine?.target === "group:" + groupB,
-        );
+      // 两个目标各自按 target 取，再拼起来（时间窗只当上界，不再当归属依据）。
+      const bothTargets = (): DecisionRow[] => [
+        ...decisionRowsForTarget(config.decisions, "group:" + groupA, caseStart),
+        ...decisionRowsForTarget(config.decisions, "group:" + groupB, caseStart),
+      ];
       let decisions = bothTargets();
       {
         const deadline = Date.now() + 14000;
@@ -1461,7 +1468,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const caseStart = Date.now();
       ackEnabled = false; // 不回 ack：第一泡会 ack 超时，第二泡记 unsent，这一轮 sent=0
       const messageId = post(groupId, SPEAKER_A, "这条发不出去 " + TWO_MARK);
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 30000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 30000);
       await sleep(600);
       const mine = rowsFor(readRowsFile(config.ledger), "mid:" + messageId);
       const outboundFail = mine.filter((row) => row.kind === "uncertain" || row.kind === "failed" || row.kind === "unsent");
@@ -1494,7 +1501,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const controlStart = Date.now();
       const controlMark = mark();
       post(controlGroup, SPEAKER_A, "这条发得出去");
-      await waitForDecisionRows(config.decisions, controlStart, 1, 12000);
+      await waitForTargetDecisionRows(config.decisions, "group:" + controlGroup, controlStart, 1, 12000);
       await sleep(400);
       const controlActions = actionsSince(controlMark).length;
       add(
@@ -1508,7 +1515,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
     // ---- G7：silent → 一条 action 都不出，决策账 silent_mode + 账里 blocked ----
     {
       await channel.stop();
-      channel = await startChannel(core.url, "silent");
+      channel = await startChannel(core.url, "silent", fastGatePath);
       ackEnabled = false;
       try {
         socket.close();
@@ -1521,7 +1528,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const caseStart = Date.now();
       const start = mark();
       const messageId = post(groupId, SPEAKER_A, "silent 也别说");
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 8000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 8000);
       await sleep(Math.min(3000, config.wait));
       const actions = actionsSince(start);
       add("G7a", "silent：一条 action 都不出", actions.length === 0, "收到 " + actions.length + " 个 action 帧");
@@ -1547,7 +1554,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const caseStart = Date.now();
       const start = mark();
       const messageId = post(groupId, SPEAKER_A, "silent 也走核这趟");
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 8000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 8000);
       await sleep(1200);
       const hits = hitsOf(groupId);
       const actionCount = actionsSince(start).length;
@@ -1570,6 +1577,137 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         "reason_code=" + String(lastRow?.machine?.reason_code) + " 配额 " + stamps.length + " 条",
       );
     }
+    // ---- G20：定向门（第一层 / 第二层 / 两道阀），用**真实** data/gate.json（burstMs=5000） ----
+    {
+      await channel.stop();
+      channel = await startChannel(core.url, "send");
+      ackEnabled = true;
+      try {
+        socket.close();
+      } catch {
+        /* 收尾而已 */
+      }
+      socket = await connect(channel.url);
+      say(
+        "G20：默认词表通道 " + channel.url + "（burstMs=" + realGate.burstMs +
+          "，recalledMinScore=" + realGate.recalledMinScore + " 占位）",
+      );
+
+      const groupId = nextGroup();
+      const tgt = "group:" + groupId;
+      const caseStart = Date.now();
+      const start = mark();
+      let sendWall: number | null = null;
+      const rowsSoFar = (): DecisionRow[] => decisionRowsForTarget(config.decisions, tgt, caseStart);
+      const postAndWait = async (text: string, opts: { mention?: boolean } = {}): Promise<DecisionRow | undefined> => {
+        const want = rowsSoFar().length + 1;
+        post(groupId, SPEAKER_A, text, opts.mention ?? false);
+        const rows = await waitForTargetDecisionRows(config.decisions, tgt, caseStart, want, 25000);
+        const row = rows[rows.length - 1];
+        if (row?.machine?.decided === "sent") sendWall = Date.now();
+        return row;
+      };
+      const clearBurst = async (): Promise<void> => {
+        while (sendWall !== null && Date.now() - sendWall < realGate.burstMs - 1500) await sleep(100);
+      };
+
+      // 10 条：@×2（第 2 条紧跟上一次发出 → 被 burst 压掉）、点名问×2、无定向闲聊×5、外号×1
+      await postAndWait("叫她一声", { mention: true }); // 1 @ → 定向放行、发出
+      await postAndWait("又叫一声", { mention: true }); // 2 @ → 落在 5s 内 → burst_guard
+      await postAndWait("今天天气不错 " + LOW_RECALL_MARK); // 3 闲聊 → no_mention
+      await postAndWait("路边的猫好多 " + LOW_RECALL_MARK); // 4 闲聊 → no_mention
+      await clearBurst();
+      await postAndWait("你在忙吗"); // 5 点名问（吗 + 你）→ 定向放行、发出
+      await postAndWait("中午吃面 " + LOW_RECALL_MARK); // 6 闲聊 → no_mention
+      await clearBurst();
+      await postAndWait("你们几点下班？"); // 7 点名问 → 定向放行、发出
+      await postAndWait("地铁好挤 " + LOW_RECALL_MARK); // 8 闲聊 → no_mention
+      await clearBurst();
+      await postAndWait("小肥鱼今天好安静"); // 9 外号 → 定向放行、发出
+      await postAndWait("我先去开会 " + LOW_RECALL_MARK); // 10 闲聊 → no_mention
+      await sleep(600);
+
+      const rows = rowsSoFar();
+      const actions = actionsSince(start);
+      const directed = rows.filter((row) =>
+        ["at", "question+person", "nickname"].includes(String(row.machine?.direct?.rule)),
+      );
+      const bursts = rows.filter((row) => row.machine?.reason_code === "burst_guard");
+      const noMention = rows.filter((row) => row.machine?.reason_code === "no_mention");
+      add(
+        "G20a",
+        "定向层放行 5 条（2 @ + 2 点名问 + 1 外号）",
+        rows.length === 10 && directed.length === 5,
+        "决策 " + rows.length + " 行，定向 " + directed.length + " 条：[" +
+          rows.map((row) => String(row.machine?.direct?.rule)).join(",") + "]",
+      );
+      add(
+        "G20b",
+        "burst 阀压掉 1 条（账上 reason=burst_guard）",
+        bursts.length === 1,
+        "burst=" + bursts.length + " 条，reason 序列=[" + rows.map((row) => String(row.machine?.reason_code)).join(",") + "]",
+      );
+      add("G20c", "实际发出 4 条（4 个 action 帧）", actions.length === 4, "收到 " + actions.length + " 个 action 帧");
+      add(
+        "G20d",
+        "5 条无定向闲聊全部 no_mention（direct.rule=null、score=0.2）",
+        noMention.length === 5 &&
+          noMention.every((row) => row.machine?.direct?.rule === null && row.machine?.direct?.score === 0.2),
+        "no_mention=" + noMention.length + " 行，scores=[" +
+          noMention.map((row) => String(row.machine?.direct?.score)).join(",") + "]",
+      );
+
+      // 三条单点：命令 / 纯表情 / 纯图无字（各用一条独立消息、各自的群）
+      const decisionOf = async (message: Array<Record<string, unknown>>): Promise<DecisionRow | undefined> => {
+        const group = nextGroup();
+        const since = Date.now();
+        const event = buildGroupEvent(fixture, {
+          groupId: group,
+          speaker: SPEAKER_A,
+          messageId: nextMessage(),
+          text: "",
+          mention: false,
+          selfId,
+        });
+        (event as Record<string, any>).message = message;
+        socket.send(JSON.stringify(event));
+        const rows = await waitForTargetDecisionRows(config.decisions, "group:" + group, since, 1, 20000);
+        return rows[rows.length - 1];
+      };
+      const commandRow = await decisionOf([{ type: "text", data: { text: "/help" } }]);
+      const stickerRow = await decisionOf([{ type: "face", data: { id: "14" } }]);
+      const imageRow = await decisionOf([{ type: "image", data: { file: "a.jpg" } }]);
+      add("G20e", "命令（/ 开头）→ reason=command", commandRow?.machine?.reason_code === "command",
+        "reason=" + String(commandRow?.machine?.reason_code) + " human=" + JSON.stringify(String(commandRow?.human ?? "")));
+      add("G20f", "纯表情 → reason=sticker", stickerRow?.machine?.reason_code === "sticker",
+        "reason=" + String(stickerRow?.machine?.reason_code) + " human=" + JSON.stringify(String(stickerRow?.human ?? "")));
+      add("G20g", "纯图无字 → reason=media_only", imageRow?.machine?.reason_code === "media_only",
+        "reason=" + String(imageRow?.machine?.reason_code) + " human=" + JSON.stringify(String(imageRow?.human ?? "")));
+
+      // @ 不是通行证：先把这一群打满 6 次（用 /say，它同样计额度），第 7 条是 @ 她 → 仍被配额拦
+      const quotaGroup = nextGroup();
+      const sayUrl = "http://127.0.0.1:" + channel.port + "/say";
+      const filled: boolean[] = [];
+      for (let index = 0; index < policy.quota.perGroupMax; index += 1) {
+        const res = await postJson(sayUrl, { scene: "group", target: quotaGroup, chunks: [{ text: "打满 " + (index + 1) }] });
+        filled.push(res.json?.ok === true);
+      }
+      // 等出于 burst 窗口：我们要验的是配额，不是这道阀。
+      await sleep(realGate.burstMs + 600);
+      const quotaStart = Date.now();
+      post(quotaGroup, SPEAKER_A, "叫她一声再问一句", true);
+      const quotaRows = await waitForTargetDecisionRows(config.decisions, "group:" + quotaGroup, quotaStart, 1, 25000);
+      const quotaRow = quotaRows[quotaRows.length - 1];
+      add(
+        "G20h",
+        "@ 达到配额上限后仍被挡：第 " + (policy.quota.perGroupMax + 1) + " 条是 @ 她 → quota_exceeded",
+        filled.length === policy.quota.perGroupMax && filled.every(Boolean) && quotaRow?.machine?.reason_code === "quota_exceeded",
+        "前 " + policy.quota.perGroupMax + " 次 ok=" + JSON.stringify(filled) +
+          " 第 " + (policy.quota.perGroupMax + 1) + " 条 reason=" + String(quotaRow?.machine?.reason_code) +
+          " direct.rule=" + String(quotaRow?.machine?.direct?.rule),
+      );
+    }
+
   } finally {
     await channel.stop();
     await core.close();
@@ -1642,7 +1780,7 @@ const runSaySuite = async (config: Config): Promise<void> => {
       const sentRows = sayRowsSince(config.ledger, caseStart).filter(
         (row) => row.kind === "sent" && row.key === id,
       );
-      const decision = decisionRowsSince(config.decisions, caseStart).pop();
+      const decision = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart).pop();
       add(
         "G14a",
         "群 2 泡：2 个 action、2 行 sent retcode=0、决策 sent+proactive（msgs=0）、响应 ok:true sent:2",
@@ -1681,7 +1819,7 @@ const runSaySuite = async (config: Config): Promise<void> => {
       const seventh = await postJson(sayUrl(), { scene: "group", target: quotaGroup, chunks: [{ text: "该被挡了" }] });
       await sleep(400);
       const actions = actionsSince(start);
-      const lastRow = readDecisionRows(config.decisions).pop();
+      const lastRow = decisionRowsForTarget(config.decisions, "group:" + quotaGroup, Date.now() - 120_000).pop();
       add(
         "G14c",
         "同群连发 " + perGroupMax + " 次后第 " + (perGroupMax + 1) + " 次：ok:false quota_exceeded、0 action、决策 quota_exceeded",
@@ -1728,7 +1866,7 @@ const runSaySuite = async (config: Config): Promise<void> => {
       await sleep(300);
       const actions = actionsSince(start);
       const text = String(actions[0]?.params?.message?.[0]?.data?.text ?? "");
-      const decision = decisionRowsSince(config.decisions, caseStart).pop();
+      const decision = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart).pop();
       add(
         "G14e",
         "4 泡（>maxChunks=" + policy.outbound.maxChunks + "）→ 只发 1 条默认短句、决策 replaced_too_long",
@@ -1795,7 +1933,7 @@ const runSaySuite = async (config: Config): Promise<void> => {
       const blocked = sayRowsSince(config.ledger, caseStart).filter(
         (row) => row.kind === "blocked" && row.key === id,
       );
-      const decision = decisionRowsSince(config.decisions, caseStart).pop();
+      const decision = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart).pop();
       add(
         "G14b",
         "silent：0 个 action、1 行 blocked（text 是整段原文）、决策 silent_mode+proactive、响应 ok:false",

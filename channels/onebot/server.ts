@@ -28,8 +28,16 @@ import { loadPolicy, type Policy } from "./policy.ts";
 import { BatchHub, type BatchSnapshot } from "./batch.ts";
 import { renderSegment } from "./segment.ts";
 import { enforceLimits } from "./compose.ts";
-import { DECISIONS_RELATIVE_PATH, DecisionLog, readGateSummary, type GateInput } from "./decide.ts";
+import {
+  DECISIONS_RELATIVE_PATH,
+  DecisionLog,
+  readGateSummary,
+  type DecisionDirect,
+  type GateInput,
+} from "./decide.ts";
 import { QUOTA_RELATIVE_PATH, Quota } from "./quota.ts";
+import { burstBlocked, firstLayer, loadGateWords, readRecalledTopScore, recalledPass, secondLayer, type GateWords } from "./direct.ts";
+import { OWN_IDS_RELATIVE_PATH, OwnIds } from "./own-ids.ts";
 
 const HOST = "127.0.0.1";
 const WS_PATH = "/ws";
@@ -38,6 +46,7 @@ const LEDGER_PATH = join(HERE, LEDGER_RELATIVE_PATH);
 // 决策账与配额状态跟账同一个目录：一本讲「发了什么」，一本讲「为什么没发」，一本讲「这个小时说了几次」。
 const DECISIONS_PATH = join(HERE, DECISIONS_RELATIVE_PATH);
 const QUOTA_PATH = join(HERE, QUOTA_RELATIVE_PATH);
+const OWN_PATH = join(HERE, OWN_IDS_RELATIVE_PATH);
 
 const now = (): string => new Date().toISOString();
 const log = (tag: string, message: string): void => {
@@ -65,6 +74,9 @@ const CORE_PATH = argOf("--core-path", "/chat");
 const CORE_TIMEOUT = readCoreTimeout(
   process.argv.includes("--core-timeout") ? argOf("--core-timeout", "") : null,
 );
+// --gate 只给演练用（G1–G19 不测 burst 阀，用一份 burstMs=0 的临时表）；
+// 线上就是 data/gate.json，系数一个都没写进代码（只注入路径）。
+const GATE_PATH = argOf("--gate", join(HERE, "data", "gate.json"));
 
 const describeWho = (event: ParsedEvent): string => {
   const parts = [String(event.who.id)];
@@ -91,6 +103,8 @@ let policy: Policy | null = null;
 let hub: BatchHub | null = null;
 let decisions: DecisionLog | null = null;
 let quota: Quota | null = null;
+let gateWords: GateWords | null = null;
+let ownIds: OwnIds | null = null;
 if (CORE_URL) {
   try {
     policy = loadPolicy();
@@ -100,9 +114,23 @@ if (CORE_URL) {
     process.stdout.write("", () => process.exit(1));
   }
   if (policy !== null) {
+    try {
+      gateWords = loadGateWords(GATE_PATH);
+    } catch (error) {
+      // 判定词表读不出来同样别上线：没有词表的定向门只会瞎拦或全放。
+      log("error", `判定词表读不出来，进程退出：${(error as Error).message}`);
+      process.stdout.write("", () => process.exit(1));
+    }
+  }
+  if (policy !== null && gateWords !== null) {
     hub = new BatchHub(policy.batch);
     decisions = new DecisionLog({ path: DECISIONS_PATH, policy, onWarn: (message) => log("warn", message) });
     quota = new Quota({ path: QUOTA_PATH, policy, onWarn: (message) => log("warn", message) });
+    ownIds = new OwnIds({ path: OWN_PATH, onWarn: (message) => log("warn", message) });
+    log(
+      "direct",
+      `定向门就绪：burstMs=${gateWords.burstMs} recalledMinScore=${gateWords.recalledMinScore}（占位值，未经校准） own=${ownIds.size()} 条`,
+    );
   }
 }
 
@@ -113,7 +141,7 @@ let requestSeq = 0;
 // /say 没有「来源 socket」：主动开口只能往当前连着的那个协议端发。没有连接就是发不出去（不是崩溃）。
 let lastSocket: WebSocket | null = null;
 
-type AckFrame = { echo: string; status: string | null; retcode: number | null; note: string };
+type AckFrame = { echo: string; status: string | null; retcode: number | null; messageId: number | null; note: string };
 type AckWaiter = (outcome: AckOutcome) => void;
 const ackWaiters = new Map<string, AckWaiter>();
 
@@ -145,12 +173,14 @@ const isActionAck = (raw: string): AckFrame | null => {
   }
   const status = typeof record.status === "string" ? record.status : null;
   const retcode = typeof record.retcode === "number" ? record.retcode : null;
+  const rawMessageId = data.message_id;
+  const messageId = typeof rawMessageId === "number" && Number.isFinite(rawMessageId) ? rawMessageId : null;
   log(
     "ack",
     `收到下发应答 echo=${JSON.stringify(record.echo)} status=${String(record.status)} retcode=${String(record.retcode)}` +
       (extras.length > 0 ? ` ${extras.join(" ")}` : ""),
   );
-  return { echo: String(record.echo), status, retcode, note: extras.join(" ") };
+  return { echo: String(record.echo), status, retcode, messageId, note: extras.join(" ") };
 };
 
 // 等 ack 必须有超时兜底：协议端不回话时不能把整批吊死，更不能自动重发（可能已经发出去了）。
@@ -168,9 +198,26 @@ const waitAck = (echo: string): Promise<AckOutcome> =>
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+// burst 阀：同一会话「上一次真正发出」的时刻。silent 不更新（没发出去就不算说过）。
+// 进程内状态就够了：重启后她刚说过什么这件事，账里本来也查得到，这里只防连发。
+const lastSentAt = new Map<string, number>();
+
 // 一段消息的「账的固定部分」：这一段的每一行都带同样的 key / 场景 / 目标。
 // key 取这一段最后一句话的 key——单条成段时它就是这个群/私聊里唯一能对上的那个键。
-type BatchMeta = { key: string; messageId: number | null; socket: WebSocket; who: ParsedEvent["who"]; where: Where; hasImage: boolean };
+type BatchMeta = {
+  key: string;
+  messageId: number | null;
+  socket: WebSocket;
+  who: ParsedEvent["who"];
+  where: Where;
+  hasImage: boolean;
+  // M7 定向判定要的聚合位（一段里只要有一条满足就算满足；贴纸/裸图要整段都是才算）
+  mentionedSelf: boolean;
+  quotedHer: boolean;
+  allSticker: boolean;
+  allBareImage: boolean;
+  texts: string[];
+};
 const batchMeta = new Map<string, BatchMeta>();
 
 // 每个会话（group:<id> / user:<id>）一个定时器：永远指向 hub.state(key) 报的那个 deadline。
@@ -220,8 +267,11 @@ const onDeadline = (key: string): void => {
 };
 
 // 每段一次核调用。这一段里所有「为什么没发」的结论都收成恰好一行决策账。
+//
+// 管线顺序（M7 钉死）：
+//   mode → 第一层布尔链 → 第二层(a)(b) → burst 阀 → 配额(charge) → 调核 → 第二层(c) → 未定向则 refund → 上限 → 出站 → 决策账
 const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<void> => {
-  if (policy === null || decisions === null || quota === null) return;
+  if (policy === null || decisions === null || quota === null || gateWords === null || ownIds === null) return;
   const id = ++requestSeq;
   const started = Date.now();
   const elapsed = (): string => `${Date.now() - started}ms`;
@@ -237,9 +287,12 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
 
   const gates: GateInput[] = [];
   let decided = false;
-  // 只有真扣过配额的那一段才谈得上退回：silent 不扣，所以也不退。
   let charged = false;
-  // 一批只写一行：先到的那句实话就是这一段的结论，后面谁再想写都不许覆盖。
+  // 定向结论：rule=谁判进来的（null=没有判据），score=核回的 recalled 最高分（没调核就没有）。
+  let rule: string | null = null;
+  let score: number | null = null;
+  const directNow = (): DecisionDirect => ({ rule, score });
+
   const decide = (extra: GateInput[], reason: string | null = null, gate: Record<string, unknown> | null = null): void => {
     if (decided) return;
     decided = true;
@@ -249,13 +302,10 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         scene: snapshot.scene,
         mentioned: snapshot.mentioned,
         target,
-        // 入站路径永远是 inbound；主动开口（/say）显式传 proactive。
         source: "inbound",
-        // 核给的理由是自由文本，由 machine.reason 单独承载；why 只描述门，不许再塞门名里。
         reason,
-        // 核的闸判摘要（原样）：和 gates（通道门链）两格并存，没拿到就是 null。
         gate,
-        // msgs 是条数，不是 segment.ts 里那份消息数组：名字撞了，写错会让面板把条数算成 NaN。
+        direct: directNow(),
         batch: {
           id: snapshot.batchId,
           msgs: snapshot.msgs.length,
@@ -269,7 +319,6 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       log("error", `段 ${snapshot.batchId} 决策账没写成：${(error as Error).message}`);
     }
   };
-  // 确认「她没出手」之后把这一次配额退回去：扣了却没回，等于白占这个群一次额度。
   const refund = (why: string): void => {
     if (!charged) return;
     charged = false;
@@ -283,12 +332,55 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       `段 ${snapshot.batchId} msgs=${snapshot.msgs.length} tier=${snapshot.tier} waited=${snapshot.waited_ms}ms @=${snapshot.mentioned} → ${target}`,
     );
 
-    // ① 门在最外层，mode 永远是第一道。silent 时**照样调核**——门是这套里唯一的变量，
-    //    silent 的账要能回答「如果门开着她会说什么」，所以 blocked 行必须有 text。
+    // ① 门在最外层，mode 永远是第一道。
     const isSend = gate.mode === "send";
     gates.push({ name: "mode", code: "silent_mode", hit: !isSend });
 
-    // ② 群配额：只对 send 扣（silent 本来就不会出手，扣了纯属白占这个群的额度）。
+    // ② 第一层布尔链：命令 > 定向（私聊/@/引用她）> 纯表情/纯图。
+    //    判词只看原话（不带「昵称(id)：」前缀）：名里带个「你」不该被当成叫她。
+    const judgeText = meta.texts.join("");
+    const first = firstLayer(
+      {
+        scene: scene === "private" ? "private" : "group",
+        mentionedSelf: meta.mentionedSelf,
+        quotedHer: meta.quotedHer,
+        text: judgeText,
+        isSticker: meta.allSticker,
+        isBareImage: meta.allBareImage,
+      },
+      gateWords,
+    );
+    if (first.kind === "blocked") {
+      gates.push({ name: "direct", code: first.reason, hit: true });
+      log("direct", `段 ${snapshot.batchId} 第一层拦下：${first.reason}（不调核、不发）`);
+      decide([]);
+      return;
+    }
+    if (first.kind === "directed") {
+      rule = first.rule;
+      gates.push({ name: "direct", code: "sent", hit: false });
+      log("direct", `段 ${snapshot.batchId} 定向：${rule}`);
+    } else {
+      // ③ 第二层 (a)(b)：便宜判，不用调核。没中就先记下「还没定向」，等 (c)。
+      const second = secondLayer(judgeText, gateWords);
+      if (second !== null) {
+        rule = second.rule;
+        gates.push({ name: "direct", code: "sent", hit: false });
+        log("direct", `段 ${snapshot.batchId} 定向（便宜判）：${rule}`);
+      }
+    }
+
+    // ④ burst 阀：刚说过就别连发。窗口按会话各算，silent 永远不会命中（没发过）。
+    const lastSent = lastSentAt.get(target) ?? null;
+    if (burstBlocked(lastSent, Date.now(), gateWords.burstMs)) {
+      gates.push({ name: "burst", code: "burst_guard", hit: true });
+      log("burst", `段 ${snapshot.batchId} target=${target} 距上次发出 ${Date.now() - (lastSent ?? 0)}ms < ${gateWords.burstMs}ms，压掉`);
+      decide([]);
+      return;
+    }
+    gates.push({ name: "burst", code: "burst_guard", hit: false });
+
+    // ⑤ 配额：调核之前扣（配额满了连核都不调）。silent 不扣。
     if (isSend) {
       const charge = quota.charge(target, Date.now(), snapshot.mentioned);
       if (!charge.ok) {
@@ -299,14 +391,13 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       }
       charged = true;
       gates.push({ name: "quota", code: "quota_exceeded", hit: false });
-      // 被 @ 时可以突破配额：这是「有人叫她」而不是「她抢话」，门认得出来就照记一笔。
       if (charge.overridden) {
         gates.push({ name: "mention", code: "sent", hit: false });
         log("quota", `段 ${snapshot.batchId} target=${target} 配额已满（used=${charge.used}），被 @ 突破，照回`);
       }
     }
 
-    // ③ 送核：text 用 renderSegment 的逐行渲染，batch 带上这一段的元信息；其余字段照旧。
+    // ⑥ 送核（(a)(b) 已定向的也要调：这一调用同时就是生成回复的那一次，不额外多调）。
     const rendered = renderSegment(snapshot);
     log(`req#${id}`, `② 交给核 POST ${CORE_URL}${CORE_PATH}（${snapshot.msgs.length} 行，${elapsed()}）`);
 
@@ -337,8 +428,6 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         }
       }
     } catch (error) {
-      // 核不可达只记一行：崩掉或重试都会把通道变成核的从属进程。
-      // 但「等超时了」和「连不上」要分开记：混成一个前缀，排障时就不知道该调超时还是查网络。
       const failure = error as Error;
       const timedOut = failure.name === "TimeoutError" || failure.name === "AbortError";
       attempt = timedOut
@@ -346,8 +435,31 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         : { kind: "unreachable", message: failure.message };
     }
 
-    // 收尾一律走既有 settleRound：error / empty / silent / blocked 的文案与前缀一个字都不新写，
-    // 发出去那一段也仍然是它调 runBatch（分泡 + send_at + ack + 落账）。
+    // 闸判摘要只从原始回包取（chunks/text 两路都能读到它）。
+    const gateSummary = attempt.kind === "payload" ? readGateSummary(attempt.payload) : null;
+    // ⑦ 第二层 (c)：核记得的东西里最高分 ≥ 阈值才算「值得搭话」。
+    const topScore = attempt.kind === "payload" ? readRecalledTopScore(attempt.payload) : null;
+    if (rule === null) {
+      if (recalledPass(topScore, gateWords.recalledMinScore)) {
+        rule = "recalled";
+        score = topScore;
+        gates.push({ name: "direct", code: "sent", hit: false });
+        log("direct", `段 ${snapshot.batchId} 定向（recalled）：top=${String(topScore)} ≥ ${gateWords.recalledMinScore}`);
+      } else {
+        // 没定向：这一轮本来就不该回。核已经调过了（那一次调用同时是生成回复的那次），配额退回去。
+        score = topScore;
+        refund("没定向");
+        gates.push({ name: "direct", code: "no_mention", hit: true });
+        log("direct", `段 ${snapshot.batchId} 没定向（recalled top=${String(topScore)} < ${gateWords.recalledMinScore}），不发`);
+        decide([]);
+        return;
+      }
+    } else if (rule === "question+person" || rule === "nickname") {
+      // 便宜判进来的：顺手把她这次 recalled 的最高分记上，以后靠它校准阈值。
+      score = topScore;
+    }
+
+    // ⑧ 收尾一律走 settleRound：error / empty / silent / blocked 的文案一个字不新写。
     const settle = async (value: CoreAttempt): Promise<Awaited<ReturnType<typeof settleRound>>> =>
       settleRound({
         mode: gate.mode,
@@ -368,9 +480,6 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         log: logOf,
       });
 
-    // 闸判摘要只从**原始回包**取：chunks / text 两路都要能读到它，所以别从 parseCoreResponse 的产物里取。
-    const gateSummary = attempt.kind === "payload" ? readGateSummary(attempt.payload) : null;
-
     if (attempt.kind !== "payload") {
       await settle(attempt);
       refund("核出错");
@@ -380,15 +489,12 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
 
     const reply = parseCoreResponse(attempt.payload);
     if (!reply.ok) {
-      // 认不出就交给 settleRound 记 error（前缀「响应认不出：」），这一轮不发。
       await settle({ kind: "unreadable", reason: reply.reason });
       refund("响应认不出");
       decide([{ name: "core", code: "core_error", hit: true }]);
       return;
     }
 
-    // 核主动说「这轮不说话」（send:false）：不是故障。账上落一行 silent（理由进 note），
-    // 决策账仍然是 core_empty，核给的理由进 machine.reason。
     if (reply.silent !== undefined) {
       await settle(attempt);
       refund("她这轮不想说");
@@ -396,10 +502,9 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       return;
     }
 
-    // ④ 三道上限：整批越界就整批换成一句短的，绝不截半句。
+    // ⑨ 三道上限：整批越界就整批换成一句短的。
     const limited = enforceLimits(reply.chunks, snapshot.batchId, policy);
     if (limited.reason === "core_empty") {
-      // 用空 chunks 走 settleRound：账上照样恰好一行 empty（「她这轮没说」）。
       await settle({ kind: "payload", payload: { ok: true, chunks: [] } });
       refund("她这轮没说");
       decide([{ name: "limits", code: "core_empty", hit: true }]);
@@ -408,32 +513,25 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
 
     const result = await settle({ kind: "payload", payload: { ok: true, chunks: limited.chunks } });
     if (result.kind === "empty") {
-      // 核回了泡，但全是空白：和「一个泡都没有」是同一件事，账上那行 empty 已经写了。
       refund("全是空白泡");
       decide([{ name: "limits", code: "core_empty", hit: true }]);
       return;
     }
-    // 出站全败（failed / uncertain / unsent / ack 超时 / 发送前连接已断）：她一条都没发出去，
-    // 这一次配额不该占着。sent>=1 算出手过，不退——部分发出也是一句真话。
-    // 退款的四个入口（core_error / core_empty / send:false / 出站全败）共用同一个 refund()，
-    // 它带 charged 标志，所以一条路径只会真退一次，绝不重复退。
     // 只有门开着（send）才谈得上「出站全败」：silent 下 sent=0 是门挡的，由 mode 那道门说明。
     if (result.batch !== null && result.batch.sent === 0 && gate.mode === "send") {
       refund(`sent=0，stopped=${result.batch.stopped ?? "—"}`);
-      // 出站全败有自己的 code（outbound_failed）：ack 超时 / 连接断开时我们不知道对方收没收到，
-      // 措辞是「没确认」——不是「核坏了」，也不是「没发」。decided 仍是 silent，退款照旧只退一次。
       gates.push({ name: "outbound", code: "outbound_failed", hit: true });
     }
-    // 只有真的发出去（sent ≥ 1）才算「这一轮拿到了核的闸判并走完了」；出站全败 / 没出手一律 null。
+    // 真发出去了才更新「上一次真正发出」：burst 阀看的是这个时刻。
+    if (result.batch !== null && result.batch.sent > 0) lastSentAt.set(target, Date.now());
+    // 只有真的发出去（sent ≥ 1）才算「这一轮拿到了核的闸判并走完了」。
     const gateForRow = result.batch !== null && result.batch.sent > 0 ? gateSummary : null;
     if (limited.reason === "replaced_too_long") {
-      // 她真发了一条（换成一句短的），这一次不算白占配额。
       decide([{ name: "limits", code: "replaced_too_long", hit: true }], null, gateForRow);
       return;
     }
     decide([{ name: "limits", code: "core_empty", hit: false }], null, gateForRow);
   } catch (error) {
-    // 认领早就放了，这一段也早就落过 batched 行；异常只补一行 error，不重试、不重发。
     const message = (error as Error).message;
     log("error", `段 ${snapshot.batchId} 处理异常，本轮收尾：${message}`);
     ledger.appendNew({
@@ -495,6 +593,8 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
     const state = hub.state(target);
     const batchId = state.batchId ?? "unknown";
     const before = batchMeta.get(batchId);
+    // 「引用她」只认引用的是她自己发过的消息：reply 的 id 必须命中 own-ids 集合。
+    const quotedHer = event.replyToId !== null && (ownIds?.has(event.replyToId) ?? false);
     batchMeta.set(batchId, {
       key,
       messageId: event.messageId,
@@ -502,6 +602,12 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
       who: event.who,
       where: event.where,
       hasImage: event.hasImage || (before?.hasImage ?? false),
+      // 定向位：只要这一段里有一条满足就算满足（贴纸/裸图相反，要整段都是）
+      mentionedSelf: event.mentionedSelf || (before?.mentionedSelf ?? false),
+      quotedHer: quotedHer || (before?.quotedHer ?? false),
+      allSticker: event.isSticker && (before?.allSticker ?? true),
+      allBareImage: event.isBareImage && (before?.allBareImage ?? true),
+      texts: [...(before?.texts ?? []), event.text],
     });
     // 每条入站恰好一行 batched：消息账从此讲的是「这条消息进没进来」，不是「这条消息发没发」。
     ledger.appendNew({
@@ -685,8 +791,9 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
         target,
         source: "proactive",
         reason: null,
-        // /say 这条路不调核，没有闸判可抄。
+        // /say 这条路不调核：没有闸判可抄，也没有定向判据。
         gate: null,
+        direct: { rule: null, score: null },
         // msgs=0：这一段没有入站消息（别塞 chunks 数——那是「泡」，不是「消息」）。
         batch: { id, msgs: 0, waited_ms: 0, tier: "proactive", at: new Date().toISOString() },
         gates: [...gates, ...extra],
@@ -744,6 +851,8 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
     log,
   });
 
+  // 真发出去了也要更新 burst 时刻：主动开口同样算「刚说过」。
+  if (result.sent > 0) lastSentAt.set(target, Date.now());
   // 同入站：silent 下 sent=0 是门挡的（blocked 行已经说了），不算「出站全败」。
   if (result.sent === 0 && isSend) {
     // 与入站同一套：出站全败（含「没有连接」「全是空白泡」）→ 退配额。
@@ -849,7 +958,9 @@ wss.on("connection", (socket, request) => {
       const waiter = ackWaiters.get(ack.echo);
       if (waiter) {
         ackWaiters.delete(ack.echo);
-        waiter({ kind: "ack", status: ack.status, retcode: ack.retcode, note: ack.note });
+        // 发成功了就把这条 message_id 记成「她说过的话」：之后别人引用它才算定向。
+        if (ack.retcode === 0 && ack.messageId !== null) ownIds?.add(ack.messageId);
+        waiter({ kind: "ack", status: ack.status, retcode: ack.retcode, messageId: ack.messageId, note: ack.note });
       }
       return;
     }

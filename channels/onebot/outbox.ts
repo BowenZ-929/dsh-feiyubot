@@ -109,8 +109,10 @@ export const buildAction = (where: Where, text: string, echo: string): Record<st
   return { action: "send_private_msg", params: { user_id: where.userId, message }, echo };
 };
 
+// messageId 是协议端在 ack 里回的 data.message_id：M7 用它记住「她说过的话」，
+// 之后别人引用这条才算「引用她」（引用 id 与她自己发过的 id 比对）。
 export type AckOutcome =
-  | { kind: "ack"; status: string | null; retcode: number | null; note: string }
+  | { kind: "ack"; status: string | null; retcode: number | null; messageId: number | null; note: string }
   | { kind: "timeout" }
   | { kind: "closed" };
 

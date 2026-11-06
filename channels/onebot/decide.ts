@@ -32,6 +32,9 @@ export type BatchSnapshot = {
 // code 是这道门"如果拦下会给出哪个 reason_code"：门名给人认，code 给账认，
 // 两样都要，否则面板只能说"某道门拦了"却说不出按哪条理由。
 export type GateInput = { name: string; code: string; hit: boolean };
+
+// 定向结论：条名说清是哪一条判据把它放进来的（或根本没有）。
+export type DecisionDirect = { rule: string | null; score: number | null };
 export type GateRecord = { name: string; hit: boolean };
 
 export type DecisionInput = {
@@ -48,6 +51,9 @@ export type DecisionInput = {
   // 核的闸判摘要（原样）。没进闸 / 没拿到回包 / /say 这条路都是 null。
   // 注意它和 gates（通道自己的门链）是两回事，两格并存、不许合并。
   gate?: Record<string, unknown> | null;
+  // 定向判定的结论：为什么这次回 / 为什么不回。「被门拦下」时 rule=null。
+  // score 是核回的 recalled 最高分（没调核 / 没有 recalled 就是 null）。
+  direct?: DecisionDirect | null;
   batch: BatchSnapshot;
   gates: GateInput[];
 };
@@ -63,6 +69,7 @@ export type DecisionMachine = {
   reason: string | null;
   source: "inbound" | "proactive";
   gate: Record<string, unknown> | null;
+  direct: DecisionDirect;
 };
 
 export type DecisionRow = {
@@ -80,6 +87,11 @@ const HUMAN_SILENT: Record<string, string> = {
   quota_exceeded: "没回：这个群这个小时说得够多了",
   core_empty: "没回：她这轮不想说",
   core_error: "没回：核出了问题",
+  // M7 定向门的三条硬拦 + 一道阀
+  command: "没回：那是一条命令",
+  sticker: "没回：只发了个表情",
+  media_only: "没回：只发了张图",
+  burst_guard: "没回：刚说过，别连发",
   // ack 超时 / 连接断开时我们并不知道对方收没收到：措辞必须是「没确认」，不是「没发」，更不是「核坏了」。
   // 与「远端不确认就改判 uncertain、永不自动重发」同源。
   outbound_failed: "没回：发出去了但没确认（协议端没回执）",
@@ -136,6 +148,16 @@ export const makeDecision = (
   if (source !== "inbound" && source !== "proactive") {
     throw new RangeError(`machine.source 只认 inbound / proactive，拿到 ${JSON.stringify(input.source)}`);
   }
+  // 定向结论：缺省是「没判据」（rule=null、score=null），绝不空着不写。
+  const rawDirect = input.direct ?? { rule: null, score: null };
+  if (typeof rawDirect !== "object" || rawDirect === null || Array.isArray(rawDirect)) {
+    throw new RangeError("machine.direct 必须是 {rule, score} 对象");
+  }
+  const rule = typeof rawDirect.rule === "string" && rawDirect.rule.length > 0 ? rawDirect.rule : null;
+  const score =
+    typeof rawDirect.score === "number" && Number.isFinite(rawDirect.score) ? rawDirect.score : null;
+  const direct: DecisionDirect = { rule, score };
+
   // 闸判摘要：缺省落到 null（不是 undefined——JSON.stringify 之后账里必须看得见 "gate":null）。
   const gate = input.gate ?? null;
   if (gate !== null && !isPlainObject(gate)) {
@@ -177,6 +199,7 @@ export const makeDecision = (
       reason,
       source,
       gate,
+      direct,
     },
   };
 };

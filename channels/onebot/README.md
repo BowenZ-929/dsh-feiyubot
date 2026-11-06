@@ -618,7 +618,7 @@ M4 只换**粒度**：原来是「一条消息一次核调用」，现在是「*
 | `segment.ts` | 段渲染：一行一条 `昵称(id)：原话`，原话里的换行原样保留 |
 | `compose.ts` | 三道上限（字 / 句 / 条）：越界**整批换成一句短的**，绝不截半句 |
 | `decide.ts` | 决策账：每段恰好一行，人话给人看、结构化给面板指认 |
-| `quota.ts` | 每群 1 小时软配额；被 @ 可以突破（把人叫住了还不吭声才是真故障） |
+| `quota.ts` | 每群 1 小时软配额。**M7 起 `mentionCanExceed=false`：@ 也计一条、且不能突破**（覆盖 M4 的旧口径） |
 | `server.ts` | 接线：入站 → `batched` → 定时器 → 取件 → 配额 → 核**一次** → 上限 → 出站 → 决策 |
 | `outbox.ts` | 只加一条支路：`send:false`（核主动沉默）；分泡 / 发送 / 每泡一行账一个字没动 |
 | `gate.ts` | `LedgerKind` 增加 `batched`（这条进了哪一段）与 `silent`（核主动说这轮不说话） |
@@ -733,7 +733,7 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 | `sent` | 出了手 | `回了：被 @` / `回了：接话` |
 | `replaced_too_long` | 三道上限超了，整批换成一句短的（照发） | `回了：本来太长，换成一句短的` |
 | `silent_mode` | 门关着（silent）：照旧调核、只在出站挡住，不扣配额 | `没回：门关着（silent）` |
-| `quota_exceeded` | 这个群这个小时说得够多了（@ 可突破） | `没回：这个群这个小时说得够多了` |
+| `quota_exceeded` | 这个群这个小时说得够多了（**M7 起 @ 也不能突破**） | `没回：这个群这个小时说得够多了` |
 | `core_error` | 核超时 / 不可达 / HTTP 非 2xx / 响应认不出 | `没回：核出了问题` |
 | `outbound_failed` | **出站全败**：`runBatch` 收尾 `sent === 0`（`failed` / `uncertain` / `unsent` / ack 超时 / 发送前连接已断） | `没回：发出去了但没确认（协议端没回执）` |
 | `core_empty` | 她这轮没说话（`chunks:[]`、全是空白泡，或**主动沉默**） | `没回：她这轮不想说` |
@@ -768,7 +768,7 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 | 2 | `quota` | `quota_exceeded` | 不调核、不发 |
 | 3 | `core` | `core_error` | 不重试、不发 |
 | 4 | `limits` | `core_empty` / `replaced_too_long` | 前者不发，后者换一句短的照发 |
-| 5 | `mention` | `sent`（`hit:false`） | 记录「配额满了但被 @ 突破」 |
+| 5 | `mention` | `sent`（`hit:false`） | **M7 起 `mentionCanExceed=false`，这一档不会再 hit**（保留记录位，防回滚时没人记得它本来在哪） |
 
 **核主动沉默（`send:false`）**：理由进 `machine.reason`，门名照旧只写门（实测）——
 
@@ -813,7 +813,8 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 ## 配额：`quota.charge(target, now, mentioned)`
 
 - 冷却单位是 **群**（`group:<id>` 前缀）；私聊（`user:<id>`）**不记账**，配额对它恒 ok。
-- 窗口 `windowMs` 内最多 `perGroupMax` 次；到点后不搭话，但**被 @** 且 `mentionCanExceed` 时照样回。
+- 窗口 `windowMs` 内最多 `perGroupMax` 次；到点后不搭话。
+- **M7 覆盖**：`mentionCanExceed` 已改成 `false` —— **@ 也计一条、也不能突破**（被 @ 不是无限通行证）。
 - 一次「段」算一次，不管这一段里有几条消息、出去几泡。
 - 状态写在 `.state/quota.json`，重启后接着数（临时文件 + rename，半截写不会把整本账作废）。
 
@@ -842,199 +843,117 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 | 开批（上一条已取走） | `privateOpen` | `min(now + 3500, firstAt + 8000)` |
 | 续发 | `continuing` | `min(now + 3500, firstAt + 8000)` |
 
-- **3500ms 窗**：单条私聊实测 **3506ms** 出手（drill G16d；旧口径是 0ms 立刻回）。
-- **8 秒顶**：连发不停也只攒 8s——实测 3 条 ×3s 间隔在 `firstAt+8000`（硬顶）出手，1 段 3 行、只调核 1 次、只回 1 次（G16a..G16c）。
-- **6 条上限**：私聊同样受 `maxMsgs` 管，凑满 6 条立刻出手（与群里同一条规则，没有私聊特例）。
+# M7 定向门：群里「要不要回」终于有判据
 
-## M1：不给 `--core`
+M7 之前群里是零判据：只要有人说话她就接（27 条里 12 条没点名也接）。M7 加一道**定向门**：
+先按一串便宜的判据判断「这条到底是不是在叫她」，判不出来才去问核（核那一次调用同时就是生成回复的那次，不额外多调）。
 
-一个字都没变：只记日志，不调核、不写账、不建 `.state`。
-`policy` / `hub` / 决策账 / 配额这几个对象只在给了 `--core` 时才构造。
+## 管线（钉死，本轮最容易做错的地方）
 
-## 演练：`tools/drill.ts --batch`（G 组）
-
-A–F 组假设「通道已经跑着」；G 组不能这么假设——它要控制**核回什么**、**门开不开**、**配额剩几次**，
-所以 G 组自己起一个假核 + 一个**独用端口的通道**，跑完就关（这是 drill 里唯一会起进程的地方）：
-
-```bash
-node channels/onebot/tools/drill.ts --batch
+```
+mode 门 → 第一层布尔链 → 第二层(a)(b) 便宜判 → burst 阀 → 配额(charge) → 调核 → 第二层(c) recalled
+        → 没定向就 refund + no_mention（不发） → 三道上限 → runBatch → 决策账一行
 ```
 
-默认**每次新造群号**：M4 起每个群有 1 小时配额，写死一个群会让一小时内的第二遍演练被本群配额拦下
-（那是配额在按设计工作，不是回归）。要复现「配额用尽」就显式写 `--group <固定群号>` 跑第二遍。
+- **定向的**（@ / 引用她 / 私聊）：`mode → 定向过 → burst → charge → core → limits → send`。
+- **非定向**（(a)(b) 没中）：`mode → burst → charge → core → (c) → 不过则 refund + no_mention`。
+- 「先拦再调」仍然成立：配额满了连核都不调；(c) 用的就是生成回复那一次核调用。
+- `silent` 不扣配额，但**照样走完定向门与调核**（门是唯一变量：账要能回答「她本来会不会说」）。
+  定向门拦下的那一轮在 silent 下**不会**产生 `blocked` 行——本来就不会说的话，没有「想发什么」可记。
 
-| 断言 | 它在验什么 |
+## 第一层：布尔链（顺序：命令 > 定向 > 纯表情/纯图）
+
+| 判据 | 结论 |
 | --- | --- |
-| G0 | drill 自己起了假核 + 通道（独立端口，mode=send） |
-| G1a..G1d | 同一人连说 3 句（1.6s + **2.6s** 间隔）→ **只调核一次**、段里 3 行、同一 speaker、`tier=continuing`；第 3 句与前一条隔 2.6s 仍在同一段（证明续发窗是 3s，不是旧的 2s） |
-| G2a..G2c | **三个人**交替 6 条（0.3s、3 秒内）→ 一段 6 行、speaker 按 `A,B,C,A,B,C`、`tier=continuing` |
-| G3a..G3d | 6 条 ×**3.5s** 间隔 → **4 段**、条数 `[1,2,2,1]`、firstAt 相对 `[0,3500,10500,17500]`（±300ms）、speaker 序列 `A | B,A | B,A | B` |
-| G3e/G3f | 时间基是墙钟：决策行 `ts ≥ at` 且 `ts−at ≤ hardCap+1s`；`msgs[].at` 严格递增且都不早于段起点 |
-| G4 | 被 @ → 从消息到出手 ≤1200ms（等待上限 `mentionCapMs=1000` + 送核/下发余量），决策账 `human="回了：被 @"` |
-| G5a..G5c | 1s×10 条：第一段在 **8s 硬顶**出手（`出手−firstAt≤8500`、`waited_ms≤8000`、条数≥8），第 10 条落在第二段 |
-| G6a/G6b | 假核回 600 字 → 只发**一条默认短句**（取自 `policy.defaultReplies`），决策账 `replaced_too_long` |
-| G7a..G7c | silent：0 个 action、决策账 `silent_mode`、`blocked` 行 `text` 非空且 note 带 `chunks=` |
-| G8a..G8c | 同群 7 段（`perGroupMax+1`）：前 6 段各回一条，第 7 段不出手、不调核、决策账 `quota_exceeded` |
-| G9a..G9d | `send:false`：0 个 action、账里恰好 1 行 `silent`（note 含理由）、决策账 `core_empty`+`decided=silent`+`reason` 含理由（且理由不进 `why`）、**核只调 1 次**（没有重试） |
-| G10a/G10b | 对照：`{"ok":true,"chunks":[]}`（**没有** `send`）仍然是 1 行 `empty`、0 行 `silent` |
-| G11a..G11c | refund：同群 6 段 `send:false` 后配额仍是 **0 条**、第 7 段真的出手（配额只被它自己占一次）；对照组 6 次真出手后第 7 次 `quota_exceeded` 且不出手 |
-| G12a..G12d | silent 仍然**调核 1 次**、0 个 action、`blocked` 行 `text` 非空、决策账 `silent_mode`、且该群配额**没有新增时间戳** |
-| G13a..G13d | **出站全败**（假核回两泡、drill 故意不回 ack）：该群配额仍是 0 条（退还）、ledger 里有 `uncertain`/`unsent` 行、决策账仍一行且 `decided=silent`；对照组正常 ack 的那段配额 1 条不退 |
-| G15a..G15c | **会话隔离**：A/B 两群交替各说 2 句 → 恰好 2 段、决策行 `target` 各自正确、每群只调核 1 次且段里只带本群的人、两条 action 分别进各自的群 |
-| G16a..G16d | **私聊攒段**：私聊 3 条 ×3s → 1 段 3 行、只调核 1 次、只回 1 次、`tier=continuing`；单条私聊实测 **3506ms** 出手（≥3500 说明真的按 `privateOpen` 攒了一段，≤8000 是硬顶） |
-| G17a/G17b | **换人不断开**：群里两个不同人、1s 交替共 4 条 → 仍然 **1 段** 4 行、speaker `A,B,A,B`、`tier=continuing` |
-| G18a/G18b | **6 条上限**：群里连发 8 条 ×0.3s → 恰好 **2 段 `[6,2]`**、8 条不重不漏（第 7 条绝不许被塞进第一批） |
+| 去掉行首空白后以 `/` 或 `／` 开头 | **不过**，`command`（人话「没回：那是一条命令」） |
+| 私聊 | **过**，`rule=private`（私聊不做第二层判定） |
+| 群里被 @ 她（`mentionedSelf`；`@全体` 不算） | **过**，`rule=at` |
+| 引用的是**她自己发过的**消息（`replyToId` 命中「她说过的话」集合） | **过**，`rule=quote` |
+| 纯表情包（`isSticker`） | **不过**，`sticker`（「没回：只发了个表情」） |
+| 纯图片无字（`isBareImage`） | **不过**，`media_only`（「没回：只发了张图」） |
 
-跑一遍约 3–4 分钟（G3 四段各等 3.5s，G5 要等满 8s 硬顶，G11 要跑 13 段 ×3s 续发窗，G18 要等第二段到期）。全 PASS 退出码 0。
+**一条「@ 她的命令」仍算命令不过**——命令优先于定向，这是刻意的：`/xxx` 归命令处理，不该触发闲聊回复。
 
-演练用的旋钮（默认值即线上行为）：
+## 第二层：只对未定向的群消息
 
-| 参数 | 默认 | 说明 |
+- **(a) 问号 + 人称**：句子里出现 `questionMarks` 里的任一个（`？ ? 吗 呢`）**且**出现 `personWords` 里的任一个
+  （`你 您 你们 江迟 她`）→ 过，`rule=question+person`。
+- **(b) 外号**：全文命中 `nicknames`（`小肥鱼 哦鲸鲸 本鱼 大肥鱼`）→ 过，`rule=nickname`。
+- **(c) 核记得**：核回包 `recalled` 里的**最高 score** ≥ `recalledMinScore` → 过，`rule=recalled`，
+  并把那个分数记进决策账（`machine.direct.score`）。
+- 全都没中 → `no_mention`（「没回：没叫我」）。**没定向的群消息默认不回**。
+
+### `recalledMinScore` 是占位值
+
+现在是 **0.75**，**未经任何数据校准**——手上没有真实核的 recalled 分数分布。
+选它的理由只有两条：正余弦类相似度里 0.75 大致是「同一件事」的下沿；而且它比 0.8 松一点，
+宁可在校准前多放几条进来、也别把真叫她的话拦死。
+决策账把每次的 `machine.direct.score` 都记下来，就是为了**以后拿真数据重新校准这个数**。
+它不是「概率门控」，没有贝叶斯、没有置信度——就是一个阈值比较。
+
+## 第三层：两道阀
+
+| 阀 | 判据 | 记账 |
 | --- | --- | --- |
-| `--batch` | 关 | 只跑 G 组，自己起假核 + 通道，不碰 `--url` 上那个 |
-| `--say` | 关 | 只跑 G14 组（`POST /say` 主动开口），自己起通道，不调核 |
-| `--decisions <path>` | `channels/onebot/.state/decisions.jsonl` | G 组读的决策账；必须和通道写的是同一个 |
-| `server.ts --port <n>` | `6200` | 端口。G 组靠它起独用端口的通道（不抢线上那个 6200） |
+| burst | 同一会话距**上次真正发出**不足 `burstMs`（5000ms）→ 压掉 | `burst_guard`（「没回：刚说过，别连发」） |
+| 配额 | 1 小时 / 群 6 条，`mentionCanExceed=false`（**@ 也计、不能突破**） | `quota_exceeded` |
 
-## 已知差异与边界（都是实测，不是猜测）
+- burst 窗口**按会话各算**（群是群、私聊是私聊）；`silent` 不更新这个时刻（没发出去就不算说过）。
+- burst 只在「本来要回」的那条路上判（定向的、或非定向但要等 (c) 的）——它挡的是连发，不是判断。
 
-1. **silent 与 M3 同口径：门是唯一变量**。门关着时**照样调核**，只在出站那一脚挡住：
-   `blocked` 行 `text` 是**她本来要说的那句**、note 带 `chunks=1 send_at=[0]`（实测）。
-   silent **不扣配额**（本来就不会出手）。drill 的 **A3 因此重新通过**（silent 11/11、send 17/17，实测）。
-2. **F3 的 dup note 变了**：`batched` 行在入段时就落地，所以重投看到的是 `已有 kind=batched`，
-   不再是 `同一条正在处理中（在飞窗口重投）`——去重照样生效，只是「在飞」这个窗口短到只剩一次同步 observe。
-   F3 的期望已改成接受两种 note；「`sent` 行数不增加」这条核心断言保留。
-3. **时间基是墙钟**：`hub` 的时钟由 `performance.now()` 换成 `Date.now()`，所以 `batch.at` / `msgs[].at` 是**真时间**，
-   能和决策行的 `ts` 直接对表（实测 `ts−at` = 2006 / 6507 / 6508 / 5005ms，就是 G3 那 4 段）。
-   上界是 **`hardCap`(8000)+1s**，不是 `waited_ms`+1s：一条消息在安静档也要等满 2000ms 才出手
-   （`waited_ms=0` 但 `ts−at≈2000`），这是合批的本意，不是误差。
-4. **G1 的间隔不能是 2.0s**：`openMs.quietOpen` 就是 2000ms——**第一条消息自己**就在 2s 到期，
-   所以「同人 3 句、2.0s 间隔」压在的是开批窗而不是续发窗：实测劈成 `[2]` 与 `[1]` 两段
-   （第 2 句并进第 1 段，第 3 句另起一段）。现在 G1 用 **1.6s + 2.6s**：第一段间隔躲开 2000ms，
-   第二段 2.6s 专门落在「旧 `sameSpeaker` 2000ms」与「新 `continueMs` 3000ms」之间——
-   要证的就是续发窗真的从 2s 变成了 3s（实测第 2→3 句隔 2600ms 仍在同一段）。
-5. **G3 用 3.5s 而不是 3.0s**：3.0s 正好就是 `continueMs.group`，第 4 条与 deadline **同刻**到达，
-   结果由「定时器先跑还是消息先到」决定——实测 3.0s 给出 **3 段 `[1,3,2]`**（第 4 条并进了前一段），
-   不是 4 段。3.5s 离边界 500ms，实测稳定 **4 段 `[1,2,2,1]`**，相对 firstAt `[0,3501,10503,17505]`。
-   新群号就够，不用再空等 31s：`quietGapMs`（30s）的「上一条到达」是**按会话**存的，
-   新群的第一条必然是 `quietOpen`（2000ms）。（旧实现是进程级单值，那时不空等 31s 就会变成 `[2,2,2]`。）
-   speaker 序列按实测 `A | B,A | B,A | B` 断言。
-6. **@ 的 ≤1000ms 只能是「等待上限」**：`mentionCapMs=1000` 卡的是**等多久**，之后还要送核 + 下发，
-   实测 1004–1007ms。所以判据写成「≤1200ms（1000 + 余量）」，实测值打进结论表。
-7. **G5 用无竞态版本**：原来是 10 条 ×1s，第 9 条（t=8000）正好压在 `hardCap` 上，谁先跑由抖动决定。
-   现在 `maxMsgs=6` 让一段最多 6 条，硬顶只能用 **5 条 ×1.6s** 来证：没有硬顶时第 5 条会把 deadline
-   推到 `firstAt+9400`，实测在 **`firstAt+8005`** 就出手（`waited_ms=6407`、跨度 6407ms），
-   补的第 6 条落在第二段（两段 firstAt 差 8608ms）。
-8. **`maxMsgs=6` 与「第一段装 8 条」互斥**：旧 G5 的「第一段条数 ≥8」在 6 条上限下不可能成立
-   （不是系数调错，是两条口径撞车）。所以 G5 的输入改成 5 条 + 第 6 条，断言的是**同一个硬顶**，不是放宽。
-   条数上限本身由 G18 钉死：连发 8 条 ×0.3s → `[6,2]`。
-9. **私聊不再 0 延迟**：单条私聊实测 **3506ms** 出手（`openMs.privateOpen`），连发不停则在 `firstAt+8000` 出手。
-   旧口径「私聊每条即批」下 85/85 段都是 1 条一段——这就是这次改判据的原因。
-# M5 主动开口：`POST /say`
-
-M5 给通道加一个**内部入口**：没人说话、她自己想说的时候，由核侧（或运维）直接投一段话。
-它走的**是同一条出站管线**，不是第二条发送路径：
-
-```
-POST /say → 门（silent）→ 群配额 → 三道上限 → planChunks + runBatch（分泡/ack/每泡一行账）→ 决策账一行
-```
-
-## HTTP 与 WS 共用一个端口
-
-```ts
-const httpServer = createServer(handleHttp);          // 只认 POST /say，别的一律 404
-const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
-httpServer.listen(PORT, HOST);                        // 仍然是 127.0.0.1:6200（--port 可覆盖）
-```
-
-- **只绑 `127.0.0.1`，不做鉴权**：这是本机内部接口。
-- 只处理一条路：`POST /say`；其它路径/方法一律 `404 {"ok":false,"message":"只有 POST /say"}`。
-- 监听失败（`EADDRINUSE`）行为不变：打一行 `监听失败：…，进程退出`，**退出码 1**（实测见下）。
-  注意：`ws` 挂在已有 `http.Server` 上时会把 server 的 `error` 再转发成 `wss` 的 `'error'`，
-  所以 `wss.on("error")` 要留一个空监听器（否则进程会带着堆栈崩，把我们那句人话吃掉）。
-- 请求体上限 **64KB**，非 JSON 一律 `400` + 一句中文。
-
-## 请求 / 响应（实测）
-
-```bash
-curl -s -X POST http://127.0.0.1:6261/say \
-  -H 'content-type: application/json' \
-  -d '{"scene":"group","target":791000001,"chunks":[{"text":"主动第一泡","send_at":0},{"text":"主动第二泡","send_at":0.5}]}'
-# {"ok":true,"id":"say-1","source":"proactive","sent":2,"stopped":null,"reason_code":"sent"}
-```
-
-| 字段 | 含义 |
-| --- | --- |
-| `scene` | **只认** `group` / `private`（`unknown` 400：主动开口没有「不知道发给谁」这一档） |
-| `target` | 群号 / QQ 号，必须有限正整数 |
-| `chunks` | 非空数组；每项 `text` 非空字符串，`send_at` 可缺省为 0（浮点秒） |
-| `source` | **请求里的 source 一律忽略**：这条路恒为 `proactive` |
-
-坏输入一律 `400`，`ok:false` + 一句中文（`scene 只认 group 或 private（拿到 "unknown"）` /
-`target 必须是有限正整数（拿到 "700000001"）` / `chunks 必须是非空数组`）。
-
-响应（除 400/404 外一律 `200`，**发送同步等完再回**，方便调用方和 drill 立刻对账）：
+## `data/gate.json`（键名冻结，系数只此一份）
 
 ```json
-{ "ok": true, "id": "say-1", "source": "proactive", "sent": 2, "stopped": null, "reason_code": "sent" }
+{ "commandPrefixes": ["/", "／"],
+  "questionMarks": ["？", "?", "吗", "呢"],
+  "personWords": ["你", "您", "你们", "江迟", "她"],
+  "nicknames": ["小肥鱼", "哦鲸鲸", "本鱼", "大肥鱼"],
+  "burstMs": 5000,
+  "recalledMinScore": 0.75 }
 ```
 
-- `ok` = 这一轮算不算「出手了」：`sent` / `replaced_too_long` 为 `true`，其余（`silent_mode` /
-  `quota_exceeded` / `core_empty` / `outbound_failed`）为 `false`。
-- **被拒也是 200**：`silent` 与 `quota_exceeded` 是「正常决定」，不是服务器错误。
+代码里不许出现第二个数字：`direct.ts` 只做判定，词表与阈值全部注入（`--gate <path>` 只注入**路径**，
+演练用它给 G1–G19 一份 `burstMs=0` 的临时表，因为那些用例测的不是这道阀）。
 
-## 管线顺序（钉死）
-
-1. **门**：`silent` → 不发送，落 1 行 `blocked`（`text` 是整段原文、note 带 `chunks=N send_at=[…]`，
-   仍然是 `runBatch` 的 silent 分支在写）+ 决策账 `silent_mode`。
-2. **配额**：`quota.charge(targetOf(where), now, false)` —— 群也计（不然主动开口能刷屏），
-   `mentioned` 恒 `false`；私聊按 `user:` 前缀自动跳过。不 ok → 决策账 `quota_exceeded`、`ok:false`、0 个 action。
-3. **三道上限**：`enforceLimits(chunks, id, policy)`：越界整批换成一句短的（sha256 按 id 选，永远同一句）。
-4. **发送**：`planChunks` + `runBatch`（**这一层一个字都没改**），`echo` 仍是 `req-<n>-<i>`。
-5. **收尾**：恰好一行决策账：`machine.source="proactive"`、
-   `machine.batch={id:"say-<n>", msgs:0, waited_ms:0, tier:"proactive", at:<墙钟 ISO>}`
-   （`msgs=0` 表示「没有入站消息」，不是泡数）；gates 顺序 `mode → quota → limits`（没有 `core` 门）。
-6. **出站全败**（`sent===0` 且 stopped 是 failed/uncertain/unsent/ack 超时/没有连接）→
-   与入站一致：`reason_code="outbound_failed"` + 退还这一次配额（同一个带 `charged` 的 `refund()`，只退一次）。
-
-## 决策账多一个 `source`
+## 决策账的 `machine.direct`
 
 ```json
-{"ts":"…","kind":"decision","scene":"group","human":"回了：接话","machine":{"batch":{"id":"say-1","msgs":0,"waited_ms":0,"tier":"proactive","at":"2026-11-06T04:41:5x.xxxZ"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":false}],"decided":"sent","why":"门全过（2 道），照发","reason_code":"sent","scene":"group","target":"group:791000001","reason":null,"source":"proactive","gate":null}}
+"direct": { "rule": "at", "score": null }              // 定向通过（private / at / quote）
+"direct": { "rule": "recalled", "score": 0.91 }        // 非定向通过（question+person / nickname / recalled）
+"direct": { "rule": null, "score": 0.2 }               // 被门拦下（调过核就记 top score）
+"direct": { "rule": null, "score": null }              // 被门拦下（压根没调核）
 ```
 
-- `machine.source`：`"inbound"`（入站合批那条路）或 `"proactive"`（`/say`）；**缺省是 `inbound`**，
-  所以既有入站调用点一行不改也照旧，认不出的值会当场抛。
-- `ledger.jsonl` 的 schema **没变**：来源只由决策账承担；`/say` 的 ledger 行 `key=say-<n>`、`messageId=null`。
+新增 `reason_code`：`command` / `sticker` / `media_only` / `burst_guard`（都在 `policy.reasonCodes` 白名单里，
+人话在 `decide.ts`）。`no_mention` 沿用。**ledger 行 schema 一个字没加**：这些理由全在决策账。
 
-## 演练：`drill --say`（G14 组）
+## 判据（人拍的，写死在这里）
 
-```bash
-node channels/onebot/tools/drill.ts --say
-```
+1. **没定向的群消息默认不回**——这是看场合，不是冷淡。
+2. **@ 也计额度**：被 @ 不是无限通行证（`mentionCanExceed=false`，**覆盖** M4 的「@ 可突破」）。
+3. 以后要上小模型，**只替换第二层**；第一层与两道阀不动。
 
-自己起一条通道（`--core` 指向一个不可达地址就行——`/say` 不调核），默认不跑（`--batch` 仍是 40 条那套）。
+## 演练：G20（在 `--batch` 里，用真实 gate.json）
+
+10 条群消息：@她 ×2、点名问 ×2、无定向闲聊 ×5、外号 ×1，其中**恰好 1 条**定向落在上一次发出后 5 秒内：
 
 | 断言 | 它在验什么 |
 | --- | --- |
-| G14a | 群 2 泡：2 个 action、账里 2 行 `sent` `retcode=0`、决策 `sent`+`source=proactive`（`msgs=0`）、响应 `ok:true sent:2` |
-| G14a2 | `echo` 仍是 `req-<n>-<i>`、泡序号从 0 递增 |
-| G14b | silent：0 个 action、1 行 `blocked`（`text` 是整段原文）、决策 `silent_mode`+`proactive`、响应 `ok:false` |
-| G14c | 同群连发 `perGroupMax`(6) 次后第 7 次：`ok:false` + `quota_exceeded`、0 个 action、决策末行 `quota_exceeded` |
-| G14d | 群配额已满时私聊 `/say` 仍 `ok:true` 且真发出去（`send_private_msg`） |
-| G14e | 一次给 4 泡（> `maxChunks=3`）→ 只发 1 条默认短句、决策 `replaced_too_long` |
-| G14f | 坏输入（`scene:unknown` / `target` 非数字 / `chunks:[]`）三条都 `400` + `ok:false` |
-| G14g | 非 `/say` 路径 → `404` 且 `message` 固定 |
+| G20a | 定向层放行 5 条（2 @ + 2 点名问 + 1 外号），10 行决策账 `direct.rule` 序列可读 |
+| G20b | burst 压掉 1 条（`reason=burst_guard`） |
+| G20c | 实际发出 4 条（4 个 action 帧） |
+| G20d | 5 条无定向闲聊全部 `no_mention`，且 `direct.score=0.2`（核的 recalled 真被比过） |
+| G20e/f/g | 命令 → `command`、纯表情 → `sticker`、纯图无字 → `media_only` |
+| G20h | 打满 6 次后第 7 条是 @ 她 → 仍 `quota_exceeded`（@ 不是通行证） |
 
 ## 已知边界
 
-1. **M1（没给 `--core`）下 `/say` 返回 `503`**：没有系数、没有账、而且 M1 不许建 `.state`，所以直说不接活。
-2. **没有 WS 连接时 `/say` 发不出去**：`isSocketOpen()` 为假 → `runBatch` 落 `unsent`、决策 `outbound_failed`、
-   配额退回、HTTP 仍是 `200 {ok:false}`——「没人接」是运行时事实，不是服务器错误。
-3. **`/say` 的 `id` 是进程内序号**（`say-1`, `say-2`…）：重启后从 `say-1` 重来，落账时靠时间戳区分。
-4. **演练不要并发跑**：`--batch` / `--say` / `--expect-mode …` 都用同一份 `.state`，
-   并发时决策行的「时间窗归属」会串（实测：两套演练同时跑，G1/G2 会误判）。一次只跑一套。
-5. **合批按会话分开**（已修）：`batch.ts` 的 `opens` / `queues` / `lastArrivals` 都是 `Map<会话键, …>`，
-   会话键就是 `gate.targetOf` 那套（`group:<id>` / `user:<id>`）。两个群同时说话各自成段、各回各的群
-   （drill G15 钉住这条）；`batchId` 仍是全局递增的 `b1,b2,…`。
-   注意：**演练仍然一次只跑一套**——原因不是合批，而是多套演练共用同一份 `.state`，决策行只能按时间窗归属。
+1. **A–F 组需要一个会回 `recalled` 的核**：drill 的 fixture 是「在吗」（没有称人词/外号），
+   所以它靠 (c) 放行；核不回 recalled 时它会被 `no_mention` 挡下——**那是新口径的正常结果**，
+   不是回归。drill 自带的假核默认回 `recalled [{score:0.9}]`，带 `LOWRECALL` 标记的回 0.2。
+2. **一段多句时，判词用整段原话拼接**（`meta.texts.join("")`）：只要这一段里有一条 @ 她 / 引用她，
+   整段就算定向；命令前缀按「这一段最后一条」的开始字符判。
+3. **burst 时刻只存内存**：进程重启后第一次不会再被「刚说过」压住（账里查得到，但这道阀不追求跨重启一致）。
+4. **定向门拦下的轮次在 ledger 里没有结论行**（只有 `batched`）：理由全在决策账，这是 M4 就定下的分工。
+5. **`replyToId` 只认 `reply` 段的 `id`**：协议端若把引用塞在 CQ 码或别的字段里，这里读不到——
+   读不到就按「没引用」处理（宁可少搭一句，也不误判成引用她）。
