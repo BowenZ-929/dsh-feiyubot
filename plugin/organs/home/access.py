@@ -31,6 +31,17 @@ MAX_SEGMENT = 64
 MAX_DEPTH = 4
 ROLES = ("agent", "organ", "human")
 
+#: 抽屉是结构只读房，但它是「她自己写的东西」那间。2026-11-06 人裁的**唯一按 kind 的例外**：
+#: 只放行 role=agent 写日记与梦；物件／素材之类的照旧进不来（门一对其它 kind 仍然角色无关地拒）。
+#: 判定仍然只有 _doors 一处——不是给抽屉另开一扇门，是给门一加一条写明的例外。
+DRAWER_ROOM = "抽屉"
+#: 抽屉里谁写哪几类：日记与梦是**她写的**；自画像与人设卡是**人给的**（人登记指针，不改内容）。
+#: 其余角色、其余 kind 一律照旧拒——物件、素材之类进不了抽屉。
+DRAWER_WRITE_KINDS: dict = {
+    "agent": ("日记", "梦"),
+    "human": ("自画像", "人设卡"),
+}
+
 ENV_ACCESS = "HOME_ACCESS_FILE"
 # 门一用的名字：与 rooms.READONLY_ROOMS 是同一份事实，这只给个本模块的叫法，不另写一遍
 ROOM_READONLY = READONLY_ROOMS
@@ -300,7 +311,8 @@ def _day_quota(*, root, room: str, consume: bool, limit: int) -> None:
 
 
 def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
-                root=None, whitelist: Optional[Whitelist] = None) -> None:
+                root=None, whitelist: Optional[Whitelist] = None,
+                kind: Optional[str] = None) -> None:
     """写前唯一的准入判定：两道门加五道上限，顺序固定。
 
     门一 结构门（角色无关）：房名在十间，且不是结构性只读的那五间。它不看任何配置文件，
@@ -310,7 +322,7 @@ def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
 
     两道门之后：路径形状 → 单次字数 → 单次文件数 → 该房件数 → 该房日频。
     """
-    found = _doors(role=role, room=room, root=root, whitelist=whitelist)
+    found = _doors(role=role, room=room, root=root, whitelist=whitelist, kind=kind)
     check_path_shape(found.name, name)
 
     if chars > MAX_CHARS_PER_WRITE:
@@ -333,7 +345,7 @@ def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
 
 
 def _doors(*, role: str, room: str, root=None,
-           whitelist: Optional[Whitelist] = None):
+           whitelist: Optional[Whitelist] = None, kind: Optional[str] = None):
     """两道门只在这里判一次：门一结构门（角色无关）、门二白名单门（只管 agent）。
 
     写与消费共用一个实现——消费是「她拿走一件」，与「她放下一件」过的是同一扇门。
@@ -345,10 +357,19 @@ def _doors(*, role: str, room: str, root=None,
         raise _deny("ROOM_MISS", str(miss), 0, len(ROOM_NAMES), 1,
                     room=room, nearest=miss.nearest)
 
+    drawer_writes_herself = False
     if found.name in READONLY_ROOMS:
-        raise _deny("ROOM_READONLY", "这间只读，不放东西：%s" % found.name,
-                    0, 0, 1, door="structure", room=found.name,
-                    readonly=sorted(READONLY_ROOMS))
+        drawer_writes_herself = (found.name == DRAWER_ROOM
+                                 and kind in DRAWER_WRITE_KINDS.get(role, ()))
+        if not drawer_writes_herself:
+            raise _deny("ROOM_READONLY", "这间只读，不放东西：%s" % found.name,
+                        0, 0, 1, door="structure", room=found.name,
+                        readonly=sorted(READONLY_ROOMS))
+
+    if drawer_writes_herself:
+        # 门二不盖抽屉：她的日记与梦不该被「今天能被收回哪几间」这条关掉。
+        # 抽屉本来也不在白名单里（配置点名只读房会被判成配置与结构打架）。
+        return found
 
     if role == "agent":
         allowed = whitelist if whitelist is not None else load_whitelist(root)

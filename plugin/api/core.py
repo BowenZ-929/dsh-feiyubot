@@ -85,8 +85,9 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
                                     "（干跑只算不发，不落盘）" % route}
         if route in home_api.HOME_ROUTES:
             return 405, {"ok": False,
-                         "message": "%s 只收 %s：家有十条路由，只有 POST /home/write 这一条是写，"
-                                    "其余九条只读，方法不对一律 405（写权限也看这张表，不看 UI）"
+                         "message": "%s 只收 %s：日记与梦只能是她写的，人不能改——"
+                                    "PATCH/PUT/DELETE 一律 405；家里十四条路由只有四条 POST 是写"
+                                    "（POST /home/write 等），其余只读（写权限看这张表，不看 UI）"
                                     % (route, ROUTES[route])}
         if route in day_api.DAY_ROUTES:
             return 405, {"ok": False,

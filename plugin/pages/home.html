@@ -93,6 +93,9 @@
          vertical-align: middle; overflow: hidden;
          background: color-mix(in srgb, currentColor 14%, transparent); }
   .bar i { display: block; height: 100%; background: currentColor; }
+  .drawer-card { border-top: 1px dashed var(--home-border); padding: .45rem 0; }
+  .drawer-title { color: var(--home-muted); font-size: .82rem; }
+  .drawer-card pre { margin: .25rem 0 0; white-space: pre-wrap; font-size: .88rem; line-height: 1.6; }
   pre { margin: .5rem 0 0; padding: .6rem .7rem; background: var(--home-bg); white-space: pre-wrap;
         overflow-wrap: anywhere; font: .84rem/1.5 var(--home-mono); border: 1px solid var(--home-border);
         border-radius: 6px; max-height: 22rem; overflow: auto; }
@@ -220,8 +223,16 @@
         改了进度要留一行审计；没有进度就显示「—」，<strong>不显示 0</strong>——「还没登记」和「在起点」是两件事。</p>
     </section>
 
+    <section aria-labelledby="dr-h">
+      <h2 id="dr-h">抽屉<small>她写的（日记·梦）＋ 人给的（自画像·人设卡）</small></h2>
+      <div id="drawer-body"></div>
+      <p class="state" id="drawer-state">载入中…</p>
+      <p class="note">日记与梦是**她写的**：一天一张，人不能改（PATCH 一律 405）。自画像只登记指针与指纹，
+        不搬本体；人设卡是参考卡，<strong>不进提示词</strong>。梦只作谈资，<code>testimony=false</code>。</p>
+    </section>
+
     <section aria-labelledby="log-h">
-      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐八条读端点</small></h2>
+      <h2 id="log-h">日志<small>这套页面只有一个数据源：本按钮一次拉齐九条读端点</small></h2>
       <button id="refresh-all" type="button">刷新全部</button>
       <pre id="log">就绪。</pre>
       <p class="state" id="status">载入中…</p>
@@ -700,6 +711,57 @@
       + (data.truncated ? " · 这次只取了一部分" : ""));
   }
 
+  // —— 抽屉 ————————————————————————————————————————
+  function showDrawer(res) {
+    var body = el("drawer-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    var data = res.data || {};
+    var items = data.items || [];
+    if (!items.length) {
+      var none = document.createElement("pre");
+      none.textContent = "抽屉是空的。";
+      body.appendChild(none);
+      mark("drawer-state", "total=0");
+      return;
+    }
+    var order = ["日记", "梦", "自画像", "人设卡"];
+    order.forEach(function (kind) {
+      var group = items.filter(function (card) { return card.kind === kind; });
+      if (!group.length) { return; }
+      var head = document.createElement("h3");
+      head.textContent = kind + "（" + group.length + (kind === "日记" || kind === "梦" ? " 天" : " 张") + "）";
+      body.appendChild(head);
+      group.forEach(function (card) {
+        var block = document.createElement("div");
+        block.className = "drawer-card";
+        var title = document.createElement("div");
+        title.className = "drawer-title";
+        var text = ((card.params || {}).text || card.note || "");
+        title.textContent = (card.display || card.name)
+          + (kind === "人设卡" ? "  ·不进提示词" : "")
+          + (kind === "自画像" ? "  ·" + ((card.params || {}).caption || "只登记指针") : "");
+        block.appendChild(title);
+        if (text) {
+          var pre = document.createElement("pre");
+          pre.textContent = text;
+          block.appendChild(pre);
+        }
+        if (card.kind === "自画像" || card.kind === "人设卡") {
+          var p = document.createElement("p");
+          p.className = "note";
+          p.textContent = "指针：" + ((card.params || {}).image_path || "—");
+          block.appendChild(p);
+        }
+        body.appendChild(block);
+      });
+    });
+    var counts = {};
+    items.forEach(function (c) { counts[c.kind] = (counts[c.kind] || 0) + 1; });
+    mark("drawer-state", "共 " + items.length + " 张：" + Object.keys(counts).map(function (k) {
+      return k + " " + counts[k];
+    }).join(" · ") + (data.shelves ? "（格子 " + JSON.stringify(data.shelves) + "）" : ""));
+  }
+
   // —— 她手上的事 ————————————————————————————————
   function showHands(res) {
     var body = el("hands-body");
@@ -797,6 +859,7 @@
       mark("warehouse-state", "载入中…");
       mark("anchors-state", "载入中…");
       mark("hands-state", "载入中…");
+      mark("drawer-state", "载入中…");
     }
     return Promise.all([
       call("GET", "/home/rooms"),
@@ -806,7 +869,8 @@
       call("GET", "/home/archive/borrow"),
       call("GET", "/home/warehouse"),
       call("GET", "/home/anchors"),
-      call("GET", "/home/list?room=" + encodeURIComponent("工作台"))
+      call("GET", "/home/list?room=" + encodeURIComponent("工作台")),
+      call("GET", "/home/list?room=" + encodeURIComponent("抽屉") + "&include_consumed=1")
     ]).then(function (out) {
       var failures = 0;
 
@@ -879,6 +943,15 @@
         var handNode = el("hands-state");
         handNode.className = "state bad";
         handNode.textContent = "读 /home/list?room=工作台 失败：" + problem(out[7]);
+      }
+
+      if (out[8].status === 200) { showDrawer(out[8]); }
+      else {
+        failures += 1;
+        el("drawer-body").textContent = "";
+        var drNode = el("drawer-state");
+        drNode.className = "state bad";
+        drNode.textContent = "读 /home/list?room=抽屉 失败：" + problem(out[8]);
       }
 
       if (state.room) { openRoom(state.room); }

@@ -19,6 +19,7 @@ CardError(code="CARD_DISK_MISMATCH")，消息里说「卡与盘对不上」，�
 from __future__ import annotations
 
 import json
+import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,16 @@ INDEX_NAME = "index.jsonl"
 # 七种卡：物件（放着的）、痕迹（写下的经过）、名片（一人一卡）、借阅条（借来的一份语料）、
 # 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）。
 CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费",
-                               "进度")
+                               "进度", "日记", "梦", "人设卡")
+#: 抽屉里的「格子」：这四个 kind 各自落一个子目录，各一份 index.jsonl。
+#: 房名表不变（还是十间）——格子是**一间房里的抽屉分格**，不是新房间。
+SHELF_KINDS: Tuple[str, ...] = ("自画像", "人设卡", "日记", "梦")
+#: 只有抽屉分格。工作台上的「自画像」是画到一半的工作稿（另一件事），不分格、也不套抽屉那套严格形状。
+SHELF_ROOM = access.DRAWER_ROOM
+#: 她一天一张的那两类。
+DATE_KINDS: Tuple[str, ...] = ("日记", "梦")
+DIARY_MIN_CHARS = 80
+DIARY_MAX_CHARS = 150
 
 # 家里能当正文读的后缀；别的后缀（图、音视频）只认指纹与路径，不读正文。
 TEXT_SUFFIXES: Tuple[str, ...] = (".md", ".jsonl")
@@ -73,12 +83,51 @@ def _target_room(name: Any) -> rooms.Room:
                         "房名不在十间里：%r（最接近的一间是 %r）" % (name, nearest)) from exc
 
 
+def _shelf_path(home: Path, room_name: str, kind: str) -> Tuple[Optional[str], Path]:
+    """这个 kind 落哪一格：四类各一格（抽屉/自画像/…），其余落房级索引。"""
+    shelf = kind if (kind in SHELF_KINDS and room_name == SHELF_ROOM) else None
+    if shelf:
+        return shelf, home / room_name / shelf / INDEX_NAME
+    return None, home / room_name / INDEX_NAME
+
+
+def _index_paths(home: Path, room_name: str) -> List[Tuple[Optional[str], Path]]:
+    """一间房的全部索引：房级一份 + 每个有卡的格子各一份（抽屉就是这样装四类的）。
+
+    只列盘上真有的；一份都没有时回到房级路径，读出来是 0 件——不是"读不到"。
+    """
+    base = home / room_name
+    found: List[Tuple[Optional[str], Path]] = []
+    room_index = base / INDEX_NAME
+    if room_index.exists():
+        found.append((None, room_index))
+    if base.is_dir():
+        for child in sorted(p for p in base.iterdir() if p.is_dir()):
+            path = child / INDEX_NAME
+            if path.exists():
+                found.append((child.name, path))
+    if not found:
+        found.append((None, room_index))
+    return found
+
+
 def _index_path(home: Path, room_name: str) -> Path:
     return home / room_name / INDEX_NAME
 
 
 def _line_count(path: Path) -> int:
     return store_module.line_count(path) if path.exists() else 0
+
+
+def _read_room_rows(home: Path, room_name: str) -> Tuple[List[Dict[str, Any]], int]:
+    """一间房的全部行：房级 + 各格子合起来。折叠、挑件、查重都吃这一份。"""
+    rows: List[Dict[str, Any]] = []
+    bad = 0
+    for _shelf, path in _index_paths(home, room_name):
+        part, part_bad = _read_index(path)
+        bad += part_bad
+        rows.extend(part)
+    return rows, bad
 
 
 def _read_index(path: Path) -> Tuple[List[Dict[str, Any]], int]:
@@ -149,10 +198,86 @@ def _identity_keys(card: Dict[str, Any]) -> List[Tuple[Any, ...]]:
     return keys
 
 
+def _need(params: Dict[str, Any], key: str, kind: str) -> str:
+    value = params.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise CardError("KIND_FIELD_MISSING", {"kind": kind, "field": key},
+                        "%s 这张卡缺 %s（放在 params 里，不能空）" % (kind, key))
+    return value
+
+
+def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
+                       room_name: str) -> Dict[str, Any]:
+    """按 kind 校验字段；返回补齐后的 params。
+
+    日记与梦是**她写的**：一天一张、80–150 字；梦另带 `dream_of` 并标 `source_type=梦`。
+    自画像只登记指针与指纹（不搬本体）；人设卡是参考卡，接口上要能一眼看出它不进提示词。
+    """
+    params = dict(raw.get("params") or {})
+    strict = room_name == SHELF_ROOM
+    if kind in DATE_KINDS and not strict:
+        raise CardError("KIND_WRONG_ROOM", {"kind": kind, "room": room_name},
+                        "%s 只落抽屉：它是她自己写的，不进别的房" % kind)
+    if kind in DATE_KINDS:
+        date = _need(params, "date", kind)
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+            raise CardError("BAD_DATE", {"kind": kind, "date": date},
+                            "%s 的 date 要 YYYY-MM-DD：%r" % (kind, date))
+        text = _need(params, "text", kind)
+        count = len(text)
+        if count < DIARY_MIN_CHARS or count > DIARY_MAX_CHARS:
+            raise CardError("KIND_TEXT_LENGTH",
+                            {"kind": kind, "length": count,
+                             "min": DIARY_MIN_CHARS, "max": DIARY_MAX_CHARS},
+                            "%s 要 %d–%d 字，这篇 %d 字"
+                            % (kind, DIARY_MIN_CHARS, DIARY_MAX_CHARS, count))
+        _need(params, "mood", kind)
+        memories = params.get("from_memories")
+        if memories is not None and (not isinstance(memories, list)
+                                     or any(not isinstance(item, str) for item in memories)):
+            raise CardError("KIND_FIELD_MISSING", {"kind": kind, "field": "from_memories"},
+                            "%s 的 from_memories 要是 id 字符串数组（可空）" % kind)
+        if kind == "梦":
+            _need(params, "dream_of", kind)
+            params["source_type"] = "梦"
+        # 一天一张靠幂等：同一天再写就拒，并说清「今天已经写过了」。
+        for _shelf, path in _index_paths(home, room_name):
+            rows, _bad = _read_index(path)
+            for card in fold(rows):
+                if card.get("kind") == kind and not card.get("consumed") \
+                        and str((card.get("params") or {}).get("date")) == date:
+                    raise CardError("DATE_ALREADY_WRITTEN",
+                                    {"kind": kind, "date": date,
+                                     "card_id": card.get("card_id")},
+                                    "%s %s 今天已经写过了（一天一张）" % (kind, date))
+    elif kind == "自画像" and strict:
+        # 抽屉那套严格形状：只登记指针与指纹，不搬本体。工作台上的工作稿不走这条。
+        image = _need(params, "image_path", kind)
+        digest = _need(params, "sha256", kind)
+        size = params.get("bytes")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise CardError("KIND_FIELD_MISSING", {"kind": kind, "field": "bytes"},
+                            "自画像要记 bytes（正整数）")
+        target = Path(image)
+        if not target.is_file():
+            raise CardError("CARD_DISK_MISMATCH", {"kind": kind, "image_path": image},
+                            "自画像那张图不在盘上：%s" % image)
+        actual = store_module.sha256_file(target)
+        if actual != digest:
+            raise CardError("CARD_DISK_MISMATCH",
+                            {"kind": kind, "card_sha256": digest, "actual_sha256": actual},
+                            "自画像的 sha256 对不上：卡上 %s… / 盘上 %s…"
+                            % (digest[:12], actual[:12]))
+    elif kind == "人设卡" and strict and not params:
+        raise CardError("KIND_FIELD_MISSING", {"kind": kind},
+                        "人设卡要带上它的参考内容（params 不能空）")
+    return params
+
+
 def _new_card(raw: Dict[str, Any], *, role: str, by: str, room_name: str, seq: int,
-              progress: Any = _ABSENT) -> Dict[str, Any]:
+              progress: Any = _ABSENT, prefix: Optional[str] = None) -> Dict[str, Any]:
     card = {
-        "card_id": "%s-%d" % (room_name, seq),
+        "card_id": "%s-%d" % (prefix or room_name, seq),
         "room": room_name,
         "kind": raw["kind"],
         "name": raw["name"],
@@ -168,6 +293,13 @@ def _new_card(raw: Dict[str, Any], *, role: str, by: str, room_name: str, seq: i
     }
     if progress is not _ABSENT:
         card["progress"] = progress          # None 也写进去：显式「没有进度」要留痕
+    if card["kind"] == "梦":
+        # 梦只是谈资，不是证词：读出来带 testimony=false，显示时加「（梦）」前缀。
+        card["testimony"] = False
+        card["display"] = "（梦）" + str((card.get("params") or {}).get("text") or "")
+    if card["kind"] == "人设卡":
+        # 参考卡：读得到、面板能看，但接口上一眼看出它不进提示词。
+        card["in_prompt"] = False
     return card
 
 
@@ -182,7 +314,7 @@ def append_cards(root=None, *, role: str, by: str, cards: list) -> dict:
     if not cards:
         return {"cards": [], "audit": []}
 
-    prepared: List[Tuple[Dict[str, Any], str, int, Any]] = []
+    prepared: List[Tuple[Dict[str, Any], str, int, Any, str]] = []
     for raw in cards:
         if not isinstance(raw, dict):
             raise CardError("BAD_CARD", {"card": raw}, "卡必须是字典")
@@ -201,18 +333,24 @@ def append_cards(root=None, *, role: str, by: str, cards: list) -> dict:
         progress = _ABSENT
         if "progress" in raw:
             progress = _check_progress(raw.get("progress"), where="card")
+        if kind in DATE_KINDS:
+            # 日记/梦的"多大"就是正文长度：门要拿它判单次上限，所以先算出来再进门。
+            text = (raw.get("params") or {}).get("text")
+            if isinstance(text, str):
+                chars = len(text)
         access.check_path_shape(room.name, name)
         access.check_write(role=role, room=room.name, name=name, chars=chars,
-                           files=len(cards), root=root)
-        prepared.append((raw, room.name, chars, progress))
+                           files=len(cards), root=root, kind=kind)
+        raw = dict(raw, params=_check_kind_fields(raw, kind, home, room.name))
+        prepared.append((raw, room.name, chars, progress, kind))
 
     written: List[Dict[str, Any]] = []
     entries: List[Any] = []
-    for raw, room_name, chars, progress in prepared:
-        store_module.ensure_dir(home / room_name)
-        path = _index_path(home, room_name)
+    for raw, room_name, chars, progress, kind in prepared:
+        shelf, path = _shelf_path(home, room_name, kind)
+        store_module.ensure_dir(path.parent)
         card = _new_card(raw, role=role, by=by, room_name=room_name,
-                         seq=_line_count(path) + 1, progress=progress)
+                         seq=_line_count(path) + 1, progress=progress, prefix=shelf)
         store_module.append_line(path, card)
         entries.append(audit.append_entry(root=root, role=role, by=by, room=room_name,
                                           name=card["name"], chars=card["chars"],
@@ -396,7 +534,7 @@ def set_progress(root=None, *, role: str, by: str, room: str, progress: Any,
                        root=root)
     home = store_module.home_root(root)
     path = _index_path(home, target_room.name)
-    rows, _bad = _read_index(path)
+    rows, _bad = _read_room_rows(home, target_room.name)
     target = _pick_target(fold(rows), card_id=card_id, name=name, room_name=target_room.name)
     access.check_path_shape(target_room.name, str(target.get("name")))
 
@@ -437,7 +575,7 @@ def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] 
 
     home = store_module.home_root(root)
     path = _index_path(home, target_room.name)
-    rows, _bad = _read_index(path)
+    rows, _bad = _read_room_rows(home, target_room.name)
     folded = fold(rows)
     target = _pick_target(folded, card_id=card_id, name=name, room_name=target_room.name)
 
@@ -466,9 +604,14 @@ def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
     """
     target = _target_room(room)
     home = store_module.home_root(root)
-    rows, bad = _read_index(_index_path(home, target.name))
+    rows, bad = _read_room_rows(home, target.name)
     stats: Dict[str, Any] = {}
     items = fold(rows, stats=stats)
+    shelves: Dict[str, int] = {}
+    for shelf, path in _index_paths(home, target.name):
+        count = _line_count(path)
+        if count:
+            shelves[shelf or target.name] = count
     consumed = sum(1 for card in items if card.get("consumed"))
     if not include_consumed:
         items = [card for card in items if not card.get("consumed")]
@@ -495,6 +638,7 @@ def list_room(root=None, *, room: str, offset: int = 0, limit: int = 200,
     return {"room": target.name, "slug": target.slug, "offset": offset, "limit": limit,
             "total": len(items), "lines": len(shown), "chars": chars,
             "truncated": truncated, "bad_lines": bad, "items": shown,
+            "shelves": shelves,
             "consumed": consumed,
             "orphan_consumes": int(stats.get("orphans", 0)),
             "repeat_consumes": int(stats.get("repeats", 0)),

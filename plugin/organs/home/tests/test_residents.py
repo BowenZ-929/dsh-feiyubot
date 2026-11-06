@@ -149,7 +149,12 @@ class ResidentsTest(unittest.TestCase):
                              .read_text(encoding="utf-8").splitlines()), 1)
 
     def test_residents_has_no_code_path_that_writes_the_drawer(self):
-        """residents.py 里凡是提到抽屉的行，都不许是写盘那几句；cards.py 根本不提抽屉。"""
+        """residents.py 里凡是提到抽屉的行，都不许是写盘那几句。
+
+        口径变更（2026-11-06 人裁）：抽屉**不再是「谁也写不进去」**——她可以往里面写日记与梦
+        （access 的按 kind 例外）。但 residents 这一层仍然只读：资料卡、自画像指针、借阅条
+        都不许从它的代码里落进抽屉。所以这条只查 residents，不再查 cards（格子的名字本来就在那儿）。
+        """
         home = Path(__file__).resolve().parents[1]
         source = (home / "residents.py").read_text(encoding="utf-8")
         drawer_lines = [line for line in source.splitlines() if "DRAWER" in line]
@@ -158,7 +163,6 @@ class ResidentsTest(unittest.TestCase):
             for writer in ("append_line", "atomic_write_text", "append_cards", "write_text",
                            "os.replace"):
                 self.assertNotIn(writer, line, line)
-        self.assertNotIn("抽屉", (home / "cards.py").read_text(encoding="utf-8"))
 
     def test_nothing_written_into_drawer_by_residents(self):
         """把所有会写的动作跑一遍：抽屉里不该长出任何文件（资料卡只有人去放）。"""
