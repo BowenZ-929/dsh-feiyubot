@@ -12,7 +12,7 @@ from pathlib import Path
 from api import api
 from api import core as api_core
 from api import home as home_api
-from organs.home import access, anchors, rooms
+from organs.home import access, anchors, rooms  # noqa: E402
 
 # 五句原文只有一份权威副本（organs/home/tests/test_anchors.py）——「不复制原文到别处」也管测试：
 # 这里要验逐字一致，但不必再抄一遍，抄两份就是两处真源。
@@ -57,24 +57,29 @@ class HomeAnchorsApiTest(unittest.TestCase):
         self.assertTrue(got["ok"] and got["readonly"])
         self.assertEqual(5, got["total"])
         self.assertEqual(5, got["lines"])
-        by_scene = {card["scene"]: card for card in got["anchors"]}
+        by_scene = {card["id"]: card for card in got["anchors"]}
         for want in FIVE:
-            self.assertEqual(want["say"], by_scene[want["scene"]]["say"])
+            self.assertEqual(want["example"], by_scene[want["id"]]["example"])
+            self.assertEqual(want["phrase"], by_scene[want["id"]]["phrase"])
+            self.assertLessEqual(len(by_scene[want["id"]]["phrase"]), anchors.PHRASE_MAX,
+                                 "进提示词的那档必须 ≤4 字")
 
     def test_changing_one_line_lands_a_new_row_and_reads_latest(self) -> None:
         self._append([dict(card) for card in FIVE])
-        changed = FIVE[0]["say"][:-1] + "？"      # 由原文派生，不另抄一句
-        status, payload = self._append([{"scene": "被夸", "say": changed,
+        changed = FIVE[0]["example"][:-1] + "？"   # 由原文派生，不另抄一句
+        status, payload = self._append([{"id": "被夸", "phrase": FIVE[0]["phrase"],
+                                         "example": changed, "when": FIVE[0]["when"],
                                          "body": FIVE[0]["body"]}])
         self.assertEqual(200, status, payload)
         _status, got = self._call("GET", "/home/anchors")
         self.assertEqual(6, got["lines"], "改一句是追加，不是覆盖")
         self.assertEqual(5, got["total"])
-        latest = {card["scene"]: card for card in got["anchors"]}["被夸"]
-        self.assertEqual(changed, latest["say"])
+        latest = {card["id"]: card for card in got["anchors"]}["被夸"]
+        self.assertEqual(changed, latest["example"])
 
     def test_body_written_on_someone_else_is_refused_with_400(self) -> None:
-        status, payload = self._append([{"scene": "被夸", "say": "嗯。", "body": "我给你倒了水"}])
+        status, payload = self._append([{"id": "被夸", "phrase": "嗯", "example": "嗯。",
+                                         "when": "被夸", "body": "我给你倒了水"}])
         self.assertEqual(400, status)
         self.assertEqual("BODY_NOT_SELF", payload["code"])
         self.assertEqual("body", payload["detail"].get("field", "body"))

@@ -33,7 +33,19 @@ from . import store as home_store
 
 ANCHORS_ROOM = "仓库"
 ANCHORS_FILE = "anchors.jsonl"
-ANCHOR_FIELDS: Tuple[str, ...] = ("say", "body", "scene", "who", "why", "ts")
+# 一张卡的现行形状。**两档**是判据（docs/plan.md §3.14）：`phrase` 是进提示词的口癖（≤4 字），
+# `example` 是完整例句，只作「她的口吻长什么样」的证据、**不进提示词**。
+# `id` 是稳定键：改 `when` / 改 `example` 都不改 id——**别拿句子当 id**。
+# `when` 是语境提示，**不是触发条件**：不许实现成「命中场景就插这句」。
+ANCHOR_FIELDS: Tuple[str, ...] = ("id", "phrase", "example", "when", "body", "who", "why", "ts")
+#: 老格式只在**读**的时候兼容（`say` 整句 → example、`scene` → when），写入一律拒。
+LEGACY_FIELDS: Tuple[str, ...] = ("say", "scene")
+#: 口癖上限。不是建议值，是判据：给模型整句示例它就照着念（参考实测复述率 22%~27%）。
+PHRASE_MAX = 4
+WARN_LEGACY_SAY = "LEGACY_SAY_AS_EXAMPLE"
+WARN_LEGACY_SCENE = "LEGACY_SCENE_AS_WHEN"
+WARN_NO_ID = "LEGACY_NO_ID"
+WARN_PHRASE_TOO_LONG = "LEGACY_PHRASE_TOO_LONG"
 
 # body 里出现这些就说明写到别人身上了。不用动词表是因为它必漏；人称对象是这句话的成分，
 # 写自己的身体描述根本用不到它们。
@@ -90,6 +102,27 @@ def check_body(body: str) -> None:
                               {"marker": marker, "body": body})
 
 
+def check_phrase(value: Any) -> str:
+    """口癖只收 **≤4 字**；空串合法（表示这一档还没定，**不许替人猜**）。
+
+    超了当场拒，消息里写清字数：`phrase` 是要进提示词的那一档，它一旦变长，
+    模型就会把「碎片」当句子照念——那正是 §3.14 要挡的事。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise AnchorError(CODE_BAD, "phrase 要是字符串", {"reason": "PHRASE_NOT_TEXT",
+                                                          "phrase": value})
+    count = len(value)
+    if count > PHRASE_MAX:
+        raise AnchorError(CODE_BAD,
+                          "phrase 最多 %d 字，这句 %d 字：%r（口癖是碎片，不是台词）"
+                          % (PHRASE_MAX, count, value),
+                          {"reason": "PHRASE_TOO_LONG", "phrase": value,
+                           "length": count, "max": PHRASE_MAX})
+    return value
+
+
 def _text(raw: Any, label: str, *, required: bool) -> str:
     if raw is None:
         if required:
@@ -103,24 +136,45 @@ def _text(raw: Any, label: str, *, required: bool) -> str:
 
 
 def _normalise(raw: Any, *, who: str) -> Dict[str, Any]:
-    """一张卡从入参变成本仓里的形状。**say 与 body 一个字都不改**——它们是主人逐句定的原文。"""
+    """一张卡从入参变成本仓里的形状。**example 与 body 一个字都不改**——都是人逐句定的原文。
+
+    老字段 `say`／`scene` **当别名收下**（say→example、scene→when），因为别的线还在按老形状
+    播种；但 `phrase` **绝不猜**——不猜就等于不让「整句台词」偷偷回到唯一内容的位置。
+    用了老字段会记在返回的 `legacy_fields` 里，不静默。
+    `id` 缺省时按 `when` 归并（与读侧同一条规则），所以老形状的写入也落得进去。
+    """
     if not isinstance(raw, dict):
         raise AnchorError(CODE_BAD, "一张台词卡要是一个对象", {"got": type(raw).__name__})
-    extra = sorted(set(raw) - set(ANCHOR_FIELDS))
+    card = dict(raw)
+    legacy_used: List[str] = []
+    if "say" in card:
+        legacy_used.append("say")
+        if "example" not in card:
+            card["example"] = card["say"]
+        card.pop("say")
+    if "scene" in card:
+        legacy_used.append("scene")
+        if "when" not in card:
+            card["when"] = card["scene"]
+        card.pop("scene")
+    extra = sorted(set(card) - set(ANCHOR_FIELDS))
     if extra:
         raise AnchorError(CODE_BAD, "台词卡有不认识的字段：%s" % "、".join(extra), {"extra": extra})
-    say = _text(raw.get("say"), "say", required=True)
-    body = _text(raw.get("body"), "body", required=False)
-    scene = _text(raw.get("scene"), "scene", required=True)
+    example = _text(card.get("example"), "example", required=True)
+    when = _text(card.get("when"), "when", required=True)
+    anchor_id = _text(card.get("id"), "id", required=False) or when
+    body = _text(card.get("body"), "body", required=False)
     check_body(body)
     return {
-        "say": say,
+        "id": anchor_id,
+        "phrase": check_phrase(card.get("phrase")),
+        "example": example,
+        "when": when,
         "body": body,
-        "scene": scene,
-        "who": _text(raw.get("who"), "who", required=False) or who,
-        "why": _text(raw.get("why"), "why", required=False),
-        "ts": _text(raw.get("ts"), "ts", required=False) or _now(),
-    }
+        "who": _text(card.get("who"), "who", required=False) or who,
+        "why": _text(card.get("why"), "why", required=False),
+        "ts": _text(card.get("ts"), "ts", required=False) or _now(),
+    }, legacy_used
 
 
 def append_anchors(root=None, *, role: str, by: str, anchors: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -131,8 +185,10 @@ def append_anchors(root=None, *, role: str, by: str, anchors: List[Dict[str, Any
     """
     if not isinstance(anchors, list) or not anchors:
         raise AnchorError(CODE_BAD, "要给一张以上的台词卡；空批等于什么都没登记", {})
-    prepared = [_normalise(raw, who=by) for raw in anchors]
-    chars = sum(len(card["say"]) + len(card["body"]) for card in prepared)
+    normalised = [_normalise(raw, who=by) for raw in anchors]
+    prepared = [card for card, _legacy in normalised]
+    legacy_fields = sorted({name for _card, legacy in normalised for name in legacy})
+    chars = sum(len(card["example"]) + len(card["body"]) for card in prepared)
     access.check_write(role=role, room=ANCHORS_ROOM, name=ANCHORS_FILE,
                        chars=chars, files=len(prepared), root=root)
 
@@ -145,26 +201,75 @@ def append_anchors(root=None, *, role: str, by: str, anchors: List[Dict[str, Any
         written.append(card)
         entries.append(audit.append_entry(
             root=root, role=role, by=card["who"], room=ANCHORS_ROOM,
-            name="%s#%s" % (ANCHORS_FILE, card["scene"]),
-            chars=len(card["say"]) + len(card["body"]),
-            bytes=len(card["say"].encode("utf-8")) + len(card["body"].encode("utf-8"))))
+            name="%s#%s" % (ANCHORS_FILE, card["id"]),
+            chars=len(card["example"]) + len(card["body"]),
+            bytes=len(card["example"].encode("utf-8")) + len(card["body"].encode("utf-8"))))
     return {"room": ANCHORS_ROOM, "file": str(path), "count": len(written),
-            "anchors": written, "audit": entries}
+            "anchors": written, "audit": entries,
+            # 用了老字段就记在这儿：不静默，也不因为兼容就把 phrase 猜出来。
+            "legacy_fields": legacy_fields}
+
+
+def _read_row(row: Dict[str, Any], line: int) -> Tuple[Optional[Dict[str, Any]],
+                                                      List[Dict[str, Any]]]:
+    """把盘上一行读成卡片；**老格式的兼容只在这里**，而且绝不猜 phrase。
+
+    老格式 = 只有一句话（`say`）：读成 `example`、`phrase` 留空、发一条 warn。
+    猜 phrase 就等于替人定口癖，而口癖是判据（`docs/plan.md` §3.14）。
+    读路径也不因为坏数据崩：超长的 phrase 照样读出来，只如实记账。
+    """
+    warnings: List[Dict[str, Any]] = []
+    card = dict(row)
+    if "say" in card and "example" not in card:
+        card["example"] = card.pop("say")
+        warnings.append({"line": line, "code": WARN_LEGACY_SAY,
+                         "note": "老格式：整句读成 example，phrase 留空（不猜口癖）"})
+    if "scene" in card and "when" not in card:
+        card["when"] = card.pop("scene")
+        warnings.append({"line": line, "code": WARN_LEGACY_SCENE,
+                         "note": "老格式：scene 读成 when"})
+    card.setdefault("phrase", "")
+    if not card.get("id"):
+        card["id"] = str(card.get("when") or "").strip()
+        warnings.append({"line": line, "code": WARN_NO_ID,
+                         "note": "老行没有 id：按 when 归并（「改 when 不改 id」从今天起才成立）"})
+    if not str(card.get("id") or "").strip():
+        return None, warnings
+    phrase = str(card.get("phrase") or "")
+    if len(phrase) > PHRASE_MAX:
+        warnings.append({"line": line, "code": WARN_PHRASE_TOO_LONG,
+                         "note": "phrase 有 %d 字，超过 %d 字：%r（读路径不崩，如实报）"
+                                 % (len(phrase), PHRASE_MAX, phrase)})
+    # 缺 when 也读得出来（手写行、半截行都可能缺）：老实留空，不编一个场合。
+    card["when"] = str(card.get("when") or "")
+    # 兼容别名：尚未改造的 /home/anchors 页面按 scene／say 取值。页面改完后删掉这两行。
+    # 面板本来就该显示完整例句（§3.14：例句「进魂·manner 与面板、不进提示词」），所以这个别名不丢信息。
+    card["scene"] = card["when"]
+    card["say"] = card["example"]
+    return card, warnings
+
+
+def _latest(cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    latest: Dict[str, Dict[str, Any]] = {}
+    for card in cards:
+        latest[card["id"]] = card
+    return sorted(latest.values(), key=lambda card: (str(card.get("ts") or ""), card["id"]))
 
 
 def latest_by_scene(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """按 scene 取最新一条：**追加顺序在后者赢**，不比时间戳。
+    """按卡片的稳定键取最新一条（键就是 `id`；当前与场合同名）。**追加顺序在后者赢**，不比时间戳。
 
-    只追加的实现里，盘上最后写下的那句就是她此刻该说的那句；ts 是人给的，可错、可重复，
-    拿它当权威等于让写错的时间戳覆盖掉新台词。
+    只追加的实现里，盘上最后写下的那张才是现状；ts 是人给的，可错、可重复，
+    拿它当权威等于让写错的时间戳覆盖掉后写的那张。
     """
-    latest: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        scene = str(row.get("scene") or "").strip()
-        if not scene:
+    cards: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
             continue
-        latest[scene] = row
-    return sorted(latest.values(), key=lambda row: (str(row.get("ts") or ""), row["scene"]))
+        card, _warnings = _read_row(row, index + 1)
+        if card is not None:
+            cards.append(card)
+    return _latest(cards)
 
 
 def read_all(root=None, *, offset: int = 0, limit: int = 200) -> Dict[str, Any]:
@@ -175,15 +280,29 @@ def read_all(root=None, *, offset: int = 0, limit: int = 200) -> Dict[str, Any]:
     """
     path = anchors_path(root)
     rows, bad = home_store.read_lines(path)
-    current = latest_by_scene(rows)
+    cards: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        card, row_warnings = _read_row(row, index + 1)
+        warnings.extend(row_warnings)
+        if card is not None:
+            cards.append(card)
+    current = _latest(cards)
     access.check_read(room=ANCHORS_ROOM, name=ANCHORS_FILE,
                       lines=min(len(current), access.READ_MAX_LINES),
-                      chars=min(sum(len(r.get("say") or "") + len(r.get("body") or "")
+                      chars=min(sum(len(r.get("example") or "") + len(r.get("body") or "")
                                     for r in current), access.READ_MAX_CHARS))
     window = current[offset:offset + limit]
+    # 老格式的 warn 逐行留着：读得到不等于没有问题，也不许为了安静把 phrase 猜出来。
     return {"room": ANCHORS_ROOM, "file": str(path), "file_exists": path.exists(),
             "lines": len(rows), "bad": bad, "total": len(current),
             "truncated": offset + limit < len(current),
+            "legacy_rows": len({w["line"] for w in warnings
+                                if w["code"] in (WARN_LEGACY_SAY, WARN_LEGACY_SCENE,
+                                                 WARN_NO_ID)}),
+            "warnings": warnings,
             "anchors": window}
 
 
