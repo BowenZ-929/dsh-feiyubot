@@ -38,12 +38,17 @@ MOOD_MAX = 100
 MOOD_UNIT = 10
 MOOD_BASELINE_DEFAULT = 60
 
+# 五类事件的名义档：口径是「正向小幅、负向明显」——被骂（−2）> 被冷落（−1）由数自己说清。
+# 权威那本在 data/emotion_contract.json（人可改），这里是没文件时的出厂值，
+# 两者由 tests/test_report.py 钉住不许漂。
 MOOD_PRAISE = 1
+MOOD_CARE = 0.5
 MOOD_COLD = -1
-MOOD_CONFLICT = -2
+MOOD_REJECTED = -2
 
-# 冲突一天最多扣两次，剩下的当天不再扣。
-MOOD_CONFLICT_DAILY_CAP = 2
+# 负向（被拒 / 被骂）一天最多扣两次，剩下的当天不再扣。
+# 状态文件里那一栏仍叫 conflict_used：schema 定死，不跟着事件改名。
+MOOD_NEGATIVE_DAILY_CAP = 2
 
 # 天花板：就是 MOOD_MAX 那把尺，不另造同值常数。正向增量乘余量 (1 - 当前值/天花板)，
 # 越贴近顶越加不动——一顿夸顶不满，只能一路逼近。只给 mood 用。
@@ -150,10 +155,13 @@ INTENT_PROACTIVE = "proactive"
 INTENTS = (INTENT_PASSIVE, INTENT_PROACTIVE)
 
 EVENT_PRAISE = "praise"
+EVENT_CARE = "care"
 EVENT_COLD = "cold"
-EVENT_CONFLICT = "conflict"
 EVENT_INSULT = "insult"
-EVENTS = (EVENT_PRAISE, EVENT_COLD, EVENT_CONFLICT, EVENT_INSULT)
+# rejected 是原来「冲突 / 被拒」那一类改来的：语义（对方拒了这个话题／拒了她的请求）
+# 与权重（−2 档）都照旧，旧名一个都不留——两个同义名会让账本分不清是哪一种。
+EVENT_REJECTED = "rejected"
+EVENTS = (EVENT_PRAISE, EVENT_CARE, EVENT_COLD, EVENT_INSULT, EVENT_REJECTED)
 
 # ---- 时间工具 ------------------------------------------------------------
 # 一律本地时区、秒精度；落盘串里带偏移，读回来永远 aware。

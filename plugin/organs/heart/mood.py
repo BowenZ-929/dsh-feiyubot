@@ -25,7 +25,7 @@
    MOOD_MAX，一顿夸只能逼近它，顶不满；
 2. 热度折扣：同一类型事件 model.MOOD_HEAT_WINDOW_MIN 分钟内第 n+1 次，
    增益 × 1/(1 + n/model.MOOD_HEAT_K)——越密越薄。
-负向（cold / conflict / insult）两个折扣**一个都不给**：疲惫与压力是代价，不打折，
+负向（cold / rejected / insult）两个折扣**一个都不给**：疲惫与压力是代价，不打折，
 只挡地板（不许穿底）。
 上一轮那两条"第 2 次起半档 / 单日同向封顶 N 档"连同
 model.MOOD_DIMINISH_FACTOR、model.MOOD_DAILY_SAME_DIRECTION_CAP_TIERS 一起撤了——
@@ -48,13 +48,16 @@ from organs.heart import events, model, store
 MOOD_FILE = "mood.json"
 TRAJ_FILE = "mood_traj.jsonl"
 
-# 事件 → 档。被骂（insult）与冲突同为 −2 档；model 里没有单独的 MOOD_INSULT，
-# 这里复用冲突的档值，不改 model。
+# 事件 → 名义档（五类，与 model.EVENTS 一一对应，不多不少）。
+# 被骂（insult）与被拒（rejected）同为 −2 档；被关心（care）只有半档。
+# 这一张只是**没给 tiers 时**的出厂档：report_event 会带契约权重进来覆盖它
+# （data/emotion_contract.json 是人能改的那一份）。
 _EVENT_TIERS = {
     model.EVENT_PRAISE: model.MOOD_PRAISE,
+    model.EVENT_CARE: model.MOOD_CARE,
     model.EVENT_COLD: model.MOOD_COLD,
-    model.EVENT_CONFLICT: model.MOOD_CONFLICT,
-    model.EVENT_INSULT: model.MOOD_CONFLICT,
+    model.EVENT_INSULT: model.MOOD_REJECTED,
+    model.EVENT_REJECTED: model.MOOD_REJECTED,
 }
 
 # 档位词：五档，与 model.TIER_COUNT 对齐。档界围着默认基线对称铺开：
@@ -243,13 +246,19 @@ def read(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
 
 
 def apply_event(
-    kind: str, root: Any = None, now: Optional[str] = None, who: str = "主人"
+    kind: str,
+    root: Any = None,
+    now: Optional[str] = None,
+    who: str = "主人",
+    tiers: Optional[float] = None,
 ) -> Dict[str, Any]:
     """一个事件：先现算衰减，再按"渐近线 + 热度"折算增量，切掉超出的部分，最后落账。
 
     落账顺序钉死，别调换：
     1. 现算衰减得 before（_effective：baseline 先漂，now 再往漂好的 baseline 走）；
-    2. 名义增量 nominal = 名义档 × MOOD_UNIT（praise +1、cold −1、conflict −2、insult −2）；
+    2. 名义增量 nominal = 名义档 × MOOD_UNIT（praise +1、care +0.5、cold −1、
+       insult −2、rejected −2）；名义档给了 tiers 就用 tiers（契约权重就从这个口子
+       进来），没给沿用 _EVENT_TIERS——**这是本模块唯一的一个新口子**，其余一步不动；
     3. 正向（nominal > 0）两个折扣一起上：
        n = events.same_kind_since(kind, …) 本热度窗口内已有几次（不含本次）
        heat = 1 / (1 + n / MOOD_HEAT_K)           ← 越密越薄
@@ -263,9 +272,10 @@ def apply_event(
        落账时也只投递一次；心不自己编事件。
 
     - kind 不在 model.EVENTS 里 → ValueError，不静默吞掉；
+    - tiers 只换名义档；heat 折扣、渐近线、负向不缩放、windowed、负向日上限照旧；
     - 两道旧闸照旧保留在前面，被挡时状态一个字节不改、账本也不落行：
       同一人同一小时最多一次：{"ok": False, "skipped": "windowed"}；
-      冲突 / 被骂单日封顶 MOOD_CONFLICT_DAILY_CAP 次：{"ok": False, "skipped": "capped"}；
+      被拒 / 被骂单日封顶 MOOD_NEGATIVE_DAILY_CAP 次：{"ok": False, "skipped": "capped"}；
     - 成功返回 {"ok": True, "before", "after", "delta", "heat", "headroom", "skipped",
       "kind", "who", "tier"}：delta 是真正落账的分差（被夹到刻度边界时比名义增量小），
       heat 是这次用的热度系数、headroom 是渐近线系数（负向两者都是 1.0：没打过折）。
@@ -281,16 +291,16 @@ def apply_event(
     if state["window"].get(label) == hour:
         return {"ok": False, "skipped": "windowed"}
 
-    capping = kind in (model.EVENT_CONFLICT, model.EVENT_INSULT)
+    capping = kind in (model.EVENT_REJECTED, model.EVENT_INSULT)
     used = state["conflict_used"] if state["day"] == today else 0
-    if capping and used >= int(model.MOOD_CONFLICT_DAILY_CAP):
+    if capping and used >= int(model.MOOD_NEGATIVE_DAILY_CAP):
         return {"ok": False, "skipped": "capped"}
 
     # 1) 现算衰减
     values = _effective(state, at)
     before = values["now"]
-    # 2) 名义档 → 分
-    nominal = float(_EVENT_TIERS[kind]) * float(model.MOOD_UNIT)
+    # 2) 名义档 → 分（tiers 给了就用它：契约权重从这一个口子进来）
+    nominal = float(_EVENT_TIERS[kind] if tiers is None else tiers) * float(model.MOOD_UNIT)
     heat = 1.0
     headroom = 1.0
     if nominal > 0.0:

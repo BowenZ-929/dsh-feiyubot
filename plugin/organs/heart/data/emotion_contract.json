@@ -1,0 +1,95 @@
+{
+  "note": "这是出厂默认值，不是验收线；改这份即生效，不用重启。（运行期读 store.default_root()/emotion_contract.json，home/organs/heart/ 里那份就是你能改的那份）",
+  "version": 1,
+  "cooldown_min": 10,
+  "events": {
+    "praise": {
+      "name": "被夸",
+      "meaning": "对方明确夸她、谢她、说她做得好",
+      "weight": 1,
+      "ledger": [
+        "at",
+        "kind",
+        "who",
+        "note",
+        "weight",
+        "applied",
+        "reason",
+        "mood_before",
+        "mood_after"
+      ]
+    },
+    "care": {
+      "name": "被关心",
+      "meaning": "对方问她吃没吃、累不累，让她早点睡这类照顾",
+      "weight": 0.5,
+      "ledger": [
+        "at",
+        "kind",
+        "who",
+        "note",
+        "weight",
+        "applied",
+        "reason",
+        "mood_before",
+        "mood_after"
+      ]
+    },
+    "cold": {
+      "name": "被冷落",
+      "meaning": "她说了话没人接，或对方明显敷衍",
+      "weight": -1,
+      "ledger": [
+        "at",
+        "kind",
+        "who",
+        "note",
+        "weight",
+        "applied",
+        "reason",
+        "mood_before",
+        "mood_after"
+      ]
+    },
+    "insult": {
+      "name": "被骂",
+      "meaning": "针对她的辱骂、贬损",
+      "weight": -2,
+      "ledger": [
+        "at",
+        "kind",
+        "who",
+        "note",
+        "weight",
+        "applied",
+        "reason",
+        "mood_before",
+        "mood_after"
+      ]
+    },
+    "rejected": {
+      "name": "被拒绝",
+      "meaning": "对方拒了这个话题／拒了她的请求",
+      "weight": -2,
+      "ledger": [
+        "at",
+        "kind",
+        "who",
+        "note",
+        "weight",
+        "applied",
+        "reason",
+        "mood_before",
+        "mood_after"
+      ]
+    }
+  },
+  "reactions": {
+    "warm": {
+      "name": "有人接了她的话"
+    },
+    "cold": {
+      "name": "没人理"
+    }
+  }
+}

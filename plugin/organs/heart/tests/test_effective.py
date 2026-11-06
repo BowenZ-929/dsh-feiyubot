@@ -70,8 +70,8 @@ class ThreeSourcesAreTheSameNumber(EffectiveBase):
 
     def setUp(self) -> None:
         super().setUp()
-        # 让数字离开默认值：一次冲突 = −2 档，读书时再掉一小截（衰减在 mood.read 里）。
-        mood_module.apply_event("conflict", root=self.root, now=T_APPLIED)
+        # 让数字离开默认值：一次被拒 = −2 档，读书时再掉一小截（衰减在 mood.read 里）。
+        mood_module.apply_event("rejected", root=self.root, now=T_APPLIED)
 
     def test_mood_now_is_one_number_in_three_places(self):
         organ = self.organ_state(T0)

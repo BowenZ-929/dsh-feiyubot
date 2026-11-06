@@ -38,9 +38,11 @@ PAGES = PLUGIN / "pages"
 # 一次就会往这儿丢运行时文件——守卫见 PanelContractTest.test_zz_heart_data_dir_stays_clean。
 # engage_weights.json 是第四轮的出厂权重表（intent 的参数表，人可改、改完即生效）：
 # 它是**出厂文件**，不是运行时落盘——intent 只读它，一个字节都不写。
+# emotion_contract.json 同理：情绪的契约（五类事件、权重、账格式），report 只读它；
+# 运行期那份在 store.default_root()，不是这里。
 HEART_DATA = PLUGIN / "organs" / "heart" / "data"
 ALLOWED_HEART_DATA = {".gitignore", ".gitkeep", "baseline-card.json",
-                      "engage_weights.json"}
+                      "engage_weights.json", "emotion_contract.json"}
 BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
                 "/brain/recall", "/brain/selfnarration", "/brain/proposals")
 # 关键端点：方法 + 路径。条数由 api.ROUTES 自己算（见 RouteRegistryTest），这里只钉"必须在"。

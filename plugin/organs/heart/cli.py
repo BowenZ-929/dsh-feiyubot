@@ -1,4 +1,4 @@
-"""心的人可读自检：python3 -m organs.heart.cli <card|…|refuse|all>（十段，见 SECTIONS）。
+"""心的人可读自检：python3 -m organs.heart.cli <card|…|report|all>（十一段，见 SECTIONS）。
 
 只做演示与取证，不是产品入口：每条命令都把数据根指到 tempfile.mkdtemp() 的临时目录，
 第一行就把这个路径打印出来——**仓里的 data 一个字节都不碰**。
@@ -29,10 +29,12 @@ from organs.heart import mood as mood_module
 from organs.heart import offset as offset_module
 from organs.heart import pending as pending_module
 from organs.heart import refuse as refuse_module
+from organs.heart import report as report_module
 from organs.heart import sleep as sleep_module
+from organs.heart import store as store_module
 
 SECTIONS = ("card", "energy-day", "sleep", "mood-praise3", "gates", "intent", "pending",
-            "window", "refuse")
+            "window", "refuse", "report")
 
 # 三连夸的期望值：写成字面量，不按公式现算——现算就等于拿实现给它自己判卷。
 PRAISE_EXPECTED = (64.0, 67.3, 70.1)
@@ -475,10 +477,92 @@ def demo_refuse(root: Path) -> None:
           % (last["until"], beyond, released["cooling"], released["remaining_min"]))
 
 
+# ---- report：两本账 + 冷却 + 静音触发的那条 cold ---------------------------
+
+
+def _contract_table(root: Path) -> None:
+    """把契约摊开：五类事件、各自档位、账格式——人照着改就行。"""
+    table = report_module.load_contract(root)
+    print("  契约 cooldown_min=%g 分钟（同一类冷却期内只推一次）"
+          % float(table["cooldown_min"]))
+    print("  %-9s %-6s %-6s %s" % ("kind", "名字", "权重", "账格式（列的字段）"))
+    for kind in model.EVENTS:
+        entry = table["events"][kind]
+        print("  %-9s %-6s %+5.1f  %s"
+              % (kind, entry["name"], float(entry["weight"]),
+                 " / ".join(entry["ledger"])))
+
+
+def demo_report(root: Path) -> None:
+    """情绪契约与两个投递口：连投十次只推一次；三次没人理 → 静音 + 一条 cold。
+
+    第一幕：同一分钟十次 praise——冷却按 kind 各算，第一次推（60.0 → 64.0），
+    其余九次记账但不推（applied:false / reason:cooldown），mood 只有一个台阶。
+    第二幕：把临时根里的 cooldown_min 改成 0 再投十次（十个不同的人）——全部过闸；
+    「契约可改」不是形容词，改完就换行为。
+    第三幕：cold 反馈连三次——前两次 mood 一分不动；第三次 proactive 进静音，
+    同时**额外**推一条 cold 情绪事件（force 绕冷却，reason=mute-triggered）：
+    静音是行为，cold 是情绪，两件都要落。
+    """
+    _root_note(root)
+    (root / report_module.CONTRACT_FILE).write_bytes(
+        (store_module.DATA_DIR / report_module.CONTRACT_FILE).read_bytes())
+    _contract_table(root)
+
+    at = _stamp(5, 9)
+    print("  ① 同一分钟（%s）连投十次 praise：" % at)
+    before = mood_module.read(root, at)["now"]
+    results = [report_module.report_event("praise", who="主人", root=root, now=at)
+               for _ in range(10)]
+    after = mood_module.read(root, at)["now"]
+    print("     applied=%s" % " ".join("是" if row["applied"] else "否" for row in results))
+    print("     reason =%s" % " ".join(str(row["reason"]) for row in results))
+    print("     mood %.1f → %.1f（只推了一次，就是一个台阶 %+.1f）"
+          % (before, after, after - before))
+    log = store_module.read_jsonl(root / report_module.LOG_FILE)
+    print("     emotion_log.jsonl %d 行；事件账 %d 行"
+          % (len(log),
+             len(events_module.recent(root=root, now=at, window_min=60.0))))
+
+    base = report_module.load_contract(root)
+    table = json.loads((root / report_module.CONTRACT_FILE).read_text(encoding="utf-8"))
+    table["cooldown_min"] = 0
+    (root / report_module.CONTRACT_FILE).write_text(
+        json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("  ② 只把临时根里的 cooldown_min 从 %g 改成 0，再投十次（十个不同的人）："
+          % float(base["cooldown_min"]))
+    loose = [report_module.report_event("praise", who="客%d" % index, root=root, now=at)
+             for index in range(10)]
+    print("     applied=%s  全部过闸=%s"
+          % (" ".join("是" if row["applied"] else "否" for row in loose),
+             all(row["applied"] for row in loose)))
+
+    fed = root / "fed"
+    fed.mkdir()
+    (fed / report_module.CONTRACT_FILE).write_bytes(
+        (store_module.DATA_DIR / report_module.CONTRACT_FILE).read_bytes())
+    print("  ③ 另一个临时子根：cold 反馈连三次（她主动开口，连着没人理）：")
+    for index in range(1, 4):
+        start = mood_module.read(fed, at)["now"]
+        got = report_module.report_reaction("cold", who="主人", root=fed, now=at)
+        end = mood_module.read(fed, at)["now"]
+        event = got["mood_event"] or {}
+        print("     第 %d 次：streak=%d muted=%-5s mood %.1f → %.1f%s"
+              % (index, got["streak"], got["muted"], start, end,
+                 "  推了 cold（%s，%+.1f）" % (event.get("reason"),
+                                              event["mood_after"] - event["mood_before"])
+                 if event else "  没推情绪"))
+    rows = store_module.read_jsonl(fed / report_module.LOG_FILE)
+    print("     情绪账只有那一条：%s" % json.dumps(rows[-1], ensure_ascii=False))
+    print("  σ 一句话：核只说「发生了什么」，推多少由心的冷却与权重自己拍——"
+          "静音与 cold 两条同时落，不拿行为顶替情绪。")
+
+
 DEMOS = {"card": demo_card, "energy-day": demo_energy_day,
          "sleep": demo_sleep, "mood-praise3": demo_mood_praise3,
          "gates": demo_gates, "intent": demo_intent,
-         "pending": demo_pending, "window": demo_window, "refuse": demo_refuse}
+         "pending": demo_pending, "window": demo_window, "refuse": demo_refuse,
+         "report": demo_report}
 
 
 def _run_section(index: int, total: int, name: str) -> None:
@@ -495,7 +579,7 @@ def main(argv: Any = None) -> int:
         prog="python3 -m organs.heart.cli",
         description="心的人可读自检：每段都跑在自己的临时根上，绝不写仓里的 data。")
     parser.add_argument("cmd", choices=tuple(SECTIONS) + ("all",),
-                        help="card / energy-day / mood-praise3 / gates / all")
+                        help="card / energy-day / mood-praise3 / gates / refuse / report / all")
     args = parser.parse_args(argv)
     if args.cmd == "all":
         total = len(SECTIONS) + 1

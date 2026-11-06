@@ -10,7 +10,7 @@
 - 两个落账口子：
   deliver() 给嘴/脑投递，只认六个 DELIVER_KINDS
   （ignored / harsh / replied / normal / asleep / awake），别的 kind 一律 ValueError；
-  append() 是内部口子，mood 的四类事件（praise / cold / conflict / insult）也落同一本账。
+  append() 是内部口子，mood 的五类事件（praise / care / cold / insult / rejected）也落同一本账。
 - 行形状 {"at": iso, "kind": str, "who": str, ...extra}；下一轮的 engage 窗口与念头层读它。
 """
 from __future__ import annotations
@@ -119,7 +119,7 @@ def deliver(
 def append(
     kind: str, who: str = "主人", root: Any = None, now: Optional[str] = None, **extra: Any
 ) -> None:
-    """内部口子：mood 的四类事件也落同一本账（kind 就用 praise/cold/conflict/insult）。
+    """内部口子：mood 的五类事件也落同一本账（kind 就用 praise/care/cold/insult/rejected）。
 
     不校验枚举（枚举归 mood 管），但 kind 必须是非空字符串——空名字的行读不出意义。
     """

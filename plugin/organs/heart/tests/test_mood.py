@@ -268,15 +268,15 @@ class MoodTest(unittest.TestCase):
     # ---- 验收第 4 条：负向不缩放 -----------------------------------------
 
     def test_negative_is_never_scaled(self) -> None:
-        """验收第 4 条：conflict / insult 各连打 3 次（间隔 20 秒 < 热度窗口），
-        delta 恒为 −20：不随次数缩水、也不被天花板折算（只受冲突日上限与地板限制）。"""
+        """验收第 4 条：rejected / insult 各连打 3 次（间隔 20 秒 < 热度窗口），
+        delta 恒为 −20：不随次数缩水、也不被天花板折算（只受负向日上限与地板限制）。"""
         from unittest import mock
 
         start = _local()
-        for kind, want in (("conflict", -20.0), ("insult", -20.0)):
+        for kind, want in (("rejected", -20.0), ("insult", -20.0)):
             root = self._fresh_root()
             self._seed_into(root, 60, 60, model.iso(start))
-            with mock.patch.object(model, "MOOD_CONFLICT_DAILY_CAP", 10):
+            with mock.patch.object(model, "MOOD_NEGATIVE_DAILY_CAP", 10):
                 rows = [
                     mood.apply_event(kind, root, now=_at_sec(20 * index, start), who="人%d" % index)
                     for index in range(3)
@@ -300,13 +300,13 @@ class MoodTest(unittest.TestCase):
 
     # ---- 旧闸 ------------------------------------------------------------
 
-    def test_conflict_hits_twice_then_the_daily_gate_closes(self) -> None:
-        """负向的"档位上限"退役了，只剩冲突日上限（默认 2 次/日）：
+    def test_rejected_hits_twice_then_the_daily_gate_closes(self) -> None:
+        """负向的"档位上限"退役了，只剩负向日上限（默认 2 次/日）：
         前两次各 −20，第三次 capped，被挡时不落账。"""
         start = _local()
         self._seed(60, 60, model.iso(start))
         results = [
-            mood.apply_event("conflict", self.root, now=model.iso(start), who=who)
+            mood.apply_event("rejected", self.root, now=model.iso(start), who=who)
             for who in ("甲", "乙", "丙")
         ]
         self.assertEqual([True, True, False], [row["ok"] for row in results])
@@ -328,11 +328,11 @@ class MoodTest(unittest.TestCase):
         self.assertFalse(results[2]["ok"])
         self.assertGreater(results[1]["after"], float(model.MOOD_MIN))
 
-    def test_conflict_count_gate_still_fires(self) -> None:
-        """MOOD_CONFLICT_DAILY_CAP 那道旧闸没拆：配额用满就 capped。"""
+    def test_rejected_count_gate_still_fires(self) -> None:
+        """MOOD_NEGATIVE_DAILY_CAP 那道旧闸没拆：配额用满就 capped。"""
         start = _at()
-        self._seed(60, 60, start, conflict_used=int(model.MOOD_CONFLICT_DAILY_CAP))
-        got = mood.apply_event("conflict", self.root, now=start, who="甲")
+        self._seed(60, 60, start, conflict_used=int(model.MOOD_NEGATIVE_DAILY_CAP))
+        got = mood.apply_event("rejected", self.root, now=start, who="甲")
         self.assertFalse(got["ok"])
         self.assertEqual("capped", got["skipped"])
 
@@ -361,7 +361,7 @@ class MoodTest(unittest.TestCase):
         start = _at()
         yesterday = _at(-24)
         self._seed(60, 60, start, conflict_used=2, day=day_model.day_key(yesterday, cutover_hour=0))
-        got = mood.apply_event("conflict", self.root, now=start, who="甲")
+        got = mood.apply_event("rejected", self.root, now=start, who="甲")
         self.assertTrue(got["ok"], "跨日了还按昨天的 conflict_used 封顶")
 
     # ---- 验收第 5 条：旧状态兼容 -----------------------------------------
@@ -375,7 +375,7 @@ class MoodTest(unittest.TestCase):
             60,
             model.iso(start),
             extra={
-                "day_events": {"praise": 3, "cold": 1, "conflict": 1, "insult": 0},
+                "day_events": {"praise": 3, "cold": 1, "rejected": 1, "insult": 0},
                 "day_delta_tiers": {"positive": 2.0, "negative": 1.0},
             },
         )

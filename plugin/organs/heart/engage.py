@@ -178,7 +178,7 @@ def window_signal(root: Any, now: Optional[str] = None,
         w = Σ kind_weight(kind) × (1 − age_min / window_min)
     age_min = now − at 的分钟数（现算），kind_weight：
     ignored = +1.0、harsh = +1.5、replied = −1.0、normal = −0.5。
-    账本里别的 kind（mood 的 praise/cold/conflict/insult）只计数不参与加权。
+    账本里别的 kind（mood 的 praise/care/cold/insult/rejected）只计数不参与加权。
 
     所以越新的事件越接近满权重、越贴窗口边缘越接近 0：连续的 ignored 一条条
     叠起来就是"越来越冷"，靠的是这条线性衰减，**不靠任何累积的"冷度"状态**；

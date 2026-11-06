@@ -4,3 +4,5 @@
 !baseline-card.json
 # 出厂权重表要入库：人得能看见默认长什么样、怎么改（intent.load_weights 每次现读）
 !engage_weights.json
+# 情绪的契约也入库：五类事件、各自权重、账格式，人看得见也改得动（report.load_contract 每次现读）
+!emotion_contract.json

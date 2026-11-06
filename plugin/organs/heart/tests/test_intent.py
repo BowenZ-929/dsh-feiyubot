@@ -14,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 
-from organs.heart import events, intent, model, pending, store
+from organs.heart import events, intent, model, pending, report, store
 from organs.heart.tests import helpers
 
 # 固定时刻：BASE 是白天（14 点），NIGHT 在夜间窗口里（23:30）。
@@ -187,10 +187,11 @@ class WeightsTableTest(unittest.TestCase):
         self.assertIn("不是验收线", raw["note"])
         self.assertIn("改这个文件即生效", raw["note"])
 
-    def test_data_dir_only_holds_dotfiles_card_and_weights(self) -> None:
+    def test_data_dir_only_holds_whitelisted_factory_files(self) -> None:
+        """data/ 里只放白名单那几份出厂文件：卡片、意图权重、情绪契约。"""
         names = sorted(p.name for p in helpers.heart_data().iterdir())
         self.assertEqual(names, [".gitignore", ".gitkeep", "baseline-card.json",
-                                 intent.WEIGHTS_FILE])
+                                 report.CONTRACT_FILE, intent.WEIGHTS_FILE])
         self.assertNotEqual(Path(self.root), helpers.heart_data())
 
     def test_copy_of_factory_file_reads_clean_from_a_root(self) -> None:

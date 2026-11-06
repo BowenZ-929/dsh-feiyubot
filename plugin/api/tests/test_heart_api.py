@@ -377,7 +377,7 @@ class EffectiveIsTheSingleSource(HeartApiTest):
             self.assertFalse(payload["axes"][axis]["greyed"], axis)
 
     def test_three_places_publish_one_number(self):
-        mood_module.apply_event("conflict", root=self.root, now=_stamp(5, 8))
+        mood_module.apply_event("rejected", root=self.root, now=_stamp(5, 8))
         effective = self.get("/heart/effective", now=T0)[1]
         engaged = self.get("/heart/engage", now=T0)[1]
         mood_route = self.get("/heart/mood", now=T0)[1]
