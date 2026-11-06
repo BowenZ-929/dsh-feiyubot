@@ -181,9 +181,16 @@ def add_task(*, who: str, title: Any, due: Any = None, when: Any = None, note: s
     if failure is not None:
         return failure
 
+    # 卡上那格「这是一件事」（params.task）由手写：日子线判「快到点该提醒了」只认这一格
+    # （organs/day/proactive.py 的 pending_task），不写它，卡就只是躺在工作台上的一张纸。
+    # 走家的公开写口 append_cards，房间与种类的名字仍从家取——不在手里抄第二份常量。
+    size = len(title) + len(note) if isinstance(title, str) and isinstance(note, str) else 0
     try:
-        card = home_cards.add_task(root=store.home_root(root), role=ROLE, by=who, title=title,
-                                   due=resolved, note=note, at=store.now_iso(now))
+        written = home_cards.append_cards(root=store.home_root(root), role=ROLE, by=who, cards=[
+            {"room": home_cards.TASK_ROOM, "kind": home_cards.TASK_KIND, "name": title,
+             "chars": size, "at": store.now_iso(now),
+             "params": {"due": resolved, "done": False, "note": note, "task": True}}])
+        card = written["cards"][0]
     except _HOME_ERRORS as exc:
         origin = _origin_of(exc)
         return _settle(who=who, action="add_task", params=params, now=now, root=root,

@@ -133,6 +133,21 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
 注意 payload.reason 一直是**出站闸**的理由码（night / today-volume…），与由头的理由码不是一回事，
 所以后者只在这一格，两处不共用一个字段。
 
+**「要我记事」那一轮（remind，装配前一次轻量识别）**：这一步排在装配之前、**一个字都不进
+提示词**——它判的不是她怎么说，而是这一轮要不要落一个动作。判据与文案全在
+organs/mind/data/remind.json（意图词、噪声词、数字表、相对时间的单位、三句回执），本文件
+一个词都没有；实现在 organs/mind/remind.py：
+  · 认出「十分钟后叫我」→ 手·add_task 往家·工作台落一张卡（who=这一轮的号、title=去掉时间词
+    的那半句、due=当前+10 分钟），落了卡才说 remind.json 的 say.ok；没落成就说 say.fail；
+  · 有意图没时间（「回头提醒我」）→ 反问 say.ask，**一张卡都不建**——解析不出就不猜；
+  · 普通闲聊 → remind.handle 回 None，这一轮一个字都不改（回包里 remind 那一格也不出现）。
+主动那一轮（seed 不是 None）不认：由头是她自己的念头，不是谁让她记的事。
+回包因此多一格 remind{parsed, due, card_id, ok, why}（**只在认作记事的那一轮出现**）：
+parsed 认没认出时刻、due 落在哪一刻（ISO 带偏移）、card_id 哪张卡、ok 成没成、
+why 为什么没成（no_time 或手那边的码）。**卡先落、话后说**：认出来就先落卡，再走模型那一趟，
+所以模型出错也不会丢掉「这件事」；代价是那一轮白花一次模型调用（她的台词这句已定）。
+remind_root：手的实盘根（None → <器官目录>/hand，家按兄弟目录换算）——测试靠它把卡落到临时盘。
+
 **四个旋钮落到能验收的东西上**（阈值、字数上限、玩笑词表全在 assembly.json 的 tone_rules 里，
 本文件一个数都不写）：
   长度  心情凉（mood < low_mood_below，0–1 刻度）或精力低（energy < low_energy_below，0–100 刻度）
@@ -195,6 +210,7 @@ from ..mouth.split import split as split_text
 from . import events
 from . import llm
 from . import recent
+from . import remind
 from . import repeat
 from . import usage
 
@@ -961,6 +977,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
            store: Any = None, brain: Any = None,
            heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
            drawer_root: Any = None,
+           remind_root: Any = None,
            now: Optional[str] = None,
            transport: Optional[Any] = None, config: Optional[Mapping[str, Any]] = None,
            env: Optional[Mapping[str, str]] = None,
@@ -974,6 +991,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     绝不发真网络请求；本文件不写死任何模型名、地址与 key。
     recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
     usage_root：口癖账的落点（None → <器官目录>/mind/anchor_usage.jsonl）。
+    remind_root：记事那张卡的落点（手的实盘根：None → <器官目录>/hand，家按兄弟目录换算，
+    与手那边同一条口径）——只有认作「要我记事」的那一轮才会落卡。
     drawer_root：恒定那篇的账本落点（None → <器官目录>/mind/drawer_usage.jsonl）——去重看的就是
     这一本账，它记的是「哪一篇哪一轮带过」，与提示词无关。
     assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
@@ -1077,6 +1096,12 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 别名先登记（排在读人名录之前）：这一轮的称呼与「关于他」因此当场看得到昵称 / 群名片，
     # 不是下一轮才生效。**只登记别名**——身份还是 who，记忆条一条都不写（见 _register_aliases）。
     _register_aliases(brain, who, aliases)
+    # 0.1) 「要我记事」那一轮：**装配之前**先认一次（不进提示词，一个字都不进这一轮的装配）。
+    #      认出来就先落卡（手·add_task），没认出时刻只反问、不落卡；普通闲聊这里是 None，
+    #      这一轮因此一个字节都不变（口径与文案见文档「要我记事」那一节）。
+    #      主动那一轮不认：由头是她自己的念头，没有人在这句话里让她记什么。
+    remind_read = (None if proactive
+                   else remind.handle(said, who=who, now=at, root=remind_root))
 
     # 0) 最近几轮先读、先对账：脑里记了、这份账上却没落的轮，**这一轮就得看见**。
     #    这一读必须排在 recall 之前——recall 会按它自己的钟顺手换日（换日就把「今日在役」
@@ -1224,6 +1249,12 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     said_back = llm.complete(messages, config=call_conf, env=env, transport=transport,
                              temperature=temperature)
 
+    # 5.1) 认作「要我记事」的那一轮，嘴里那句就是回执（文案来自 remind.json）：模型那句不用——
+    #      这一轮要说的话在落卡那一刻就已经定了，再让她自由发挥就有了两种说法。
+    #      排在闸与照抄审计之前：这句话一样要过闸、一样要分包（她一样是在说话）。
+    if remind_read is not None:
+        said_back = str(remind_read.get("say") or "")
+
     # 5.5) 硬兜底：配额满了就替她把动作行删掉（不靠模型自觉）——删后的文本往下走全程
     said_back = _strip_blocked_actions(said_back, action_read)
 
@@ -1243,7 +1274,11 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
             reply, anchors_rows, conf, _copy_rewriter(transport, call_conf, env), _sink(trace))
     # 6.9) 四个旋钮落到这一句上：删玩笑句、删问句、按上限在句末截断。
     #      排在闸与照抄审计之后（被弃掉的句子没人听得见）、分包之前（拿改过的句子算分包）。
-    shaped = _shape_reply(reply, max_chars, capped, knobs, conf["tone_rules"])
+    # 记事那一轮的两个删除旋钮**不锯回执**：回执是固定的那一句（「记着了…」/「几点？…」），
+    # 被「少说」删掉前半句就成了看不懂的半句——这一轮她说的是「记了没有」，不是闲聊。
+    receipt_knobs = (dict(knobs, no_question=False, ban_joke=False)
+                     if remind_read is not None else knobs)
+    shaped = _shape_reply(reply, max_chars, capped, receipt_knobs, conf["tone_rules"])
     reply = shaped["reply"]
     chunks = [] if dropped else _bubbles(reply, who, at)
 
@@ -1328,6 +1363,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         "anchors": anchor_read,
         "guard": guard_read,
         "memory": {"wrote": wrote},
+        # 「要我记事」那一轮才有的那一格（普通闲聊一个字节都不多）：见文档那一段。
+        **({"remind": remind.packet(remind_read)} if remind_read is not None else {}),
     }
 
 

@@ -166,8 +166,12 @@ def claim(entries: List[Mapping[str, Any]], root: Optional[Any] = None,
     pool: List[List[Any]] = []       # [ts, 截断后的 said, msg_id, 是否已被认领]
     for entry in entries:
         stamp = str(entry.get(TS) or "")
-        key = str(entry.get(MSG_ID) or "")
-        said = clip(entry.get(SAID), cap)[0]
+        # 脑里那一条的凭据叫 id（账上这一栏叫 msg_id）；只认 MSG_ID 会让池子恒空，
+        # 于是「一条都认不回来」——误标就是这么进来的。
+        key = str(entry.get(MSG_ID) or entry.get("id") or "")
+        # 脑里的行把人那句记在 text（quote）上，账上这一栏叫 said——两头叫法不同，
+        # 只认 SAID 会让旧行永远认不回来（那正是「误标」的入口）。
+        said = clip(entry.get(SAID) or entry.get("text") or entry.get("quote"), cap)[0]
         if stamp and key:
             pool.append([stamp, said, key, False])
     if not pool:

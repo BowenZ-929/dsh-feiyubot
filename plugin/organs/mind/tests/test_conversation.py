@@ -2446,8 +2446,10 @@ class ConversationEventTest(unittest.TestCase):
         person = self.brain.lookup(WHO)
         self.assertIsNotNone(person, "号下没有卡：别名没登记进人名录")
         self.assertEqual(WHO, person.get("id"), "身份被别名顶掉了")
-        self.assertEqual("能毕业就是胜利", person.get("display"), "昵称没落成显示名")
-        self.assertEqual(["小红花的爹"], person.get("aliases"), "群名片没进别名表")
+        self.assertEqual("能毕业就是胜利", person.get("nickname"), "昵称该落成 nickname")
+        self.assertEqual("", person.get("display"), "display 归人：通道不许盖")
+        self.assertEqual(["能毕业就是胜利", "小红花的爹"], person.get("aliases"),
+                         "aliases 累积所有见过的叫法")
         # 登记别名不写记忆条：这一轮仍然只有他那句与她那句
         self.assertEqual(2, len(got["memory"]["wrote"]))
         self.assertEqual(2, len(self.brain.today_entries()))

@@ -34,6 +34,7 @@ from organs.heart import model as heart_model
 from organs.mind import conversation
 from organs.soul import load as load_soul
 
+WHO = "3425635473"   # 脑里的 who 现在是数字号（WHO_RE），昵称只作 display
 PLUGIN = Path(__file__).resolve().parents[3]
 SOUL_FIXTURES = PLUGIN / "organs" / "soul" / "fixtures"
 
@@ -110,7 +111,7 @@ class NoteDisplayTest(unittest.TestCase):
 
     def _answer(self, *, brain: object = None, captured: list = None, **extra) -> dict:
         capture = captured if captured is not None else []
-        return conversation.answer(QUESTION, "主人", store=self.store,
+        return conversation.answer(QUESTION, WHO, store=self.store,
                                    brain=self.brain if brain is None else brain,
                                    now=_at(5), transport=_transport(SENTENCE, capture),
                                    config=CONFIG, env=ENV, **extra)
@@ -127,7 +128,7 @@ class NoteDisplayTest(unittest.TestCase):
         """
         entry_id = "t-quoteless-1"
         self.brain._append_longterm([{
-            "id": entry_id, "day": ts[:10], "ts": ts, "who": "主人",
+            "id": entry_id, "day": ts[:10], "ts": ts, "who": WHO,
             "text": "", "quote": "", "count": 1, "status": "active",
             "source_type": "亲历", "alpha": 2, "beta": 3,
             "note": note, "unclear": False, "beta_note": 2,
@@ -138,7 +139,7 @@ class NoteDisplayTest(unittest.TestCase):
     # —— 1) 带 note：原文行与「她理解：…」行都在 ————————————————
 
     def test_memory_with_note_shows_both_lines_and_the_field(self):
-        self.brain.ingest(who="主人", text=MEMORY_TEXT, note=NOTE, ts=_at(0))
+        self.brain.ingest(who=WHO, text=MEMORY_TEXT, note=NOTE, ts=_at(0))
         capture: list = []
         got = self._answer(captured=capture)
 
@@ -177,7 +178,7 @@ class NoteDisplayTest(unittest.TestCase):
     # —— 3) 空 note 与「脑没给这一栏」两态 ——————————————————————
 
     def test_empty_note_says_no_understanding_and_never_leaves_a_blank_line(self):
-        self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0))
+        self.brain.ingest(who=WHO, text=MEMORY_TEXT, ts=_at(0))
         capture: list = []
         got = self._answer(captured=capture)
         self.assertEqual(UNDERSTOOD, got["recalled"][0]["note_display"])
