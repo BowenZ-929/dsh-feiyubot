@@ -56,10 +56,15 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
 
 各段只搬已有器官的读数，一个判据都不自己造：
   soul    store.render()（魂六件）
-  caller  这一轮是谁：brain.lookup + brain.card_view 查那个号有没有名片——查得到就写「来的是谁
-          （名片的 display）+ 号 + 她叫他的那个称呼」，查不到（或查的时候抛错）就照实说「一个
-          不认识的号」，who 空着就写「不知道是谁」。**只认号、不认自称**：这一轮的正文一个字都
-          不看；三句只陈述事实、不带一句指令（文案与兜底词全在 assembly.json 的 caller 里）。
+  caller  这一轮是谁：brain.lookup + brain.card_view 查那个号有没有名片——查得到就写「来的是
+          {relation}（你叫{address}）」，查不到（或查的时候抛错）就照实说「一个不认识的号」，
+          who 空着就写「不知道是谁」。**只认号、不认自称**：这一轮的正文一个字都不看；**号的
+          数字一个字都不进提示词**（三句模板里没有 {who}；号只在回包 assembly.sections 里
+          caller 那一行，与账上）。
+          relation 只从名片的称呼 / 关系栏来、没有就用 relation_fallback；address 只从名片上她
+          对他的称呼来、没有就用 address_fallback——昵称（display）绝不顶这两个位置，它另起一行
+          由 nickname_line 交代。三句只陈述事实、不带一句指令（文案与兜底词全在 assembly.json 的
+          caller 里）。
   anchors 家·仓库里那几张锚句卡（organs.home.anchors.read_all 的公开读口）：**只注入 phrase 的前
           半句**，example 一个字都不进提示词；没配 / 卡不在 / 读不出来一律写「未配锚句」，不静默跳过
   recent  organs/mind/recent.py：最近几轮原文；omitted > 0 时把「更早还有 N 轮」放在段尾
@@ -199,7 +204,14 @@ NO_SEGMENT = "这一段没有别的发言"          # 段空着 / 没给时这�
 SEGMENT_LINE = "%s：%s"                    # 段里一行的样子：谁 + 说了什么（没有项目符号，与 recent 一眼分开）
 SEGMENT_KEYS = ("speaker", "text")         # 段里一条记录的两个键（两种形状：对象，或二元组）
 SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可以更小，不许更大（这节只有一句「在哪儿说」）
+CALLER_KEY = "caller"                     # 「这一轮是谁」在 order / sections 里的键
 CALLER_SHAPES = ("known", "unknown", "missing")   # 「这一轮是谁」三种形状：数据里一句都不许缺
+# 名片上「关系 / 称呼 / 昵称」三类各看哪几栏：键名是名片的结构，不是文案，所以不进 assembly.json。
+# display 是通道写进来的群昵称（_register_aliases 与 brain.interact 都往这一栏写），它只能当昵称用。
+CALLER_RELATION_KEYS = ("relation", "关系")        # 「主人」这类关系词只许从这几栏来
+CALLER_ADDRESS_KEYS = ("称呼",)                    # 她对他的那个称呼：名片上人写的那一栏
+CALLER_NICKNAME_KEYS = ("display", "昵称", "nickname")   # 昵称：只给 nickname_line 用，不许顶上面两处
+CALLER_WHO_TOKEN = "{who}"                        # 号不进提示词：模板里带这个占位就是数据坏了
 DRAWER_KEY = "drawer"                     # 抽屉那一节在 order / sections 里的键（空着就整节不加）
 LINE_JOIN = "\n"                          # 抽屉每篇一行、行与行之间的分隔（也用来隔开节尾那句说明）
 # 抽屉那一块认得的键（装配时多余的一律报错）：翻不翻只看 enabled + keywords，**没有「场合: 翻不翻」
@@ -692,15 +704,20 @@ def _check_caller(spec: Any, where: str, wanted: bool) -> Optional[Dict[str, Any
 
     三句的名字是这一层的判据（known / unknown / missing），不是场景名，所以不跟着
     brain_model.SCENE_TYPES 走；缺一句就当场报——补一句默认话，等于在数据之外又造了一处
-    「来的是谁」的真源。address_fallback 也必须在数据里：名片上没填称呼时用哪个词，
-    是文案，不许在代码里写死一个「你」。
+    「来的是谁」的真源。relation_fallback / address_fallback / nickname_line 同理，一个都不许
+    在代码里补默认：那三处都是文案，也正是上一版实盘 bug 的位置（昵称顶了 relation）。
+
+    两条硬约束在这里就拦住，不等渲染：
+      · 三句里不许有 {who}——号任何方向都不进提示词（她嘴里也不许出数字）；
+      · known 必须有 {relation} 与 {address}——少了哪个,那个词就白算了，昵称就会顺手顶上去。
     """
     if spec is None:
         if wanted:
             raise ValueError("order 里有 caller，装配说明却缺 caller（三句话）：%s" % where)
         return None
     if not isinstance(spec, dict):
-        raise ValueError("caller 要一份对象（lines 三句 + address_fallback）：%s" % where)
+        raise ValueError("caller 要一份对象（lines 三句 + nickname_line + 两个兜底词）：%s"
+                         % where)
     lines = spec.get("lines")
     if not isinstance(lines, dict):
         raise ValueError("caller.lines 要一份 {形状: 一句话} 的表：%s" % where)
@@ -709,12 +726,30 @@ def _check_caller(spec: Any, where: str, wanted: bool) -> Optional[Dict[str, Any
         text = lines.get(name)
         if not isinstance(text, str) or not text.strip():
             raise ValueError("caller.lines.%s 要一句非空的话：%s" % (name, where))
+        if CALLER_WHO_TOKEN in text:
+            raise ValueError("caller.lines.%s 里不许出现 {who}（号不进提示词，也不许念出来）：%s"
+                             % (name, where))
         clean[name] = text.strip()
-    fallback = spec.get("address_fallback")
-    if not isinstance(fallback, str) or not fallback.strip():
-        raise ValueError("caller.address_fallback 要一个非空的称呼词（名片上没填时用它）：%s"
-                         % where)
-    return {"lines": clean, "address_fallback": fallback.strip()}
+    for token in ("{relation}", "{address}"):
+        if token not in clean["known"]:
+            raise ValueError("caller.lines.known 里缺 %s（关系词与称呼各有各的来处，"
+                             "不许拿昵称顶）：%s" % (token, where))
+    nickname_line = _nonempty_text(spec.get("nickname_line"), "caller.nickname_line", where)
+    if "{nickname}" not in nickname_line:
+        raise ValueError("caller.nickname_line 里缺 {nickname}：%s" % where)
+    relation_fallback = _nonempty_text(spec.get("relation_fallback"),
+                                       "caller.relation_fallback（名片上没有关系词时用它）", where)
+    address_fallback = _nonempty_text(spec.get("address_fallback"),
+                                      "caller.address_fallback（名片上没填称呼时用它）", where)
+    return {"lines": clean, "nickname_line": nickname_line,
+            "relation_fallback": relation_fallback, "address_fallback": address_fallback}
+
+
+def _nonempty_text(value: Any, name: str, where: str) -> str:
+    """数据里的一句非空文案：缺了 / 空串 / 不是字符串当场报，并把这个键的名字点出来。"""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("%s 要一句非空的文案：%s" % (name, where))
+    return value.strip()
 
 
 def _check_scene(spec: Any, where: str) -> Dict[str, Any]:
@@ -1025,8 +1060,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     mouth_text = _mouth_text(voice, knobs, conf["tone_rules"])
     person_text = _person_text(brain, who)
     # 「这一轮是谁」：恒在（三种之一），只看号、不看这一轮的原话——她认下「我是主人」时，
-    # 手里得先有一句反证材料：号是号，自称是自称。
-    caller_text = _caller_text(conf, brain, who)
+    # 手里得先有一句反证材料：号是号，自称是自称。正文里一个数字都没有（号不进提示词），
+    # 号留在 caller_read.who 里给回包 / 面板 / 账用。
+    caller_text, caller_read = _caller_read(conf, brain, who)
 
     # 4) 提示词与回复预算
     tier = heart_words["mood"]["tier"]
@@ -1059,6 +1095,10 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         row = {"key": key, "chars": len(clipped), "cap": spec["cap"]}
         if key == DRAWER_KEY:
             row["count"] = drawer_read["count"]      # 这一轮真放进几篇（页面照它显示）
+        if key == CALLER_KEY:
+            # 这一轮是谁的读数：号**只在这一行**（回包 / 面板 / 账看得到），提示词里一个数字都没有。
+            # 不另开顶层键：成功体的键是冻结契约，这一格挂在已有的 assembly.sections 里。
+            row.update(caller_read)
         sections.append(row)
     # 主动那一轮换的是**整份模板**（prompt.proactive：由头与理由都进提示词），user 那一问是空串
     # ——没有对方的话，就没有可替换的 {text}。两态只差模板与那一问，装配出来的几段一模一样。
@@ -2088,32 +2128,74 @@ def _caller_card(brain: Any, who: str) -> Optional[Mapping[str, Any]]:
 
 
 def _caller_text(conf: Mapping[str, Any], brain: Any, who: str) -> str:
+    """这一节的正文（不含号）：_caller_read 的正文那一半，判据与来处全在那里。"""
+    return _caller_read(conf, brain, who)[0]
+
+
+def _caller_read(conf: Mapping[str, Any], brain: Any, who: str) -> Tuple[str, Dict[str, Any]]:
     """「这一轮是谁」这一节：**只认号，不认自称**——他嘴上说「我是主人」，这一个字都不变。
 
     三种形状各一句，文案全在 assembly.json 的 caller.lines（本文件没有这句中文）：
-      known   who 有号、脑里也查得到名片 → 名（名片 display）+ 号 + 她叫他的那个称呼；
+      known   who 有号、脑里也查得到名片 → {relation}（你叫{address}）+
+              拿得到昵称时另起一行由 nickname_line 交代；
       unknown who 有号、脑里没名片（或查名片时抛了错）→ 一个不认识的号，照实说；
       missing who 是空串 → 不知道是谁在说话。
     判据只有 who 这一个输入：这一轮的正文一个字都不看——她顺着一句「我是主人」认下来，
     缺的正是这一格反证，不是又一条指令。
 
-    称呼取名片上的那一栏（脑的名片只有「称呼」这一栏，见 organs/brain/store.py 的 CARD_FIELDS），
-    名片上没填就用数据给的 caller.address_fallback——代码里不写死一个「你」。
+    **号的数字一个字都不进正文**（三句模板里根本没有 {who}）：号只在第二格那个读数里
+    （assembly 把它挂在 assembly.sections 的 caller 那一行），供回包 / 面板 / 账用。她该知道
+    「这是谁」，不该把号念出来。
+
+    relation 只从名片的称呼 / 关系那类栏来，没有就用 caller.relation_fallback；address 只从
+    名片上她对他的那个称呼来，没有就用 caller.address_fallback。昵称（display）**只喂
+    nickname_line**：上一版实盘里群昵称被塞进 {who} 那个位置，成了「你号是能毕业就是胜利」，
+    病根就是让 display 去顶一个它不该顶的位置。昵称那一行放不进 sections.caller.cap 就整句
+    不放：锯一半正好砍掉「昵称不是身份」，剩下的正好是「把昵称当称呼用」。
     """
     spec = conf.get("caller")
     if not isinstance(spec, Mapping):
-        return ""
+        return "", {"who": str(who or "").strip(), "shape": ""}
     lines = spec["lines"]
     key = str(who or "").strip()
     if not key:
-        return str(lines["missing"])
+        return str(lines["missing"]), {"who": "", "shape": "missing"}
     card = _caller_card(brain, key)
     if card is None:
-        return _fill(str(lines["unknown"]), {"who": key})
-    name = str(card.get("display") or "").strip()
-    return _fill(str(lines["known"]),
-                 {"name": name, "who": key,
-                  "address": name or str(spec["address_fallback"])})
+        return _fill(str(lines["unknown"]), {}), {"who": key, "shape": "unknown"}
+    relation = _card_word(card, CALLER_RELATION_KEYS) or str(spec["relation_fallback"])
+    address = _card_word(card, CALLER_ADDRESS_KEYS) or str(spec["address_fallback"])
+    text = _fill(str(lines["known"]), {"relation": relation, "address": address})
+    nickname = _card_word(card, CALLER_NICKNAME_KEYS)
+    line = _fill(str(spec["nickname_line"]), {"nickname": nickname}) if nickname else ""
+    cap = _caller_cap(conf)
+    if line and (not cap or len(text) + 1 + len(line) <= cap):
+        text = text + "\n" + line
+    return text, {"who": key, "shape": "known", "nickname": bool(nickname)}
+
+
+def _card_word(card: Mapping[str, Any], keys: Tuple[str, ...]) -> str:
+    """名片上这几栏里第一个有字的：一栏都没有就给空串，由调用方决定用哪个兜底词。
+
+    只认列出来的那几栏：display 是昵称，所以它只出现在 CALLER_NICKNAME_KEYS 里，
+    绝不参与 relation / address 的挑选——「谁顶上去谁就是上次那个 bug」。
+    """
+    for key in keys:
+        value = card.get(key)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _caller_cap(conf: Mapping[str, Any]) -> int:
+    """这一节的上限（sections.caller.cap）：数据没给就当 0，昵称那一行于是不放。"""
+    sections = conf.get("sections")
+    spec = sections.get("caller") if isinstance(sections, Mapping) else None
+    cap = spec.get("cap") if isinstance(spec, Mapping) else None
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        return 0
+    return cap
 
 
 def _person_text(brain: Any, who: str) -> str:
