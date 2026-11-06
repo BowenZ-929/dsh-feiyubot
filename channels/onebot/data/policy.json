@@ -1,18 +1,20 @@
 {
   "batch": {
     "quietGapMs": 30000,
-    "tiersMs": {
+    "openMs": {
       "quietOpen": 2000,
       "activeOpen": 5000,
-      "sameSpeaker": 2000,
-      "switchSpeaker": 500
+      "privateOpen": 3500
+    },
+    "continueMs": {
+      "group": 3000,
+      "private": 3500
     },
     "hardCapMs": 8000,
+    "maxMsgs": 6,
     "mentionCapMs": 1000,
     "bareImageMs": 4000,
-    "stickerMs": 500,
-    "privateCapMs": 3500,
-    "sameSpeaker": 3500
+    "stickerMs": 500
   },
   "outbound": {
     "maxChars": 512,

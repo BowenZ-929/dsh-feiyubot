@@ -1,10 +1,11 @@
-// 合批：把「一段消息」收成一个批次，交给核做一次调用。
-// 这里只做时间的账——什么时候开批、deadline 到哪、这批都装了谁。
-// 时钟由调用方传入（observe/consume 都收 now），所以 2s / 8s / @ 1s 这些边界能被测试钉成数字。
+// 合批：把「一小段在聊什么」收成一个批次，交给核做一次调用。
+// 判据一句话：**合批的单位是「这一小段在聊什么」，不是「谁说了几句」**——换人不拆段，沉默与条数才拆段。
+// 这里只做时间的账——什么时候开批、deadline 到哪、这批都装了谁；系数一律来自注入的 policy，
+// 所以 2s / 5s / 3.5s / 8s / @ 1s / 6 条这些边界都能被测试钉成数字。
 //
-// 按**会话**分批：每个 group:<id> / user:<id> 各有自己的 open、排队和「上一条到达时刻」。
+// 按**会话**分批：每个 group:<id> / user:<id> 各有自己的 open、待取队列和「上一条到达时刻」。
 // 会话键直接用 gate.targetOf 那一套（与配额、账里的 target 完全同源），不许自造第二套键。
-import type { BatchPolicy, Tier } from "./policy.ts";
+import type { BatchPolicy, OpenTier, Tier } from "./policy.ts";
 import { targetOf } from "./gate.ts";
 
 export type Where = { scene: "group"; groupId: number } | { scene: "private"; userId: number };
@@ -49,7 +50,6 @@ type Open = {
   tier: Tier;
   firstAt: number;
   lastAt: number;
-  lastSpeaker: number;
   deadline: number;
   // 最早一次 @ 她的时刻：@ 的上限绑在"第一次被叫"上，而不是最后一条上，
   // 否则最后补一句 @ 就能把整批再续命一秒。
@@ -78,7 +78,9 @@ export class BatchHub {
   private readonly policy: BatchPolicy;
   // 每个会话一份状态：A 群聊得再热闹，也不会把 B 群的 deadline 或「安静档」带着走。
   private readonly opens = new Map<string, Open>();
-  // 私聊排队也按会话：同一个人的上一条还没取走时先在这里排，绝不合并。
+  // 待取队列：满了 maxMsgs 的段先挪到这里，于是下一句话有地方开新的一段。
+  // 「一段 ≤ maxMsgs 条」靠的就是它——留在 opens 里等下一次 observe 的话，
+  // 第 7 条会走「已到期 → 只并入不延长」那条路，照样挤进同一段。
   private readonly queues = new Map<string, BatchSnapshot[]>();
   // 上一条消息的到达时刻也按会话分开（跨批次保留）：安静开批与活跃开批就靠它区分。
   private readonly lastArrivals = new Map<string, number>();
@@ -99,24 +101,24 @@ export class BatchHub {
       mentioned: input.mentioned,
     };
 
-    if (input.where.scene === "private") {
-      this.observePrivate(key, input, msg, now);
-      this.lastArrivals.set(key, now);
-      return;
-    }
+    // 已经装满 maxMsgs 的那一段必须先取走：它此刻的 deadline 就是它自己的 lastAt，
+    // 再往它身上观察只会命中「已到期」分支——那条分支的规矩是"只并入、不延长"，第 7 条就这么进来了。
+    const full = this.opens.get(key) ?? null;
+    if (full !== null && full.msgs.length >= this.policy.maxMsgs) this.shelve(key, full);
 
     const open = this.opens.get(key) ?? null;
     // 边界判据是「严格晚于」：now == deadline 那一刻仍算活着（还能续），晚 1ms 就只能并入、不许续。
-    if (open !== null && now > open.deadline) {
+    if (open === null) {
+      this.opens.set(key, this.openNew(input, msg, now, this.lastArrivals.get(key) ?? null));
+    } else if (now > open.deadline) {
       // 已到期：这条仍然算进这一批（同一段话不该被劈成两批），但 deadline 一个字节都不动。
       // 这是合批与固定窗口的分界线——到期还能续命的话，「再等一条」会被一条一条地续下去，窗口就没有边了。
       this.append(open, input, msg, now);
-    } else if (open !== null) {
-      this.extend(open, input, msg, now);
     } else {
-      this.opens.set(key, this.openNew(input, msg, now, this.lastArrivals.get(key) ?? null));
+      this.extend(open, input, msg, now);
     }
     this.lastArrivals.set(key, now);
+    this.sealIfFull(key);
   }
 
   // 到期才取件，而且只取这一个会话的件。到这里 deadline 已经不会再变，consume 是纯粹的动作。
@@ -175,41 +177,22 @@ export class BatchHub {
     return [...keys];
   }
 
-  private observePrivate(key: string, input: ObserveInput, msg: BatchMessage, now: number): void {
-    // 私聊没有"等一会儿看看还有没有下一句"的余地：对面就她一个人，多等一秒只是慢一秒。
-    const open = this.opens.get(key) ?? null;
-    if (open !== null) {
-      const queue = this.queues.get(key) ?? [];
-      queue.push(this.snapshotOf(open));
-      this.queues.set(key, queue);
-    }
-    this.opens.set(key, {
-      batchId: this.nextId(),
-      msgs: [msg],
-      tier: "quietOpen",
-      firstAt: now,
-      lastAt: now,
-      lastSpeaker: input.senderId,
-      // privateCapMs 是"私聊最多等多久"：0 延迟下取 min 后必然等于 now。
-      // 留着这一项不是为了用，而是让系数表在这一档上也有出处，而不是凭空少一个键。
-      deadline: Math.min(now, now + this.policy.privateCapMs),
-      atFirst: input.mentioned ? now : null,
-      mentioned: input.mentioned,
-      where: input.where,
-    });
-  }
-
   private openNew(input: ObserveInput, msg: BatchMessage, now: number, prevArrival: number | null): Open {
-    // 安静久了只等 2s（她可以早点接话）；同一个会话里正热闹就等 5s（把这一段说完再回）。
-    const tier: Tier = prevArrival === null || now - prevArrival > this.policy.quietGapMs ? "quietOpen" : "activeOpen";
+    // 群聊：安静久了只等 2s（她可以早点接话），同一个会话正热闹就等 5s（把这一段说完再回）。
+    // 私聊不分安静/活跃——对面只有一个人，热闹与否不是判据，恒 3.5s。
+    const tier: OpenTier =
+      input.where.scene === "private"
+        ? "privateOpen"
+        : prevArrival === null || now - prevArrival > this.policy.quietGapMs
+          ? "quietOpen"
+          : "activeOpen";
     return {
       batchId: this.nextId(),
       msgs: [msg],
       tier,
       firstAt: now,
       lastAt: now,
-      lastSpeaker: input.senderId,
-      deadline: this.capped(now + this.policy.tiersMs[tier], input, now, now, input.mentioned ? now : null),
+      deadline: this.capped(now + this.policy.openMs[tier], input, now, now, input.mentioned ? now : null),
       atFirst: input.mentioned ? now : null,
       mentioned: input.mentioned,
       where: input.where,
@@ -219,7 +202,6 @@ export class BatchHub {
   private append(open: Open, input: ObserveInput, msg: BatchMessage, now: number): void {
     open.msgs.push(msg);
     open.lastAt = now;
-    open.lastSpeaker = input.senderId;
     if (input.mentioned) {
       open.mentioned = true;
       open.atFirst = open.atFirst === null ? now : Math.min(open.atFirst, now);
@@ -228,18 +210,32 @@ export class BatchHub {
   }
 
   private extend(open: Open, input: ObserveInput, msg: BatchMessage, now: number): void {
-    const tier: Tier = input.senderId === open.lastSpeaker ? "sameSpeaker" : "switchSpeaker";
     open.msgs.push(msg);
     open.lastAt = now;
-    open.lastSpeaker = input.senderId;
     if (input.mentioned) {
       open.mentioned = true;
       open.atFirst = open.atFirst === null ? now : Math.min(open.atFirst, now);
     }
-    open.tier = tier;
-    // 整段重算而不是在原值上取 max：换人（0.5s）本来就该比同人（2s）更早到点，
-    // 提前和推后在同一个 min 里表达，才不会被"只许延后"的写法吃掉换人这一档。
-    open.deadline = this.capped(now + this.policy.tiersMs[tier], input, now, open.firstAt, open.atFirst);
+    // 续发不分人：换人说明这段话还在往下说，按「换人就拆段」只会把一段对白劈成两半。
+    open.tier = "continuing";
+    const window = this.policy.continueMs[open.where.scene];
+    open.deadline = this.capped(now + window, input, now, open.firstAt, open.atFirst);
+  }
+
+  // 第 maxMsgs 条落地的那一刻就把 deadline 压到自己这条到达时刻：定时器 0ms 内取件，
+  // 「满了就出手」不需要发明第二种到点机制，出口仍然只有 deadline 一个。
+  private sealIfFull(key: string): void {
+    const open = this.opens.get(key);
+    if (open === undefined || open.msgs.length < this.policy.maxMsgs) return;
+    open.deadline = Math.min(open.deadline, open.lastAt);
+  }
+
+  // 满段挪进待取队列：调换的是"下一次 observe 能开新段"，不是"这一段什么时候出手"。
+  private shelve(key: string, open: Open): void {
+    const queue = this.queues.get(key) ?? [];
+    queue.push(this.snapshotOf(open));
+    this.queues.set(key, queue);
+    this.opens.delete(key);
   }
 
   // 裸图想多等 4s、纯表情只想赶紧收，但两者都逃不出硬顶与 @ 上限：

@@ -520,14 +520,30 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
   armTimer(target);
 };
 
+// 心跳与生命周期事件照收（parse 照跑、序号照走），只是不刷日志：
+// 心跳默认 1 秒一条，原样写会一分钟撑 60 行、把真消息淹掉。summary 每分钟一行。
+const HEARTBEAT_LOG_EVERY_MS = 60_000;
+let heartbeatSeen = 0;
+let lastHeartbeatLogAt = 0;
+
 const handleEvent = (socket: WebSocket, raw: string): void => {
   eventSeq += 1;
   const id = eventSeq;
-  log("recv", `#${id} 原始事件 ${raw}`);
+  const isLifecycle = raw.includes('"post_type":"meta_event"');
+  if (isLifecycle) {
+    heartbeatSeen += 1;
+    const now = Date.now();
+    if (now - lastHeartbeatLogAt >= HEARTBEAT_LOG_EVERY_MS) {
+      log("recv", `心跳/生命周期事件累计 ${heartbeatSeen} 条（每秒 1 条照收，日志每分钟一行）`);
+      lastHeartbeatLogAt = now;
+    }
+  } else {
+    log("recv", `#${id} 原始事件 ${raw}`);
+  }
 
   const parsed = parseEvent(raw);
   if (!parsed.ok) {
-    log("parse", `#${id} 解析失败：${parsed.reason}`);
+    if (!isLifecycle) log("parse", `#${id} 解析失败：${parsed.reason}`);
     return;
   }
   log(

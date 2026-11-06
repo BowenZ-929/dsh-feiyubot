@@ -6,12 +6,13 @@ test("落盘系数：合批/出站/配额/决策四段的每个数字都对得�
   const policy = loadPolicy();
 
   assert.equal(policy.batch.quietGapMs, 30000);
-  assert.deepEqual(policy.batch.tiersMs, { quietOpen: 2000, activeOpen: 5000, sameSpeaker: 2000, switchSpeaker: 500 });
+  assert.deepEqual(policy.batch.openMs, { quietOpen: 2000, activeOpen: 5000, privateOpen: 3500 });
+  assert.deepEqual(policy.batch.continueMs, { group: 3000, private: 3500 });
+  assert.equal(policy.batch.maxMsgs, 6);
   assert.equal(policy.batch.hardCapMs, 8000);
   assert.equal(policy.batch.mentionCapMs, 1000);
   assert.equal(policy.batch.bareImageMs, 4000);
   assert.equal(policy.batch.stickerMs, 500);
-  assert.equal(policy.batch.privateCapMs, 1000);
 
   assert.equal(policy.outbound.maxChars, 512);
   assert.equal(policy.outbound.maxSentences, 8);
@@ -41,7 +42,7 @@ test("落盘系数：合批/出站/配额/决策四段的每个数字都对得�
 
 test("默认路径按模块位置解析到 data/policy.json，不是按 cwd", () => {
   assert.ok(DEFAULT_POLICY_PATH.endsWith("/channels/onebot/data/policy.json"), DEFAULT_POLICY_PATH);
-  assert.deepEqual([...TIERS], ["quietOpen", "activeOpen", "sameSpeaker", "switchSpeaker"]);
+  assert.deepEqual([...TIERS], ["quietOpen", "activeOpen", "privateOpen", "continuing"]);
 });
 
 test("读盘失败：文件不存在说清路径，不静默回落成内置默认值", () => {
@@ -57,9 +58,9 @@ test("形状校验：缺键、类型错、负数、非整数都在读盘这一�
   delete noBatch.batch;
   assert.throws(() => readPolicy(noBatch), /缺少 batch 段/);
 
-  const noSwitch = good();
-  delete noSwitch.batch.tiersMs.switchSpeaker;
-  assert.throws(() => readPolicy(noSwitch), /batch\.tiersMs\.switchSpeaker 应为有限数字，实际是（缺失）/);
+  const noPrivateOpen = good();
+  delete noPrivateOpen.batch.openMs.privateOpen;
+  assert.throws(() => readPolicy(noPrivateOpen), /batch\.openMs\.privateOpen 应为有限数字，实际是（缺失）/);
 
   const negative = good();
   negative.batch.quietGapMs = -1;

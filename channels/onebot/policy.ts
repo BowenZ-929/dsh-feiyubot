@@ -4,19 +4,40 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export type Tier = "quietOpen" | "activeOpen" | "sameSpeaker" | "switchSpeaker";
+// 开批三档：群聊安静 / 群聊正热闹 / 私聊（私聊不分安静活跃）。续发另有一档 continuing。
+// 档位只决定「开批等多久」；续发时长按会话类型走 continueMs，所以 Tier 里"谁在说"这一维已经没有了。
+export type OpenTier = "quietOpen" | "activeOpen" | "privateOpen";
+export const OPEN_TIERS: readonly OpenTier[] = ["quietOpen", "activeOpen", "privateOpen"];
 
-export const TIERS: readonly Tier[] = ["quietOpen", "activeOpen", "sameSpeaker", "switchSpeaker"];
+export type Tier = OpenTier | "continuing";
+export const TIERS: readonly Tier[] = [...OPEN_TIERS, "continuing"];
+
+export type ContinueScene = "group" | "private";
+export const CONTINUE_SCENES: readonly ContinueScene[] = ["group", "private"];
 
 export type BatchPolicy = {
   quietGapMs: number;
-  tiersMs: Record<Tier, number>;
+  openMs: Record<OpenTier, number>;
+  continueMs: Record<ContinueScene, number>;
   hardCapMs: number;
+  maxMsgs: number;
   mentionCapMs: number;
   bareImageMs: number;
   stickerMs: number;
-  privateCapMs: number;
 };
+
+// 删掉的键不许静默被忽略：文件里还写着旧键，说明有人还在按旧口径调系数，
+// 调了半天生效的却是另一套键。键名 → 人话（为什么删、该改成什么）。
+const REMOVED_BATCH_KEYS: ReadonlyArray<readonly [string, string]> = [
+  [
+    "tiersMs",
+    "合批档位已改成 openMs.quietOpen / openMs.activeOpen / openMs.privateOpen（开批）与 continueMs.group / continueMs.private（续发），请把整块 tiersMs 删掉",
+  ],
+  [
+    "privateCapMs",
+    "私聊不再「每条即批、0 延迟」，改成和群聊一样攒一段：openMs.privateOpen + continueMs.private + hardCapMs + maxMsgs，请删掉 privateCapMs",
+  ],
+];
 
 export type OutboundPolicy = {
   maxChars: number;
@@ -94,10 +115,18 @@ export const readPolicy = (raw: unknown, label = "data/policy.json"): Policy => 
   if (!isRecord(raw)) throw new Error(`${label} 应是 JSON 对象，实际是 ${show(raw)}`);
 
   const batch = section(raw, "batch", label);
-  const tiersRaw = section(batch, "tiersMs", label);
-  const tiersMs = {} as Record<Tier, number>;
-  for (const tier of TIERS) {
-    tiersMs[tier] = ms(tiersRaw[tier], `batch.tiersMs.${tier}`, label);
+  for (const [name, hint] of REMOVED_BATCH_KEYS) {
+    if (name in batch) throw new Error(`${label} 的 batch.${name} 已经删掉了，但文件里还写着${show(batch[name])}：${hint}`);
+  }
+  const openRaw = section(batch, "openMs", label);
+  const openMs = {} as Record<OpenTier, number>;
+  for (const tier of OPEN_TIERS) {
+    openMs[tier] = ms(openRaw[tier], `batch.openMs.${tier}`, label);
+  }
+  const continueRaw = section(batch, "continueMs", label);
+  const continueMs = {} as Record<ContinueScene, number>;
+  for (const scene of CONTINUE_SCENES) {
+    continueMs[scene] = ms(continueRaw[scene], `batch.continueMs.${scene}`, label);
   }
 
   const outbound = section(raw, "outbound", label);
@@ -107,12 +136,13 @@ export const readPolicy = (raw: unknown, label = "data/policy.json"): Policy => 
   return {
     batch: {
       quietGapMs: ms(batch.quietGapMs, "batch.quietGapMs", label),
-      tiersMs,
+      openMs,
+      continueMs,
       hardCapMs: ms(batch.hardCapMs, "batch.hardCapMs", label),
+      maxMsgs: count(batch.maxMsgs, "batch.maxMsgs", label),
       mentionCapMs: ms(batch.mentionCapMs, "batch.mentionCapMs", label),
       bareImageMs: ms(batch.bareImageMs, "batch.bareImageMs", label),
       stickerMs: ms(batch.stickerMs, "batch.stickerMs", label),
-      privateCapMs: ms(batch.privateCapMs, "batch.privateCapMs", label),
     },
     outbound: {
       maxChars: count(outbound.maxChars, "outbound.maxChars", label),

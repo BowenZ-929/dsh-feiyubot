@@ -428,9 +428,16 @@ const EMPTY_MARK = "EMPTYREPLY";
 const TWO_MARK = "TWOREPLY";
 const SPEAKER_A = 3100000001;
 const SPEAKER_B = 3100000002;
-// 同人一档是 tiersMs.sameSpeaker=2000ms：正好 2s 会压在 deadline 上，胜负由定时器与网络抖动决定，
-// 所以真跑时留 400ms 余量（判据要证的是「同人连说三句进一段」，不是抢那 1ms 的边界）。
-const G1_GAP_MS = 1600;
+const SPEAKER_C = 3100000003;
+// 第一段间隔必须 < openMs.quietOpen=2000ms：第一条消息自己就在 2s 到期，
+// 所以「2.0s 间隔」压在的不是续发窗而是开批窗——实测 3 句 2.0s 间隔会劈成 [2] 与 [1] 两段。
+const G1_OPEN_GAP_MS = 1600;
+// 第二段间隔 2.6s：> 旧 sameSpeaker(2000ms)、< 新 continueMs.group(3000ms)，
+// 这一段就是为了证明续发窗真的从 2s 变成了 3s。
+const G1_CONTINUE_GAP_MS = 2600;
+// G3 的间隔不能正好压在 continueMs=3000 上：3.0s 时第 4 条与 deadline 同刻到达（实测 3 段 [1,3,2]，
+// 边界由「定时器先跑还是消息先到」决定），3.5s 离边界 500ms，实测稳定 4 段 [1,2,2,1]。
+const G3_GAP_MS = 3500;
 
 type CoreHit = { t: number; body: Record<string, any> };
 
@@ -644,6 +651,26 @@ const buildGroupEvent = (
   return event;
 };
 
+// 私聊事件的造法：结构与 fixtures/event.private.text.json 一致（message_type=private、没有 group_id）。
+// 私聊也要能连发三条进一段，所以这里不能只靠 fixture 那一条固定消息。
+const buildPrivateEvent = (
+  fixture: Record<string, unknown>,
+  opts: { userId: number; messageId: number; text: string },
+): Record<string, unknown> => {
+  const event = buildEvent(fixture, {
+    scene: "private",
+    groupId: 0,
+    userId: opts.userId,
+    messageId: opts.messageId,
+    time: Math.floor(Date.now() / 1000),
+  }) as Record<string, any>;
+  delete event.group_id;
+  event.message = [{ type: "text", data: { text: opts.text } }];
+  event.raw_message = opts.text;
+  event.sender = { user_id: opts.userId, nickname: "私" + (opts.userId % 1000) };
+  return event;
+};
+
 const runBatchSuite = async (config: Config): Promise<void> => {
   const fixture = JSON.parse(readFileSync(resolve(FIXTURES, "event.group.text.json"), "utf8"));
   const selfId = Number((fixture as Record<string, any>).self_id ?? 0);
@@ -670,7 +697,20 @@ const runBatchSuite = async (config: Config): Promise<void> => {
     socket.send(JSON.stringify(buildGroupEvent(fixture, { groupId, speaker, messageId, text, mention, selfId })));
     return messageId;
   };
+  // 私聊也用「每次新造一个号」：配额与判重都按会话走，同一个号跑第二遍会被配额挡住。
+  let userSeq = 0;
+  const userBase = 340_000_000 + (Date.now() % 100_000) * 10;
+  const nextUser = (): number => {
+    userSeq += 1;
+    return userBase + userSeq;
+  };
+  const postPrivate = (userId: number, text: string): number => {
+    const messageId = nextMessage();
+    socket.send(JSON.stringify(buildPrivateEvent(fixture, { userId, messageId, text })));
+    return messageId;
+  };
   const hitsOf = (groupId: number): CoreHit[] => core.hits.filter((hit) => hit.body?.where?.groupId === groupId);
+  const hitsOfPrivate = (userId: number): CoreHit[] => core.hits.filter((hit) => hit.body?.where?.userId === userId);
   const waitForHits = async (groupId: number, want: number, ms: number): Promise<CoreHit[]> => {
     const deadline = Date.now() + ms;
     while (hitsOf(groupId).length < want && Date.now() < deadline) await sleep(50);
@@ -686,21 +726,22 @@ const runBatchSuite = async (config: Config): Promise<void> => {
   add("G0", "drill 自己起了假核 + 通道（独立端口，mode=send）", true, "核=" + core.url + " 通道=" + channel.url);
 
   try {
-    // ---- G1：同一人连说三句（1.6s 间隔）→ 一段、一次核调用 ----
+    // ---- G1：同一人连说三句（1.6s + 2.6s 间隔）→ 一段、一次核调用 ----
     {
       const groupId = nextGroup();
       const caseStart = Date.now();
-      for (let i = 0; i < 3; i += 1) {
-        post(groupId, SPEAKER_A, "同人第 " + (i + 1) + " 句");
-        if (i < 2) await sleep(G1_GAP_MS);
-      }
-      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 12000);
+      post(groupId, SPEAKER_A, "同人第 1 句");
+      await sleep(G1_OPEN_GAP_MS);
+      post(groupId, SPEAKER_A, "同人第 2 句");
+      await sleep(G1_CONTINUE_GAP_MS);
+      post(groupId, SPEAKER_A, "同人第 3 句");
+      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 14000);
       await sleep(500);
       const hits = hitsOf(groupId);
       const speakers = speakersOf(hits[0]?.body);
       add(
         "G1a",
-        "同人 3 句（间隔 " + G1_GAP_MS + "ms）：只调核一次、决策账记 3 条",
+        "同人 3 句（间隔 " + G1_OPEN_GAP_MS + "ms / " + G1_CONTINUE_GAP_MS + "ms）：只调核一次、决策账记 3 条",
         hits.length === 1 && rows[0]?.machine?.batch?.msgs === 3,
         "调核 " + hits.length + " 次，决策账 batch.msgs=" + String(rows[0]?.machine?.batch?.msgs),
       );
@@ -710,27 +751,59 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         linesOf(hits[0]?.body).length === 3 && speakers.length === 3 && new Set(speakers).size === 1,
         "行数 " + linesOf(hits[0]?.body).length + " speakers=[" + speakers.join(",") + "]",
       );
+      const tier = String(rows[0]?.machine?.batch?.tier ?? "");
+      add(
+        "G1c",
+        "续发不分人：tier=continuing（旧账里的 sameSpeaker 只是历史）",
+        tier === "continuing",
+        "tier=" + tier,
+      );
+      const times = (Array.isArray(hits[0]?.body?.batch?.msgs) ? hits[0].body.batch.msgs : []).map((item: any) =>
+        Date.parse(String(item?.at)),
+      );
+      const gap23 = times.length === 3 ? times[2] - times[1] : -1;
+      add(
+        "G1d",
+        "第 3 句与前一条隔 " + G1_CONTINUE_GAP_MS + "ms 仍进同一段（续发窗 3000，不是旧的 sameSpeaker 2000）",
+        gap23 >= G1_CONTINUE_GAP_MS - 50 && gap23 <= G1_CONTINUE_GAP_MS + 400,
+        "实测第 2→3 句间隔 " + gap23 + "ms",
+      );
     }
 
-    // ---- G2：A/B 交替 6 条（0.3s）→ 一段 6 行、speaker 交替 ----
+    // ---- G2：三个人交替 6 条（0.3s）→ 一段 6 行、speaker 交替 ----
+    // 三个人是为了钉住「合批的单位是这一段在聊什么，不是谁说了几句」：
+    // 6 条换来换去仍然是同一段（maxMsgs=6 在这一条上刚好也到期）。
     {
       const groupId = nextGroup();
       const caseStart = Date.now();
-      for (let i = 0; i < 6; i += 1) {
-        post(groupId, i % 2 === 0 ? SPEAKER_A : SPEAKER_B, "交替第 " + (i + 1) + " 条");
-        if (i < 5) await sleep(300);
+      const plan = [SPEAKER_A, SPEAKER_B, SPEAKER_C, SPEAKER_A, SPEAKER_B, SPEAKER_C];
+      for (let i = 0; i < plan.length; i += 1) {
+        post(groupId, plan[i], "交替第 " + (i + 1) + " 条");
+        if (i < plan.length - 1) await sleep(300);
       }
-      await waitForDecisionRows(config.decisions, caseStart, 1, 10000);
+      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 10000);
       await sleep(500);
       const hits = hitsOf(groupId);
       const speakers = speakersOf(hits[0]?.body);
-      const alternating = speakers.length === 6 && speakers.every((id, index) => id === (index % 2 === 0 ? SPEAKER_A : SPEAKER_B));
-      add("G2a", "A/B 交替 6 条（间隔 0.3s）：只调核一次", hits.length === 1, "调核 " + hits.length + " 次");
+      const alternating = speakers.length === 6 && speakers.join(",") === plan.join(",");
+      add(
+        "G2a",
+        "三个人交替 6 条（间隔 0.3s、3 秒内）：只调核一次",
+        hits.length === 1,
+        "调核 " + hits.length + " 次",
+      );
       add(
         "G2b",
-        "段里 6 行、speaker 交替",
+        "段里 6 行、speaker 按 A,B,C,A,B,C 交替（三个人都在同一段）",
         linesOf(hits[0]?.body).length === 6 && alternating,
         "行数 " + linesOf(hits[0]?.body).length + " speakers=[" + speakers.join(",") + "]",
+      );
+      const tier = String(rows[0]?.machine?.batch?.tier ?? "");
+      add(
+        "G2c",
+        "换人不改 tier：6 条（含换人）仍然一路 continuing",
+        tier === "continuing",
+        "tier=" + tier,
       );
     }
 
@@ -743,7 +816,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const plan = [SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B];
       for (let i = 0; i < plan.length; i += 1) {
         post(groupId, plan[i], "G3-" + (i + 1));
-        if (i < plan.length - 1) await sleep(3000);
+        if (i < plan.length - 1) await sleep(G3_GAP_MS);
       }
       const hits = await waitForHits(groupId, 4, 26000);
       await sleep(700);
@@ -751,14 +824,19 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const counts = all.map((hit) => (Array.isArray(hit.body?.batch?.msgs) ? hit.body.batch.msgs.length : -1));
       const firsts = all.map((hit) => Date.parse(String(hit.body?.batch?.at ?? "")));
       const offsets = firsts.map((value) => Math.round(value - firsts[0]));
-      const wantOffsets = [0, 3000, 9000, 15000];
+      const wantOffsets = [0, 3500, 10500, 17500];
       const speakerPlan = all.map((hit) => speakersOf(hit.body).join("+")).join(" | ");
       const wantSpeakers = [String(SPEAKER_A), SPEAKER_B + "+" + SPEAKER_A, SPEAKER_B + "+" + SPEAKER_A, String(SPEAKER_B)].join(" | ");
-      add("G3a", "间隔 3s 的 6 条 → 4 段（每段恰好一次核调用）", all.length === 4, "段数 " + all.length + "（核调用 " + hits.length + " 次）");
+      add(
+        "G3a",
+        "间隔 " + G3_GAP_MS + "ms（> continueMs=3000）的 6 条 → 4 段（每段恰好一次核调用）",
+        all.length === 4,
+        "段数 " + all.length + "（核调用 " + hits.length + " 次）",
+      );
       add("G3b", "每段条数 = [1,2,2,1]", counts.join(",") === "1,2,2,1", "[" + counts.join(",") + "]");
       add(
         "G3c",
-        "每段 firstAt 相对首段 = [0,3000,9000,15000]（±300ms）",
+        "每段 firstAt 相对首段 = [0,3500,10500,17500]（±300ms）",
         offsets.length === 4 && wantOffsets.every((want, index) => Number.isFinite(offsets[index]) && Math.abs(offsets[index] - want) <= 300),
         "[" + offsets.join(",") + "]ms（按相对差比，不依赖机器时钟精度）",
       );
@@ -807,6 +885,120 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
     }
 
+    // ---- G17：群里换人不断开（两个人、1s 交替 4 条）→ 1 段 4 行 ----
+    // 旧口径下「换人」自己就是一档（switchSpeaker=500ms），换一次人就提前到点；新口径续发不分人。
+    {
+      const groupId = nextGroup();
+      const caseStart = Date.now();
+      const plan = [SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B];
+      for (let i = 0; i < plan.length; i += 1) {
+        post(groupId, plan[i], "换人第 " + (i + 1) + " 条");
+        if (i < plan.length - 1) await sleep(1000);
+      }
+      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 12000);
+      await sleep(600);
+      const hits = hitsOf(groupId);
+      const speakers = speakersOf(hits[0]?.body);
+      const tier = String(rows[0]?.machine?.batch?.tier ?? "");
+      add(
+        "G17a",
+        "两个不同人、1s 交替共 4 条 → 仍然 1 段（换人不再把一段话劈开）",
+        hits.length === 1 && rows[0]?.machine?.batch?.msgs === 4,
+        "调核 " + hits.length + " 次，决策账 msgs=" + String(rows[0]?.machine?.batch?.msgs),
+      );
+      add(
+        "G17b",
+        "段里 4 行、speaker 两人按 A,B,A,B 交替、tier=continuing",
+        linesOf(hits[0]?.body).length === 4 && speakers.join(",") === plan.join(",") && tier === "continuing",
+        "行数 " + linesOf(hits[0]?.body).length + " speakers=[" + speakers.join(",") + "] tier=" + tier,
+      );
+    }
+
+    // ---- G18：六条上限（群里连发 8 条、间隔 0.3s）→ 两段 [6,2] ----
+    // 最难写对的一条：凑满 6 条若只把 deadline 设成 now 而不先结束当前批，
+    // 第 7 条会走「已到期 → 只并入」被塞进同一批，于是一段装下了 8 条。
+    {
+      const groupId = nextGroup();
+      for (let i = 0; i < 8; i += 1) {
+        post(groupId, i % 2 === 0 ? SPEAKER_A : SPEAKER_B, "上限第 " + (i + 1) + " 条");
+        if (i < 7) await sleep(300);
+      }
+      await waitForHits(groupId, 2, 20000);
+      await sleep(800);
+      const all = hitsOf(groupId);
+      const counts = all.map((hit) => (Array.isArray(hit.body?.batch?.msgs) ? hit.body.batch.msgs.length : -1));
+      add(
+        "G18a",
+        "第 6 条一到就出手：恰好 2 段，条数 [6,2]",
+        all.length === 2 && counts.join(",") === "6,2",
+        "段数 " + all.length + "，条数 [" + counts.join(",") + "]",
+      );
+      const want = [SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B, SPEAKER_A, SPEAKER_B];
+      const order = all.flatMap((hit) => speakersOf(hit.body));
+      add(
+        "G18b",
+        "两段合计 8 条、顺序不乱（段间不重不漏）",
+        order.length === 8 && order.join(",") === want.join(","),
+        "合计 " + order.length + " 条：[" + order.join(",") + "]",
+      );
+    }
+
+    // ---- G16：私聊三连发（3s 间隔）→ 1 段 3 行、只调核 1 次、只回 1 次；单条私聊 → 8s 内出手 ----
+    // 私聊不再「每条即批 0 延迟」：现在也攒一段（3500ms 窗、8 秒顶、6 条上限）。
+    {
+      const userId = nextUser();
+      const caseStart = Date.now();
+      const start = mark();
+      for (let i = 0; i < 3; i += 1) {
+        postPrivate(userId, "私聊第 " + (i + 1) + " 句");
+        if (i < 2) await sleep(3000);
+      }
+      const rows = await waitForDecisionRows(config.decisions, caseStart, 1, 16000);
+      await sleep(700);
+      const hits = hitsOfPrivate(userId);
+      const actions = actionsSince(start);
+      const speakers = speakersOf(hits[0]?.body);
+      const tier = String(rows[0]?.machine?.batch?.tier ?? "");
+      add(
+        "G16a",
+        "私聊 3 条（间隔 3s）：只调核 1 次、决策账记 3 条",
+        hits.length === 1 && rows[0]?.machine?.batch?.msgs === 3,
+        "调核 " + hits.length + " 次，决策账 batch.msgs=" + String(rows[0]?.machine?.batch?.msgs),
+      );
+      add(
+        "G16b",
+        "段里 3 行、同一个 speaker、tier=continuing",
+        linesOf(hits[0]?.body).length === 3 && speakers.length === 3 && new Set(speakers).size === 1 && tier === "continuing",
+        "行数 " + linesOf(hits[0]?.body).length + " speakers=[" + speakers.join(",") + "] tier=" + tier,
+      );
+      add(
+        "G16c",
+        "只回 1 次（假核回 1 泡 → 恰好 1 个 action 帧）",
+        actions.length === 1,
+        "收到 " + actions.length + " 个 action 帧",
+      );
+
+      // 单条私聊：不再 0 延迟，按 privateOpen=3500ms 那一窗到期才出手；硬顶 8s 是它的上界。
+      const solo = nextUser();
+      const soloSent = Date.now();
+      const soloStart = mark();
+      postPrivate(solo, "私聊单条");
+      const soloDeadline = Date.now() + 9000;
+      while (actionsSince(soloStart).length === 0 && Date.now() < soloDeadline) await sleep(20);
+      const soloFrames = framesSince(soloStart);
+      const soloIndex = soloFrames.findIndex(isActionFrame);
+      const soloLatency = soloIndex >= 0 ? frameTimes[soloStart + soloIndex] - soloSent : -1;
+      const soloRows = await waitForDecisionRows(config.decisions, soloSent, 1, 9000);
+      await sleep(400);
+      add(
+        "G16d",
+        "单条私聊：从到达到出手 ≤8000ms，且 ≥3500ms（证明真的按 privateOpen 攒了一段，不是 0 延迟）",
+        soloLatency >= 0 && soloLatency <= 8000 && soloLatency >= 3500,
+        "实测 " + soloLatency + "ms；决策账 tier=" + String(soloRows[soloRows.length - 1]?.machine?.batch?.tier ?? "") +
+          " msgs=" + String(soloRows[soloRows.length - 1]?.machine?.batch?.msgs),
+      );
+    }
+
     // ---- G4：被 @ → 从消息到出手 ≤1000ms（+ 送核/下发余量） ----
     {
       const groupId = nextGroup();
@@ -827,26 +1019,33 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
     }
 
-    // ---- G5：1s×10 条 → 第一段 8s 硬顶出手，第 10 条落在第二段 ----
+    // ---- G5：5 条 ×1.6s → 第一段在 8s 硬顶出手，第 6 条落在第二段 ----
+    // maxMsgs=6 之后一段最多 6 条，所以「8s 硬顶」只能用 5 条来证：
+    // 没有硬顶的话第 5 条会把 deadline 推到 firstAt+9400，实测在 firstAt+8000 就出手了。
     {
       const groupId = nextGroup();
       const started = Date.now();
-      for (let i = 0; i < 10; i += 1) {
+      for (let i = 0; i < 5; i += 1) {
         post(groupId, SPEAKER_A, "顶第 " + (i + 1) + " 条");
-        if (i < 9) await sleep(1000);
+        if (i < 4) await sleep(1600);
       }
+      // 等第一段到点（firstAt+8000）之后再补第 6 条：这条必须落在第二段。
+      await sleep(2200);
+      post(groupId, SPEAKER_A, "顶第 6 条");
       await waitForHits(groupId, 2, 24000);
       await sleep(700);
       const all = hitsOf(groupId);
       const first = all[0]?.body?.batch;
       const second = all[1]?.body?.batch;
-      const fire = all[0] === undefined ? -1 : all[0].t - started;
+      // 出手时刻直接对 firstAt 算，不带客户端网络那一截。
+      const fire = first === undefined ? -1 : all[0].t - Date.parse(String(first.at ?? ""));
       const firstCount = Array.isArray(first?.msgs) ? first.msgs.length : -1;
       add(
         "G5a",
-        "第一段在 8s 硬顶出手：出手−firstAt ≤8500、waited_ms ≤8000、条数 ≥8",
-        first !== undefined && fire >= 0 && fire <= 8500 && Number(first.waited_ms) <= 8000 && firstCount >= 8,
-        "出手 +" + fire + "ms waited=" + String(first?.waited_ms) + "ms 条数=" + firstCount,
+        "第一段在 8s 硬顶出手：出手−firstAt 落在 [7900,8600]、waited_ms ≤8000、条数 5",
+        first !== undefined && fire >= 7900 && fire <= 8600 && Number(first.waited_ms) <= 8000 && firstCount === 5,
+        "出手 firstAt+" + fire + "ms waited=" + String(first?.waited_ms) + "ms 条数=" + firstCount +
+          "（客户端首条发出→出手 " + (all[0] === undefined ? -1 : all[0].t - started) + "ms）",
       );
       const span =
         Array.isArray(first?.msgs) && first.msgs.length > 0
@@ -856,7 +1055,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const between = first !== undefined && second !== undefined ? Date.parse(String(second.at)) - Date.parse(String(first.at)) : -1;
       add(
         "G5c",
-        "第 10 条落在第二段（第二段 firstAt − 第一段 firstAt ≥ 8000ms）",
+        "第 6 条落在第二段（第二段 firstAt − 第一段 firstAt ≥ 8000ms）",
         between >= 8000,
         "两段 firstAt 差 " + between + "ms，第二段条数=" + (Array.isArray(second?.msgs) ? second.msgs.length : -1),
       );

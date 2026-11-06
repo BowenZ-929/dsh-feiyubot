@@ -38,7 +38,7 @@ test("段渲染：3 条（含 @ 她 + 一条带换行）→ 每行 昵称(id)：
     600,
   );
 
-  const batch = h.consume(K, 1100);
+  const batch = h.consume(K, 3600);
   assert.ok(batch);
   const rendered = renderSegment(batch);
 
@@ -54,7 +54,7 @@ test("段渲染：3 条（含 @ 她 + 一条带换行）→ 每行 昵称(id)：
     id: "b1",
     count: 3,
     waited_ms: 600,
-    tier: "switchSpeaker",
+    tier: "continuing",
     mentioned: true,
     at: "1970-01-01T00:00:00.000Z",
     scene: "group",
@@ -86,7 +86,7 @@ test("段渲染：每一条物理行都带 speaker——两行消息 + 单行消
     100,
   );
 
-  const batch = h.consume(K, 2000);
+  const batch = h.consume(K, 3100);
   assert.ok(batch);
   const rendered = renderSegment(batch);
   const lines = rendered.text.split("\n");
@@ -124,7 +124,7 @@ test("段渲染：私聊只有 userId，没有 groupId", () => {
     { senderId: 3000000003, senderName: "路人甲", text: "在吗", mentioned: false, bareImage: false, sticker: false, where: P },
     1000,
   );
-  const batch = h.consume(PK, 1000);
+  const batch = h.consume(PK, 4500);
   assert.ok(batch);
   const rendered = renderSegment(batch);
 

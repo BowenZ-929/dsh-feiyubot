@@ -597,6 +597,14 @@ rm -rf channels/onebot/.state
 
 # M4 合批：一段消息一次核调用
 
+> **判据：合批的单位是「这一小段在聊什么」，不是「谁说了几句」。**
+
+旧系数是「按人分档」的（同人一档 2s、换人一档 0.5s），于是合批几乎不发生：
+实测旧口径下 **私聊 85/85 段、群里 21/27 段都是 1 条一段**——「一段话」只存在于群里两个人抢话的缝隙里，
+私聊更是每条自成一段（0 延迟）。这不是合批，这是给「一条一条回」换了个名字。
+现在续发**不分人**：谁接着说都算同一段（`tier=continuing`），一段的边界只由三件事决定——
+这一段聊到哪儿了（`continueMs`）、这一段攒到第几条（`maxMsgs`）、这一段开了多久（`hardCapMs`）。
+
 M4 只换**粒度**：原来是「一条消息一次核调用」，现在是「**一段消息一次核调用**」。
 其余口径没变：解析走 `parse.ts`、出站走 `outbox.ts` 的 `runBatch`（分泡 + `send_at` + ack + 每泡一行账）、
 门仍然是 `QQAGENT_CHANNEL_MODE`。新增两本账：`.state/decisions.jsonl`（每段一行决定）与
@@ -617,11 +625,60 @@ M4 只换**粒度**：原来是「一条消息一次核调用」，现在是「*
 | `.state/decisions.jsonl` | 决策账：每段一行 |
 | `.state/quota.json` | 配额状态：重启后接着数（`group:<id>` → 时间戳数组） |
 
+## 系数：`data/policy.json` 的 `batch` 节
+
+数字只有这一处落盘（`batch.ts` / `policy.ts` 里一个都不写死，少一个键就在读盘那一刻炸掉）：
+
+| 键 | 值 | 管什么 |
+| --- | --- | --- |
+| `quietGapMs` | `30000` | 群里距「上一条到达」超过它，下一次开批就是安静档 |
+| `openMs.quietOpen` | `2000` | 群里安静开批：等 2s |
+| `openMs.activeOpen` | `5000` | 群里正热闹开批：等 5s（把这一段说完） |
+| `openMs.privateOpen` | `3500` | 私聊开批：等 3.5s |
+| `continueMs.group` | `3000` | 群里续发：每来一条把 deadline 推到 `now+3s` |
+| `continueMs.private` | `3500` | 私聊续发：同上，3.5s |
+| `hardCapMs` | `8000` | 一段最多开 8s（**任何系数都绕不过它**） |
+| `maxMsgs` | `6` | 一段最多 6 条：第 6 条一到就出手 |
+| `mentionCapMs` | `1000` | 被 @ 时最晚在「第一次被叫」+1s 出手 |
+| `bareImageMs` | `4000` | 裸图想多等 4s |
+| `stickerMs` | `500` | 纯表情只想等 0.5s |
+
+**旧值 `tiersMs`（四档）与 `privateCapMs` 已删**：同一个数字只许有一处出处。
+`tiersMs.sameSpeaker` / `tiersMs.switchSpeaker` 随「续发不分人」一起没了——
+读旧账时把这两个值当成「续发」看（见下面的 tier 表）。
+
+判定（每个会话各自一批，会话键仍是 `gate.targetOf(where)`；到期判据是 `now > deadline`，取件是 `now >= deadline`）：
+
+1. **群里开批**：距该会话上一条 > `quietGapMs` → `quietOpen`，否则 `activeOpen`；`deadline = min(now + openMs[tier], firstAt + hardCapMs)`。
+2. **群里续发**：**不分人**，`tier` 恒为 `continuing`；`deadline = min(now + continueMs.group, firstAt + hardCapMs)`，
+   若本段**曾有人 @ 她**，再 `min(atFirst + mentionCapMs)`。
+3. **私聊开批**：`tier = privateOpen`，`deadline = min(now + openMs.privateOpen, firstAt + hardCapMs)`——私聊**不**分安静/活跃。
+4. **私聊续发**：`tier = continuing`，`deadline = min(now + continueMs.private, firstAt + hardCapMs)`。
+5. **@ 只认 `parse` 的 `mentionedSelf`**（含「从第一条起最早那次」）；`atFirst` 只 `min` 不改。
+6. **裸图** `deadline = max(deadline, now + bareImageMs)`；**纯表情** `deadline = min(deadline, now + stickerMs)`；
+   两者之后统一被 `hardCap` 与 `mentionCap` 封顶（顺序不变，谁也别想绕过硬顶）。
+7. **条数上限**：任一批（群/私聊）达到 `maxMsgs` 的那一刻就**结束它**——`deadline` 压到这一条的到达时刻（定时器 0ms 内取件），
+   已满的段进待取队列，让下一句话有地方开新的一段。
+   注意不能「只把 deadline 推成 now」：那样第 7 条会走「已到期 → 只并入、不延长」被塞进同一批。
+   `observe` 必须在凑满的那一刻**结束当前批**，每段才 ≤ `maxMsgs` 条（drill G18：连发 8 条、间隔 0.3s → 两段 `[6,2]`）。
+
+### `tier` 的四个取值
+
+| tier | 什么时候是它 |
+| --- | --- |
+| `quietOpen` | 群里开批，且距上一条 > `quietGapMs`（安静久了，她可以早点接话） |
+| `activeOpen` | 群里开批，但刚才就有人在说话 |
+| `privateOpen` | 私聊开批 |
+| `continuing` | 续发——**不分人**、不分群/私聊 |
+
+旧账里的 `sameSpeaker` / `switchSpeaker` **只是历史**：这两档随「续发不分人」一起删了，
+新判断里不要再认它们（面板读旧账时按「续发」渲染）。
+
 ## 一段消息是怎么走出去的
 
 1. **入站**：`parseEvent` → `ledger.claim(key)` 判重（命中就落 `dup` 行、丢弃，与 M3 一模一样）→ `hub.observe(...)`。
 2. **落一行 `batched`**：字段沿用 `makeRow`（`key` / `messageId` / `scene` / `target`），
-   note 写 `batch=b3 tier=sameSpeaker @=否`。消息账从此讲「这条**进没进来**」，不再讲「发没发」。
+   note 写 `batch=b3 tier=continuing @=否`。消息账从此讲「这条**进没进来**」，不再讲「发没发」。
 3. **定时器**：每次 observe 后按 `hub.state().deadline` 重排一次 `setTimeout`；
    **已到期绝不延长**——秒回优先于等齐，8 秒硬顶不是目标只是上限。
 4. **取件**：到点 `hub.consume(now)`；返回 `null` 就什么都不做（deadline 被后到的消息推后了 / 已经取走）。
@@ -633,7 +690,7 @@ M4 只换**粒度**：原来是「一条消息一次核调用」，现在是「*
 
    ```json
    { "text": "小明(3000000001)：在吗\n小红(3000000002)：在的",
-     "batch": { "id": "b3", "count": 2, "waited_ms": 300, "tier": "switchSpeaker",
+     "batch": { "id": "b3", "count": 2, "waited_ms": 300, "tier": "continuing",
                 "mentioned": false, "at": "…", "scene": "group", "groupId": 700000001,
                 "msgs": [ { "id": 3000000001, "name": "小明", "text": "在吗", "at": "…", "mentioned": false } ] } }
    ```
@@ -657,7 +714,7 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 一行一段，`kind` 固定是 `decision`（实测）：
 
 ```json
-{"ts":"…","kind":"decision","scene":"group","human":"没回：这个群这个小时说得够多了","machine":{"batch":{"id":"b19","msgs":2,"waited_ms":121.38,"tier":"switchSpeaker","at":"2026-11-06T03:05:47.221Z"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":true}],"decided":"silent","why":"第 2 道门 quota 拦下了","reason_code":"quota_exceeded","scene":"group","target":"group:734723709","reason":null}}
+{"ts":"…","kind":"decision","scene":"group","human":"没回：这个群这个小时说得够多了","machine":{"batch":{"id":"b19","msgs":2,"waited_ms":121.38,"tier":"continuing","at":"2026-11-06T03:05:47.221Z"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":true}],"decided":"silent","why":"第 2 道门 quota 拦下了","reason_code":"quota_exceeded","scene":"group","target":"group:734723709","reason":null}}
 ```
 
 - `machine.batch.msgs` 是**条数**，不是 `segment.ts` 里那份消息数组（名字撞了，写错会让面板把条数算成 NaN）。
@@ -759,11 +816,24 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 **一条路径只退一次**：所有退款入口共用 `runSegment` 里同一个 `refund()`，它带 `charged` 标志——
 第一次调用真正退回并把 `charged` 置 false，之后同一条路径再调都是空操作（silent 模式压根没 `charge`，`charged` 一直是 false）。
 
-## 私聊与 M1
+## 私聊
 
-- **私聊每一条自成一段**（0 延迟）：`hub` 里那条消息的 deadline 就是「现在」，所以行为与 M3 一致——仍然逐条回。
-- **M1（不给 `--core`）一个字都没变**：只记日志，不调核、不写账、不建 `.state`。
-  `policy` / `hub` / 决策账 / 配额这几个对象只在给了 `--core` 时才构造。
+私聊不再「每条即批、0 延迟」——对面就一个人，但一个人也会连发三句，逐条回就是三条消息三个回复。
+现在私聊和群聊走同一套攒段，只是**只有一档开批窗**（私聊没有「安静/活跃」之分）：
+
+| 时机 | tier | deadline |
+| --- | --- | --- |
+| 开批（上一条已取走） | `privateOpen` | `min(now + 3500, firstAt + 8000)` |
+| 续发 | `continuing` | `min(now + 3500, firstAt + 8000)` |
+
+- **3500ms 窗**：单条私聊实测 **3506ms** 出手（drill G16d；旧口径是 0ms 立刻回）。
+- **8 秒顶**：连发不停也只攒 8s——实测 3 条 ×3s 间隔在 `firstAt+8000`（硬顶）出手，1 段 3 行、只调核 1 次、只回 1 次（G16a..G16c）。
+- **6 条上限**：私聊同样受 `maxMsgs` 管，凑满 6 条立刻出手（与群里同一条规则，没有私聊特例）。
+
+## M1：不给 `--core`
+
+一个字都没变：只记日志，不调核、不写账、不建 `.state`。
+`policy` / `hub` / 决策账 / 配额这几个对象只在给了 `--core` 时才构造。
 
 ## 演练：`tools/drill.ts --batch`（G 组）
 
@@ -780,9 +850,9 @@ node channels/onebot/tools/drill.ts --batch
 | 断言 | 它在验什么 |
 | --- | --- |
 | G0 | drill 自己起了假核 + 通道（独立端口，mode=send） |
-| G1a/G1b | 同一人连说 3 句（1.6s 间隔）→ **只调核一次**、段里 3 行、同一 speaker |
-| G2a/G2b | A/B 交替 6 条（0.3s）→ 一段 6 行、speaker 交替 |
-| G3a..G3d | A/B 交替 6 条（3s）→ **4 段**、条数 `[1,2,2,1]`、firstAt 相对 `[0,3000,9000,15000]`（±300ms）、speaker 序列 `A | B,A | B,A | B` |
+| G1a..G1d | 同一人连说 3 句（1.6s + **2.6s** 间隔）→ **只调核一次**、段里 3 行、同一 speaker、`tier=continuing`；第 3 句与前一条隔 2.6s 仍在同一段（证明续发窗是 3s，不是旧的 2s） |
+| G2a..G2c | **三个人**交替 6 条（0.3s、3 秒内）→ 一段 6 行、speaker 按 `A,B,C,A,B,C`、`tier=continuing` |
+| G3a..G3d | 6 条 ×**3.5s** 间隔 → **4 段**、条数 `[1,2,2,1]`、firstAt 相对 `[0,3500,10500,17500]`（±300ms）、speaker 序列 `A | B,A | B,A | B` |
 | G3e/G3f | 时间基是墙钟：决策行 `ts ≥ at` 且 `ts−at ≤ hardCap+1s`；`msgs[].at` 严格递增且都不早于段起点 |
 | G4 | 被 @ → 从消息到出手 ≤1200ms（等待上限 `mentionCapMs=1000` + 送核/下发余量），决策账 `human="回了：被 @"` |
 | G5a..G5c | 1s×10 条：第一段在 **8s 硬顶**出手（`出手−firstAt≤8500`、`waited_ms≤8000`、条数≥8），第 10 条落在第二段 |
@@ -795,8 +865,11 @@ node channels/onebot/tools/drill.ts --batch
 | G12a..G12d | silent 仍然**调核 1 次**、0 个 action、`blocked` 行 `text` 非空、决策账 `silent_mode`、且该群配额**没有新增时间戳** |
 | G13a..G13d | **出站全败**（假核回两泡、drill 故意不回 ack）：该群配额仍是 0 条（退还）、ledger 里有 `uncertain`/`unsent` 行、决策账仍一行且 `decided=silent`；对照组正常 ack 的那段配额 1 条不退 |
 | G15a..G15c | **会话隔离**：A/B 两群交替各说 2 句 → 恰好 2 段、决策行 `target` 各自正确、每群只调核 1 次且段里只带本群的人、两条 action 分别进各自的群 |
+| G16a..G16d | **私聊攒段**：私聊 3 条 ×3s → 1 段 3 行、只调核 1 次、只回 1 次、`tier=continuing`；单条私聊实测 **3506ms** 出手（≥3500 说明真的按 `privateOpen` 攒了一段，≤8000 是硬顶） |
+| G17a/G17b | **换人不断开**：群里两个不同人、1s 交替共 4 条 → 仍然 **1 段** 4 行、speaker `A,B,A,B`、`tier=continuing` |
+| G18a/G18b | **6 条上限**：群里连发 8 条 ×0.3s → 恰好 **2 段 `[6,2]`**、8 条不重不漏（第 7 条绝不许被塞进第一批） |
 
-跑一遍约 2 分钟（G3 要真等 31s 空档，G5 要等满 8s 硬顶，G11 要跑 13 段）。全 PASS 退出码 0。
+跑一遍约 3–4 分钟（G3 四段各等 3.5s，G5 要等满 8s 硬顶，G11 要跑 13 段 ×3s 续发窗，G18 要等第二段到期）。全 PASS 退出码 0。
 
 演练用的旋钮（默认值即线上行为）：
 
@@ -816,18 +889,31 @@ node channels/onebot/tools/drill.ts --batch
    不再是 `同一条正在处理中（在飞窗口重投）`——去重照样生效，只是「在飞」这个窗口短到只剩一次同步 observe。
    F3 的期望已改成接受两种 note；「`sent` 行数不增加」这条核心断言保留。
 3. **时间基是墙钟**：`hub` 的时钟由 `performance.now()` 换成 `Date.now()`，所以 `batch.at` / `msgs[].at` 是**真时间**，
-   能和决策行的 `ts` 直接对表（实测 `ts−at` = 2004 / 3505 / 3505 / 5008ms）。
+   能和决策行的 `ts` 直接对表（实测 `ts−at` = 2006 / 6507 / 6508 / 5005ms，就是 G3 那 4 段）。
    上界是 **`hardCap`(8000)+1s**，不是 `waited_ms`+1s：一条消息在安静档也要等满 2000ms 才出手
    （`waited_ms=0` 但 `ts−at≈2000`），这是合批的本意，不是误差。
-4. **G1 用 1.6s 而不是 2.0s**：`tiersMs.sameSpeaker` 就是 2000ms，2.0s 正好压在 deadline 上
-   （谁先跑由定时器与网络抖动决定），实测会劈成两段。1.6s 才是「同人连说三句进一段」的稳定判据。
-5. **G3 用新群号就够，不用再空等**：`quietGapMs`（30s）的「上一条到达」现在是**按会话**存的，
-   新群的第一条必然是安静档（`quietOpen` 2000ms），所以 `[1,2,2,1]` 直接成立。
-   （旧实现是进程级单值，那时不空等 31s 就会变成 `[2,2,2]`——实测过，已随按会话分批一起修掉。）
+4. **G1 的间隔不能是 2.0s**：`openMs.quietOpen` 就是 2000ms——**第一条消息自己**就在 2s 到期，
+   所以「同人 3 句、2.0s 间隔」压在的是开批窗而不是续发窗：实测劈成 `[2]` 与 `[1]` 两段
+   （第 2 句并进第 1 段，第 3 句另起一段）。现在 G1 用 **1.6s + 2.6s**：第一段间隔躲开 2000ms，
+   第二段 2.6s 专门落在「旧 `sameSpeaker` 2000ms」与「新 `continueMs` 3000ms」之间——
+   要证的就是续发窗真的从 2s 变成了 3s（实测第 2→3 句隔 2600ms 仍在同一段）。
+5. **G3 用 3.5s 而不是 3.0s**：3.0s 正好就是 `continueMs.group`，第 4 条与 deadline **同刻**到达，
+   结果由「定时器先跑还是消息先到」决定——实测 3.0s 给出 **3 段 `[1,3,2]`**（第 4 条并进了前一段），
+   不是 4 段。3.5s 离边界 500ms，实测稳定 **4 段 `[1,2,2,1]`**，相对 firstAt `[0,3501,10503,17505]`。
+   新群号就够，不用再空等 31s：`quietGapMs`（30s）的「上一条到达」是**按会话**存的，
+   新群的第一条必然是 `quietOpen`（2000ms）。（旧实现是进程级单值，那时不空等 31s 就会变成 `[2,2,2]`。）
    speaker 序列按实测 `A | B,A | B,A | B` 断言。
 6. **@ 的 ≤1000ms 只能是「等待上限」**：`mentionCapMs=1000` 卡的是**等多久**，之后还要送核 + 下发，
    实测 1004–1007ms。所以判据写成「≤1200ms（1000 + 余量）」，实测值打进结论表。
-7. **G5 用无竞态版本**：第 9 条（t=8000）正好压在 `hardCap` 上，谁先跑由抖动决定，所以断言写成
+7. **G5 用无竞态版本**：原来是 10 条 ×1s，第 9 条（t=8000）正好压在 `hardCap` 上，谁先跑由抖动决定。
+   现在 `maxMsgs=6` 让一段最多 6 条，硬顶只能用 **5 条 ×1.6s** 来证：没有硬顶时第 5 条会把 deadline
+   推到 `firstAt+9400`，实测在 **`firstAt+8005`** 就出手（`waited_ms=6407`、跨度 6407ms），
+   补的第 6 条落在第二段（两段 firstAt 差 8608ms）。
+8. **`maxMsgs=6` 与「第一段装 8 条」互斥**：旧 G5 的「第一段条数 ≥8」在 6 条上限下不可能成立
+   （不是系数调错，是两条口径撞车）。所以 G5 的输入改成 5 条 + 第 6 条，断言的是**同一个硬顶**，不是放宽。
+   条数上限本身由 G18 钉死：连发 8 条 ×0.3s → `[6,2]`。
+9. **私聊不再 0 延迟**：单条私聊实测 **3506ms** 出手（`openMs.privateOpen`），连发不停则在 `firstAt+8000` 出手。
+   旧口径「私聊每条即批」下 85/85 段都是 1 条一段——这就是这次改判据的原因。
 # M5 主动开口：`POST /say`
 
 M5 给通道加一个**内部入口**：没人说话、她自己想说的时候，由核侧（或运维）直接投一段话。
