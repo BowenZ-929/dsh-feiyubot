@@ -138,10 +138,14 @@ class TickTest(unittest.TestCase):
 
     def test_state_and_registers_are_the_only_things_written(self):
         rhythm.tick(at(NOW), root=self.root)
-        # 动念账也是日子线自己的账（一行一次"她想开口"），一并列进来：这一条断言的是
-        # "tick 不写别人的东西"（不碰脑、不碰家、不碰实盘的心），条数不该悄悄变。
-        # heart/ 是心的根按 <root>/heart 派生出来的（root 给了就绝不去读真实的心）。
-        self.assertEqual(["plans.json", "proactive_log.jsonl", rhythm.STATE_FILE],
+        # 日子线自己的账全在这一棵树底下，三本一起列出来：计划账、动念账（一行一次
+        # "她想开口"）、idle 账（一行一次独处）。这一条断言的是"tick 不写别人的东西"——
+        # 不碰脑、不碰实盘的家、不碰实盘的心。
+        # heart/ 与 home/ 是心与家的根按 <root>/heart、<root>/home 派生出来的（root 给了
+        # 就绝不去读真实的那两个）；home/ 底下那几张卡是这一 tick 独处时她自己落的
+        # （c：给自己开一张卡），仍然只落在这棵临时树下。
+        self.assertEqual(["home", "plans.json", "proactive_idle_log.jsonl",
+                          "proactive_log.jsonl", rhythm.STATE_FILE],
                          sorted(path.name for path in self.root.iterdir()
                                 if path.name != "heart"))
         self.assertTrue((self.root / "heart").is_dir(),

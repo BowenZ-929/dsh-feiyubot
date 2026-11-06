@@ -2,7 +2,7 @@
 
 判据（先写在这里，别处不许再判一次）：
 
-1. **「想开口」的判定与理由码只在本文件这一处算**。四个驱动源各一个理由码：
+1. **「想开口」的判定与理由码只在本文件这一处算**。五个驱动源各一个理由码：
    - `pending_task`：家的 task_room（默认「工作台」）里有一张**任务卡快到点了**——
      `params.task` 为真、`params.due` 能读成时刻、没完成（`progress < 100`；被拿走的卡
      默认查询就看不见）、当天没提醒过，且 due 在 due_soon_minutes 内、或过期不超过
@@ -11,6 +11,10 @@
      不走 because_chars 的截断：逐字来自卡上，才有"不编"可言。
    - `thought`：心的念头非空（heart.pending.open_thoughts）；
    - `unfinished`：脑的 today 里**最后一手是别人说的、她当天没接上**的那条；
+   - `own_doing`：她独处时做了点自己的事、做完想跟你说一声（organs/day/solitude.py
+     往由头池 proactive_own_doing.jsonl 写一条，本文件读它）。**只在"真做了"之后才有**：
+     没读到正文的日记、今天没有真素材的草稿都不许由头；一次独处最多一条，池里挂着
+     没被用掉的那条就不再写第二条。用掉之后（动念账上落了这个 id）就不再出现。
    - `unscheduled`：今天还没定下要做什么（日程日志里没有当天的条目），
      **并且此刻在 unscheduled_window 里**（proactive.json，默认 9–12 点）：
      那是个常驻条件，窗外它不算由头——否则等于每天固定时间硬灌。
@@ -87,17 +91,26 @@ KIND = "proactive"
 CONFIG_FILE = "proactive.json"
 LOG_FILE = "proactive_log.jsonl"
 TASK_LOG_FILE = "proactive_task_log.jsonl"
+#: 由头池（第五类 own_doing）：独处做完一件事想跟你说一声时，solitude 往这里写一条，
+#: sources() 读它——另起一套就变成第二个动念。
+OWN_DOING_FILE = "proactive_own_doing.jsonl"
 VERSION = 1
 
-#: 四个驱动源的理由码（闭合集合：不许再长出第五个）。
+#: 五个驱动源的理由码（闭合集合：不许再长出第六个）。
 REASON_PENDING_TASK = "pending_task"
 REASON_THOUGHT = "thought"
 REASON_UNFINISHED = "unfinished"
 REASON_UNSCHEDULED = "unscheduled"
-REASONS = (REASON_PENDING_TASK, REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED)
+#: 第五类：她独处时做了点自己的事，做完想跟你说一声（由 organs/day/solitude.py 写进由头池，
+#: 走的是同一条链：由头 → 计划 → 到点再判一次 engage → 说或只说给自己听）。
+REASON_OWN_DOING = "own_doing"
+REASONS = (REASON_PENDING_TASK, REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED,
+           REASON_OWN_DOING)
 #: 几个都成立时取谁：一次动念只排一条计划，理由要能说清是哪个。
-#: pending_task 排第一——快到点的事比"她想说"更硬。
-REASON_ORDER = (REASON_PENDING_TASK, REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED)
+#: pending_task 排第一——快到点的事比"她想说"更硬；own_doing 排最后——那是她自己的事，
+#: 别人的由头先说话。
+REASON_ORDER = (REASON_PENDING_TASK, REASON_THOUGHT, REASON_UNFINISHED, REASON_UNSCHEDULED,
+                REASON_OWN_DOING)
 
 ACT_PLANNED = "planned"
 ACT_HELD = "held"
@@ -134,13 +147,15 @@ DEFAULTS: Dict[str, Any] = {
     "plan_delay_minutes": 5,
     "base_priority": 50,
     "reason_priority": {REASON_PENDING_TASK: 70, REASON_THOUGHT: 60,
-                        REASON_UNFINISHED: 50, REASON_UNSCHEDULED: 40},
+                        REASON_UNFINISHED: 50, REASON_UNSCHEDULED: 40,
+                        REASON_OWN_DOING: 35},
     "lately_talked_hours": 24,
     "lately_talked_downgrade": 20,
     # 每个理由码一天最多动念几次：不是每个人，是每个"由头"——同一个由头一天只用一次
     # （unscheduled 默认 1：那是"今天还没定下做什么"，定下来之前问一次就够了）。
     "per_reason_daily_cap": {REASON_PENDING_TASK: 3, REASON_THOUGHT: 3,
-                             REASON_UNFINISHED: 3, REASON_UNSCHEDULED: 1},
+                             REASON_UNFINISHED: 3, REASON_UNSCHEDULED: 1,
+                             REASON_OWN_DOING: 1},
     # unscheduled 这条由头只在上午成立：它描述的是"今天还没定下来做什么"，
     # 一个常驻条件不该整天成立（否则等于每天固定时间硬灌三条，那就不是由头了）。
     # 本地时区的整点，左闭右开；from > to 表示跨零点。
@@ -459,6 +474,60 @@ def _append_line(target: Path, row: Dict[str, Any]) -> Path:
     return target
 
 
+def append_row(target: Path, row: Dict[str, Any]) -> Path:
+    """一行的写法公开出去：别的账（独处的 idle 账）与动念账用同一套，崩了都不留半行。"""
+    return _append_line(target, row)
+
+
+def read_rows(target: Path) -> List[Dict[str, Any]]:
+    """一本 jsonl 账的每一行（坏行原样跳过）：与 append_row 成对，别处不必各写一份。"""
+    return _read_lines(target)
+
+
+def own_doing_path(root: Any = None) -> Path:
+    """由头池：日子线数据根下的 proactive_own_doing.jsonl（一行一条 own_doing）。"""
+    return model.day_root(root) / OWN_DOING_FILE
+
+
+def append_own_doing(root: Any, row: Dict[str, Any]) -> Path:
+    """往由头池追加一条（只增：被用掉不删这一行，靠动念账上的 own_doing_id 认领）。"""
+    return _append_line(own_doing_path(root), row)
+
+
+def own_doing_lines(root: Any = None) -> List[Dict[str, Any]]:
+    """由头池的每一行（坏行原样跳过）。"""
+    return _read_lines(own_doing_path(root))
+
+
+def open_own_doing(root: Any = None, now_ts: Any = None) -> Optional[Dict[str, Any]]:
+    """今天还没被用掉的那条 own_doing（没有就 None）。
+
+    "用掉"= 动念账上已经有一行带这个 id（planned / held / quota 都算：那一次由头已经
+    说出口了，无论说成没成）。只认当天的行——昨天那句"想跟你说一声"到今天不该再冒出来。
+    """
+    at = _now(now_ts)
+    day = model.day_key(at)
+    used = set()
+    for row in log_lines(root):
+        rid = str(row.get("own_doing_id") or "")
+        if rid:
+            used.add(rid)
+    latest: Optional[Dict[str, Any]] = None
+    for row in own_doing_lines(root):
+        rid = str(row.get("id") or "")
+        if not rid or rid in used:
+            continue
+        if not str(row.get("because") or "").strip():
+            continue
+        try:
+            if model.day_key(str(row.get("at") or "")) != day:
+                continue
+        except ValueError:
+            continue
+        latest = row
+    return latest
+
+
 def log_lines(root: Any = None) -> List[Dict[str, Any]]:
     """动念账的每一行（坏行原样跳过，不因为一行坏了读不了整份）。"""
     return _read_lines(log_path(root))
@@ -736,6 +805,11 @@ def pending_task(now_ts: Any = None, *, root: Any = None, home_root: Any = None,
             continue
         card_id = str(card.get("card_id") or "")
         params = card.get("params") if isinstance(card.get("params"), dict) else {}
+        if _truthy(params.get("self")):
+            # 她自己给自己开的卡（独处做的那件 c，params.self=true）：不是别人要她做的事，
+            # 也没有 due。它连一行 skipped 都不留——task 账数的是"这张卡提醒过几次"，
+            # 而她自己的那张永远不该被问"到点了吗"。
+            continue
         due_raw = str(params.get("due") or "")
         item: Dict[str, Any] = {"card_id": card_id, "name": str(card.get("name") or ""),
                                 "due": due_raw, "when": "",
@@ -900,6 +974,15 @@ def sources(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
         found[REASON_UNFINISHED] = {"reason_code": REASON_UNFINISHED,
                                     "because": _clip(talk["text"], chars),
                                     "thought_id": "", "who": talk["who"]}
+
+    # 第五类：她独处时做的那件事（solitude 写进由头池、这里读）。句子只由那一步
+    # 真做的动作拼出来，所以不走 because_chars 的截断——它是这一步的原文，不是别人的长话。
+    doing = open_own_doing(root, at)
+    if doing is not None:
+        found[REASON_OWN_DOING] = {"reason_code": REASON_OWN_DOING,
+                                   "because": str(doing.get("because") or ""),
+                                   "thought_id": "", "who": "",
+                                   "own_doing_id": str(doing.get("id") or "")}
 
     if not _scheduled_today(root, at) and in_unscheduled_window(at, cfg):
         found[REASON_UNSCHEDULED] = {
@@ -1191,6 +1274,8 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                streak=muted.get("streak") if muted.get("muted") else "",
                card_id=str(card.get("card_id") or ""),
                task_due=str(card.get("due") or ""),
+               # own_doing 那一次由头：把这个 id 落账，由头池才知道这条已经被用掉了
+               own_doing_id=str(top.get("own_doing_id") or ""),
                quota=quota)
     append_log(root, row)
     _flush_task_log(root, at, task, *_task_verdict(action, quota, muted, code, blocked),

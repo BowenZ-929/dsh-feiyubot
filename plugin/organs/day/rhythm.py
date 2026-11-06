@@ -19,6 +19,8 @@
    试满仍失败 → 进 never_ran 第五栏 + 一条 never_ran 审计，**不许静默 consume**。
    单飞：进程内 NIGHT_LOCK 非阻塞抢，抢不到就 skipped="night_running"，同一晚不跑两遍。
    **不生成任何内容**：排的只是配置里写好的钟点，日程内容归 schedule，夜的四步归 night。
+   到点跑完、动念问完，再问一次"她自己那点时间"（solitude.consider）：没到阈值就什么都不做，
+   做了也只落一行 idle 账——它不调核、一条都不发（理由与由头归 organs/day/solitude.py）。
 3. 换日只看 model.day_key 这一处：day_key(now) 与上次记下的不同 → rollovers + 1 并记下
    新的一天。所以 23:59 与次日 05:00 两次 tick 只换一次日，同一个 now 再跑不重复数。
 
@@ -38,7 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .. import paths
-from . import model, night, plan, proactive
+from . import model, night, plan, proactive, solitude
 
 STATE_FILE = "rhythm.json"
 VERSION = 1
@@ -310,7 +312,20 @@ def tick(now_ts: Any = None, *, root: Any = None,
         _save_state(state, root)
         warnings.warn("日子·节律：这一 tick 的动念失败了（%s），tick 照常返回" % message,
                       RuntimeWarning, stacklevel=2)
-    ledger = plan.load(root)   # 夜与主动开口都动过账了（consumed / expired），重读一遍再算
+    # 最后：她自己那点时间。**接在动念之后**——她刚做完一件事、想跟你说一声，动念那一轮
+    # 已经排过了，这一条只管"没人的时候她做点什么"。同样整段兜错：独处坏了不许让节律停摆。
+    idle_out: Dict[str, Any] = {}
+    try:
+        idle_out = solitude.consider(at, root=root, brain=brain, heart_root=heart_root,
+                                     home_root=home_root, limits=cfg)
+    except Exception as exc:  # noqa: BLE001 - 独处是旁支，坏了要报出来而不是静默吞掉
+        message = "solitude: %s: %s" % (type(exc).__name__, exc)
+        idle_out = {"ok": False, "error": message}
+        state["last_error"] = message
+        _save_state(state, root)
+        warnings.warn("日子·节律：这一 tick 的独处失败了（%s），tick 照常返回" % message,
+                      RuntimeWarning, stacklevel=2)
+    ledger = plan.load(root)   # 夜、主动开口、独处都动过账了（consumed / expired），重读一遍再算
     ahead = plan.next_at(at, root=root, data=ledger)
     every = int(cfg["tick_seconds"])
     return {
@@ -332,6 +347,9 @@ def tick(now_ts: Any = None, *, root: Any = None,
         # 这一 tick 的动念：fired=False 就是没有由头（skipped=no-source / pending-plan），
         # 有由头才有 action（planned / held / quota / muted / blocked）
         "proactive_consider": considered,
+        # 这一 tick 的独处：fired=False 就是没到阈值（skipped=not-idle/night/nothing-to-do），
+        # 有动作才有 action（a 读日记 / b 记一句 / c 开一张卡）；它不调核、一条都不发
+        "solitude": idle_out,
         "next_at": ahead,
         # 没有待办就不是"没有下一次"，而是"下一次按节律再问一遍"：纯算术，不猜内容
         "next_tick_at": model.iso(model.parse_ts(at) + timedelta(seconds=every)),

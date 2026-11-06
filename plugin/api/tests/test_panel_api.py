@@ -107,6 +107,8 @@ REQUIRED_ROUTES = (
     # 日子线第五波：主动开口那一类（读账 / 动念 / 结算回执）
     ("GET", "/day/proactive"), ("POST", "/day/proactive/consider"),
     ("POST", "/day/proactive/outcome"),
+    # 日子线第七波：独处循环（idle 账尾部 + 读数；手工触发一次）
+    ("GET", "/day/solitude"), ("POST", "/day/solitude/consider"),
 )
 # 有必填查询参数的 GET：空 query 时必须是 400（不是 200，也不许崩）——缺哪个参数就得在 message 里点名。
 # 以后加带必填参数的端点，放进这一组；别把它学成 skip（skip 掉就没人守「缺参要响」了）。

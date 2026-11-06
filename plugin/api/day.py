@@ -42,6 +42,8 @@ DAY_ROUTES = {
     "/day/proactive": "GET",
     "/day/proactive/consider": "POST",
     "/day/proactive/outcome": "POST",
+    "/day/solitude": "GET",
+    "/day/solitude/consider": "POST",
 }
 
 DEFAULT_LOG_LIMIT = 20
@@ -58,6 +60,8 @@ _REQUIRES = {
     "/day/proactive": "organs.day.proactive",
     "/day/proactive/consider": "organs.day.proactive",
     "/day/proactive/outcome": "organs.day.proactive",
+    "/day/solitude": "organs.day.solitude",
+    "/day/solitude/consider": "organs.day.solitude",
 }
 
 
@@ -212,7 +216,7 @@ def unconnected_routes() -> List[str]:
     return out
 
 
-# ---- 十三条路由 -----------------------------------------------------------
+# ---- 十五条路由 -----------------------------------------------------------
 
 
 def run_tick(now: Any = None, *, root: Any = None, brain: Any = None,
@@ -372,6 +376,35 @@ def _proactive_outcome(params: Mapping[str, str], body: Mapping[str, Any],
     return 200, dict(payload)
 
 
+def _solitude(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
+    """GET /day/solitude：idle 账尾部 + 此刻的读数（三档阈值、两个档位、闲置几分钟、是不是夜里）。
+
+    纯读：不动手、不落账、不调核（GET 不该写盘，那是写动作）。
+    """
+    module = _module("organs.day.solitude")
+    roots = _roots(params)
+    return 200, dict(_invoke(module, "overview", now_ts=_now(params), brain=brain,
+                             limit=_int(params, "limit"), **roots))
+
+
+def _solitude_consider(params: Mapping[str, str], body: Mapping[str, Any],
+                       brain: Any) -> Result:
+    """POST /day/solitude/consider：手工触发一次独处（支持 ?now=）。
+
+    body 可以点名"这一次做什么"（{"action": "b"} / 带一张草稿），**多塞的一律拒**：
+    独处一次只做一件，两张草稿这种请求回 400 并说明为什么（不是默默只做第一张）。
+    """
+    module = _module("organs.day.solitude")
+    roots = _roots(params)
+    request = body if isinstance(body, dict) and body else None
+    try:
+        payload = _invoke(module, "consider", now_ts=_now(params), brain=brain,
+                          request=request, **roots)
+    except module.SolitudeError as exc:
+        return 400, {"ok": False, "message": str(exc)}
+    return 200, dict(payload)
+
+
 _ROUTES = {
     "/day/tick": _tick,
     "/day/plan": _plan,
@@ -386,12 +419,14 @@ _ROUTES = {
     "/day/proactive": _proactive,
     "/day/proactive/consider": _proactive_consider,
     "/day/proactive/outcome": _proactive_outcome,
+    "/day/solitude": _solitude,
+    "/day/solitude/consider": _solitude_consider,
 }
 
 
 def dispatch(route: str, params: Mapping[str, str], body: Optional[Mapping[str, Any]] = None,
              store: Any = None, brain: Any = None) -> Result:
-    """十三条路由的实际分派；store 不用（日子线自带账），brain 喂夜 / 日程 / 动念。"""
+    """十五条路由的实际分派；store 不用（日子线自带账），brain 喂夜 / 日程 / 动念 / 独处。"""
     handler = _ROUTES.get(route)
     if handler is None:
         return 404, {"ok": False, "message": "没有这个端点：%s" % route}

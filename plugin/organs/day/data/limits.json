@@ -29,5 +29,27 @@
     "per_who_daily_cap": 3,
     "task_remind_per_card": 1
   },
-  "note": "日子线的阈值：改这份就是改节奏，代码里只留 model.DEFAULTS 兜底。tick_seconds 是节律线程的间隔（秒）；min_gap_minutes 是同类型计划之间的硬下限；daily_cap 是每类每天 optional 计划的条数上限（required 的不受这条管）。daily_cap 已降级为保险丝：撞到不是节奏控制，是异常（bug 循环、模型暴走），撞到时只写 WARN 不写人话；day_cutover_hour 是本地时区的换日钟点。kinds 是自动排程表：每个 kind 每天按 at 那个钟点（本地时区，按换日点归到某一天）确保恰有一条计划，本期有 night 与 proactive；**没有 at 的 kind 不由钟点排**（proactive 是事件驱动的，ensure 会跳过它并把名字列在 skipped 里）；kind 自己那一栏里的 min_gap_minutes / daily_cap 覆盖全局值；required=true 的那一类既不看 min_gap 也不看额度（没写或不在 kinds 里的候选一律按 optional）。proactive.task_remind_per_card 是「同一条任务卡一辈子最多提醒几次」（默认 1）——它数的是 task 账里这张卡的 planned/held 行，超了就记 quota（动念账上 scope=card）、不排计划；0 表示这条由头这一版不用。proactive.per_who_daily_cap 是「同一个 who 一天最多几条主动开口计划」——超了就记 quota、不排计划；这个数只许改这里（与 night.max_retries 同一套摆法：顶层一节放这一类自己的参数）。night.max_retries 是夜里那一步失败后最多重试几次（首跑 1 次 + max_retries 次重试＝总尝试次数）；night.backoff_minutes 是每一次失败到下一次重试之间等多久（分钟，按尝试序号取，末项之后沿用末项；所以首跑 T → T+1 → T+6 → T+21）；试满了仍不成功就进 never_ran 栏并写一条 never_ran 审计，不静默 consume。删掉整个 kinds 就完全没有自动排程。"
+  "solitude": {
+    "thresholds_minutes": {
+      "double_low": 180,
+      "both_mid": 40,
+      "otherwise": 90
+    },
+    "tier_level": {
+      "mood": {
+        "冰点": "low",
+        "偏冷": "low",
+        "平常": "mid",
+        "偏热": "high",
+        "滚烫": "high"
+      },
+      "energy": {
+        "累": "low",
+        "偏累": "low",
+        "一般": "mid",
+        "充沛": "high"
+      }
+    }
+  },
+  "note": "日子线的阈值：改这份就是改节奏，代码里只留 model.DEFAULTS 兜底。tick_seconds 是节律线程的间隔（秒）；min_gap_minutes 是同类型计划之间的硬下限；daily_cap 是每类每天 optional 计划的条数上限（required 的不受这条管）。daily_cap 已降级为保险丝：撞到不是节奏控制，是异常（bug 循环、模型暴走），撞到时只写 WARN 不写人话；day_cutover_hour 是本地时区的换日钟点。kinds 是自动排程表：每个 kind 每天按 at 那个钟点（本地时区，按换日点归到某一天）确保恰有一条计划，本期有 night 与 proactive；**没有 at 的 kind 不由钟点排**（proactive 是事件驱动的，ensure 会跳过它并把名字列在 skipped 里）；kind 自己那一栏里的 min_gap_minutes / daily_cap 覆盖全局值；required=true 的那一类既不看 min_gap 也不看额度（没写或不在 kinds 里的候选一律按 optional）。proactive.task_remind_per_card 是「同一条任务卡一辈子最多提醒几次」（默认 1）——它数的是 task 账里这张卡的 planned/held 行，超了就记 quota（动念账上 scope=card）、不排计划；0 表示这条由头这一版不用。proactive.per_who_daily_cap 是「同一个 who 一天最多几条主动开口计划」——超了就记 quota、不排计划；这个数只许改这里（与 night.max_retries 同一套摆法：顶层一节放这一类自己的参数）。night.max_retries 是夜里那一步失败后最多重试几次（首跑 1 次 + max_retries 次重试＝总尝试次数）；night.backoff_minutes 是每一次失败到下一次重试之间等多久（分钟，按尝试序号取，末项之后沿用末项；所以首跑 T → T+1 → T+6 → T+21）；试满了仍不成功就进 never_ran 栏并写一条 never_ran 审计，不静默 consume。删掉整个 kinds 就完全没有自动排程。solitude 是独处循环那一节：thresholds_minutes 是「多久没人说话就该做点自己的事」的三档阈值（分钟）——double_low（心情低且精力低，最长那一档）、both_mid（两边都到 mid 以上，最短那一档）、otherwise（其余）；三条都必须短于白天清醒时长（24 减去睡眠窗口，见 organs/heart/energy.py 的 DEFAULT_SLEEP_WINDOW），否则等于永不触发。tier_level 是「心的档位 → low/mid/high」的映射：日子只读档位，不自己算值；改档位词就改这一张表（心情五档、精力四档）。"
 }

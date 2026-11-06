@@ -57,8 +57,9 @@ class DayApiTest(unittest.TestCase):
         json.dumps(payload, ensure_ascii=False)
         return status, payload
 
-    def test_thirteen_routes_registered_with_one_method_each(self):
-        self.assertEqual(13, len(DAY_ROUTES))
+    def test_fifteen_routes_registered_with_one_method_each(self):
+        # 口径变更（独处循环）：13 → 15，多了 GET /day/solitude 与 POST /day/solitude/consider
+        self.assertEqual(15, len(DAY_ROUTES))
         for route, method in DAY_ROUTES.items():
             self.assertIn(route, api.ROUTES, "日子线的表没并进 core.ROUTES")
             self.assertEqual(method, api.ROUTES[route], route)
@@ -90,7 +91,8 @@ class DayApiTest(unittest.TestCase):
     def test_routes_with_modules_are_never_in_the_unconnected_set(self):
         for route in ("/day/tick", "/day/plan", "/day/night", "/day/log",
                       "/day/proactive", "/day/proactive/consider",
-                      "/day/proactive/outcome"):
+                      "/day/proactive/outcome", "/day/solitude",
+                      "/day/solitude/consider"):
             self.assertNotIn(route, unconnected_routes())
 
     def test_tick_is_idempotent_over_http(self):
@@ -103,6 +105,26 @@ class DayApiTest(unittest.TestCase):
         self.assertEqual(first[1]["counts"], second[1]["counts"])
         self.assertEqual(first[1]["rollovers"], second[1]["rollovers"])
         self.assertEqual(first[1]["next_tick_at"], second[1]["next_tick_at"])
+
+    def test_solitude_route_reads_without_writing(self):
+        """GET /day/solitude：三档阈值 / 两个档位 / 闲置分钟的读数 + idle 账尾，纯读不落账。"""
+        status, payload = self._call("GET", "/day/solitude", query={"now": at(NOW)})
+        self.assertEqual(200, status)
+        self.assertIn("threshold_minutes", payload)
+        self.assertEqual(900, payload["awake_minutes"])
+        self.assertIn("idle_minutes", payload)
+        self.assertEqual([], payload["log"], "GET 不该写 idle 账")
+
+    def test_solitude_consider_refuses_two_drafts_in_one_trigger(self):
+        """一次只做一件：同一次塞两张草稿 → 400，并且说清为什么（不是默默只做第一张）。"""
+        status, payload = self._call("POST", "/day/solitude/consider",
+                                     {"drafts": [{"name": "草稿一", "note": "第一张"},
+                                                 {"name": "草稿二", "note": "第二张"}]},
+                                     query={"now": at(NOW)})
+        self.assertEqual(400, status)
+        self.assertFalse(payload["ok"])
+        self.assertIn("一次只做一件", payload["message"])
+        self.assertIn("2 张草稿", payload["message"])
 
     def test_plan_route_keeps_three_columns(self):
         status, payload = self._call("GET", "/day/plan")

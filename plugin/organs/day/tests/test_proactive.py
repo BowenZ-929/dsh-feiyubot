@@ -145,8 +145,10 @@ class SourcesTest(ProactiveCase):
         self.heard("晚上有空吗")
         fired = proactive.sources(at(NOW), root=self.root, heart_root=self.heart,
                                   brain=self.brain)
-        # pending_task 只在真有快到点的任务卡时才成立（这里家是空的），所以是后三条
-        self.assertEqual(list(proactive.REASON_ORDER[1:]),
+        # pending_task 只在真有快到点的任务卡时才成立（这里家是空的）；
+        # own_doing 只在独处做完一件事、由头池里挂着一条时才成立（这里池子是空的）——
+        # 所以成立的是中间那三条
+        self.assertEqual(list(proactive.REASON_ORDER[1:-1]),
                          [row["reason_code"] for row in fired])
         self.assertEqual("pending_task", proactive.REASON_ORDER[0],
                          "快到点的事比她想说更硬：它排第一")
