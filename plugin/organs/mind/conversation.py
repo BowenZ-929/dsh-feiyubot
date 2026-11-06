@@ -212,6 +212,7 @@ from . import llm
 from . import recent
 from . import remind
 from . import repeat
+from . import themes
 from . import usage
 
 LOGGER = logging.getLogger("qqagent.mind")   # 对账对不上要留痕：一行 warning，不刷屏
@@ -2290,14 +2291,24 @@ def _recall(brain: Any, said: str, who: str, scene: Optional[str] = None
     由脑的 recall 装配好（「她理解：…」/「（无理解）」/「（unclear，未理解）」），本层只搬运、
     一个前缀都不自己加——「召回时标明这是她的理解」这条判据的真源在脑，不在这里。
 
+    交给脑的查询串是 themes.expand(said)（原句 + 同一主题的其它说法）：偏的只是**这一句
+    怎么问**，记忆、召回引擎、装包一处都不动——「换说法认不出」的病只能在查询这一侧治。
+
     scene 原样交给脑的 recall：**判据不在这一层**——group 时脑才把 audience=私密 的条目打上
     retellable=False / retell_note（它只打标记、不过滤召回）。这两个键脑给了就原样透出，
     没给就不带（没给不是「能讲」，是这一栏压根没判）。
     """
+    # 只扩查询、不动记忆：这一句「闹别扭」要能想起记忆里那句「又生气了」，靠的是主题词表
+    # （data/themes.json）在这**一句**上补同一主题的其它说法；记忆一个字都不许为召回去改。
+    # 一个主题都没命中就原样查；词表本身坏了只该少召回一点，不该把这一轮打哑。
     try:
-        result = brain.recall(query=said, who=who or None, scene=scene)
+        query = themes.expand(said)
+    except ValueError:
+        query = said
+    try:
+        result = brain.recall(query=query, who=who or None, scene=scene)
     except TypeError:      # 只认两个参数的假脑 / 老脑：这一次就不带 scene（不猜，也不让它闭口）
-        result = brain.recall(query=said, who=who or None)
+        result = brain.recall(query=query, who=who or None)
     items = result.get("items") or []
     recalled: List[Dict[str, Any]] = []
     for item in items:
