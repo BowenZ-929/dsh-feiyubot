@@ -15,14 +15,23 @@
    5 轮 → 没这句、notice 是空串；一条历史都没有 → recent 段写「还没有更早的对话」。
 9. **温度两档**：recalled 非空且预算 ≤ 阈值 → 0.5/factual，否则 0.7/default；返回体
    llm.temperature 与假 transport 收到的 payload 里那个温度逐字相同（两个数都从数据读）。
-10. **锚句**：没配 / 卡不在 → 提示词含「未配锚句」且 anchors.configured is False；
-    写了一张家·仓库的卡 → 提示词含锚句正文、configured True、chars 是真字数。
+10. **锚句只装 phrase**：没配 / 卡不在 → 提示词含「未配锚句」且 anchors.configured is False；
+    写了一张家·仓库的卡 → 提示词含 **phrase 的半句**，**example 连着的 6 个字一个都不出现**
+    （它是「口吻长什么样」的证据，不是给模型看的），when 也不进提示词（它是语境提示，不是用法说明）。
+    返回体 anchors.items 只带 id / phrase / injected / when。
 11. **落账**：一轮之后 recent_turns.jsonl 多一条，said / reply 与返回体一致；
     被闸弃掉的那一轮 reply 记空串、人那句仍然存。
 12. **口癖护栏**：最近 50 轮老用锚句开场（命中率 > 30% 且轮数够 min_rounds）→ 降档只注入
     2 条半句，其余在 anchors.skipped 里点名；命中率低就五条全给。guard 的八/九键对
     页面冻结、值全来自 assembly.json 的 anchors.guard（改数据 → 读数跟着变）。
     这一轮说出口之后账本多一行（hit 与回话开头一致）；被闸弃掉的轮账本不增行。
+16. **近轮禁用扩到锚句**：最近 anchors.repeat.window 轮里同一张卡（按 id）命中到 max 次，
+    这一轮就不注入那张、并在 anchors.banned_by_repeat 里点名；只命中 1 次不影响；窗口外的旧账
+    不算；次序是「先按 guard 定总条数、再按 repeat 剔除」。
+17. **照抄审计（两级）**：回话与某张卡的 example 连续重合 ≥ anchors.audit.example_overlap 字
+    → 判「报台词」，**发一次重写请求**改一次，改好就发新稿（decision=rewritten）；改完仍重合
+    → 这一句弃掉（decision=dropped，reply 空）；只命中 phrase → 放行、只记账（kind=phrase）。
+    返回体 audit{decision, kind, card_id, overlap}；数据缺键 / 类型不对一律 ValueError。
 13. **近轮禁用**：另起一节，只抽她那一侧最近 N 轮的动作行与开场；重复三次只列一条并标
     「重复 3 次」；人的原话一个字都不进这一节；最近几轮的原文段一个字都不删；
     窗口外的更早轮不算禁令；返回体 banned{rounds, action_lines, openings} 与历史对得上。
@@ -96,6 +105,23 @@ def _transport(reply: str, captured: list = None, status: int = 200):
     return send
 
 
+def _script(*replies: str, captured: list = None):
+    """假 transport：按调用顺序依次回那几句（第 1 次是装配那一问，第 2 次起是重写）。
+
+    最后一句会一直用下去：一泡命中、后面再命中时，重写都是用最后那一句回的。
+    """
+    queue = list(replies)
+
+    def send(url, headers, payload, timeout):
+        if captured is not None:
+            captured.append(payload)
+        text = queue[0] if len(queue) == 1 else queue.pop(0)
+        data = {"choices": [{"message": {"content": text}}]}
+        return 200, json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+    return send
+
+
 def _section(text: str, label: str) -> str:
     """提示词里某一节的正文：从「[标题]」到下一个空行分节为止（段与段之间是空行）。"""
     head = text.index("[%s]" % label) + len(label) + 2
@@ -124,9 +150,11 @@ class ConversationAnswerTest(unittest.TestCase):
         return load_soul(target)
 
     def _answer(self, text: str = QUESTION, reply: str = SENTENCE, *, who: str = "主人",
-                now: str = _at(5), captured: list = None, transport=None, **extra):
+                now: str = _at(5), captured: list = None, transport=None, brain=None,
+                **extra):
         send = transport if transport is not None else _transport(reply, captured)
-        return conversation.answer(text, who, store=self.store, brain=self.brain,
+        return conversation.answer(text, who, store=self.store,
+                                   brain=self.brain if brain is None else brain,
                                    now=now, transport=send, config=CONFIG, env=ENV, **extra)
 
     # —— 1) 装配来自数据 ————————————————————————————
@@ -1145,12 +1173,19 @@ class ConversationAnswerTest(unittest.TestCase):
 
     # —— 10) 锚句（家·仓库的五张台词卡） ————————————————
 
+    #: 五张现行台词卡（新格式）：phrase ≤4 字是进提示词的那一档，example 是整句例句（不进提示词），
+    #: when 是语境提示（只回给人看，不是触发条件），body 只写她自己的身体。
     FIVE = (
-        {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
-        {"scene": "被关心", "say": "行了行了，我又不是玻璃做的。", "body": "别开头、脸微微发红"},
-        {"scene": "不想聊", "say": "这个啊……以后再说吧。", "body": ""},
-        {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
-        {"scene": "你要走", "say": "你忙你的，我在这儿。", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
+        {"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。",
+         "when": "被夸，且不想直接承认高兴", "body": "尾巴翘起来晃了两下"},
+        {"id": "被关心", "phrase": "行了行了", "example": "行了行了，我又不是玻璃做的。",
+         "when": "被关心，且不想被当成弱者", "body": "别开头、脸微微发红"},
+        {"id": "不想聊", "phrase": "以后再说", "example": "这个啊……以后再说吧。",
+         "when": "不想继续聊，但要留门", "body": ""},
+        {"id": "认错", "phrase": "记岔了", "example": "……是我记岔了。",
+         "when": "发现自己记错了", "body": "低头、尾巴垂下去不敢动"},
+        {"id": "你要走", "phrase": "我在这儿", "example": "你忙你的，我在这儿。",
+         "when": "他要走或要忙", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
     )
 
     def _anchors_home(self, rows=None):
@@ -1187,8 +1222,8 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn(conversation.ANCHORS_MISSING, capture[0]["messages"][0]["content"])
         self.assertFalse(got["anchors"]["configured"])
 
-    def test_five_halves_go_in_and_no_full_line_no_body(self):
-        """五条半句全注入、不按场合挑；整句与 body 一个字都不许进提示词。"""
+    def test_five_halves_go_in_and_never_the_example(self):
+        """五条 phrase 的半句全注入、不按场合挑；example 与 when 一个字都不许进提示词。"""
         self._anchors_home(list(self.FIVE))
         capture = []
         got = self._answer(captured=capture)
@@ -1198,29 +1233,61 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(5, got["anchors"]["count"], "五条全给，不按场合挑")
         self.assertIn(conf["instruction"], system, "行为规矩没进提示词")
         for want in self.FIVE:
-            cut = int(math.ceil(len(want["say"]) * conf["inject"]["fraction"]))
-            half = want["say"][:cut] + conf["inject"]["suffix"]
-            self.assertIn(half, system, "半句没装上：%s" % want["scene"])
-            self.assertNotIn(want["say"], system, "整句进了提示词：%s" % want["scene"])
+            cut = int(math.ceil(len(want["phrase"]) * conf["inject"]["fraction"]))
+            half = want["phrase"][:cut] + conf["inject"]["suffix"]
+            self.assertIn(half, system, "半句没装上：%s" % want["id"])
+            self.assertNotIn(want["example"], system, "整句例句进了提示词：%s" % want["id"])
             if want["body"]:
                 self.assertNotIn(want["body"], system,
-                                 "body 进了提示词（那是在等着被照抄）：%s" % want["scene"])
-        items = {item["scene"]: item for item in got["anchors"]["items"]}
+                                 "body 进了提示词（那是在等着被照抄）：%s" % want["id"])
+            # when 是语境提示（回给人看），**不是触发条件**：不许按它挑卡，也不许当用法说明
+            self.assertNotIn(want["when"], system, "when 进了提示词：%s" % want["id"])
+        items = {item["id"]: item for item in got["anchors"]["items"]}
         self.assertEqual(len(self.FIVE), len(items))
         for want in self.FIVE:
-            self.assertEqual(want["say"], items[want["scene"]]["say"], "全文要回给人核对")
-            self.assertEqual(want["body"], items[want["scene"]]["body"], "body 要回给人核对")
+            self.assertEqual({"id", "phrase", "injected", "when", "example", "body"},
+                         set(items[want["id"]]),
+                             "items 只带这四栏：example 一个字都不回（审计要用时现读家）")
+            self.assertEqual(want["phrase"], items[want["id"]]["phrase"])
+            self.assertEqual(want["when"], items[want["id"]]["when"])
+
+    def test_no_six_chars_of_any_example_reach_the_prompt(self):
+        """逐张卡取 example 的每一段连续 6 字：提示词里一个都找不到（phrase 那半句不算）。"""
+        self._anchors_home(list(self.FIVE))
+        capture = []
+        self._answer(captured=capture)
+        system = usage.normalize(capture[0]["messages"][0]["content"])
+        size = int(conversation.load_assembly()["anchors"]["audit"]["example_overlap"])
+        for want in self.FIVE:
+            example = usage.normalize(want["example"])
+            for start in range(0, len(example) - size + 1):
+                piece = example[start:start + size]
+                self.assertNotIn(piece, system,
+                                 "example 的连续 %d 字进了提示词：%r（%s）"
+                                 % (size, piece, want["id"]))
 
     def test_half_line_keeps_its_shape(self):
-        """人给的样子：「哼，才知道啊。」注入成「哼，才知……」。"""
+        """人给的样子：phrase「才知道啊」注入成「才知……」——半句从 phrase 取，不从整句取。"""
+        self._anchors_home([{"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。",
+                             "when": "被夸，且不想直接承认高兴", "body": "尾巴翘起来晃了两下"}])
+        capture = []
+        got = self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        self.assertEqual("才知……", got["anchors"]["items"][0]["injected"])
+        self.assertIn("才知……", system)
+        self.assertNotIn("哼，才知……", system, "半句是从整句开头截的：不是 phrase 那一档")
+        self.assertNotIn("哼，才知道啊。", system)
+        self.assertNotIn("尾巴翘起来晃了两下", system)
+
+    def test_a_card_without_phrase_gives_no_half_line(self):
+        """老卡（只有 say）没有 phrase：不拿整句顶上去——example 一个字都不进提示词。"""
         self._anchors_home([{"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"}])
         capture = []
         got = self._answer(captured=capture)
         system = capture[0]["messages"][0]["content"]
-        self.assertEqual("哼，才知……", got["anchors"]["items"][0]["injected"])
-        self.assertIn("哼，才知……", system)
+        self.assertFalse(got["anchors"]["configured"], "没有 phrase 却报成配了半句")
+        self.assertIn(conversation.ANCHORS_MISSING, system)
         self.assertNotIn("哼，才知道啊。", system)
-        self.assertNotIn("尾巴翘起来晃了两下", system)
 
     # —— 11) 落账 ————————————————————————————
 
@@ -1274,15 +1341,15 @@ class ConversationAnswerTest(unittest.TestCase):
     def _halves(self):
         """家那几条半句，**按台词库的现行顺序**（read_all 给的顺序，不是 FIVE 的书写顺序）。
 
-        现行顺序是 latest_by_scene 排出来的（ts → scene），所以降档时注入的是它开头那两条——
-        从 read_all 现读，测试才不会替台词库另定一个顺序。
+        现行顺序是 latest_by_scene 排出来的（ts → id），所以降档时注入的是它开头那两条——
+        从 read_all 现读，测试才不会替台词库另定一个顺序。半句一律从 **phrase** 取。
         """
         conf = conversation.load_assembly()["anchors"]
         out = []
         for row in home_anchors.read_all()["anchors"]:
-            say = str(row.get("say") or "")
-            cut = int(math.ceil(len(say) * conf["inject"]["fraction"]))
-            out.append((str(row.get("scene") or ""), say[:cut] + conf["inject"]["suffix"]))
+            phrase = str(row.get("phrase") or "")
+            cut = int(math.ceil(len(phrase) * conf["inject"]["fraction"]))
+            out.append((str(row.get("id") or ""), phrase[:cut] + conf["inject"]["suffix"]))
         return out
 
     def test_frequent_opening_downgrades_to_the_first_two_halves(self):
@@ -1304,11 +1371,11 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(5, guard["available"])
 
         halves = self._halves()
-        for scene, half in halves[:2]:
-            self.assertIn(half, system, "前两条该注入：%s" % scene)
-        for scene, half in halves[2:]:
-            self.assertNotIn(half, system, "降档了还在注入：%s" % scene)
-        self.assertEqual([scene for scene, _half in halves[2:]], got["anchors"]["skipped"],
+        for card, half in halves[:2]:
+            self.assertIn(half, system, "前两条该注入：%s" % card)
+        for card, half in halves[2:]:
+            self.assertNotIn(half, system, "降档了还在注入：%s" % card)
+        self.assertEqual([card for card, _half in halves[2:]], got["anchors"]["skipped"],
                          "被跳过的 3 条要逐个点名，不许静默丢")
         self.assertEqual(2, got["anchors"]["injected"])
         self.assertEqual(5, got["anchors"]["available"])
@@ -1330,13 +1397,13 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(5, guard["injected"])
         self.assertEqual(5, got["anchors"]["injected"])
         self.assertEqual([], got["anchors"]["skipped"])
-        for scene, half in self._halves():
-            self.assertIn(half, system, "没降档却不给这半句：%s" % scene)
+        for card, half in self._halves():
+            self.assertIn(half, system, "没降档却不给这半句：%s" % card)
 
     def test_this_round_lands_in_the_usage_ledger(self):
-        """说出口之后账本多一行：opening 是回话开头，hit / scene 与家那五条对得上。"""
+        """说出口之后账本多一行：opening 是回话开头，hit / id / phrase / scene 与家那五条对得上。"""
         self._anchors_home(list(self.FIVE))
-        reply = "这个啊，又来了。"
+        reply = "以后再说吧，现在不行。"
         got = self._answer(reply=reply)
         self.assertEqual("pass", got["gate"]["decision"])
 
@@ -1346,8 +1413,11 @@ class ConversationAnswerTest(unittest.TestCase):
         conf = conversation.load_assembly()["anchors"]["guard"]
         self.assertEqual(usage.opening(reply, conf["opening_chars"]), row["opening"],
                          "opening 不是这一轮回话的开头")
-        self.assertTrue(row["hit"], "回话开头就是「这个啊」，却判成没命中")
-        self.assertEqual("不想聊", row["scene"], "命中要记那条台词的 scene")
+        self.assertTrue(row["hit"], "回话开头就是 phrase「以后再说」，却判成没命中")
+        self.assertEqual("不想聊", row["id"], "命中要记是哪一张卡（近轮禁用按 id 数次数）")
+        self.assertEqual("以后再说", row["phrase"], "命中要记是哪一句口癖")
+        self.assertEqual("不想继续聊，但要留门", row["scene"],
+                         "scene 那一栏口径不变：读侧给的场景（等于 when）")
         self.assertTrue(row["ts"], "账本缺时刻")
 
     def test_dropped_round_is_not_written_to_the_usage_ledger(self):
@@ -1427,6 +1497,293 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(20, got["guard"]["min_rounds"])
         self.assertEqual(20, usage.read()["rounds"], "这一轮该在读数之后才落账")
 
+
+    # —— 16) 近轮禁用扩到锚句 ————————————————————
+
+    def _card_seed(self, card_id: str, phrase: str, times: int) -> None:
+        """往同一本口癖账里记 times 轮「命中了这一张卡」（带 id 与 phrase）。"""
+        for _ in range(times):
+            usage.append(True, "才知道什么呀", "被夸", card_id=card_id, phrase=phrase)
+
+    def test_a_card_seen_twice_in_the_window_is_not_injected(self):
+        """最近 12 轮里同一张卡出现 2 次（= anchors.repeat.max）→ 这一轮不注入它、点名报出来。"""
+        self._anchors_home(list(self.FIVE))
+        repeats = conversation.load_assembly()["anchors"]["repeat"]
+        self._card_seed("被夸", "才知道啊", int(repeats["max"]))
+        capture = []
+        got = self._answer(captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        halves = dict(self._halves())
+        self.assertEqual(["被夸"], got["anchors"]["banned_by_repeat"],
+                         "被近轮禁用挡住的那张要逐个点名，不许静默丢")
+        self.assertNotIn(halves["被夸"], system, "被禁的那张还在注入")
+        self.assertIn(halves["被关心"], system, "别的卡跟着一起被禁了")
+        self.assertEqual(len(self.FIVE) - 1, got["anchors"]["injected"])
+        self.assertEqual(len(self.FIVE), got["anchors"]["available"])
+
+    def test_one_hit_in_the_window_does_not_ban(self):
+        self._anchors_home(list(self.FIVE))
+        self._card_seed("被夸", "才知道啊", 1)
+        capture = []
+        got = self._answer(captured=capture)
+        self.assertEqual([], got["anchors"]["banned_by_repeat"])
+        self.assertIn(dict(self._halves())["被夸"], capture[0]["messages"][0]["content"])
+
+    def test_a_hit_outside_the_window_does_not_ban(self):
+        """窗口外的旧账不算：先记 2 次，再空 12 轮，那两次已经滑出去了。"""
+        self._anchors_home(list(self.FIVE))
+        self._card_seed("被夸", "才知道啊", 2)
+        for _ in range(int(conversation.load_assembly()["anchors"]["repeat"]["window"])):
+            usage.append(False, "今天挺好的", "")
+        capture = []
+        got = self._answer(captured=capture)
+        self.assertEqual([], got["anchors"]["banned_by_repeat"])
+        self.assertIn(dict(self._halves())["被夸"], capture[0]["messages"][0]["content"])
+
+    def test_repeat_window_and_max_come_from_the_assembly_file(self):
+        """改数据 → 判定跟着变：window 收到 3、max 1 → 同一张卡只出现过 1 次也禁。"""
+        self._anchors_home(list(self.FIVE))
+        conf = conversation.load_assembly()
+        conf["anchors"]["repeat"] = {"window": 3, "max": 1}
+        self._card_seed("被夸", "才知道啊", 1)
+        capture = []
+        got = self._answer(assembly=conf, captured=capture)
+        self.assertEqual(["被夸"], got["anchors"]["banned_by_repeat"])
+        self.assertNotIn(dict(self._halves())["被夸"], capture[0]["messages"][0]["content"])
+
+    def test_ledger_rows_without_id_never_ban_a_card(self):
+        """老行读不到 id：当它没命中过（猜一个 id 回去，会把从没出现过的卡禁掉）。"""
+        self._anchors_home(list(self.FIVE))
+        for _ in range(5):
+            usage.append(True, "这个啊又来了", "不想聊")        # 老形状：没有 id / phrase
+        got = self._answer()
+        self.assertEqual([], got["anchors"]["banned_by_repeat"])
+
+    def test_broken_repeat_data_is_reported_not_defaulted(self):
+        """anchors.repeat 缺键 / 类型不对 / max 大过 window → ValueError，并指名是哪一项。"""
+        for name, value, needle in (("window", None, "anchors.repeat.window"),
+                                    ("max", "两次", "anchors.repeat.max"),
+                                    ("max", 99, "anchors.repeat.max")):
+            conf = conversation.load_assembly()
+            repeat_conf = conf["anchors"]["repeat"]
+            if value is None:
+                repeat_conf.pop(name)
+            else:
+                repeat_conf[name] = value
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn(needle, str(caught.exception),
+                          "缺 %s 时没有指名报错：%s" % (name, caught.exception))
+
+    # —— 17) 照抄审计（两级）————————————————————
+
+    def test_a_copied_example_is_rewritten_once(self):
+        """回话与某张卡的 example 连续重合 ≥ 阈值 → 报台词：**发一次重写请求**，改好就发新稿。"""
+        self._anchors_home(list(self.FIVE))
+        copied = "嗯……行了行了，我又不是玻璃做的。"
+        rewrite = "我哪有那么脆，别瞎操心。"
+        capture = []
+        got = self._answer(reply=copied, transport=_script(copied, rewrite, captured=capture))
+        threshold = int(conversation.load_assembly()["anchors"]["audit"]["example_overlap"])
+        self.assertEqual("example", got["audit"]["kind"])
+        self.assertEqual("rewritten", got["audit"]["decision"])
+        self.assertEqual("被关心", got["audit"]["card_id"])
+        self.assertGreaterEqual(got["audit"]["overlap"], threshold)
+        self.assertEqual(rewrite, got["reply"], "改好了却没发改写后的那句")
+        self.assertEqual(2, len(capture), "该有两次模型请求：装配一次、重写一次")
+        self.assertIn("【原文】", capture[1]["messages"][0]["content"],
+                      "第二次请求不是那套重写指令（organs/mouth/rewrite.py 的 prompt）")
+        self.assertIn(copied, capture[1]["messages"][0]["content"], "重写请求里没有那一句原文")
+        row = usage.read()["rows"][-1]
+        guard = conversation.load_assembly()["anchors"]["guard"]
+        self.assertEqual(usage.opening(rewrite, guard["opening_chars"]), row["opening"],
+                         "账本记的开头不是她真说出口的那一句（换过稿之后要按新稿数）")
+        self.assertFalse(row["hit"], "改稿之后她没念任何口癖，账上却记成命中")
+
+    def test_a_rewrite_that_still_copies_is_dropped(self):
+        """改了一次仍与 example 连续重合 ≥ 阈值 → 这一句弃掉（不发出去、不落账）。"""
+        self._anchors_home(list(self.FIVE))
+        copied = "行了行了，我又不是玻璃做的。"
+        again = "行了行了，我又不是铁打的。"
+        capture = []
+        got = self._answer(reply=copied, transport=_script(copied, again, captured=capture))
+        self.assertEqual("example", got["audit"]["kind"])
+        self.assertEqual("dropped", got["audit"]["decision"])
+        self.assertEqual("", got["reply"], "改了还是照抄，却照样发了出去")
+        self.assertEqual([], got["chunks"])
+        self.assertEqual(2, len(capture), "重写那一次该发出去过")
+        self.assertEqual(0, usage.read()["rounds"], "没说出口的轮不该记账")
+
+    def test_a_rewrite_that_cannot_be_read_is_dropped(self):
+        """重写回来原样抄一遍（accept 判「等于没改」）→ 按改不动处置：这一句不发。"""
+        self._anchors_home(list(self.FIVE))
+        copied = "嗯……行了行了，我又不是玻璃做的。"
+        got = self._answer(reply=copied, transport=_script(copied, copied))
+        self.assertEqual("dropped", got["audit"]["decision"])
+        self.assertEqual("", got["reply"])
+        self.assertTrue(got["audit"]["card_id"])
+
+    def test_a_phrase_hit_passes_and_is_only_recorded(self):
+        """只命中 phrase（≤4 字那一档）→ 放行、只记账：不判废、不改写、不发第二次请求。"""
+        self._anchors_home(list(self.FIVE))
+        reply = "才知道什么呀，我才不承认。"
+        capture = []
+        got = self._answer(reply=reply, captured=capture)
+        self.assertEqual(1, len(capture), "只命中 phrase 却发了第二次模型请求")
+        self.assertEqual("pass", got["audit"]["decision"])
+        self.assertEqual("phrase", got["audit"]["kind"])
+        self.assertEqual("被夸", got["audit"]["card_id"])
+        self.assertEqual(reply, got["reply"])
+        row = usage.read()["rows"][-1]
+        self.assertTrue(row["hit"])
+        self.assertEqual("被夸", row["id"], "命中要带 id（近轮禁用靠它数次数）")
+        self.assertEqual("才知道啊", row["phrase"])
+
+    def test_no_hit_leaves_an_honest_empty_audit(self):
+        self._anchors_home(list(self.FIVE))
+        got = self._answer(reply="今天风挺大的，窗户响了一夜。")
+        self.assertEqual({"decision": "pass", "kind": "none", "card_id": "", "overlap": 0},
+                         got["audit"])
+
+    def test_without_anchors_the_audit_is_empty_and_asks_nothing(self):
+        """没配锚句：没有例句可比，审计如实写 none，也不多发一次请求。"""
+        self._anchors_home()
+        capture = []
+        got = self._answer(reply="今天风挺大的。", captured=capture)
+        self.assertEqual(1, len(capture))
+        self.assertEqual({"decision": "pass", "kind": "none", "card_id": "", "overlap": 0},
+                         got["audit"])
+
+    def test_broken_audit_data_is_reported_not_defaulted(self):
+        """anchors.audit 缺键 / 类型不对 → ValueError，并指名是哪一项。"""
+        for name, value, needle in (("example_overlap", None, "anchors.audit.example_overlap"),
+                                    ("example_overlap", "六个字", "anchors.audit.example_overlap"),
+                                    ("example_overlap", True, "anchors.audit.example_overlap")):
+            conf = conversation.load_assembly()
+            audit_conf = conf["anchors"]["audit"]
+            if value is None:
+                audit_conf.pop(name)
+            else:
+                audit_conf[name] = value
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn(needle, str(caught.exception),
+                          "缺 %s 时没有指名报错：%s" % (name, caught.exception))
+
+    def test_a_missing_repeat_or_audit_section_is_reported(self):
+        for name in ("repeat", "audit"):
+            conf = conversation.load_assembly()
+            conf["anchors"].pop(name)
+            with self.assertRaises(ValueError) as caught:
+                self._answer(assembly=conf)
+            self.assertIn("anchors.%s" % name, str(caught.exception))
+
+
+    # —— 场合 ————————————————————————————————
+
+    def _scene_book(self):
+        """场合那一段的标题与三句话：都从装配说明里读，测试里一个字的文案都没有。"""
+        conf = conversation.load_assembly()
+        return conf["sections"]["scene"]["label"], conf["scene"]["lines"]
+
+    def _scene_block(self, captured):
+        label, _ = self._scene_book()
+        return _section(captured[0]["messages"][0]["content"], label)
+
+    def test_group_scene_says_the_group_line(self):
+        """scene=group：提示词里「场合」段是群里那一句，另两句一个字都不出现。"""
+        label, lines = self._scene_book()
+        capture = []
+        got = self._answer(scene=brain_model.SCENE_GROUP, captured=capture)
+        self.assertEqual({"value": brain_model.SCENE_GROUP}, got["scene"])
+        self.assertIn(label, capture[0]["messages"][0]["content"], "「场合」那一段没进提示词")
+        block = self._scene_block(capture)
+        self.assertEqual(lines[brain_model.SCENE_GROUP], block.strip().splitlines()[0])
+        for name in (brain_model.SCENE_PRIVATE, brain_model.SCENE_UNKNOWN):
+            self.assertNotIn(lines[name], capture[0]["messages"][0]["content"],
+                             "别处的场合那句也进来了：%s" % name)
+
+    def test_private_scene_says_the_private_line(self):
+        label, lines = self._scene_book()
+        capture = []
+        got = self._answer(scene=brain_model.SCENE_PRIVATE, captured=capture)
+        self.assertEqual({"value": brain_model.SCENE_PRIVATE}, got["scene"])
+        self.assertEqual(lines[brain_model.SCENE_PRIVATE],
+                         self._scene_block(capture).strip().splitlines()[0])
+        self.assertNotIn(lines[brain_model.SCENE_GROUP], capture[0]["messages"][0]["content"])
+
+    def test_a_missing_or_bogus_scene_is_unknown_not_private(self):
+        """不传 / 空白 / 非法都落成 unknown（**不猜成私聊**：猜错就是把私事在群里说出去了）。"""
+        label, lines = self._scene_book()
+        for value in (None, "", "   ", "公屏", 123):
+            capture = []
+            got = self._answer(scene=value, captured=capture)
+            self.assertEqual({"value": brain_model.SCENE_UNKNOWN}, got["scene"],
+                             "scene=%r 没落成 unknown" % (value,))
+            self.assertEqual(lines[brain_model.SCENE_UNKNOWN],
+                             self._scene_block(capture).strip().splitlines()[0],
+                             "scene=%r 时「场合」不是「不知道这是哪儿」那一句" % (value,))
+
+    def test_the_three_scenes_reach_the_brain(self):
+        """三态各打一次：脑里今日两条（人和她）的 scene 都等于这一轮给的（不传就是 unknown）。"""
+        cases = (("group", brain_model.SCENE_GROUP, brain_model.SCENE_GROUP),
+                 ("private", brain_model.SCENE_PRIVATE, brain_model.SCENE_PRIVATE),
+                 ("none", None, brain_model.SCENE_UNKNOWN))
+        for name, scene, expected in cases:
+            brain = BrainStore(self.tmp / ("scene-" + name) / "brain")
+            self._answer(scene=scene, brain=brain)
+            rows = brain.today_entries(_at(5))
+            self.assertEqual(2, len(rows), "这一轮该落两条（人一句、她一句）：%r" % (rows,))
+            self.assertEqual([expected, expected], [row.get("scene") for row in rows],
+                             "scene=%r 没落到脑里（两条还不一致）" % (scene,))
+
+    def test_a_private_memory_is_not_retellable_in_a_group_but_is_in_private(self):
+        """group 时脑把 audience=私密 的那条打 retellable=False + retell_note，两栏原样透出。
+
+        那一轮的记忆离这一轮 15 分钟（脑的合并窗口 10 分钟）：同一个人窗口内的两条会被并成
+        一条，并的时候 audience 也一起被这一轮自己的原话盖掉——那是脑的规矩，这里不去动它。
+        """
+        self.brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0),
+                          audience=brain_model.AUDIENCE_PRIVATE)
+        got = self._answer(scene=brain_model.SCENE_GROUP, now=_at(15))
+        row = next(one for one in got["recalled"] if one["text"] == MEMORY_TEXT)
+        self.assertIs(False, row["retellable"], "群里这一条没被标成不可复述")
+        self.assertTrue(row["retell_note"], "retell_note 空着：判据没透出来")
+
+        brain = BrainStore(self.tmp / "private" / "brain")
+        brain.ingest(who="主人", text=MEMORY_TEXT, ts=_at(0),
+                     audience=brain_model.AUDIENCE_PRIVATE)
+        got = self._answer(scene=brain_model.SCENE_PRIVATE, now=_at(15), brain=brain)
+        row = next(one for one in got["recalled"] if one["text"] == MEMORY_TEXT)
+        self.assertTrue(row["retellable"], "私聊里这一条该是可复述的")
+        self.assertNotIn("retell_note", row, "私聊里不该有「不可复述」那条理由")
+
+    def test_assembly_without_scene_is_reported(self):
+        """数据里缺「场合」那一整节就报，不拿默认话兜底（兜底就成第二处真源）。"""
+        conf = conversation.load_assembly()
+        conf.pop("scene")
+        with self.assertRaises(ValueError) as caught:
+            self._answer(assembly=conf)
+        self.assertIn("scene", str(caught.exception))
+
+    def test_scene_lines_missing_one_scene_is_reported(self):
+        """三句话缺一句就报，并点名缺的是哪一句。"""
+        conf = conversation.load_assembly()
+        conf["scene"]["lines"].pop(brain_model.SCENE_GROUP)
+        with self.assertRaises(ValueError) as caught:
+            self._answer(assembly=conf)
+        self.assertIn(brain_model.SCENE_GROUP, str(caught.exception))
+
+    def test_scene_cap_may_shrink_but_not_grow(self):
+        """sections.scene.cap 可以更小，不许超过 200：超了当场报，正好 200 照常装配。"""
+        conf = conversation.load_assembly()
+        conf["sections"]["scene"]["cap"] = conversation.SCENE_CAP_MAX + 1
+        with self.assertRaises(ValueError):
+            self._answer(assembly=conf)
+        conf["sections"]["scene"]["cap"] = conversation.SCENE_CAP_MAX
+        got = self._answer(assembly=conf)
+        caps = [row["cap"] for row in got["assembly"]["sections"] if row["key"] == "scene"]
+        self.assertEqual([conversation.SCENE_CAP_MAX], caps)
 
 if __name__ == "__main__":
     unittest.main()

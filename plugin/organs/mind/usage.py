@@ -4,10 +4,16 @@
 只追加、不进任何统计），也不是最近几轮（那里存原文给连续性用，谁都不许在别人的账上
 叠一层派生统计）。所以另开一份 home/organs/mind/anchor_usage.jsonl：一行一轮，只追加。
 
-**命中口径（人定的，别再改）**：把标点与空白去掉，她回话的开头若以某条现行锚句去掉
-标点后的**前 prefix_chars 个字**开头，就算命中；命中取台词库里第一条对得上的，记它的
-scene。判标点用的是 unicodedata.category 的前缀（P = 标点，Z = 空白），不写词表——
-词表必漏，而这一本账只认一条判据。
+**命中口径（人定的，别再改）**：把标点与空白去掉，她回话的开头若以某张现行台词卡
+的 **phrase**（≤4 字那一档，进提示词的也是它）去掉标点后的**前 prefix_chars 个字**开头，就算
+命中；命中取台词库里第一条对得上的，记它的 **id** 与 phrase。判标点用的是 unicodedata.category
+的前缀（P = 标点，Z = 空白），不写词表——词表必漏，而这一本账只认一条判据。
+**example 不参与判命中**：整句例句是她「口吻长什么样」的证据，不是口癖；拿它判，等于把她照抄
+一整句与念半个口癖算成同一件事（照抄那一档归 organs/mind/conversation.py 的照抄审计）。
+
+**每行带 id 是为了「同一张卡最近用过几次」**：近轮禁用（anchors.repeat）按 id 数，
+不是按句子数——改 when、改 example 都不改 id，所以同一张卡换过说法也还是同一张卡。
+老行没有 id：读回来记空串，**当它没命中过**（猜一个 id 回去，会把从没出现过的那张卡禁掉）。
 
 **门槛全在数据里**：window / threshold / opening_chars / prefix_chars / reduced_count /
 min_rounds 都在 assembly.json 的 anchors.guard 里，本文件不认识其中任何一个数，
@@ -32,6 +38,8 @@ TS = "ts"
 HIT = "hit"
 OPENING = "opening"
 SCENE = "scene"
+CARD_ID = "id"       # 命中/没命中的是哪一张卡（稳定键，改 when 与 example 都不改它）
+PHRASE = "phrase"    # 命中的是那一张卡的哪一句口癖（≤4 字，进提示词的也是它）
 
 
 def path_of(root: Optional[Any] = None) -> Path:
@@ -57,37 +65,96 @@ def opening(text: Any, chars: Any) -> str:
     return normalize(text)[:size]
 
 
-def match(text: Any, anchors: Any, prefix_chars: Any) -> Tuple[bool, str]:
-    """这条回话命中了哪一条现行台词：返回 (hit, scene)，没命中是 (False, "")。
+def hit(text: Any, anchors: Any, prefix_chars: Any) -> Optional[Dict[str, str]]:
+    """这条回话命中了哪一张现行台词卡：命中给 {card_id, phrase, scene}，没命中给 None。
 
-    对每条台词取 normalize(say) 的前 prefix_chars 个字当前缀；回话以它开头即命中，
-    取**第一条**对得上的（台词库的现行顺序就是优先级）。前缀为空（那句全是标点）跳过——
-    空前缀会匹配一切，那是假命中。
+    判据：对每张卡取 normalize(phrase) 的前 prefix_chars 个字当前缀，回话以它开头即命中，取
+    **第一条**对得上的（台词库的现行顺序就是优先级）。前缀为空（那句全是标点、或这张卡根本没定
+    phrase）跳过——空前缀会匹配一切，那是假命中。
+
+    **按 phrase 判，不按 example 判**：phrase 是进提示词的那一档（她看见的只有它），example 是
+    整句例句。拿 example 判命中，等于把「念半个口癖」与「照抄一整句」算成一件事；照抄那一档归
+    organs/mind/conversation.py 的照抄审计。
+
+    老卡没有 phrase（升级前写下的 say 那几行）：读数这一侧退回 example/say 的前缀，命中的那一笔
+    **phrase 记空**——老句不该被记成「口癖命中」，但「她是不是老在念台词」这本账仍要看得见。
+    scene 单独给一份：账本的 scene 栏是历史口径，一条都不改。
     """
     size = int(prefix_chars)
     head = normalize(text)
     if size <= 0 or not head:
-        return False, ""
+        return None
     for row in anchors or []:
         if not isinstance(row, Mapping):
             continue
-        prefix = normalize(row.get("say"))[:size]
+        phrase = str(row.get(PHRASE) or "")
+        prefix = normalize(phrase)[:size]
+        if not prefix:
+            prefix = normalize(row.get("example") or row.get("say"))[:size]
+            phrase = ""            # 靠老句命中的：不记成口癖命中（见上面的说明）
         if prefix and head.startswith(prefix):
-            return True, str(row.get("scene") or "")
-    return False, ""
+            return {CARD_ID: str(row.get(CARD_ID) or ""), PHRASE: phrase,
+                    SCENE: str(row.get(SCENE) or "")}
+    return None
 
 
-def append(hit: Any, opening: Any, scene: Any, root: Optional[Any] = None) -> Dict[str, Any]:
-    """追一行：{ts, hit, opening, scene}，只追加不重写；返回真正落下去的那一行。
+def match(text: Any, anchors: Any, prefix_chars: Any, *,
+          with_card: bool = False) -> Tuple[Any, ...]:
+    """同上，只是摊成元组（老调用口与面板要的是这一份形状）。
+
+    with_card=False → (hit, scene)：老调用口（organs/mind/bench/consistency.py 的 C 轨）按两个
+    变量接，所以默认仍是两元组——那一份**没有一起改**，改了它 bench 就整条读不出来。
+    with_card=True  → (hit, card_id, phrase)：核那一边按卡记账要的正是这三个。
+    两种形状的判据同一条（都走 hit），不另写一份匹配。
+    """
+    found = hit(text, anchors, prefix_chars)
+    if with_card:
+        if found is None:
+            return False, "", ""
+        return True, found[CARD_ID], found[PHRASE]
+    if found is None:
+        return False, ""
+    return True, found[SCENE]
+
+
+def repeats(window: Any, root: Optional[Any] = None) -> Dict[str, int]:
+    """最近 window 轮里每张卡各命中过几次：{card_id: 次数}。
+
+    近轮禁用（assembly.json 的 anchors.repeat）按 id 数，不按句子数：同一张卡就算换了说法，
+    也还是同一张卡。只数 hit 为真、且 id 非空的行——老行读不到 id，**就当它没命中过**：
+    拿 when／scene 猜一个 id 回去，会把一张从没出现过的卡禁掉，那比不禁更糟。
+    window <= 0 时一行都不算（与 read 的 window 同一个口径）。
+    """
+    size = int(window)
+    rows = _rows(path_of(root))
+    rows = rows[-size:] if size > 0 else []
+    tally: Dict[str, int] = {}
+    for row in rows:
+        if not row[HIT]:
+            continue
+        card = str(row.get(CARD_ID) or "")
+        if not card:
+            continue
+        tally[card] = tally.get(card, 0) + 1
+    return tally
+
+
+def append(hit: Any, opening: Any, scene: Any, root: Optional[Any] = None, *,
+           card_id: Any = "", phrase: Any = "") -> Dict[str, Any]:
+    """追一行：{ts, hit, opening, scene, id, phrase}，只追加不重写；返回真正落下去的那一行。
 
     ts 用器官自己的钟（brain.model.now_iso），与装配这一轮的 at 同一个口径——
     两处时刻各用一套写法，账上的先后就会跟装配分叉。
+    id / phrase 是这一轮命中的那张卡与那句口癖：近轮禁用按 id 数次数，句子换了说法也还是同一张卡。
+    hit 为假时两栏都写空串——没命中的一轮没有卡可记，写一个猜出来的 id 会误禁。
     """
     row: Dict[str, Any] = {
         TS: brain_model.now_iso(),
         HIT: bool(hit),
         OPENING: str(opening if opening is not None else ""),
         SCENE: str(scene if scene is not None else ""),
+        CARD_ID: str(card_id or "") if hit else "",
+        PHRASE: str(phrase or "") if hit else "",
     }
     path = path_of(root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,5 +229,7 @@ def _rows(path: Path) -> List[Dict[str, Any]]:
         rows.append({TS: str(item.get(TS) or ""),
                      HIT: bool(item.get(HIT)),
                      OPENING: str(item.get(OPENING) or ""),
-                     SCENE: str(item.get(SCENE) or "")})
+                     SCENE: str(item.get(SCENE) or ""),
+                     CARD_ID: str(item.get(CARD_ID) or ""),
+                     PHRASE: str(item.get(PHRASE) or "")})
     return rows

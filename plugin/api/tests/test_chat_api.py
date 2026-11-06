@@ -105,9 +105,10 @@ REWRITE_KEYS = {"status", "why", "from", "to"}
 CLAUSES = json.loads((MOUTH_DATA / "clauses.json").read_text(encoding="utf-8"))["clauses"]
 ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
-CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate",
+CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate", "audit",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
                  "guard", "memory", "addressed", "borrow", "refusal", "audience_held"}
+AUDIT_KEYS = {"decision", "kind", "card_id", "overlap"}
 BANNED_KEYS = {"rounds", "action_lines", "openings"}
 ACTION_KEYS = {"pool", "rule", "quota"}
 QUOTA_KEYS = {"window", "max", "used", "blocked", "stripped", "kept_because_empty"}
@@ -1139,28 +1140,35 @@ class ChatApiTest(unittest.TestCase):
                       "提示词里没有「（补记）」，模型会把补的当原话")
 
     def test_configured_anchor_arrives_at_the_endpoint(self):
-        """家·仓库里登记两张台词卡：端点报成配了，全文与 body 都回给人核对，body 不进提示词。"""
+        """家·仓库里登记两张台词卡：端点报成配了，只回 id / phrase / injected / when，example 不进提示词。"""
         home = Path(os.environ["HOME_ROOT"])
         home_anchors.append_anchors(root=home, role="human", by="人", anchors=[
-            {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
-            {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
+            {"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。",
+             "when": "被夸，且不想直接承认高兴", "body": "尾巴翘起来晃了两下"},
+            {"id": "认错", "phrase": "记岔了", "example": "……是我记岔了。",
+             "when": "发现自己记错了", "body": "低头、尾巴垂下去不敢动"},
         ])
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
         anchors = payload["anchors"]
         self.assertEqual({"configured", "count", "available", "injected", "instruction",
-                          "items", "skipped"}, set(anchors))
+                          "items", "skipped", "banned_by_repeat"}, set(anchors))
         self.assertTrue(anchors["configured"])
         self.assertEqual(2, anchors["count"])
         self.assertEqual(conversation.load_assembly()["anchors"]["instruction"],
                          anchors["instruction"])
-        by_scene = {item["scene"]: item for item in anchors["items"]}
-        self.assertEqual("尾巴翘起来晃了两下", by_scene["被夸"]["body"])
+        by_id = {item["id"]: item for item in anchors["items"]}
+        self.assertEqual({"id", "phrase", "injected", "when", "example", "body"},
+                         set(by_id["被夸"]),
+                         "items 只带这四栏：example 一个字都不许回（审计要用时现读家）")
+        self.assertEqual("才知道啊", by_id["被夸"]["phrase"])
+        self.assertEqual("被夸，且不想直接承认高兴", by_id["被夸"]["when"])
         system = capture[0]["messages"][0]["content"]
-        self.assertIn(by_scene["被夸"]["injected"], system)
+        self.assertIn(by_id["被夸"]["injected"], system)
         self.assertNotIn("尾巴翘起来晃了两下", system, "body 进了提示词")
-        self.assertNotIn("哼，才知道啊。", system, "整句进了提示词")
+        self.assertNotIn("哼，才知道啊。", system, "整句例句进了提示词")
+        self.assertNotIn("被夸，且不想直接承认高兴", system, "when 进了提示词")
 
     # —— 豁免：对方要她再说一遍（本轮加的） ————————————
 
@@ -1466,12 +1474,18 @@ class ChatApiTest(unittest.TestCase):
 
     # —— 口癖护栏 ————————————————————————————
 
+    #: 五张现行台词卡（新格式）：phrase 是进提示词的那一档，example 不进提示词，when 只回给人看。
     FIVE = (
-        {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
-        {"scene": "被关心", "say": "行了行了，我又不是玻璃做的。", "body": "别开头、脸微微发红"},
-        {"scene": "不想聊", "say": "这个啊……以后再说吧。", "body": ""},
-        {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
-        {"scene": "你要走", "say": "你忙你的，我在这儿。", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
+        {"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。",
+         "when": "被夸，且不想直接承认高兴", "body": "尾巴翘起来晃了两下"},
+        {"id": "被关心", "phrase": "行了行了", "example": "行了行了，我又不是玻璃做的。",
+         "when": "被关心，且不想被当成弱者", "body": "别开头、脸微微发红"},
+        {"id": "不想聊", "phrase": "以后再说", "example": "这个啊……以后再说吧。",
+         "when": "不想继续聊，但要留门", "body": ""},
+        {"id": "认错", "phrase": "记岔了", "example": "……是我记岔了。",
+         "when": "发现自己记错了", "body": "低头、尾巴垂下去不敢动"},
+        {"id": "你要走", "phrase": "我在这儿", "example": "你忙你的，我在这儿。",
+         "when": "他要走或要忙", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
     )
 
     def _five_anchors(self):
@@ -1518,12 +1532,39 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(2, len(injected))
         halves_in_prompt = [half for half in injected if half in system]
         self.assertEqual(2, len(halves_in_prompt), "提示词里该正好 2 条半句")
-        skipped = [item for item in self.FIVE if item["scene"] in anchors["skipped"]]
+        skipped = [item for item in self.FIVE if item["id"] in anchors["skipped"]]
         self.assertEqual(3, len(skipped))
         for item in skipped:
-            cut = int(math.ceil(len(item["say"]) * conf["inject"]["fraction"]))
-            self.assertNotIn(item["say"][:cut] + conf["inject"]["suffix"], system,
-                             "降档了还在注入：%s" % item["scene"])
+            cut = int(math.ceil(len(item["phrase"]) * conf["inject"]["fraction"]))
+            self.assertNotIn(item["phrase"][:cut] + conf["inject"]["suffix"], system,
+                             "降档了还在注入：%s" % item["id"])
+
+    def test_a_copied_example_is_rewritten_over_http(self):
+        """端点这一层：回话照抄 example ≥6 字 → 回包 audit 说 rewritten，模型被叫两次。"""
+        self._five_anchors()
+        copied = "嗯……行了行了，我又不是玻璃做的。"
+        rewrite = "我哪有那么脆，别瞎操心。"
+        capture = []
+        status, payload = self._post({"text": QUESTION},
+                                     _script(copied, rewrite, captured=capture))
+        self.assertEqual(200, status)
+        self.assertEqual(AUDIT_KEYS, set(payload["audit"]))
+        self.assertEqual("example", payload["audit"]["kind"])
+        self.assertEqual("被关心", payload["audit"]["card_id"])
+        self.assertEqual("rewritten", payload["audit"]["decision"])
+        self.assertIn(rewrite, payload["reply"], "改好的稿子没发出去")
+        self.assertEqual(2, len(capture), "该有两次模型请求：装配一次、重写一次")
+
+    def test_a_phrase_hit_costs_no_second_request(self):
+        """只命中 phrase（≤4 字那一档）→ 回包 audit 说 pass / phrase，模型只被叫一次。"""
+        self._five_anchors()
+        capture = []
+        status, payload = self._post({"text": QUESTION},
+                                     _body("才知道什么呀，我才不承认。", capture))
+        self.assertEqual(200, status)
+        self.assertEqual({"decision": "pass", "kind": "phrase", "card_id": "被夸", "overlap": 3},
+                         payload["audit"])
+        self.assertEqual(1, len(capture))
 
     # —— 只有一份装配 ————————————————————————
 

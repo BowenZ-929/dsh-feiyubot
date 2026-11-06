@@ -4,29 +4,40 @@
 1. **normalize 只去标点与空白**：unicodedata.category 以 P/Z 开头的那类字符去掉，
    正文一个字都不改（不替换、不改写）；全是标点的一张卡归一成空串。
 2. **opening 是去标点后的前 N 个字**：N 来自数据（anchors.guard.opening_chars）。
-3. **match 认前缀不认整句**：连标点都算上就永远对不上——两边都先归一。
-   「……是我，回晚了」对「……是我记岔了」在 prefix_chars=2 时命中（第 3 个字就分岔：
-   回 / 记，所以按默认的 3 不命中——这条差异写在断言旁边，不是漏了）；
-   「这个啊，又来了」对「这个啊……以后再说吧」在 prefix_chars=3 时命中；正常句子不命中。
-   全标点的台词归一成空前缀，**不许**匹配一切（空前缀是假命中）。
+3. **命中按 phrase 判、认前缀不认整句**：连标点都算上就永远对不上——两边都先归一。
+   前缀几个字由调用方给（anchors.guard.prefix_chars），所以「行了行」命中、「行了我」不命中
+   ——这条差异写在断言旁边，不是漏了。全标点的 phrase 归一成空前缀，**不许**匹配一切
+   （空前缀是假命中）。**example 不参与判命中**：老卡没有 phrase 时读数这一侧退回 say 的前缀，
+   命中的那一笔记空 phrase。
 4. **append / read**：一行一轮、只追加；读时只取最近 window 行；坏行跳过不炸。
-5. **report 的三条边界**：rounds < min_rounds 不 over（防小样本）；rate == threshold
+   每行带 id 与 phrase（近轮禁用按 id 数次数）；没命中的一行两栏都是空串。
+5. **repeats**：只数最近 window 轮里 hit 且有 id 的行；老行没有 id 就当没命中过。
+6. **report 的三条边界**：rounds < min_rounds 不 over（防小样本）；rate == threshold
    不 over（「超过」才是超）；rate > threshold 才 over，降档后 injected 是 reduced_count。
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from organs.mind import usage
 
+#: 五张现行台词卡。形状照 organs.home.anchors.read_all 给的现成样子：phrase（≤4 字，进提示词）
+#: + example（整句例句，不进提示词）+ when（语境提示，不是触发条件），外加老字段账本那一侧还在用的
+#: scene（读侧给的兼容别名，等于 when）。
 FIVE = [
-    {"scene": "被夸", "say": "哼，才知道啊。", "body": "尾巴翘起来晃了两下"},
-    {"scene": "被关心", "say": "行了行了，我又不是玻璃做的。", "body": "别开头、脸微微发红"},
-    {"scene": "不想聊", "say": "这个啊……以后再说吧。", "body": ""},
-    {"scene": "认错", "say": "……是我记岔了。", "body": "低头、尾巴垂下去不敢动"},
-    {"scene": "你要走", "say": "你忙你的，我在这儿。", "body": "尾巴慢慢摆一下，乖巧的笑了笑"},
+    {"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。",
+     "when": "被夸，且不想直接承认高兴", "scene": "被夸，且不想直接承认高兴"},
+    {"id": "被关心", "phrase": "行了行了", "example": "行了行了，我又不是玻璃做的。",
+     "when": "被关心，且不想被当成弱者", "scene": "被关心，且不想被当成弱者"},
+    {"id": "不想聊", "phrase": "以后再说", "example": "这个啊……以后再说吧。",
+     "when": "不想继续聊，但要留门", "scene": "不想继续聊，但要留门"},
+    {"id": "认错", "phrase": "记岔了", "example": "……是我记岔了。",
+     "when": "发现自己记错了", "scene": "发现自己记错了"},
+    {"id": "你要走", "phrase": "我在这儿", "example": "你忙你的，我在这儿。",
+     "when": "他要走或要忙", "scene": "他要走或要忙"},
 ]
 GUARD = {"window": 50, "threshold": 0.3, "opening_chars": 6, "prefix_chars": 3,
          "reduced_count": 2, "min_rounds": 20}
@@ -71,37 +82,59 @@ class NormalizeAndOpening(UsageTestBase):
 
 
 class MatchUsesThePrefix(UsageTestBase):
-    def test_sorry_pair_hits_at_two_chars(self):
-        """「……是我，回晚了」对「……是我记岔了」：去标点后头两个字相同即命中。
+    def test_prefix_length_is_the_callers_choice(self):
+        """同一个 phrase、两个前缀长度：「行了行」命中、「行了我」不命中。
 
-        默认的 prefix_chars=3 在这一对上**不**命中——第 3 个字是「回」与「记」，
-        这正是前缀长度进数据（人能改）的意义，所以这里按 2 断言、按 3 反证。
+        前缀几个字进数据（anchors.guard.prefix_chars），所以这里按 3 断言、按 3 反证另一头——
+        判据本身只有一条：去标点后以 phrase 的前 N 个字开头就算命中。
         """
-        self.assertEqual((True, "认错"), usage.match("……是我，回晚了。", FIVE, 2))
-        self.assertEqual((False, ""), usage.match("……是我，回晚了。", FIVE, 3))
+        self.assertEqual(True, usage.match("行了行了，我没事。", FIVE, 3)[0], "前三个字对上了")
+        self.assertEqual((False, ""), usage.match("行了我没事。", FIVE, 3),
+                         "第三个字是「了」不是「行」，按 3 字前缀不该命中")
 
-    def test_this_one_pair_hits_at_three_chars(self):
-        self.assertEqual((True, "不想聊"), usage.match("这个啊，又来了。", FIVE, 3))
+    def test_card_id_and_phrase_come_back_with_the_card(self):
+        """命中一律按 phrase 判：带上这一笔是**哪张卡**（id）与**哪句口癖**（phrase）。"""
+        self.assertEqual((True, "不想聊", "以后再说"),
+                         usage.match("以后再说吧，现在不行。", FIVE, 3, with_card=True))
+        self.assertEqual((True, FIVE[2]["scene"]), usage.match("以后再说吧，现在不行。", FIVE, 3),
+                         "老形状（两元组）仍是 scene：bench 的 C 轨按两个变量接")
 
     def test_ordinary_sentence_hits_nothing(self):
         self.assertEqual((False, ""), usage.match("今天挺好的，你问医院那回事。", FIVE, 3))
         self.assertEqual((False, ""), usage.match("", FIVE, 3))
-        self.assertEqual((False, ""), usage.match("这个啊又来了", [], 3), "没有台词就没有命中")
+        self.assertEqual((False, ""), usage.match("以后再说吧", [], 3), "没有台词就没有命中")
+        self.assertEqual((False, "", ""), usage.match("以后再说吧", [], 3, with_card=True))
 
-    def test_all_punctuation_line_never_matches_everything(self):
-        """一条全是标点的台词归一成空前缀：空前缀会匹配一切，那是假命中，必须跳过。"""
-        hollow = [{"scene": "空的", "say": "……——", "body": ""},
-                  {"scene": "被夸", "say": "哼，才知道啊。", "body": ""}]
-        self.assertEqual((False, ""), usage.match("今天挺好的。", hollow, 3))
-        self.assertEqual((True, "被夸"), usage.match("哼，才知道啊。", hollow, 3),
-                         "空台词不该把后面那条真台词挡掉")
+    def test_the_whole_example_is_not_a_phrase_hit(self):
+        """整句例句不是口癖：句子里有 phrase、但不是以它开头 → 不算命中（那是照抄审计那一档）。"""
+        self.assertIsNone(usage.hit("哼，才知道啊。", FIVE, 3))
+        self.assertIsNone(usage.hit("这个啊……以后再说吧。", FIVE, 3))
+
+    def test_all_punctuation_phrase_never_matches_everything(self):
+        """一条全是标点的 phrase 归一成空前缀：空前缀会匹配一切，那是假命中，必须跳过。"""
+        hollow = [{"id": "空的", "phrase": "……——", "example": "……——"},
+                  {"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。"}]
+        self.assertIsNone(usage.hit("今天挺好的。", hollow, 3))
+        self.assertEqual("被夸", usage.hit("才知道什么呀。", hollow, 3)["id"],
+                         "空 phrase 不该把后面那条真台词挡掉")
+
+    def test_a_legacy_card_without_phrase_still_reads(self):
+        """老卡（只有 say）读数这一侧退回 say 的前缀：账要看得见，但那一笔不算口癖命中。"""
+        legacy = [{"id": "被夸", "say": "哼，才知道啊。", "scene": "被夸这个场合"}]
+        self.assertEqual((True, "被夸这个场合"), usage.match("哼，才知道", legacy, 3))
+        self.assertEqual((True, "被夸", ""), usage.match("哼，才知道", legacy, 3, with_card=True),
+                         "老句不是口癖：命中的那一笔 phrase 记空")
 
 
 class AppendAndRead(UsageTestBase):
     def test_append_writes_one_line_and_read_slices_the_window(self):
-        row = usage.append(True, "这个啊又来了", "不想聊", root=self.root)
-        self.assertEqual({"ts", "hit", "opening", "scene"}, set(row))
+        row = usage.append(True, "以后再说", "不想聊", root=self.root,
+                           card_id="不想聊", phrase="以后再说")
+        self.assertEqual({"ts", "hit", "opening", "scene", "id", "phrase"}, set(row),
+                         "一行一轮的那份形状：多出来的 id / phrase 是近轮禁用要数的两栏")
         self.assertEqual("不想聊", row["scene"])
+        self.assertEqual("不想聊", row["id"], "命中要记是哪一张卡（按 id 数次数）")
+        self.assertEqual("以后再说", row["phrase"], "命中要记是哪一句口癖")
         self.assertTrue(row["ts"], "ts 要用器官自己的钟给出一个时刻")
 
         self._seed(4, 2)                                     # 再加 4 行，共 5 行
@@ -177,14 +210,45 @@ class ReportBoundaries(UsageTestBase):
 if __name__ == "__main__":
     unittest.main()
 
+class RepeatsTest(UsageTestBase):
+    """近轮禁用要的那一份读数：最近 window 轮里每张卡（按 id）各命中过几次。"""
+
+    def test_counts_hits_by_card_id_inside_the_window(self):
+        for _ in range(2):
+            usage.append(True, "才知道什么呀", "被夸", root=self.root,
+                         card_id="被夸", phrase="才知道啊")
+        usage.append(True, "以后再说吧", "不想聊", root=self.root,
+                     card_id="不想聊", phrase="以后再说")
+        usage.append(False, "今天挺好的", "", root=self.root)
+        self.assertEqual({"被夸": 2, "不想聊": 1}, usage.repeats(12, root=self.root))
+
+    def test_rows_without_id_are_not_counted(self):
+        """老行读不到 id：当它没命中过。拿 when／scene 猜一个 id，会把一张从没出现过的卡禁掉。"""
+        usage.append(True, "这个啊又来了", "不想聊", root=self.root)        # 老形状：没有 id
+        path = usage.path_of(self.root)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"ts": "t", "hit": True, "opening": "哼才知道",
+                                     "scene": "被夸"}, ensure_ascii=False) + "\n")
+        self.assertEqual({}, usage.repeats(12, root=self.root))
+
+    def test_outside_the_window_is_not_counted(self):
+        usage.append(True, "才知道什么呀", "被夸", root=self.root,
+                     card_id="被夸", phrase="才知道啊")
+        usage.append(False, "嗯", "", root=self.root)
+        usage.append(False, "嗯", "", root=self.root)
+        self.assertEqual({}, usage.repeats(2, root=self.root), "窗口只算最近 2 轮")
+        self.assertEqual({"被夸": 1}, usage.repeats(3, root=self.root))
+        self.assertEqual({}, usage.repeats(0, root=self.root), "window=0 一行都不算")
+
+
 class LeadingWhitespaceTest(unittest.TestCase):
     """说话格式要求「用换行分隔」：开头多一个换行，不该把命中判成没命中。"""
 
     def test_leading_newline_still_matches(self):
-        anchors = [{"say": "哼，才知道啊。", "scene": "被夸"}]
-        hit, scene = usage.match(chr(10) + "哼，才知……", anchors, 3)
-        self.assertTrue(hit, "开头换行把命中吞掉了")
-        self.assertEqual("被夸", scene)
+        anchors = [{"id": "被夸", "phrase": "才知道啊", "example": "哼，才知道啊。",
+                    "scene": "被夸这个场合"}]
+        self.assertEqual((True, "被夸这个场合"), usage.match(chr(10) + "才知道……", anchors, 3),
+                         "开头换行把命中吞掉了")
 
 
 if __name__ == "__main__":

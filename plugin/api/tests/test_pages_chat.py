@@ -345,10 +345,22 @@ class ReadoutsAreVisible(unittest.TestCase):
         self.assertIn("没给", body, "整个字段都没有时如实写「没给」")
         self.assertIn("conf.items", body, "要逐条显示家·仓库的台词卡")
         self.assertIn("item.injected", body, "注入的是半句")
-        self.assertIn("item.say", body, "全文要显示（人得能核对）")
+        self.assertIn("item.example", body, "例句要显示（人得能核对）")
         self.assertIn("item.body", body, "body 要显示（效果示例只给人看）")
+        self.assertIn("banned_by_repeat", body, "近 12 轮用够了的卡要点名")
         self.assertIn("body：", body, "body 要带标签")
         self.assertIn("规矩：", body, "注入的行为规矩要写明")
+
+    def test_audit_line_says_which_kind_and_what_happened(self):
+        """照抄审计那一级要能读出来：报台词（重写/弃）与「短语只记账」是两件事。"""
+        body = _between(_text(), "function auditText", "function anchorsText")
+        self.assertIn("conf.decision", body)
+        self.assertIn("报台词", body, "example 那一档要写「报台词」")
+        self.assertIn("只记账", body, "phrase 那一档要说「只记账、放行」")
+        self.assertIn("已重写", body)
+        self.assertIn("已弃掉", body)
+        readouts = _between(_text(), "function renderReadouts", "function send")
+        self.assertIn("auditText(data.audit)", readouts, "审计那一行没接到回包上")
 
     def test_every_readout_is_written_with_textcontent_only(self):
         """四个读数（温度 / 连续性 / 锚句 / 口癖护栏）各用一次 textContent，一个 innerHTML 都不许有。"""

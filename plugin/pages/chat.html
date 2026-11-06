@@ -453,6 +453,20 @@
   }
 
   // 锚句：配了就写清几个字，没配就照后端那句话写「未配锚句」——不许留白。
+  // 这一轮的口癖判定：报台词（重写/弃）与「只命中短语只记账」要能分开说
+  function auditText(audit) {
+    var conf = audit || {};
+    if (!conf.decision) { return "口癖判定：没给"; }
+    if (conf.decision === "pass" && conf.kind === "phrase") {
+      return "口癖判定：命中短语「" + String(conf.card_id || "没给") + "」，只记账、放行";
+    }
+    if (conf.decision === "pass") { return "口癖判定：这一轮没报台词"; }
+    var kind = conf.kind === "example" ? "报台词" : String(conf.kind || "没给");
+    return "口癖判定：" + kind + "（" + String(conf.card_id || "没给") + "，重合 "
+      + String(conf.overlap === undefined || conf.overlap === null ? "没给" : conf.overlap) + " 字）→ "
+      + (conf.decision === "rewritten" ? "已重写" : "已弃掉");
+  }
+
   function anchorsText(anchors) {
     var conf = anchors || {};
     if (conf.configured === true) {
@@ -462,12 +476,17 @@
       var halves = items.length
         ? "注入：" + items.map(function (item) { return "「" + String(item.injected) + "」"; }).join("")
         : "注入：没给";
+      var banned = (conf.banned_by_repeat || []).length
+        ? "｜近 12 轮用够了不给：" + conf.banned_by_repeat.join("、")
+        : "";
       var rule = conf.instruction ? "规矩：" + String(conf.instruction) : "规矩：没给";
       var rows = items.map(function (item, index) {
+        var ex = item.example ? String(item.example) : "（没给例句）";
         var body = item.body ? String(item.body) : "（没给 body）";
-        return (index + 1) + "「" + String(item.say) + "」→ body：" + body;
+        return (index + 1) + "「" + String(item.phrase || item.id || "没给") + "」→ 例句：" + ex
+          + "｜body：" + body;
       });
-      return head + "｜" + halves + "｜" + rule + (rows.length ? "｜" + rows.join("；") : "");
+      return head + halves + banned + "｜" + rule + (rows.length ? "｜" + rows.join("；") : "");
     }
     if (conf.configured === false) {
       return conf.note ? String(conf.note) : "未配锚句";
@@ -499,7 +518,7 @@
   function renderReadouts(data) {
     el("llm-temperature").textContent = temperatureText(data.llm);
     el("continuity-line").textContent = continuityText(data.continuity);
-    el("anchors-line").textContent = anchorsText(data.anchors);
+    el("anchors-line").textContent = anchorsText(data.anchors) + "｜" + auditText(data.audit);
     var guard = data.guard || {};
     el("guard-line").textContent = guardText(guard);
     if (guard.over === true) {

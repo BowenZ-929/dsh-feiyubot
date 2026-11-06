@@ -32,10 +32,20 @@ prompt 的两段模板各认几个占位符（花括号，装配时逐键**纯�
 自己，被闸弃掉的轮（reply 空）不记：她没说出口，就没有开头。护栏的六个门槛全在
 assembly.json 的 anchors.guard 里，本文件一个数都不写。
 
+**近轮禁用也扩到锚句**（anchors.repeat）：最近 window 轮里同一张卡（按 id，账上的 id 那一栏）
+命中到 max 次，这一轮就不再注入那张，并在返回体 anchors.banned_by_repeat 里逐个点名——不静默丢。
+次序钉死：**先按 guard 定总条数，再按 repeat 剔除**。两条护栏各管各的，混在一起就成了第二套判据。
+
+**照抄审计（两级）排在闸之后**：她这句与某张卡的 example 连着重合到 anchors.audit.example_overlap
+个字，判「报台词」——交 organs/mouth/rewrite.py 的 prompt / accept 改一次（走同一个 llm.complete
+出口，本文件不另起 HTTP 客户端），改完仍重合就弃掉这一句；只命中 phrase（≤4 字那一档）的放行，
+只记账。**example 一个字都不进提示词**：她抄不着没看见过的东西，能抄到的只有 phrase 那半句。
+返回体 audit 一节如实写这一轮判的是哪一档（decision / kind / card_id / overlap）。
+
 各段只搬已有器官的读数，一个判据都不自己造：
   soul    store.render()（魂六件）
-  anchors 家·仓库里那张锚句卡（organs.home.cards.read_item 的公开 API，不绕过家的 access 闸）；
-          没配 / 卡不在 / 读不出来一律写「未配锚句」，不静默跳过——那一格空着她会以为没有过
+  anchors 家·仓库里那几张锚句卡（organs.home.anchors.read_all 的公开读口）：**只注入 phrase 的前
+          半句**，example 一个字都不进提示词；没配 / 卡不在 / 读不出来一律写「未配锚句」，不静默跳过
   recent  organs/mind/recent.py：最近几轮原文；omitted > 0 时把「更早还有 N 轮」放在段尾
   banned  organs/mind/repeat.py：只抽**她那一侧**最近几轮的动作行与开场，去重计次列成禁令——
           最近几轮那段原文一个字都不删，禁令另起一节；人的话一个字都不许进来
@@ -49,7 +59,8 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
           **不 decide_and_log**）；提示词与返回体都**只给档位词**，一个数都不出门
   mouth   address.resolve + tone.from_store（口径行进提示词），过闸用 gate.enforce
-          （重写器传 None：本轮命中即弃，不进第二次模型调用），节奏用 split + pace.fill
+          （闸那一层的重写器传 None：命中即弃），节奏用 split + pace.fill；照抄审计那一档才发
+          第二次模型请求（anchors.audit，见上）
   scene   场合：按 answer(scene=...) 归一化后的值（只认 organs/brain/model.py 的 SCENE_*，
           缺省 / 空白 / 非法一律 unknown——**不猜成私聊**，猜错就是把私事说出去了）从
           assembly.json 的 scene.lines 取一句，本文件一个字的文案都不写。order 里排在最后：
@@ -93,6 +104,7 @@ from ..mouth import address as address_module
 from ..mouth import drops as drops_module
 from ..mouth import gate as gate_module
 from ..mouth import pace as pace_module
+from ..mouth import rewrite as rewrite_rules     # 参数名就叫 rewrite：模块用别名进来免得被挡住
 from ..mouth import tone as tone_module
 from ..mouth import warehouse
 from ..mouth.split import split as split_text
@@ -113,6 +125,11 @@ NOTE_INDENT = "  "                        # 她的理解另起一行、缩进两
 NO_TURNS = "还没有更早的对话"                # 盘上一条历史都没有时，recent 段不写空白
 ANCHORS_MISSING = "未配锚句"                  # 没配 / 卡不在 / 读不出来，三态同一句话
 ANCHORS_HINT = "锚句由人写，程序不替她造。"
+ANCHORS_ALL_BANNED = "这一轮没有可给的半句：都被近轮禁用挡住了（见 anchors.banned_by_repeat）。"
+COPY_CLAUSE = "报台词"                  # 照抄审计命中的那一处：重写指令里说的「哪一条」
+COPY_KIND = "例句重合"                  # 同上：这一处是哪一类（与返回体 kind 的 example 不是一回事）
+COPY_REASON = "这句与台词卡「%s」的例句连着重合 %d 字（阈值 %d 字）：那是在报台词，不是说话。"
+COPY_AGAIN = "改了一次仍与台词卡「%s」的例句连着重合 %d 字（阈值 %d 字）：这一句不发了。"
 SEED_SEP = "|"                            # 节奏的种子：who 与时刻拼起来，同一轮两次调用得到同一组间隔
 POOL_SEP = "／"                            # 动作池进提示词时部位之间的分隔（全角斜杠，与标点同一套）
 BANNED_EMPTY = "最近几轮没有可禁用的动作行与开场。"   # 一条都抽不出来时的实话（空白会被她读成「随便用」）
@@ -359,7 +376,40 @@ def _check_anchors(spec: Any, where: str) -> Optional[Dict[str, Any]]:
         raise ValueError("anchors.instruction 要一句话（注入给她的行为规矩，人能改）：%s" % where)
     clean["instruction"] = instruction.strip()
     clean["guard"] = _check_guard(spec.get("guard"), where)
+    clean["repeat"] = _check_repeat(spec.get("repeat"), where)
+    clean["audit"] = _check_audit(spec.get("audit"), where)
     return clean
+
+
+def _check_repeat(spec: Any, where: str) -> Dict[str, Any]:
+    """近轮禁用扩到锚句那一格：window / max 两个数都在数据里，代码里一个都不许有。
+
+    max 不能大于 window：窗口里一共只有 window 轮，同一张卡的次数到不了 max，那一格就是摆设。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("anchors.repeat 要给 {window, max}（同一张卡最近几轮最多出现几次）：%s"
+                         % where)
+    clean: Dict[str, Any] = {}
+    for name in ("window", "max"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("anchors.repeat.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    if clean["max"] > clean["window"]:
+        raise ValueError("anchors.repeat.max 不能大于 window（%d > %d）：%s"
+                         % (clean["max"], clean["window"], where))
+    return clean
+
+
+def _check_audit(spec: Any, where: str) -> Dict[str, Any]:
+    """照抄审计的阈值：example_overlap 是「连着重合到几个字就判报台词」，正整数，缺了当场报。"""
+    if not isinstance(spec, dict):
+        raise ValueError("anchors.audit 要给 {example_overlap}（连着重合几个字就判报台词）：%s"
+                         % where)
+    value = spec.get("example_overlap")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("anchors.audit.example_overlap 要正整数：%s" % where)
+    return {"example_overlap": value}
 
 
 def _check_guard(spec: Any, where: str) -> Dict[str, Any]:
@@ -445,8 +495,10 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
       banned{rounds, action_lines[{text,count}], openings[开场前 N 字]} /
       action{pool, rule, quota{window,max,used,blocked}} /
       llm{model, temperature, temperature_tier} /
-      anchors{configured, count, available, injected, instruction, items[实际注入的],
-      skipped[没注入的 scene]|note} /
+      anchors{configured, count, available, injected, instruction, items[{id, phrase, injected,
+      when}] 实际注入的, skipped[没注入的 id], banned_by_repeat[被近轮禁用挡住的 id]|note} /
+      audit{decision, kind, card_id, overlap}（照抄审计：kind 是 example / phrase / none，
+      decision 是 pass / rewritten / dropped，与上面 gate 那个 decision 各说各的） /
       guard{window, threshold, min_rounds, rounds, hits, rate, over, injected, available} /
       memory{wrote[{id,who}]}
 
@@ -491,12 +543,14 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         conf, repeat.count_with_actions(history, conf["action"]["quota"]["window"], her_name))
     # 口癖护栏：先读**这一轮之前**的滚动窗口，再定这一轮注入几条（先记后算会自己踩自己）。
     # 家现行台词读一次，注入按 guard 裁，口癖统计仍看全量——两件事各用各的那一份。
+    # 近轮禁用（anchors.repeat）也是「这一轮之前」的读数：同一本账，按 id 数次数。
     anchors_rows = _anchor_rows()
     guard_conf = _guard(conf)
     guard_read = (usage.report(guard_conf, injected_available=len(anchors_rows),
                                root=usage_root)
                   if guard_conf is not None else _guard_missing())
-    anchor_text, anchor_read = _anchor(conf, anchors_rows, guard_read["injected"])
+    anchor_text, anchor_read = _anchor(conf, anchors_rows, guard_read["injected"],
+                                       _anchor_repeats(conf, usage_root))
 
     # 2) 心：唯一合成点 + 一次判决；坏卡降级成只要 mood 那一块
     mood_read = mood_module.read(heart_root, at)
@@ -554,13 +608,21 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 5.5) 硬兜底：配额满了就替她把动作行删掉（不靠模型自觉）——删后的文本往下走全程
     said_back = _strip_blocked_actions(said_back, action_read)
 
-    # 6) 过嘴：切分 + 节奏 + 闸（重写器 None：本轮命中即弃）
-    batch, verdict, ledger = _pass_mouth(said_back, who, at)
+    # 6) 过嘴：八股闸（闸那一层的重写器传 None：命中即弃——这一层只判「怎么说」）
+    trace = drops_module.path_of()
+    verdict, ledger = _through_mouth(said_back, trace)
     dropped = verdict.decision == "dropped"
     reply = "" if dropped else verdict.text
-    chunks = [] if dropped else [{"text": part.text, "gap_before": part.gap_before,
-                                  "send_at": part.send_at} for part in batch.parts]
     hit = verdict.hits[0] if verdict.hits else None
+
+    # 6.5) 照抄审计（两级）：与某张卡的 example 连着重合到阈值 → 判「报台词」，改一次；仍重合就弃。
+    #      放在闸之后：被闸弃掉的那一句已经不发了，没有抄没抄可判。只命中 phrase 的放行、只记账，
+    #      那一份读数（phrase_hit）原样交给第 8 步落账——两处不许各算一遍判据。
+    audit_read, phrase_hit = _audit_clear(), None
+    if not dropped and reply and isinstance(conf.get("anchors"), Mapping):
+        audit_read, phrase_hit, reply, dropped = _copy_audit(
+            reply, anchors_rows, conf, _copy_rewriter(transport, call_conf, env), _sink(trace))
+    chunks = [] if dropped else _bubbles(reply, who, at)
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
     wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at, where)
@@ -571,12 +633,14 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 8) 落口癖账：放在最后一步。被闸弃掉的轮（reply 空）不记——她没说出口就没有开头；
     #    命中一律对**家现行全部台词**，不是只注入的那几条（口癖统计看的是全部台词）。
     if not dropped and reply and isinstance(guard_conf, Mapping):
-        # 名字不与上面的闸命中（hit）撞车：两件事互不相干，共用一个变量就会互相踩。
-        # 这一格是「命中了哪条台词的 scene」，与上面的场合参数不是一件事：换个名字，免得互相踩。
-        spoken, anchor_scene = usage.match(reply, anchors_rows,
-                                           int(guard_conf["prefix_chars"]))
-        usage.append(spoken, usage.opening(reply, int(guard_conf["opening_chars"])),
-                     anchor_scene, root=usage_root)
+        # 命中哪一张（id）用的是照抄审计那一步算过的同一份读数：两处各算一遍，迟早一处按 phrase、
+        # 一处按老 say。名字也不与上面的闸命中（hit）撞车——两件事互不相干，共用一个变量就会互相踩。
+        spoken = phrase_hit or {}
+        usage.append(bool(phrase_hit),
+                     usage.opening(reply, int(guard_conf["opening_chars"])),
+                     str(spoken.get(usage.SCENE) or ""), root=usage_root,
+                     card_id=str(spoken.get(usage.CARD_ID) or ""),
+                     phrase=str(spoken.get(usage.PHRASE) or ""))
 
     return {
         "ok": True,
@@ -590,6 +654,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
             "hit": {"clause_id": hit.clause_id, "reason": hit.reason} if hit else None,
             "drops": {"today": int(ledger.get("today") or 0)},
         },
+        # 照抄审计的读数（四键冻结）：decision 是这一档自己的判决，与上面闸那个 decision 各说各的
+        # ——闸判「怎么说」，这一档判「说的是不是背来的台词」。
+        "audit": audit_read,
         "assembly": {
             "order": list(conf["order"]),
             "sections": sections,
@@ -848,19 +915,38 @@ def _guard_missing() -> Dict[str, Any]:
             "available": None}
 
 
+def _anchor_repeats(conf: Mapping[str, Any], root: Any = None) -> Dict[str, int]:
+    """最近 anchors.repeat.window 轮里每张卡各命中过几次（按 id，账在 organs/mind/usage.py）。
+
+    没配锚句就没有这一层（没有台词，也就无所谓「最近老念哪一张」）；那一格的数据形状由
+    _check_repeat 在装载时判过，这里不再兜底。
+    """
+    spec = conf.get("anchors")
+    if not isinstance(spec, Mapping):
+        return {}
+    return usage.repeats(int(spec["repeat"]["window"]), root=root)
+
+
 def _anchor(conf: Mapping[str, Any], rows: List[Mapping[str, Any]],
-            limit: Optional[Any] = None) -> Tuple[str, Dict[str, Any]]:
-    """锚句这一段：只走家的公开读口，只给半句，按护栏的读数决定注入几条。
+            limit: Optional[Any] = None,
+            repeats: Optional[Mapping[str, int]] = None) -> Tuple[str, Dict[str, Any]]:
+    """锚句这一段：只走家的公开读口，只给半句，按两条护栏的读数决定注入哪几条。
 
     没配 / 卡不在 / 读不出来三种情况都写「未配锚句」——这一格不许空着，也不许悄悄跳过：
     空着她就以为自己没有过一句锚。
 
-    **只给半句**（这一条的理由来自人）：整句给她，她就照着念；给半句，她才得自己补完。
-    进提示词的是「正文前 fraction 段 + suffix」（两个数都在 assembly.json 的
-    anchors.inject 里）；返回体另带 body 全文——半句是给她看的，全文是给人看的。
+    **只给 phrase 的半句**（两档是判据，docs/plan.md §3.14）：整句给她她就照着念；给半句她才得
+    自己补完。进提示词的是「phrase 前 fraction 段 + suffix」（两个数都在 assembly.json 的
+    anchors.inject 里）。**example 一个字都不进提示词**，返回体也不带它——她要抄只能抄到那半句，
+    审计要用 example 时现读家（organs.home.anchors）。没有 phrase 的卡（升级前写下的 say 那几行）
+    没有半句可给：跳过它，不拿整句顶上去。
 
-    limit 是这一轮**该注入几条**（来自 usage.report 的 injected）：降档时只取现行顺序的
-    前 limit 条，其余不进提示词但在返回体的 skipped 里逐个点名——别静默丢。
+    limit 是这一轮**该注入几条**（来自 usage.report 的 injected：先按 guard 定总条数）：
+    降档时只取现行顺序的前 limit 条，其余进返回体的 skipped 里逐个点名。
+    repeats 是最近几轮每张卡的命中次数（_anchor_repeats）：达到 anchors.repeat.max 的那张这一轮
+    不再注入（**再按 repeat 剔除**），并在返回体的 banned_by_repeat 里逐个点名——不静默丢。
+    两条护栏各管各的，次序是「先 guard 定总数、再 repeat 剔」，剔除后不拿 skipped 里的卡回补：
+    回补等于把刚被禁的那张从后门放回来。
     """
     spec = conf.get("anchors")
     if not isinstance(spec, Mapping):
@@ -869,33 +955,176 @@ def _anchor(conf: Mapping[str, Any], rows: List[Mapping[str, Any]],
     suffix = str(spec["inject"]["suffix"])
     items: List[Dict[str, str]] = []
     for row in rows:
-        say = str(row.get("say") or "").strip()
-        if not say:
+        phrase = str(row.get("phrase") or "").strip()
+        if not phrase:
             continue
-        cut = min(max(int(math.ceil(len(say) * fraction)), 1), len(say))
+        cut = min(max(int(math.ceil(len(phrase) * fraction)), 1), len(phrase))
         items.append({
-            "say": say,
-            "injected": say if cut >= len(say) else say[:cut] + suffix,
+            "id": str(row.get("id") or ""),
+            "phrase": phrase,
+            "injected": phrase if cut >= len(phrase) else phrase[:cut] + suffix,
+            # when 只进返回体当语境提示（给人看），**不是触发条件**：这里不按它挑卡，也不拼进提示词
+            "when": str(row.get("when") or ""),
+            # example / body 进返回体**只为面板核对**（人得看得见整句长什么样）；
+            # 提示词那一侧一个字节都不取——test_example_never_enters_the_prompt 钉着。
+            "example": str(row.get("example") or row.get("say") or ""),
             "body": str(row.get("body") or ""),
-            "scene": str(row.get("scene") or ""),
         })
     if not items:
         return _anchors_missing()
     keep = len(items) if limit is None else max(int(limit), 0)
-    shown = items[:keep]
-    if not shown:
-        return _anchors_missing()
+    guarded = items[:keep]
+    counted = repeats or {}
+    most = int(spec["repeat"]["max"])
+    banned = [item for item in guarded if int(counted.get(item["id"], 0)) >= most]
+    blocked = {item["id"] for item in banned}
+    shown = [item for item in guarded if item["id"] not in blocked]
     instruction = str(spec["instruction"])
-    text = '\n'.join([instruction] + ["- " + item["injected"] for item in shown])
-    return text, {"configured": True, "count": len(items), "available": len(items),
-                  "injected": len(shown), "instruction": instruction, "items": shown,
-                  "skipped": [item["scene"] for item in items[keep:]]}
+    lines: List[str] = [instruction] + ["- " + item["injected"] for item in shown]
+    if not shown:
+        lines.append(ANCHORS_ALL_BANNED)
+    return "\n".join(lines), {"configured": True, "count": len(items),
+                               "available": len(items), "injected": len(shown),
+                               "instruction": instruction, "items": shown,
+                               "skipped": [item["id"] for item in items[keep:]],
+                               "banned_by_repeat": [item["id"] for item in banned]}
 
 
 def _anchors_missing() -> Tuple[str, Dict[str, Any]]:
     """未配锚句那一态：提示词里写明那句话，返回体给机器一个 false（不是空串）。"""
     return ("%s。%s" % (ANCHORS_MISSING, ANCHORS_HINT),
             {"configured": False, "note": ANCHORS_MISSING})
+
+
+# —— 照抄审计（两级）———————————————————————————
+
+
+def _audit_clear() -> Dict[str, Any]:
+    """没命中任何一档时的读数：四个键齐全、decision 是 pass——页面照同一套键渲染，缺了就是留白。"""
+    return {"decision": "pass", "kind": "none", "card_id": "", "overlap": 0}
+
+
+def _longest_common(left: str, right: str) -> str:
+    """两串里最长的那一段**连续**重合（DP；一张卡的 example 只有几十字，不必上后缀自动机）。
+
+    只认连续：她把这句拆开重排不算照抄，连着念出六个字才算。空串返回空串。
+    """
+    best_len, best_end = 0, 0            # best_end 是在 left 上的结束位置（1 起）
+    previous = [0] * (len(right) + 1)
+    for i in range(1, len(left) + 1):
+        current = [0] * (len(right) + 1)
+        head = left[i - 1]
+        for j in range(1, len(right) + 1):
+            if head == right[j - 1]:
+                current[j] = previous[j - 1] + 1
+                if current[j] > best_len:
+                    best_len, best_end = current[j], i
+        previous = current
+    return left[best_end - best_len:best_end]
+
+
+def _example_overlap(reply: str, rows: List[Mapping[str, Any]]) -> Tuple[str, int, str]:
+    """她这句与哪张卡的 example 连着重合得最长：返回 (card_id, 字数, 重合的那段字)。
+
+    两边都先过 usage.normalize（去标点 / 空白 / 控制字符）：标点不该把一句照抄切碎，
+    而这个去标点的口径全仓只有 usage 那一份，本文件不另写一套。
+    """
+    body = usage.normalize(reply)
+    best: Tuple[str, int, str] = ("", 0, "")
+    if not body:
+        return best
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        example = usage.normalize(row.get("example") or row.get("say"))
+        if not example:
+            continue
+        found = _longest_common(body, example)
+        if len(found) > best[1]:
+            best = (str(row.get("id") or ""), len(found), found)
+    return best
+
+
+def _copy_audit(reply: str, rows: List[Mapping[str, Any]], conf: Mapping[str, Any],
+                rewrite_one: Any, sink: Any = None
+                ) -> Tuple[Dict[str, Any], Any, str, bool]:
+    """照抄审计（两级）：返回 (audit 读数, phrase 命中, 这一轮出去的文本, 是不是整句弃掉)。
+
+    第一级看 **example**：她这句与某张卡的整句例句连着重合到 anchors.audit.example_overlap 个字，
+    判「报台词」——那不是在说话，是在背台词。判到就交 rewrite_one 改一次（走 organs/mouth/rewrite.py
+    的 prompt / accept，与 api/chat.py 那套重写同一条路）；改完仍重合、或改不动（超时 / 空 / 不合规 /
+    出口抛错）就**弃掉这一句**，与闸「改写一次再判」同一条路：宁可这一轮不说，也不许照原样报台词。
+    第二级看 **phrase**（≤4 字那一档）：命中就放行，只记账（kind="phrase"），不判废——
+    她看见的就是那半句，念出来是这一档设计好的用法，不是抄。
+
+    两档同时撞上时按第一级判：能对上六个字的例句，已经不是「念了半个口癖」。
+
+    phrase 那一份读数（usage.hit 的结果）连同文本一起交回调用方：落账那一栏用的是同一个判据，
+    不在这里算一遍、那里再算一遍。
+    """
+    spec = conf.get("anchors")
+    guard = spec["guard"]
+    size = int(guard["prefix_chars"])
+    phrase_hit = usage.hit(reply, rows, size)
+    threshold = int(spec["audit"]["example_overlap"])
+    card_id, overlap, matched = _example_overlap(reply, rows)
+    if overlap >= threshold:
+        why = COPY_REASON % (card_id, overlap, threshold)
+        said = {"clause_id": COPY_CLAUSE, "kind": COPY_KIND, "reason": why, "matched": matched}
+        try:
+            new = rewrite_one(reply, said)
+        except (rewrite_rules.Unrewritable, llm.LLMError) as exc:
+            _note_drop(sink, "%s 改不动（%s），这一句不发了。" % (why, exc))
+            return ({"decision": "dropped", "kind": "example", "card_id": card_id,
+                     "overlap": overlap}, phrase_hit, "", True)
+        again_id, again_overlap, _again = _example_overlap(new, rows)
+        if again_overlap >= threshold:
+            _note_drop(sink, COPY_AGAIN % (again_id, again_overlap, threshold))
+            return ({"decision": "dropped", "kind": "example", "card_id": card_id,
+                     "overlap": overlap}, phrase_hit, "", True)
+        # 换过稿之后，落账要数的是**她真说出口的那一句**：拿改稿前那句去记 hit 与开头，
+        # 账本上就会出现「开头是这句、命中的却是另一句」的错行。
+        return ({"decision": "rewritten", "kind": "example", "card_id": card_id,
+                 "overlap": overlap}, usage.hit(new, rows, size), new, False)
+    if phrase_hit is not None and phrase_hit[usage.PHRASE]:
+        # kind=phrase 时 overlap 是**命中的前缀字数**（不是例句重合）：两档同用一个键，
+        # 页面与验收读得出「这一次对上几个字」，而不必猜这一格对 phrase 是什么意思。
+        return ({"decision": "pass", "kind": "phrase", "card_id": phrase_hit[usage.CARD_ID],
+                 "overlap": min(len(usage.normalize(phrase_hit[usage.PHRASE])), size)},
+                phrase_hit, reply, False)
+    return _audit_clear(), phrase_hit, reply, False
+
+
+def _note_drop(sink: Any, reason: str) -> None:
+    """照抄审计弃掉的那一句也要进弃言账本：不记，账本上就与「没判到」长得一样。"""
+    if sink is not None:
+        sink(COPY_CLAUSE, reason)
+
+
+def _copy_rewriter(transport: Any, config: Any, env: Any) -> Any:
+    """造这一档的 rewrite(text, hit -> text)：把「报台词」的那一句交给模型改一次。
+
+    走的是 api/chat.py 同一条路、同一份判据：**发**（organs/mind/llm.complete，同一个注入的
+    transport / config / env；时限用 data 里的 budget_ms，次数用 attempts）→ **验**
+    （rewrite.accept：长度区间、数字 / 英文串 / 引号原话一条都不许少）→ 不成抛 Unrewritable，
+    由 _copy_audit 按「改不动」处置。organs/mouth/rewrite.py 与它那份数据一个字都不改。
+    判据表在这里才现读（warehouse.load 是缓存的），不判这一档的轮一次都不读。
+    """
+    def rewrite(body: str, hit: Any) -> str:
+        table = warehouse.load("rewrite")
+        budget = int(rewrite_rules.budget_ms(table))
+        conf = dict(config) if isinstance(config, Mapping) else {}
+        conf["timeout_ms"] = min(int(conf.get("timeout_ms") or budget), budget)
+        conf["retries"] = max(0, int(rewrite_rules.attempts(table)) - 1)
+        messages = [{"role": "user",
+                     "content": rewrite_rules.prompt(body, hit, table)}]
+        said = llm.complete(messages, config=llm.resolve_config(conf), env=env,
+                            transport=transport)
+        ok, why = rewrite_rules.accept(body, said, table)
+        if not ok:
+            raise rewrite_rules.Unrewritable(why)
+        return said
+    return rewrite
 
 
 # —— 场合 ————————————————————————————————————
@@ -1138,20 +1367,31 @@ def _mouth_text(voice: Any) -> str:
     return "\n".join(lines)
 
 
-def _pass_mouth(reply: str, who: str, at: str) -> Tuple[Any, Any, Dict[str, Any]]:
-    """过嘴：切分 + 节奏（seed 稳定）+ 八股闸（重写器 None：本轮命中即弃）。
+def _through_mouth(reply: str, trace: Any) -> Tuple[Any, Dict[str, Any]]:
+    """过八股闸：条款来自 warehouse.load("clauses")，重写器传 None（这一层命中即弃）。
 
     弃言记进 organs/mouth/drops.py 的账本：闸只报「哪条条款、为什么」，时刻与落盘都在
-    这一层给（照 api/mouth.py 的 _sink / _day 写法）。
+    这一层给（照 api/mouth.py 的 _sink / _day 写法）。这一层不发第二次模型请求——
+    「改一次」那一档在照抄审计（_copy_audit），只对报台词的那一句才发生。
     """
-    policy = warehouse.load("policy")
     clauses = warehouse.load("clauses").get("clauses")
+    verdict = gate_module.enforce(reply, clauses, None, _sink(trace))
+    return verdict, drops_module.report(trace, _day())
+
+
+def _bubbles(reply: str, who: str, at: str) -> List[Dict[str, Any]]:
+    """她说出口的那一句怎么分包：切分 + 节奏（seed 稳定，同一轮两次调用得到同一组间隔）。
+
+    必须排在照抄审计之后：审计那一档会把整句换掉或弃掉，拿旧的那句算分包，
+    发出去的就是她没说的那句。
+    """
+    if not reply:
+        return []
+    policy = warehouse.load("policy")
     batch = pace_module.fill(split_text(reply, policy), policy,
                              "%s%s%s" % (who or "", SEED_SEP, at))
-    trace = drops_module.path_of()
-    verdict = gate_module.enforce(reply, clauses, None, _sink(trace))
-    ledger = drops_module.report(trace, _day())
-    return batch, verdict, ledger
+    return [{"text": part.text, "gap_before": part.gap_before, "send_at": part.send_at}
+            for part in batch.parts]
 
 
 def _sink(trace: Any) -> Any:
