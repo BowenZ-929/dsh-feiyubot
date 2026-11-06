@@ -1066,7 +1066,13 @@ def _style_round(chunks: List[Dict[str, Any]], *, payload: Mapping[str, Any],
     marks = style_rules.stops(reply, table=table, rewrite=stop_rewrite, sink=_style_sink())
     after = marks.text
     if after != reply:
+        # 重切只重建文字，图不跟着丢：把原来挂着的 image 按序接回最后那几泡
+        images = [c.get("image") for c in chunks if isinstance(c, Mapping) and c.get("image")]
         chunks = _resplit(after, who)
+        if images and chunks:
+            for offset, image in enumerate(images):
+                target = chunks[max(0, len(chunks) - len(images) + offset)]
+                target["image"] = image
         rows = []
         for one in chunks:
             body = str(one.get("text") or "")

@@ -148,6 +148,24 @@ why 为什么没成（no_time 或手那边的码）。**卡先落、话后说**�
 所以模型出错也不会丢掉「这件事」；代价是那一轮白花一次模型调用（她的台词这句已定）。
 remind_root：手的实盘根（None → <器官目录>/hand，家按兄弟目录换算）——测试靠它把卡落到临时盘。
 
+**「要看图」那一轮（look，同样是装配前一次轻量识别）**：形状与上一段同一条路子——判的不是她
+怎么说，而是这一轮要不要动一次手。判据与文案全在 organs/mind/data/look.json（意图词、指示词、
+五句人话、措辞红线的禁止清单），本文件一个词都没有；实现在 organs/mind/look.py：
+  · 认出「给我看你的自画像」→ 手·send_image（who=这一轮的号、target=同一个号、scene=场合、
+    utterance=整句）——**核不拼路径**，图在哪、叫什么全由手从她原话里认；成不成按手的回答分四支：
+    认不出她说的是哪张 → 说 say.unknown；认得出、家里没有 → 说 say.missing（不假装）；
+    其余失败（额度／通道／场景与号不合规）→ 说 say.fail，why 原样带手的码；
+    成 → 图挂到**最后一泡**上（chunk.image 的 file:// 就是手给的路径），她可以补一句跟图有关的话。
+  · 有意图没指名（「给我看」）→ 反问 say.ask，**手一次都不调**（不烧额度）。
+  · 普通闲聊 → look.handle 回 None，这一轮一个字都不改（回包里 look 那一格也不出现）。
+  · 记事那一轮不与它并行（先记事后看图）：一句话只认一件事，两件事各说各的反而会打架。
+  · **红线**：成功那一轮她的措辞里不许出现「我画了／我拍的／我照的」这一类话——图是家里的，
+    不是她现做的。清单在 look.json 的 say.forbid，命中或空着就换成 say.ok 那句口径。
+回包因此多一格 look{intent, target, ok, why, name, image}（**只在认出这一类的那一轮出现**）：
+命中的意图词、发给谁、成没成、为什么没成、要看的那张叫什么、图在哪儿（file://）。
+主动那一轮（seed 不是 None）不认，理由与记事同一条：由头是她自己的念头，没有人在这句话里
+让她发图。
+
 **四个旋钮落到能验收的东西上**（阈值、字数上限、玩笑词表全在 assembly.json 的 tone_rules 里，
 本文件一个数都不写）：
   长度  心情凉（mood < low_mood_below，0–1 刻度）或精力低（energy < low_energy_below，0–100 刻度）
@@ -211,6 +229,7 @@ from ..mouth import warehouse
 from ..mouth.split import split as split_text
 from . import events
 from . import llm
+from . import look
 from . import recent
 from . import remind
 from . import repeat
@@ -994,8 +1013,9 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     绝不发真网络请求；本文件不写死任何模型名、地址与 key。
     recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
     usage_root：口癖账的落点（None → <器官目录>/mind/anchor_usage.jsonl）。
-    remind_root：记事那张卡的落点（手的实盘根：None → <器官目录>/hand，家按兄弟目录换算，
-    与手那边同一条口径）——只有认作「要我记事」的那一轮才会落卡。
+    remind_root：手的实盘根（None → <器官目录>/hand，家按兄弟目录换算，与手那边同一条口径）。
+    只有认作「要我记事」或「要看图」的那一轮才会动手：记事落一张卡、看图把家里的图发出去。
+    两件事用的是**同一个手的根**——同一个手、同一本账，不新开第二个口子。
     drawer_root：恒定那篇的账本落点（None → <器官目录>/mind/drawer_usage.jsonl）——去重看的就是
     这一本账，它记的是「哪一篇哪一轮带过」，与提示词无关。
     assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
@@ -1105,6 +1125,11 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     #      主动那一轮不认：由头是她自己的念头，没有人在这句话里让她记什么。
     remind_read = (None if proactive
                    else remind.handle(said, who=who, now=at, root=remind_root))
+    # 0.2) 「要看图」那一轮：同样是装配之前认一次（不进提示词）。认出来就交给手（send_image，
+    #      核不拼路径）；没指名的那一轮在这里就反问，手一次都不调（不烧额度、不落账）。
+    #      记事那一轮不与它并行：一句话只认一件事，先记事后看图。
+    look_read = (None if proactive or remind_read is not None
+                 else look.handle(said, who=who, scene=where, now=at, root=remind_root))
 
     # 0) 最近几轮先读、先对账：脑里记了、这份账上却没落的轮，**这一轮就得看见**。
     #    这一读必须排在 recall 之前——recall 会按它自己的钟顺手换日（换日就把「今日在役」
@@ -1257,6 +1282,10 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     #      排在闸与照抄审计之前：这句话一样要过闸、一样要分包（她一样是在说话）。
     if remind_read is not None:
         said_back = str(remind_read.get("say") or "")
+    elif look_read is not None:
+        # 看图那一轮：成的时候她那句照用（允许补一句跟图有关的话），但过了红线（数据里的禁止
+        # 清单）或干脆空着，就换成数据里 say.ok 那句口径；没成的一律说数据里那一句。
+        said_back = look.say(look_read, said_back)
 
     # 5.5) 硬兜底：配额满了就替她把动作行删掉（不靠模型自觉）——删后的文本往下走全程
     said_back = _strip_blocked_actions(said_back, action_read)
@@ -1280,10 +1309,15 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 记事那一轮的两个删除旋钮**不锯回执**：回执是固定的那一句（「记着了…」/「几点？…」），
     # 被「少说」删掉前半句就成了看不懂的半句——这一轮她说的是「记了没有」，不是闲聊。
     receipt_knobs = (dict(knobs, no_question=False, ban_joke=False)
-                     if remind_read is not None else knobs)
+                     if (remind_read is not None
+                         or (look_read is not None and look_read.get("fixed"))) else knobs)
     shaped = _shape_reply(reply, max_chars, capped, receipt_knobs, conf["tone_rules"])
     reply = shaped["reply"]
     chunks = [] if dropped else _bubbles(reply, who, at)
+    # 6.95) 看图那一轮：图挂到最后一泡上（image.file 是手给的 file://）。被闸弃掉的那一轮
+    #       chunks 是空的，不补发图片——「她说了什么」与「图上没上」不许是两份不同的账。
+    if look_read is not None and look_read.get("ok"):
+        chunks = look.with_image(chunks, look_read)
 
     # 7) 落脑：人的原话先记，她真说出口的那句再记（被弃的那句没说出口，不进脑）
     wrote, msg_id = _remember(brain, store, who, said, reply, dropped, at, where,
@@ -1368,6 +1402,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
         "memory": {"wrote": wrote},
         # 「要我记事」那一轮才有的那一格（普通闲聊一个字节都不多）：见文档那一段。
         **({"remind": remind.packet(remind_read)} if remind_read is not None else {}),
+        # 「要看图」那一轮才有的那一格（六键冻结）：意图词 / 发给谁 / 成没成 / 为什么 / 名字 / 图。
+        **({"look": look.packet(look_read)} if look_read is not None else {}),
     }
 
 
