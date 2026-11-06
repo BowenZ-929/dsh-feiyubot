@@ -1,20 +1,33 @@
 """抽屉那一节：装配前判一次意图，命中才向家取几篇旧日记（只进提示词，不进长期记忆）。
 
 判据（每条都对应交付里的一句话）：
-1. **命中才翻**：问句里出现 drawer.keywords 里任一个词 → 提示词多一节，标题是数据里的
+1. **恒定一篇**：每轮都带**一篇**与这一句最贴近的旧日记（drawer_always 那一节，标题
+   `sections.drawer_always.label`「（你写过的一篇日记）」），一行旧日记 + 一句 always.note；
+   整块（含段标题前缀）≤ always.max_chars。三档场合都有，字数单独可断言，**与关键词无关**。
+   排在最前的那一篇压不进上限（第一句就比余地长、截不出整句）就换下一篇——实盘 343 篇里
+   排第一的那几篇第一句常常 100+ 字，老代码在这一篇上就地放弃，于是 10 轮里恒定段一次都没出现。
+2. **注入里不许出现实现词**：两节标题与几句说明都是她视角，常带 / 恒定 / 回流 / 背景 / 缓存
+   一个都不许出现（判据由 `test_the_injected_prompt_has_no_implementation_words` 直接 grep）。
+3. **同一轮不许重复同一篇**：恒定那篇用过的那一篇从"被问时候选"里剔掉；剔完没了被问那一段
+   就空着（不为凑数把同一篇放回来）。
+4. **同一篇不连着带**：name 在 dedupe_days 天内带过就换下一篇（账本
+   <器官目录>/mind/drawer_usage.jsonl，一轮一行 {at,name,scene,score,why}）；8 天前的
+   那一行出了窗口，可以用回来。
+5. **命中才翻那 2–3 篇**：问句里出现 drawer.keywords 里任一个词 → 再多一节，标题是数据里的
    drawer.label，条数 ≤ max_entries，整节总字数 ≤ cap，节尾有那句 testimony_note。
-2. **没命中一次 IO 都不做**：家那两个读口（cards.list_room / cards.read_item）一次都调不到，
-   提示词里也没有这一节（不留一个只有标题的空节）。
-3. **翻不翻只看意图**：关键词命中 + enabled 就翻，**不看场合**——群聊 / unknown 同样真去读
-   （list_room 计数 ≥ 1），不再是一次 IO 都不做。
-4. **场合只决定能取哪几格**：drawer.shelves 里 private 含普通 + 恋爱两格，group / unknown 只有
-   普通那格；unknown 那档在节内第一行插一句 drawer.unknown_note（「来源未定」），private / group
-   都不插。**unknown 不许被推成 group 或 private**：不传 scene 就走这一档。
-5. **挑法**：相关性（那个月的说法整词命中，或 name / at / note 与问句连续重合若干字）优先，
-   再按日期从新到旧补足。
-6. **超长不硬塞**：一篇 2000 字日记压进 cap 以内，且收在句末（绝不截半个词）。
-7. **数据驱动**：改 keywords / max_entries 结果跟着变；缺 drawer 块 = 不翻（不是每轮翻）。
-8. **日记不进脑**：这一节只进提示词，落脑的条目里没有任何一段日记正文。
+6. **翻不翻只看意图**：关键词命中 + enabled 就翻，**不看场合**——群聊 / unknown 同样真去读
+   （list_room 计数 ≥ 1）；**没命中就只留恒定那篇**，多篇那一节一节都不加。抽屉整块关着 /
+   缺这一块才是「一次 IO 都不做」。
+7. **场合只决定能取哪几格**：drawer.shelves 里 private 含普通 + 恋爱两格，group / unknown 只有
+   普通那格（两段都照这一份）；unknown 那档在多篇那一节的节内第一行插一句
+   drawer.unknown_note（「来源未定」），private / group 都不插。**unknown 不许被推成 group 或
+   private**：不传 scene 就走这一档。
+8. **挑法**：相关性（那个月的说法整词命中，或 name / at / note 与问句连续重合若干字）优先，
+   再按日期从新到旧补足；恒定那篇按同一份分取最高的。
+9. **超长不硬塞**：一篇 2000 字日记压进 cap 以内，且收在句末（绝不截半个词）。
+10. **数据驱动**：改 keywords / max_entries / max_chars 结果跟着变；缺 drawer 块 = 不翻；
+   缺 always、max_chars / dedupe_days 非正 → ValueError 并指名。
+11. **日记不进脑**：这一节只进提示词，落脑的条目里没有任何一段日记正文。
 
 全部注入假 transport：一个字节都不发真网络。家（HOME_ROOT）指到临时根，实盘数据一个字都不读。
 """
@@ -186,20 +199,27 @@ class DrawerTest(unittest.TestCase):
         for line in [row for row in body.split("\n") if row.startswith("- ")]:
             self.assertRegex(line, r"^- \d{4}-\d{2}-\d{2}：", "行首没有日期：%r" % line[:20])
 
-    # —— 2) 没命中：三档都是一节都不加，一次 IO 都不做 ————————
+    # —— 2) 没命中：多篇那一节一节都不加（恒定那篇照旧） ——————————
 
-    def test_no_keyword_means_no_section_and_no_read_in_any_scene(self):
-        """翻不翻只看意图：三档（含不传 scene 的缺省）没命中都是一次 IO 都不做。"""
+    def test_no_keyword_drops_the_flipped_part_and_keeps_the_background_one(self):
+        """翻不翻只看意图：三档（含不传 scene 的缺省）没命中就只留恒定那篇。
+
+        恒定那篇**每轮都读**（一次 list_room + 一次 read_item 就是它的成本）——这与
+        「抽屉整块关着 / 缺这一块一次 IO 都不做」是两件事，那两条另测（见第 7 节）。
+        """
         self._five()
-        label = conversation.load_assembly()["drawer"]["label"]
+        conf = conversation.load_assembly()
+        label = conf["sections"]["drawer"]["label"]
         for scene in (brain_model.SCENE_PRIVATE, brain_model.SCENE_GROUP,
                       brain_model.SCENE_UNKNOWN, OMIT):
+            self._ledger([])          # 每一档都从头带，别让上一档的去重把它挡掉
             calls = self._count_reads()
             got, cap = self._answer(MISS, scene=scene)
             system = cap[0]["messages"][0]["content"]
             self.assertNotIn("[%s]" % label, system, "没命中却加了那一节（%r 档）" % (scene,))
-            self.assertEqual({"list_room": 0, "read_item": 0}, calls,
-                             "没命中还去翻了抽屉（%r 档）" % (scene,))
+            self.assertTrue(self._always_body(cap), "没命中就连恒定那篇也没了（%r 档）" % (scene,))
+            self.assertGreaterEqual(calls["list_room"], 1, "恒定那篇没去读抽屉（%r 档）" % (scene,))
+            self.assertEqual(1, calls["read_item"], "恒定那篇该正好读一篇正文（%r 档）" % (scene,))
             self.assertEqual([],
                              [row for row in got["assembly"]["sections"] if row["key"] == "drawer"],
                              "回包里还留着那一格（%r 档）" % (scene,))
@@ -207,12 +227,19 @@ class DrawerTest(unittest.TestCase):
     # —— 3) 场合只决定能取哪几格（翻不翻不看它） ——————————
 
     def _two_shelves(self) -> tuple:
-        """普通 + 恋爱各一篇：三档各跑一次，看哪篇进得来、有没有那句「来源未定」。"""
+        """普通 + 恋爱**各两篇**：三档各跑一次，看哪篇进得来、有没有那句「来源未定」。
+
+        每格两篇是互斥规则要求的：恒定那篇先占掉每格里排名第一的那一篇，被问那一段还得有
+        同格的下一篇可挑——一格一篇的话剔完就空，测不出「取得到这一格」。
+        同一格两篇共用一个标记句，断言才不认「具体是哪一篇」。
+        """
         self._house({
-            PLAIN: [_row("p1", "2026-10-22", "十月二十二号，去医院陪他复查，走廊里冷得像水里。")],
-            LOVE: [_row("b1", "2026-10-20", "十月二十号，喜欢他这件事写在纸上。")],
+            PLAIN: [_row("p1", "2026-10-22", "十月二十二号，去医院陪他复查，走廊里冷得像水里。"),
+                    _row("p2", "2026-10-11", "十月十一号，又去医院陪他复查，走廊里还是冷。")],
+            LOVE: [_row("b1", "2026-10-20", "十月二十号，喜欢他这件事写在纸上。"),
+                   _row("b2", "2026-10-02", "十月二号，喜欢他这件事写在纸上，一直没改。")],
         })
-        return "十月二十二号", "喜欢他这件事写在纸上"
+        return "去医院陪他复查", "喜欢他这件事写在纸上"
 
     def test_private_pulls_both_shelves_and_has_no_source_note(self):
         plain, love = self._two_shelves()
@@ -222,7 +249,8 @@ class DrawerTest(unittest.TestCase):
         self.assertIn(plain, body, "私聊里取不到普通日记")
         self.assertIn(love, body, "私聊里取不到恋爱日记——这条改窄了就是把私聊也削了")
         self.assertNotIn(conf["unknown_note"], body, "私聊里多了一句「来源未定」")
-        self.assertEqual(2, self._drawer_row(got)["count"])
+        # 四篇里恒定那篇先占一篇，剩下三篇正好是被问那一段的上限（max_entries = 3）。
+        self.assertEqual(3, self._drawer_row(got)["count"])
 
     def test_group_flips_but_takes_only_the_plain_shelf(self):
         plain, love = self._two_shelves()
@@ -298,7 +326,10 @@ class DrawerTest(unittest.TestCase):
             self.assertEqual([PLAIN], conf["shelves"][name])
 
     def test_a_love_diary_is_reachable_in_private(self):
-        self._house({LOVE: [_row("b1", "2026-10-20", "十月二十号，喜欢他这件事写在纸上。")]})
+        self._house({LOVE: [
+            _row("b1", "2026-10-20", "十月二十号，喜欢他这件事写在纸上。"),
+            _row("b2", "2026-10-02", "十月二号，喜欢他这件事写在纸上，一直没改。"),
+        ]})
         got, cap = self._answer(scene=brain_model.SCENE_PRIVATE)
         body = _section(cap[0]["messages"][0]["content"],
                         conversation.load_assembly()["drawer"]["label"])
@@ -310,6 +341,8 @@ class DrawerTest(unittest.TestCase):
     def test_a_topic_hit_wins_over_a_newer_diary(self):
         self._house({PLAIN: [
             _row("old", "2026-03-01", "三月一号，那天在医院复查，走廊很长。",
+                 note="旧家日叙事摘要：医院复查那一段"),
+            _row("old2", "2026-03-02", "三月二号，还在说医院复查的事。",
                  note="旧家日叙事摘要：医院复查那一段"),
             _row("new", "2026-10-30", "十月三十号，晚上看了一会儿书。"),
         ]})
@@ -324,6 +357,7 @@ class DrawerTest(unittest.TestCase):
         self._house({PLAIN: [
             _row("sep", "2026-09-20", "九月二十号，晚上把鱼缸擦了。"),
             _row("oct", "2026-10-02", "十月二号，早起看见光斜进来。"),
+            _row("oct2", "2026-10-03", "十月三号，光又斜进来了。"),
         ]})
         conf = conversation.load_assembly()
         conf["drawer"]["max_entries"] = 1
@@ -337,7 +371,11 @@ class DrawerTest(unittest.TestCase):
         long_text = "".join("第%d天，她在水里想起旧家的事，那句话没说出口。" % index
                             for index in range(1, 101))
         self.assertGreater(len(long_text), 2000)
-        self._house({PLAIN: [_row("long", "2026-10-22", long_text)]})
+        # 恒定那篇要落在另一篇上（互斥）：超长这一篇必须留在被问那一段里才测得到截断。
+        self._house({PLAIN: [
+            _row("long", "2026-03-01", long_text),
+            _row("short", "2026-10-28", "十月二十八号，晚上看了一会儿书。"),
+        ]})
         conf = conversation.load_assembly()["drawer"]
         got, cap = self._answer()
         body = _section(cap[0]["messages"][0]["content"], conf["label"])
@@ -395,9 +433,11 @@ class DrawerTest(unittest.TestCase):
         wrote = got["memory"]["wrote"]
         self.assertTrue(wrote, "这一轮人那句与她那句都没落脑？")
         dump = ""
-        for path in sorted((self.tmp / "brain").rglob("*")):
-            if path.is_file():
-                dump += path.read_text(encoding="utf-8", errors="ignore")
+        # 三处都查：脑（长期记忆）、recent（更早那几轮）、恒定那篇的账本（只该有 name，没有正文）。
+        for folder in (self.tmp / "brain", self.tmp / "home"):
+            for path in sorted(folder.rglob("*")):
+                if path.is_file():
+                    dump += path.read_text(encoding="utf-8", errors="ignore")
         for size in (6, 8, 12):
             for start in range(0, len(body) - size + 1):
                 piece = body[start:start + size]
@@ -429,6 +469,240 @@ class DrawerTest(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             self._answer(HIT, assembly=conf)
         self.assertIn("drawer.month_words", str(caught.exception))
+
+    # —— 10) 恒定那篇：每轮一篇、按话题挑、7 天不重复 ——————————
+
+    def _always_label(self, conf: dict = None) -> str:
+        conf = conf if conf is not None else conversation.load_assembly()
+        return conf["sections"]["drawer_always"]["label"]
+
+    def _always_body(self, cap: list, conf: dict = None) -> str:
+        """提示词里恒定那一段的正文（标题之后、下一节之前）；没有这一段就是空串。"""
+        system = cap[0]["messages"][0]["content"]
+        label = self._always_label(conf)
+        return _section(system, label) if ("[%s]" % label) in system else ""
+
+    def _always_block(self, cap: list, conf: dict = None) -> str:
+        """那一整块：段标题前缀也要算进 always.max_chars（交付里那句「含前缀」）。"""
+        body = self._always_body(cap, conf)
+        return "" if not body else "[%s]\n%s" % (self._always_label(conf), body)
+
+    def _ledger(self, rows: list) -> None:
+        """把恒定那篇的账本写成这几种时刻的历史（去重读的就是这一本）。"""
+        path = conversation.drawer_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                        encoding="utf-8")
+
+    def test_every_round_carries_one_background_diary_in_every_scene(self):
+        """三档场合每轮都有一篇，且那一块（含标题前缀）≤ always.max_chars。"""
+        self._house({PLAIN: [
+            _row("a2", "2026-10-31", "十月最后一天，凌晨两点还在群里说话。"),
+            _row("a4", "2026-11-02", "十一月二号，第一次梦见旧家。"),
+        ]})
+        conf = conversation.load_assembly()
+        always = conf["drawer"]["always"]
+        self.assertEqual("（你写过的一篇日记）", self._always_label(conf),
+                         "恒定那一段的标题要是她视角（不许出现实现词）：现在是 %r"
+                         % self._always_label(conf))
+        for scene in (brain_model.SCENE_PRIVATE, brain_model.SCENE_GROUP,
+                      brain_model.SCENE_UNKNOWN):
+            self._ledger([])
+            got, cap = self._answer(MISS, scene=scene)      # 没关键词：只有恒定那篇
+            block = self._always_block(cap)
+            self.assertTrue(block, "%r 档这一轮没有恒定那篇" % (scene,))
+            body = self._always_body(cap)
+            lines = [row for row in body.split("\n") if row.startswith("- ")]
+            self.assertEqual(1, len(lines), "恒定那篇该正好一篇：%r" % (body,))
+            self.assertLessEqual(len(block), always["max_chars"],
+                                 "恒定那一段（含「[标题]」前缀）超过 max_chars：%d" % len(block))
+            self.assertIn(always["note"], body, "恒定那一段少了那句「这是背景，不是话头」")
+            self.assertNotIn(always["note"], lines[0], "说明该另起一行，不是压在日记行尾")
+            rows = [row for row in got["assembly"]["sections"] if row["key"] == "drawer_always"]
+            self.assertEqual(1, len(rows), "回包里没有恒定那一格（%r 档）" % (scene,))
+            self.assertEqual(1, rows[0]["count"])
+            self.assertEqual(len(body), rows[0]["chars"], "回包 chars 与实际字数不一致")
+
+    def test_the_background_piece_is_the_one_closest_to_the_question(self):
+        """两篇：一篇与问句重合、一篇不重合——恒定那篇挑重合的那一篇（不是随机、不是最新）。"""
+        self._house({PLAIN: [
+            _row("near", "2026-03-01", "医院复查那天，走廊很长。",
+                 note="旧家日叙事摘要：医院复查那一段"),
+            _row("far", "2026-10-30", "晚上看了一会儿书，窗外的风很大。"),
+        ]})
+        _got, cap = self._answer("翻翻以前的日记，医院复查那次")
+        body = self._always_body(cap)
+        self.assertIn("医院复查", body, "恒定那篇没挑最贴近这一句的那一篇")
+        self.assertNotIn("窗外的风", body, "恒定那篇挑成了不相干的那一篇")
+
+    def test_the_same_diary_is_not_carried_again_within_the_window(self):
+        """窗口内带过的那一篇换下一篇；8 天前那一行出了窗口，可以用回来。"""
+        near = _row("near", "2026-03-01", "医院复查那天，走廊很长。",
+                    note="旧家日叙事摘要：医院复查那一段")["name"]
+        self._house({PLAIN: [
+            _row("near", "2026-03-01", "医院复查那天，走廊很长。",
+                 note="旧家日叙事摘要：医院复查那一段"),
+            _row("far", "2026-10-30", "晚上看了一会儿书，窗外的风很大。"),
+        ]})
+        question = "翻翻以前的日记，医院复查那次"
+        # 3 天前带过最贴近的那篇（NOW 是 2025-01-15T14:05:00+09:00）→ 这一轮换下一篇
+        self._ledger([{"at": "2025-01-12T14:05:00+09:00", "name": near, "scene": "unknown",
+                       "score": 4, "why": "topic"}])
+        _got, cap = self._answer(question)
+        body = self._always_body(cap)
+        self.assertNotIn("医院复查", body, "窗口内带过的那一篇又被带了一遍")
+        self.assertIn("窗外的风", body, "命中窗口后没有换下一篇")
+        # 8 天前 → 出了窗口，可以再用
+        self._ledger([{"at": "2025-01-07T14:05:00+09:00", "name": near, "scene": "unknown",
+                       "score": 4, "why": "topic"}])
+        _got, cap = self._answer(question)
+        self.assertIn("医院复查", self._always_body(cap), "8 天前那一行还在窗口里？")
+
+    def test_each_round_logs_one_usage_row(self):
+        """一轮一行 {at,name,scene,score,why}：去重靠的就是这一本账。"""
+        self._house({PLAIN: [_row("a1", "2026-10-22", "十月二十二号，去医院陪他复查。")]})
+        self._answer(MISS, scene=brain_model.SCENE_PRIVATE)
+        rows = conversation.read_drawer_log()
+        self.assertEqual(1, len(rows), "一轮该正好一行账")
+        self.assertEqual({"at", "name", "scene", "score", "why"}, set(rows[0]))
+        self.assertEqual("drawer_usage.jsonl", conversation.drawer_log_path().name)
+        self.assertEqual(brain_model.SCENE_PRIVATE, rows[0]["scene"])
+        self.assertTrue(str(rows[0]["name"]).startswith("2026-10-22"), rows[0])
+        self.assertIn(rows[0]["why"], (conversation.DRAWER_WHY_TOPIC,
+                                       conversation.DRAWER_WHY_DATE))
+
+    def test_the_two_parts_are_counted_separately(self):
+        """命中关键词时两段都在，各一个上限、字数各数各的。"""
+        self._five()
+        conf = conversation.load_assembly()
+        got, cap = self._answer(HIT)
+        system = cap[0]["messages"][0]["content"]
+        asked = _section(system, conf["sections"]["drawer"]["label"])
+        always = self._always_body(cap)
+        self.assertTrue(asked, "命中关键词却没有那一节")
+        self.assertTrue(always, "命中关键词那一轮没有恒定那篇")
+        self.assertLessEqual(len(asked), conf["drawer"]["cap"], "多篇那一节超过 cap")
+        self.assertLessEqual(len(self._always_block(cap)), conf["drawer"]["always"]["max_chars"],
+                             "恒定那一段超过 max_chars")
+        rows = {row["key"]: row for row in got["assembly"]["sections"]}
+        self.assertEqual(len(asked), rows["drawer"]["chars"])
+        self.assertEqual(len(always), rows["drawer_always"]["chars"])
+        self.assertGreaterEqual(rows["drawer"]["count"], 2, "命中了一次都没放进来")
+        self.assertLessEqual(rows["drawer"]["count"], conf["drawer"]["max_entries"])
+
+    def test_the_background_piece_obeys_the_same_shelves(self):
+        """group / unknown 的恒定那篇也只取普通那格（私密日记不进群聊上下文）。"""
+        plain, love = self._two_shelves()
+        for scene in (brain_model.SCENE_GROUP, brain_model.SCENE_UNKNOWN):
+            self._ledger([])
+            _got, cap = self._answer(MISS, scene=scene)
+            body = self._always_body(cap)
+            self.assertIn(plain, body, "%r 档的恒定那篇没取到普通日记" % (scene,))
+            self.assertNotIn(love, body, "%r 档的恒定那篇取了私密那格" % (scene,))
+
+    def test_a_broken_always_block_is_reported_not_defaulted(self):
+        """缺 always / max_chars 非正 / dedupe_days 非正 → ValueError 并指名。"""
+        def drop(conf):
+            del conf["drawer"]["always"]
+
+        def bad_chars(conf):
+            conf["drawer"]["always"]["max_chars"] = 0
+
+        def bad_days(conf):
+            conf["drawer"]["always"]["dedupe_days"] = 0
+
+        for name, mutate, want in (("缺 always", drop, "drawer.always"),
+                                   ("max_chars 非正", bad_chars, "drawer.always.max_chars"),
+                                   ("dedupe_days 非正", bad_days, "drawer.always.dedupe_days")):
+            conf = conversation.load_assembly()
+            mutate(conf)
+            with self.assertRaises(ValueError) as caught:
+                self._answer(MISS, assembly=conf)
+            self.assertIn(want, str(caught.exception), "%s 没当场报" % name)
+
+    # —— 11) 两节标题是她视角、同一轮互斥、恒定篇与关键词无关 ————————
+
+    def test_the_two_labels_say_what_she_wrote_not_how_it_is_carried(self):
+        """两节标题的精确值：都是她视角，一个实现词都没有。"""
+        conf = conversation.load_assembly()
+        self.assertEqual("（你写过的旧日记）", conf["sections"]["drawer"]["label"])
+        self.assertEqual("（你写过的一篇日记）", conf["sections"]["drawer_always"]["label"])
+        self.assertEqual(conf["sections"]["drawer"]["label"], conf["drawer"]["label"],
+                         "drawer.label 与 sections.drawer.label 是同一节，两处不一致")
+
+    def test_the_injected_prompt_has_no_implementation_words(self):
+        """注入里不许出现实现词：常带 / 恒定 / 回流 / 背景 / 缓存。两节标题与说明都算。"""
+        self._five()
+        banned = ("常带", "恒定", "回流", "背景", "缓存")
+        for scene in (brain_model.SCENE_PRIVATE, brain_model.SCENE_UNKNOWN):
+            self._ledger([])
+            _got, cap = self._answer(HIT, scene=scene)
+            system = cap[0]["messages"][0]["content"]
+            for word in banned:
+                self.assertNotIn(word, system,
+                                 "注入里出现了实现词「%s」（%r 档）" % (word, scene))
+
+    def test_the_two_sections_never_use_the_same_diary_in_one_round(self):
+        """互斥：恒定那篇选走之后，被问那一段的候选里就不许再有它。"""
+        self._five()
+        _got, cap = self._answer(HIT)
+        always, asked = self._always_body(cap), self._body(cap)
+        self.assertTrue(always, "这一轮没有恒定那篇，这条断言就没意义")
+        self.assertTrue(asked, "命中关键词却没有被问那一段")
+        line = [row for row in always.split("\n") if row.startswith("- ")]
+        self.assertEqual(1, len(line), "恒定那一段该正好一篇：%r" % (always,))
+        self.assertNotIn(line[0], asked, "同一轮两节用了同一篇")
+
+    def test_five_diaries_still_leave_two_or_three_for_the_asked_part(self):
+        """五篇夹具：剔掉恒定那篇还剩四篇，被问那一段照旧 2–3 篇。"""
+        self._five()
+        got, cap = self._answer(HIT)
+        row = self._drawer_row(got)
+        self.assertGreaterEqual(row["count"], 2, "剔掉恒定那篇之后被问段不够 2 篇")
+        self.assertLessEqual(row["count"], conversation.load_assembly()["drawer"]["max_entries"])
+        self.assertTrue(self._always_body(cap), "恒定那篇没了")
+
+    def test_one_diary_only_leaves_the_asked_part_empty(self):
+        """只有 1 篇日记：恒定段照旧 1 篇，被问那一段**空着**——不为凑数把同一篇放回来。"""
+        self._house({PLAIN: [_row("only", "2026-10-22", "十月二十二号，去医院陪他复查。")]})
+        conf = conversation.load_assembly()
+        got, cap = self._answer(HIT)
+        system = cap[0]["messages"][0]["content"]
+        self.assertNotIn("[%s]" % conf["sections"]["drawer"]["label"], system,
+                         "同一篇在两节里都放了")
+        self.assertEqual([], [row for row in got["assembly"]["sections"] if row["key"] == "drawer"],
+                         "剔完没有候选，被问那一段该空着（回包里也不留这一格）")
+        rows = [row for row in got["assembly"]["sections"] if row["key"] == "drawer_always"]
+        self.assertEqual(1, len(rows), "恒定那一段没了")
+        self.assertEqual(1, rows[0]["count"])
+        self.assertTrue(self._always_body(cap), "恒定那一段该照旧有 1 篇")
+
+    def test_the_background_piece_steps_past_a_diary_it_cannot_shorten(self):
+        """回归（实盘 0/10 的病根）：排名第一那篇的第一句就比余地长，整段不许因此变空。
+
+        实盘上没命中关键词时排名只看日期，最前面那几篇的第一句常常 100+ 字，压不进
+        always.max_chars 就截不出整句——老代码在那一篇上就地 return，于是每轮都空。
+        """
+        self._house({PLAIN: [
+            _row("long", "2026-11-02", "那一天" + "水" * 120 + "。后面还有话。"),
+            _row("short", "2026-10-30", "十月三十号，晚上看了一会儿书。"),
+        ]})
+        got, cap = self._answer(MISS)          # 没关键词：排名第一就是最新的那篇（long）
+        body = self._always_body(cap)
+        self.assertTrue(body, "排名第一那篇截不出整句，整段就空了（0/10 的老病）")
+        self.assertIn("晚上看了一会儿书", body, "没有换到下一篇")
+        rows = [row for row in got["assembly"]["sections"] if row["key"] == "drawer_always"]
+        self.assertEqual(1, rows[0]["count"])
+
+    def test_the_background_piece_is_computed_even_when_no_keyword_hits(self):
+        """恒定篇与关键词无关：一个关键词都不命中的轮次，恒定那一段照旧算、照旧写一行账。"""
+        self._five()
+        self._ledger([])
+        got, cap = self._answer(MISS, scene=brain_model.SCENE_PRIVATE)
+        self.assertTrue(self._always_body(cap), "没命中关键词那一轮恒定那篇没了")
+        self.assertEqual(1, [row for row in got["assembly"]["sections"]
+                             if row["key"] == "drawer_always"][0]["count"])
+        self.assertEqual(1, len(conversation.read_drawer_log()), "恒定那篇这一轮没落账")
 
 
 if __name__ == "__main__":

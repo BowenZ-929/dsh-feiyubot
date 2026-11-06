@@ -77,15 +77,28 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           recalled[]（页面要显示「想起了什么 + 证据指针 + 她的理解」）。每条记忆进提示词是
           两行：原文一行（括号里是来源｜来源类型｜证据），她的理解 note_display 另起一行、
           缩进两格——原话与她的理解不许糊成一行，那是脑里分开写的两栏
-  drawer  抽屉：装配前按 drawer.keywords 判一次意图（问句里出现任一词才翻）——**翻不翻只看
-           意图，不看场合**；场合只决定能取哪几格（drawer.shelves：private 普通 + 恋爱，group 与
-           unknown 只取普通；unknown 那档在节内多插一行 drawer.unknown_note「来源未定」，绝不把
-           unknown 猜成 group / private）。命中才向家读一次 cards.list_room
-           （room / kind / shelves 全在数据里），按相关性 + 日期挑到 max_entries 篇、逐篇
-          cards.read_item 取正文，每篇一行压进 sections.drawer.cap。节尾那句 testimony_note 是
-          这一节的要害：那些字是她自己写下的（testimony=false），只能说「我写过」，不许说成
-          对方说过。**只进提示词，绝不进脑**：这一节不交给 brain.ingest 一个字。
-          没命中就**一次 IO 都不做**，回包 assembly.sections 里也不留一个空标题。
+  drawer  抽屉，两段各占一节、字数分别数得出来：
+          · **恒定那篇**（drawer_always，每轮都带）：从家里挑**一篇**与这一句最贴近的旧日记
+            （_drawer_score：与这一句的连续重合字数 + 月份词，与「被问时」同一把尺子），一行旧
+            日记 + 一句 always.note。整块（含段标题前缀与行格式）≤ always.max_chars。
+            **同一篇 name 在 dedupe_days 天内不重复带**：账本
+            <器官目录>/mind/drawer_usage.jsonl 一轮一行 {at,name,scene,score,why}，选的时候
+            读窗口内的 name，命中就换下一篇（全落在窗口里就这一轮不带，绝不把刚带过的塞回来）。
+            **这一篇与关键词无关，每轮都算**：排在最前的那一篇压不进上限（第一句就比余地长）
+            就换下一篇，绝不因为「排第一的那篇截不出一整句」把整段拖成空。
+            她那几百篇旧账因此每轮都在，而不是只有被问到时才翻。
+          · **被问时那 2–3 篇**（drawer）：问句里出现 drawer.keywords 任一个词才翻——**翻不翻
+            只看意图，不看场合**；场合只决定能取哪几格（drawer.shelves：private 普通 + 恋爱，
+            group 与 unknown 只取普通；unknown 那档在多篇那一节的节首插 drawer.unknown_note
+            「来源未定」，绝不把 unknown 猜成 group / private）。cards.list_room 一次
+            （room / kind / shelves 全在数据里），按相关性 + 日期挑到 max_entries 篇、逐篇
+            cards.read_item 取正文，每篇一行压进 sections.drawer.cap。**恒定那篇用过的那一篇
+            从这一段的候选里剔掉**（同一轮两节不重复同一篇；剔完没了就这一节空着，不为凑数
+            把同一篇放回来）。节尾那句 testimony_note
+            是这一节的要害：那些字是她自己写下的（testimony=false），只能说「我写过」，不许说成
+            对方说过。
+          两段都**只进提示词，绝不进脑**：这一节不交给 brain.ingest 一个字；哪一段没有就
+          **整节不加**（不留一个只有标题的空节），关着的那一段一次 IO 都不做。
   heart   effective.effective_state（全仓唯一合成点）+ engage.decide（只 decide，
           **不 decide_and_log**）；提示词与返回体都**只给档位词**，一个数都不出门
   mouth   address.resolve + tone.from_store（口径行进提示词），过闸用 gate.enforce
@@ -146,7 +159,7 @@ import json
 import logging
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -213,12 +226,21 @@ CALLER_ADDRESS_KEYS = ("称呼",)                    # 她对他的那个称呼�
 CALLER_NICKNAME_KEYS = ("display", "昵称", "nickname")   # 昵称：只给 nickname_line 用，不许顶上面两处
 CALLER_WHO_TOKEN = "{who}"                        # 号不进提示词：模板里带这个占位就是数据坏了
 DRAWER_KEY = "drawer"                     # 抽屉那一节在 order / sections 里的键（空着就整节不加）
+# 恒定那篇单独一节：它每轮都在、有自己的字数上限，与「被问时那 2–3 篇」分开数、分开锯。
+DRAWER_ALWAYS_KEY = "drawer_always"
 LINE_JOIN = "\n"                          # 抽屉每篇一行、行与行之间的分隔（也用来隔开节尾那句说明）
 # 抽屉那一块认得的键（装配时多余的一律报错）：翻不翻只看 enabled + keywords，**没有「场合: 翻不翻」
 # 那种开关**——场合只经 shelves 决定能取哪几格，猜错场合就等于在群里说私话。
 DRAWER_KEYS = ("enabled", "keywords", "shelves", "unknown_note", "max_entries", "cap", "label",
                "kind", "room", "testimony_note", "note", "line", "more", "date_pattern",
-               "list_limit", "date_chars", "line_chars", "topic_min_chars", "month_words")
+               "list_limit", "date_chars", "line_chars", "topic_min_chars", "month_words",
+               "always")
+# 恒定那一段自己的键：开关、整块上限、去重窗口、行模板、省略号、那句 always.note。
+DRAWER_ALWAYS_KEYS = ("enabled", "max_chars", "dedupe_days", "line", "more", "note")
+DRAWER_LOG = "drawer_usage.jsonl"         # 恒定那篇的账本（落在 <器官目录>/mind 下，一轮一行）
+# 那本账的 why 两档：话题对得上（分够 topic_min_chars）／没对上，只是按日期从新到旧补的。
+DRAWER_WHY_TOPIC = "topic"
+DRAWER_WHY_DATE = "date"
 WORD_JOIN = " "                           # 正文里的换行压成空格：一篇只占一行，行首才认得出日期
 TONE_LOG = "tone_log.jsonl"               # 语气账的文件名（落在 <器官目录>/mind 下，只追加）
 # 每轮那一行的字段（冻结，人事后照这个核对）：四个旋钮落到哪儿、心与嘴各在哪一档、软度与称呼。
@@ -325,6 +347,15 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
                 "drawer 是 %r/%d（%s）"
                 % (section["label"], section["cap"], drawer_conf["label"],
                    drawer_conf["cap"], where))
+    # 恒定那篇自成一节：这一节的上限要装得下 always.max_chars（它量的是提示词里那一整块，
+    # 段标题前缀也在内）。装不下就等于把这一段唯一的要害（那句 always.note）锯掉。
+    if drawer_conf is not None and DRAWER_ALWAYS_KEY in checked:
+        section = checked[DRAWER_ALWAYS_KEY]
+        if section["cap"] < drawer_conf["always"]["max_chars"]:
+            raise ValueError(
+                "sections.%s.cap 要装得下 drawer.always.max_chars：现在是 %d / %d（%s）"
+                % (DRAWER_ALWAYS_KEY, section["cap"],
+                   drawer_conf["always"]["max_chars"], where))
     # 禁令窗口必须比配额窗口长一轮：配额放行的那一轮，禁令里得还看得见它——
     # 否则同一条动作会在「配额刚好重置」的那一轮重生（两个窗口同时把它挤出去）。
     want = action_conf["quota"]["window"] + 1
@@ -449,6 +480,48 @@ def _check_drawer(spec: Any, where: str) -> Optional[Dict[str, Any]]:
             raise ValueError("drawer.month_words.%s 要一段非空的字：%s" % (month, where))
         clean_months[str(int(month.strip()))] = word.strip()
     clean["month_words"] = clean_months
+    always = _check_drawer_always(spec.get("always"), where)
+    clean["always"] = always
+    return clean
+
+
+def _check_drawer_always(spec: Any, where: str) -> Dict[str, Any]:
+    """恒定那篇那一格（drawer.always）：开关、整块上限、去重窗口、行模板、省略号、那句说明。
+
+    **缺了不补默认值**：这几格一个默认值都没有——补一个 100 字、补一句 always.note，人改了
+    数据还以为生效了。上限与窗口都要正整数：0 字的上限等于每轮都不带，0 天的窗口等于不去重，
+    两种都是把这一段悄悄关掉，报错比它好查。
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("drawer.always 要一份对象（enabled / max_chars / dedupe_days / line / "
+                         "more / note）：%s" % where)
+    extra = sorted(set(spec) - set(DRAWER_ALWAYS_KEYS))
+    if extra:
+        raise ValueError("drawer.always 里有多余的键 %s（认得的只有 %s）：%s"
+                         % (extra, sorted(DRAWER_ALWAYS_KEYS), where))
+    clean: Dict[str, Any] = {}
+    enabled = spec.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("drawer.always.enabled 要么 true 要么 false：%s" % where)
+    clean["enabled"] = enabled
+    for name in ("max_chars", "dedupe_days"):
+        value = spec.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("drawer.always.%s 要正整数：%s" % (name, where))
+        clean[name] = value
+    line = spec.get("line")
+    if not isinstance(line, str) or line.count("%s") != 2:
+        raise ValueError("drawer.always.line 要一行模板、且正好两个 %%s（日期 + 正文）：%s" % where)
+    clean["line"] = line
+    more = spec.get("more")
+    if not isinstance(more, str):
+        raise ValueError("drawer.always.more 要一段字（省略号，可以空）：%s" % where)
+    clean["more"] = more
+    note = spec.get("note")
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError("drawer.always.note 要一段非空的字（那一篇的说明）：%s"
+                         % where)
+    clean["note"] = note.strip()
     return clean
 
 
@@ -869,6 +942,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
            seed: Optional[str] = None, reason: Optional[str] = None,
            store: Any = None, brain: Any = None,
            heart_root: Any = None, recent_root: Any = None, usage_root: Any = None,
+           drawer_root: Any = None,
            now: Optional[str] = None,
            transport: Optional[Any] = None, config: Optional[Mapping[str, Any]] = None,
            env: Optional[Mapping[str, str]] = None,
@@ -882,6 +956,8 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     绝不发真网络请求；本文件不写死任何模型名、地址与 key。
     recent_root：最近几轮那份账的落点（None → <器官目录>/mind/recent_turns.jsonl）。
     usage_root：口癖账的落点（None → <器官目录>/mind/anchor_usage.jsonl）。
+    drawer_root：恒定那篇的账本落点（None → <器官目录>/mind/drawer_usage.jsonl）——去重看的就是
+    这一本账，它记的是「哪一篇哪一轮带过」，与提示词无关。
     assembly：给一份内存里的装配说明就用它（不读盘）——评测脚本靠它关掉某几段做空基线。
     aliases：通道顺手发来的**别名**（QQ 昵称、群名片那一类），只登记进人名录的别名表：
     id 才是身份（who 一个字节都不动），别名不改身份、不写记忆条、不进提示词。没给就是空（老调用
@@ -1050,10 +1126,11 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     # 3) 嘴：称呼 → 语气档（口径行进提示词）。心的四样读数**真传进去**：心情凉得能压住话长、
     #    精力低得能收紧口径，softness 才不是一句空话（口径行的 heart_source 也从「未接入」变实话）。
     heart_read = _heart_readings(mood_read, energy_read, offsets, judgement)
-    # 2.5) 抽屉：装配前判一次意图，命中才向家取 2–3 篇旧事（没命中一次 IO 都不做）。
+    # 2.5) 抽屉：恒定那篇每轮都带；命中关键词再取 2–3 篇（两段各占一节、各一个上限）。
     #      放在 memory 之后、heart 之前（order 里也是这个位置）：旧事比当下记忆远一档。
     #      旧事正文**只进提示词**：这一节不交给 brain.ingest 一个字。
-    drawer_read, drawer_text = _drawer(conf, said, where)
+    drawer_read, drawer_always_text, drawer_text = _drawer(conf, said, where, at=at,
+                                                           root=drawer_root)
     voice = _voice(store, brain, who, heart_read)
     # 四个旋钮：判据全在 assembly.json 的 tone_rules 里，这一层只照着判，一个阈值都不带。
     knobs = _knobs(conf["tone_rules"], heart_read, judgement, mode)
@@ -1079,6 +1156,7 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
                 "segment": _segment_text(rows, conf, where),
                 "banned": banned_text, "action": action_text,
                 "memory": memory_text, "drawer": drawer_text,
+                "drawer_always": drawer_always_text,
                 "heart": heart_text, "mouth": mouth_text,
                 "person": person_text, "caller": caller_text,
                 "scene": _scene_text(conf, where)}
@@ -1087,14 +1165,16 @@ def answer(text: str, who: str = "", *, scene: Optional[str] = None,
     for key in conf["order"]:
         spec = conf["sections"][key]
         body = contents.get(key, "")
-        # 抽屉没翻就是**一节都不加**：不留一个只有标题的空节（她会以为旧事是空的）。
-        if key == DRAWER_KEY and not body:
+        # 抽屉这两段谁没翻谁就**一节都不加**：不留一个只有标题的空节（她会以为旧事是空的）。
+        if key in (DRAWER_KEY, DRAWER_ALWAYS_KEY) and not body:
             continue
         clipped = body if len(body) <= spec["cap"] else body[:spec["cap"]]
         blocks.append("[%s]\n%s" % (spec["label"], clipped))
         row = {"key": key, "chars": len(clipped), "cap": spec["cap"]}
         if key == DRAWER_KEY:
             row["count"] = drawer_read["count"]      # 这一轮真放进几篇（页面照它显示）
+        if key == DRAWER_ALWAYS_KEY:
+            row["count"] = 1 if drawer_always_text else 0   # 恒定那篇：一篇或没有
         if key == CALLER_KEY:
             # 这一轮是谁的读数：号**只在这一行**（回包 / 面板 / 账看得到），提示词里一个数字都没有。
             # 不另开顶层键：成功体的键是冻结契约，这一格挂在已有的 assembly.sections 里。
@@ -1806,47 +1886,74 @@ def _drawer_month(date: str, spec: Mapping[str, Any]) -> str:
     return str(spec["month_words"].get(str(int(piece))) or "")
 
 
+def _drawer_overlap(said: str, text: str) -> int:
+    """这段字与问句最长的连续重合字数（一个字都不重合就是 0）。
+
+    「连续重合」是这一节唯一的话题尺子：分词要另一份词表，词表必漏；而两句话说的是同一件事时，
+    总会有一段字一模一样。取最长的那个窗口——不是命中/没命中两档，是为了给每一篇一个分数：
+    恒定那篇按分数从高到低取，被问时那几篇也是按分数先排。
+    """
+    best = 0
+    size = len(text)
+    for start in range(size):
+        # 只找比手上更长的：end 从尾巴往回缩，缩到 start + best 就停。
+        for end in range(size, start + best, -1):
+            if text[start:end] in said:
+                best = end - start
+                break
+    return best
+
+
 def _drawer_share(said: str, text: str, size: int) -> bool:
     """这段字与问句有没有连续 size 字重合（逐段滑一遍；分词要另一份词表，这里不造）。"""
-    if len(text) < size:
-        return False
-    for start in range(0, len(text) - size + 1):
-        if text[start:start + size] in said:
-            return True
-    return False
+    return _drawer_overlap(said, text) >= size
 
 
-def _drawer_topic(item: Mapping[str, Any], date: str, spec: Mapping[str, Any], said: str) -> bool:
-    """相关性：时间词（那个月的说法）整词命中，或 name / at / note 与问句连续重合若干字。
+def _drawer_score(item: Mapping[str, Any], date: str, spec: Mapping[str, Any], said: str) -> int:
+    """这一篇有多贴近这一句：月份词（那个月的说法）整词命中 + name / at / note 的连续重合字数。
 
-    「若干」是 drawer.topic_min_chars，本文件一个数都不写。
+    「若干」是 drawer.topic_min_chars，本文件一个数都不写。两条判据**相加**，所以
+    `score >= topic_min_chars` 就是原来那个「相关 / 不相关」的判据（月份词单独命中就够）——
+    恒定那篇要的不是命中与否，是高低：用同一份分，两段才不会把「最相关」判成两篇。
     """
-    month = _drawer_month(date, spec)
-    if month and month in said:
-        return True
     size = spec["topic_min_chars"]
+    month = _drawer_month(date, spec)
+    score = size if (month and month in said) else 0
     for piece in (str(item.get("name") or ""), str(item.get("at") or ""),
                   str(item.get("note") or "")):
-        if _drawer_share(said, piece, size):
-            return True
-    return False
+        best = _drawer_overlap(said, piece)
+        if best > score:
+            score = best
+    return score
 
 
-def _drawer_pick(items: Sequence[Mapping[str, Any]], spec: Mapping[str, Any],
-                 said: str) -> List[Tuple[Mapping[str, Any], str]]:
-    """挑哪几篇：先筛出写得出日期的，再按「相关优先、同档里日期从新到旧」排，取前 max_entries。
+def _drawer_ranked(items: Sequence[Mapping[str, Any]], spec: Mapping[str, Any],
+                   said: str) -> List[Tuple[int, str, Mapping[str, Any]]]:
+    """整份清单排一遍：(分, 日期, 篇)，分高的先、同分按日期从新到旧。
 
-    两条判据写在这里、常数在数据里：相关性见 _drawer_topic；日期一栏用 name / at 的行首
-    那十个字（YYYY-MM-DD 按字面比就是按日先后比）。没有相关项时，整份清单就是纯日期倒序。
+    两段（恒定那篇与「被问时」）都从这一份里取——排一次，两处不各排一份，否则同一轮里
+    两段可能把「最相关」判成两篇。日期一栏用 name / at 的行首若干字（YYYY-MM-DD 按字面比就是
+    按日先后比）；写不出日期的那一篇整篇不进（行首没有日期，行就对不上号）。
     """
-    rows: List[Tuple[bool, str, Mapping[str, Any]]] = []
+    rows: List[Tuple[int, str, Mapping[str, Any]]] = []
     for item in items:
         date = _drawer_date(item, spec)
         if not date:
             continue
-        rows.append((_drawer_topic(item, date, spec, said), date, item))
+        rows.append((_drawer_score(item, date, spec, said), date, item))
     rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    return [(item, date) for _topic, date, item in rows[:spec["max_entries"]]]
+    return rows
+
+
+def _drawer_pick(ranked: Sequence[Tuple[int, str, Mapping[str, Any]]],
+                 spec: Mapping[str, Any]) -> List[Tuple[Mapping[str, Any], str]]:
+    """被问时挑哪几篇：从排好的那一份里取前 max_entries（分高的先、同分新的先）。"""
+    return [(item, date) for _score, date, item in ranked[:spec["max_entries"]]]
+
+
+def _drawer_name(item: Mapping[str, Any]) -> str:
+    """这一篇叫什么（去重按 name，不按 card_id：人认的是名字，账上也记名字）。"""
+    return str(item.get("name") or item.get("card_id") or "")
 
 
 def _drawer_body(item: Mapping[str, Any], spec: Mapping[str, Any]) -> str:
@@ -1892,29 +1999,192 @@ def _drawer_excerpt(body: str, allow: int, spec: Mapping[str, Any],
     return piece + spec["more"], True
 
 
-def _drawer(conf: Mapping[str, Any], said: str, scene: str) -> Tuple[Dict[str, Any], str]:
-    """抽屉这一节：装配前判一次意图，命中才向家取 2–3 篇旧事，整节压进 sections.drawer.cap。
+# —— 恒定那篇的账本 ————————————————————————————————
+
+
+def drawer_log_path(root: Optional[Any] = None) -> Path:
+    """恒定那篇的账本落点：root 给定时按它（测试），否则 <器官目录>/mind/drawer_usage.jsonl。
+
+    与口癖账、语气账落在同一处：它是她天天变的行为账，不进 git，也不是配置。
+    """
+    base = Path(root) if root is not None else paths.organ_dir("mind")
+    return base / DRAWER_LOG
+
+
+def read_drawer_log(root: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """读账本：坏行（不是 JSON、不是对象）跳过不炸——一份底稿读不下去，不该让她这一轮闭口。"""
+    path = drawer_log_path(root)
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _log_drawer(row: Mapping[str, Any], root: Optional[Any] = None) -> None:
+    """追一行：只追加，不重写全文件。写不进去只 WARN——记账不许把这一轮的话挡回去。"""
+    path = drawer_log_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        LOGGER.warning("抽屉·恒定那篇的账写不进去（%s）：%s", path, exc)
+
+
+def _drawer_when(text: Any) -> Optional[datetime]:
+    """账上那一行的时刻：解析不了就 None（坏行不参与窗口，也不炸）。"""
+    try:
+        return datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _drawer_used(at: str, spec: Mapping[str, Any], root: Optional[Any] = None) -> set:
+    """最近 dedupe_days 天带过的 name（窗口的边看这一轮的 at，不看本机此刻的钟）。
+
+    8 天前那一行已经出了窗口、3 天前那一行还在里面——去重的全部就是这一句。
+    账上带时区与不带时区凑到一块（老行）比不了大小，那一行不参与判：不猜，也不炸。
+    """
+    now = _drawer_when(at)
+    if now is None:
+        return set()
+    days = int(spec["dedupe_days"])
+    used = set()
+    for row in read_drawer_log(root):
+        name = str(row.get("name") or "")
+        when = _drawer_when(row.get("at") or "")
+        if not name or when is None:
+            continue
+        try:
+            inside = (now - when) <= timedelta(days=days)
+        except TypeError:
+            continue
+        if inside:
+            used.add(name)
+    return used
+
+
+def _drawer_always_candidates(ranked: Sequence[Tuple[int, str, Mapping[str, Any]]],
+                              used: Any) -> List[Tuple[int, str, Mapping[str, Any]]]:
+    """恒定那一篇的候选：从分最高的往下走，窗口内带过的那几个名字剔掉。
+
+    回的是**一整串**不是一篇：排最前的那一篇未必压得进 always.max_chars（第一句就比余地长
+    就截不出整句），调用方要一路往下试到有一篇撑得起这一节为止。候选全空（每个名字都在
+    dedupe_days 窗口里）才是「这一轮不带」——宁可空一轮，也不把刚带过的那篇塞回来。
+    """
+    rows: List[Tuple[int, str, Mapping[str, Any]]] = []
+    for score, date, item in ranked:
+        name = _drawer_name(item)
+        if name and name in used:
+            continue
+        rows.append((score, date, item))
+    return rows
+
+
+def _drawer_always_text(conf: Mapping[str, Any], spec: Mapping[str, Any],
+                        pick: Tuple[int, str, Mapping[str, Any]], ends: str
+                        ) -> Tuple[bool, str]:
+    """恒定那一段的字（不含段标题）：一行旧日记 + 一句数据给的说明。
+
+    上限是 always.max_chars，量的是**提示词里那一整块**——段标题（sections.drawer_always.label）
+    与行格式（日期 + 正文）都在里面，所以正文的余地要先扣掉标题前缀、行首与那句说明。
+    放不下就按话题截到整句再接 always.more；一句都截不出来就这一轮不带（不硬塞半句）。
+    """
+    always = spec["always"]
+    section = (conf.get("sections") or {}).get(DRAWER_ALWAYS_KEY)
+    if not isinstance(section, Mapping):
+        LOGGER.warning("抽屉·恒定那篇没有自己的那一节（%s）：这一轮不带", DRAWER_ALWAYS_KEY)
+        return False, ""
+    prefix = "[%s]%s" % (section["label"], LINE_JOIN)
+    _score, date, item = pick
+    body = _drawer_body(item, spec)
+    if not body:
+        return False, ""
+    note = always["note"]
+    head = always["line"] % (date, "")
+    allow = int(always["max_chars"]) - len(prefix) - len(head) - len(LINE_JOIN) - len(note)
+    if allow <= 0:
+        LOGGER.warning("抽屉·恒定那篇的余地不够（上限 %d 字）：这一轮不带",
+                       always["max_chars"])
+        return False, ""
+    piece, _cut = _drawer_excerpt(body, allow, always, ends)
+    if not piece:
+        return False, ""
+    text = (always["line"] % (date, piece)) + LINE_JOIN + note
+    if len(prefix) + len(text) > int(always["max_chars"]):
+        return False, ""
+    return True, text
+
+
+def _drawer(conf: Mapping[str, Any], said: str, scene: str, at: str = "",
+            root: Optional[Any] = None) -> Tuple[Dict[str, Any], str, str]:
+    """抽屉两段：恒定那一篇（每轮都带）+ 被问时那 2–3 篇（命中关键词才翻）。
 
     次序（挑法是这一节的判据，常数全在 assembly.json 的 drawer 里）：
-      1. _drawer_due 判意图（enabled + 关键词，**不看场合**）——不成立直接回空串，**一次 IO 都不做**；
-      2. list_room 按 room / kind / shelves[场合] 筛出她要的那一类（场合只决定能取哪几格），
-         相关性优先、再按日期从新到旧取 max_entries 篇（见 _drawer_pick）；
-      3. 逐篇 read_item 取正文，每篇一行（行模板 drawer.line：行首日期 + 正文）；
-      4. 场合是 unknown 时，**节内第一行**（节标题之后、条目之前）插一句 drawer.unknown_note：
-         别读成私聊，这一轮只翻了普通那几格。private / group 都不插这一行；
-      5. 节尾接 drawer.testimony_note：那些是她自己写下的，只能说「我写过」。
-    整节（含 unknown 那行与节尾那句说明）用 len 量的总字数 ≤ cap：放不下的那篇这一次就不放。
-    unknown 那句先占位（跟节尾那句同一个道理：它是这一档的要害，被 cap 锯掉就等于没写）。
+      0. 抽屉关着，或恒定那一段关着又没有关键词命中 → 都回空，**一次 IO 都不做**；
+      1. _drawer_rows 按 room / kind / shelves[场合] 读一次清单（场合只决定能取哪几格）；
+      2. _drawer_ranked 排一次（话题相似度 + 日期），两段都从这一份里取；
+      3. 恒定那篇：从 _drawer_always_candidates 往下试，**第一篇压得进上限的就是它**
+         （截不出整句就换下一篇，绝不因为排第一的那篇放不下把整段拖成空）；挑到就落一行账
+         （at / name / scene / score / why），渲染成一行旧日记 + always.note；
+      4. 命中关键词时，「被问时」那一节照旧取 max_entries 篇、逐篇 read_item、压进 cap：
+         恒定那篇用过的那一篇先从候选里剔掉（同一轮两节不重复同一篇；剔完没了就这一节空着），
+         unknown 那档在节内第一行插 unknown_note，节尾接 testimony_note。
+    两段各占一节、各一个上限：字数分别数得出来，一段被锯不会把另一段也吃掉。
     回包那一格只带 key 与 count——正文进提示词，**不进长期记忆**。
     """
     blank: Dict[str, Any] = {"key": DRAWER_KEY, "count": 0}
     spec = conf.get("drawer")
-    if not isinstance(spec, Mapping) or not _drawer_due(spec, said):
-        return blank, ""
-    picked = _drawer_pick(_drawer_rows(spec, scene), spec, said)
-    if not picked:
-        return blank, ""
+    if not isinstance(spec, Mapping) or not spec.get("enabled"):
+        return blank, "", ""
+    always = spec.get("always")
+    always_on = isinstance(always, Mapping) and bool(always.get("enabled"))
+    due = _drawer_due(spec, said)
+    if not due and not always_on:
+        return blank, "", ""
     ends = str(conf["tone_rules"]["sentence_end_chars"])
+    ranked = _drawer_ranked(_drawer_rows(spec, scene), spec, said)
+    if not ranked:
+        return blank, "", ""
+    always_text = ""
+    carried_name = ""
+    if always_on:
+        # 恒定那篇**不看关键词**（due 只拦被问那一段）：一路往下试，第一篇撑得起这一节的就是它。
+        for pick in _drawer_always_candidates(ranked, _drawer_used(at, always, root)):
+            carried, drawn = _drawer_always_text(conf, spec, pick, ends)
+            if not carried:
+                continue        # 这一篇压不进上限（第一句就比余地长）：换下一篇
+            score, _date, item = pick
+            carried_name = _drawer_name(item)
+            always_text = drawn
+            _log_drawer({"at": at, "name": carried_name, "scene": scene,
+                         "score": int(score),
+                         "why": (DRAWER_WHY_TOPIC
+                                 if score >= spec["topic_min_chars"] else DRAWER_WHY_DATE)},
+                        root)
+            break
+    if not due:
+        return blank, always_text, ""
+    # 同一轮两节不许是同一篇：恒定那篇用完就从这一段剔掉；剔完没了这一段就空着，不为凑数放回来。
+    rest = ([row for row in ranked if _drawer_name(row[2]) != carried_name]
+            if carried_name else list(ranked))
+    picked = _drawer_pick(rest, spec)
+    if not picked:
+        return blank, always_text, ""
     note = spec["testimony_note"]
     # 来源未定那一档：节内第一行（节标题之后、条目之前）明说这一轮不是私聊，**不猜场合**。
     # 只认 unknown 这一个值：group / private 一个字都不加（群里那句「来源未定」本身就是噪声）。
@@ -1941,9 +2211,9 @@ def _drawer(conf: Mapping[str, Any], said: str, scene: str) -> Tuple[Dict[str, A
         lines.append(line)
         used += sep + len(line)
     if not lines:
-        return blank, ""
+        return blank, always_text, ""
     body_text = LINE_JOIN.join(head_lines + lines) + LINE_JOIN + note
-    return {"key": DRAWER_KEY, "count": len(lines)}, body_text
+    return {"key": DRAWER_KEY, "count": len(lines)}, always_text, body_text
 
 
 def _recall(brain: Any, said: str, who: str, scene: Optional[str] = None

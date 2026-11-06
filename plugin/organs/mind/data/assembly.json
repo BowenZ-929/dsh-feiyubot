@@ -10,6 +10,7 @@
     "banned",
     "action",
     "memory",
+    "drawer_always",
     "drawer",
     "heart",
     "mouth",
@@ -44,8 +45,12 @@
       "label": "脑装包",
       "cap": 900
     },
+    "drawer_always": {
+      "label": "（你写过的一篇日记）",
+      "cap": 100
+    },
     "drawer": {
-      "label": "（旧家日记）",
+      "label": "（你写过的旧日记）",
       "cap": 300
     },
     "heart": {
@@ -100,7 +105,7 @@
     "unknown_note": "（来源未定：这一轮没有判定是私聊还是群聊，只翻了普通那几格，没碰私下的日记；读的时候别当私聊说。）",
     "max_entries": 3,
     "cap": 300,
-    "label": "（旧家日记）",
+    "label": "（你写过的旧日记）",
     "list_limit": 200,
     "date_pattern": "^\\d{4}-\\d{2}-\\d{2}$",
     "date_chars": 10,
@@ -122,8 +127,16 @@
       "11": "十一月",
       "12": "十二月"
     },
+    "always": {
+      "enabled": true,
+      "max_chars": 100,
+      "dedupe_days": 7,
+      "line": "- %s：%s",
+      "more": "…",
+      "note": "这一篇是我自己随手写下的那一类，不是话头：不许当开场白复述，也别每轮提同一件事。"
+    },
     "testimony_note": "这些是我自己写下的，不是他说的；可以说「我写过」，不许说成「你说过」。",
-    "note": "抽屉那一节：装配前按 enabled + keywords 判一次意图——关着，或问句里一个关键词都不出现，就一节都不加、一次 IO 都不做（缺这一块也等于不翻，不是每轮翻）。**翻不翻只看意图，不看场合**：群里或场合不明时问到旧事，一样会翻。场合只决定能取哪几格（shelves）：private 普通 + 恋爱两格都能取，group 只取普通那格（私密内容不进退群上下文），unknown 也只取普通那格（保守），且在节内第一行插一句 unknown_note 标明「来源未定」；unknown 绝不推断成 group 或 private（猜错场合就是让她在群里说私话）。从家里 list_room 按 kind + shelves 筛出日记，挑法两条：相关性（month_words 里的月份词整词出现在问句里，或 name / at / note 与问句连续重合 topic_min_chars 字）先选，再按日期从新到旧补足到 max_entries。每篇一行：line 是行模板（行首日期取 name 前 date_chars 字、不像日期就取 at 前那几个字），正文最多 line_chars 字，放不下就截到整句（句末看 tone_rules.sentence_end_chars）、末尾接 more；整节渲染完的总字数 ≤ cap（与 sections.drawer.cap 是同一格，两处不等当场报），放不下的那篇这一次就不放，不硬塞。节尾必带 testimony_note：日记是她自己写下的（testimony=false），只能说「我写过」，不许说成对方说过。**这一节只进提示词，日记正文一个字都不落进长期记忆**。"
+    "note": "抽屉分两段、各占一节、字数分别数得出。恒定那篇（always）**每轮都带**：从家里挑一篇与这一句最贴近的旧日记（月份词整词命中 + name / at / note 与问句的连续重合字数，与「被问时」同一份分），一行旧日记 + 一句 note「不是话头」；它的上限 max_chars 量的是提示词里那一整块（含段标题「[（你写过的一篇日记）]」与行格式），所以 sections.drawer_always.cap 必须装得下它，装不下当场报。同一篇 name 在 dedupe_days 天内不重复带：账本 <器官目录>/mind/drawer_usage.jsonl 一轮一行 {at,name,scene,score,why}（why 是话题命中 topic / 只是按日期补的 date），选的时候读窗口内的 name，命中就换下一篇，全落在窗口里就这一轮不带（绝不把刚带过的塞回来）；排第一的那一篇压不进 max_chars（第一句就比余地长、截不出整句）就换下一篇，绝不因为那一篇把整段拖成空；恒定那篇与关键词无关，每轮都算。被问那一段的候选里剔掉恒定那篇已经用过的那一篇——同一轮两节不许重复同一篇，剔完没了就那一段空着，不为凑数把同一篇放回来。被问时那一段照旧：装配前按 enabled + keywords 判一次意图——关着，或问句里一个关键词都不出现，就只留恒定那一篇、这一段一节都不加（缺这一块也等于不翻，不是每轮翻）。**翻不翻只看意图，不看场合**：群里或场合不明时问到旧事，一样会翻。场合只决定能取哪几格（shelves）：private 普通 + 恋爱两格都能取，group 只取普通那格（私密内容不进退群上下文），unknown 也只取普通那格（保守），且在节内第一行插一句 unknown_note 标明「来源未定」；unknown 绝不推断成 group 或 private（猜错场合就是让她在群里说私话）。从家里 list_room 按 kind + shelves 筛出日记，挑法两条：相关性（month_words 里的月份词整词出现在问句里，或 name / at / note 与问句连续重合 topic_min_chars 字）先选，再按日期从新到旧补足到 max_entries。每篇一行：line 是行模板（行首日期取 name 前 date_chars 字、不像日期就取 at 前那几个字），正文最多 line_chars 字，放不下就截到整句（句末看 tone_rules.sentence_end_chars）、末尾接 more；整节渲染完的总字数 ≤ cap（与 sections.drawer.cap 是同一格，两处不等当场报），放不下的那篇这一次就不放，不硬塞。节尾必带 testimony_note：日记是她自己写下的（testimony=false），只能说「我写过」，不许说成对方说过。**这一节只进提示词，日记正文一个字都不落进长期记忆**。"
   },
   "prompt": {
     "system": "你正在装配这一轮对话的上下文：下面几段按顺序拼好，一个字都不许改。\n\n{sections}\n\n这一次回复不超过 {reply_budget} 个字。{reply_instruction}",
