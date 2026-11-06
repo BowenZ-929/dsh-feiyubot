@@ -714,7 +714,7 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 一行一段，`kind` 固定是 `decision`（实测）：
 
 ```json
-{"ts":"…","kind":"decision","scene":"group","human":"没回：这个群这个小时说得够多了","machine":{"batch":{"id":"b19","msgs":2,"waited_ms":121.38,"tier":"continuing","at":"2026-11-06T03:05:47.221Z"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":true}],"decided":"silent","why":"第 2 道门 quota 拦下了","reason_code":"quota_exceeded","scene":"group","target":"group:734723709","reason":null}}
+{"ts":"…","kind":"decision","scene":"group","human":"没回：这个群这个小时说得够多了","machine":{"batch":{"id":"b19","msgs":2,"waited_ms":121.38,"tier":"continuing","at":"2026-11-06T03:05:47.221Z"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":true}],"decided":"silent","why":"第 2 道门 quota 拦下了","reason_code":"quota_exceeded","scene":"group","target":"group:734723709","reason":null,"source":"inbound","gate":null}}
 ```
 
 - `machine.batch.msgs` 是**条数**，不是 `segment.ts` 里那份消息数组（名字撞了，写错会让面板把条数算成 NaN）。
@@ -738,6 +738,22 @@ blocked mode=silent，想发但被门挡住 chunks=1：在的
 | `outbound_failed` | **出站全败**：`runBatch` 收尾 `sent === 0`（`failed` / `uncertain` / `unsent` / ack 超时 / 发送前连接已断） | `没回：发出去了但没确认（协议端没回执）` |
 | `core_empty` | 她这轮没说话（`chunks:[]`、全是空白泡，或**主动沉默**） | `没回：她这轮不想说` |
 | `no_mention` | 保留值，M4 不用 | — |
+
+**两格不是一回事（`gates` vs `gate`）**：
+
+| 字段 | 谁写的 | 是什么 |
+| --- | --- | --- |
+| `machine.gates` | **通道自己** | 通道的**门链**：`mode → quota → core → outbound → limits`，每道门 `{name, hit}`，第一个 `hit:true` 决定 `reason_code` |
+| `machine.gate` | **核（原样抄）** | 核那一轮的**闸判摘要**：整轮一行 `{at, audit:{status,hit,lcs_len,threshold}, rewrite:{status}}` |
+
+判据（钉死）：**`gate` 缺了就写 `null`，绝不拼空壳**。
+没进闸的那一轮回包里根本没有 `gate.summary`，`null` 是「没判」的唯一证据；
+把它补成 `{}` 或 `{status:"ok"}` 等于**伪造「判过」**，面板会把没判的轮次也算进命中率。
+`gate.summary` 不是普通对象时（字符串 / 数组 / null）同样一律 `null`：不搬运垃圾，也不把字符串包成对象。
+
+哪几轮会带上它：只有「核回包了、闸判拿到了、并且**真的发出去**（`sent ≥ 1`）」的那一轮。
+`/say`（主动开口，不调核）、`silent_mode`、`quota_exceeded`、`core_error`、`core_empty`、
+`outbound_failed` 都一律 `null`——它们没拿到核的闸判。
 
 **`outbound_failed` 为什么叫「没确认」**：ack 超时或连接断开时，我们并不知道协议端到底收没收到——
 所以措辞不能是「没发」（可能已经发出去了），也不能是「核出了问题」（核好着呢）。
@@ -984,7 +1000,7 @@ curl -s -X POST http://127.0.0.1:6261/say \
 ## 决策账多一个 `source`
 
 ```json
-{"ts":"…","kind":"decision","scene":"group","human":"回了：接话","machine":{"batch":{"id":"say-1","msgs":0,"waited_ms":0,"tier":"proactive","at":"2026-11-06T04:41:5x.xxxZ"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":false}],"decided":"sent","why":"门全过（2 道），照发","reason_code":"sent","scene":"group","target":"group:791000001","reason":null,"source":"proactive"}}
+{"ts":"…","kind":"decision","scene":"group","human":"回了：接话","machine":{"batch":{"id":"say-1","msgs":0,"waited_ms":0,"tier":"proactive","at":"2026-11-06T04:41:5x.xxxZ"},"gates":[{"name":"mode","hit":false},{"name":"quota","hit":false}],"decided":"sent","why":"门全过（2 道），照发","reason_code":"sent","scene":"group","target":"group:791000001","reason":null,"source":"proactive","gate":null}}
 ```
 
 - `machine.source`：`"inbound"`（入站合批那条路）或 `"proactive"`（`/say`）；**缺省是 `inbound`**，

@@ -7,6 +7,20 @@ export const DECISIONS_RELATIVE_PATH = ".state/decisions.jsonl";
 
 export type DecisionPolicy = { decide: { reasonCodes: string[] } };
 
+// 核回包里的「闸判摘要」：整轮一行 {at, audit:{status,hit,lcs_len,threshold}, rewrite:{status}}。
+// 这里只负责原样搬运：没进闸的那一轮回包里根本没有 gate.summary，那就是 null——
+// 绝不补默认键、绝不把 undefined 变成 {}、绝不把字符串包成 {status:…}（拼空壳等于伪造「判过」）。
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const readGateSummary = (payload: unknown): Record<string, unknown> | null => {
+  if (!isPlainObject(payload)) return null;
+  const gate = payload.gate;
+  if (!isPlainObject(gate)) return null;
+  const summary = gate.summary;
+  return isPlainObject(summary) ? summary : null;
+};
+
 export type BatchSnapshot = {
   id: string;
   msgs: number;
@@ -31,6 +45,9 @@ export type DecisionInput = {
   // source 缺省必须是 inbound：既有的入站调用点一行不改也能继续工作。
   // 主动开口（POST /say）必须显式写 proactive，别让两条路在账上长得一样。
   source?: "inbound" | "proactive";
+  // 核的闸判摘要（原样）。没进闸 / 没拿到回包 / /say 这条路都是 null。
+  // 注意它和 gates（通道自己的门链）是两回事，两格并存、不许合并。
+  gate?: Record<string, unknown> | null;
   batch: BatchSnapshot;
   gates: GateInput[];
 };
@@ -45,6 +62,7 @@ export type DecisionMachine = {
   target: string;
   reason: string | null;
   source: "inbound" | "proactive";
+  gate: Record<string, unknown> | null;
 };
 
 export type DecisionRow = {
@@ -118,6 +136,11 @@ export const makeDecision = (
   if (source !== "inbound" && source !== "proactive") {
     throw new RangeError(`machine.source 只认 inbound / proactive，拿到 ${JSON.stringify(input.source)}`);
   }
+  // 闸判摘要：缺省落到 null（不是 undefined——JSON.stringify 之后账里必须看得见 "gate":null）。
+  const gate = input.gate ?? null;
+  if (gate !== null && !isPlainObject(gate)) {
+    throw new RangeError(`machine.gate 必须是 JSON 对象或 null，拿到 ${typeof gate}`);
+  }
   const gates: GateRecord[] = input.gates.map((gate) => ({ name: gate.name, hit: gate.hit === true }));
   const blockingIndex = input.gates.findIndex((gate) => gate.hit === true);
   const reasonCode = blockingIndex >= 0 ? input.gates[blockingIndex].code : "sent";
@@ -153,6 +176,7 @@ export const makeDecision = (
       target: input.target,
       reason,
       source,
+      gate,
     },
   };
 };

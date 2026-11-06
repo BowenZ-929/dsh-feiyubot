@@ -426,6 +426,51 @@ const SILENT_MARK = "SILENTREPLY";
 const EMPTY_MARK = "EMPTYREPLY";
 // 这个标记让假核回**两泡**：G13 靠「协议端不回 ack」把两泡都卡在出站失败上（sent=0）。
 const TWO_MARK = "TWOREPLY";
+// G19：假核按这些标记往回包里塞「闸判摘要」的五种形状（没有标记就一个字节都不加）。
+const GATE_HIT = "GATEHIT";
+const GATE_MISS = "GATEMISS";
+const GATE_NONE = "GATENONE";
+const GATE_BAD_STR = "GATEBADSTR";
+const GATE_BAD_ARR = "GATEBADARR";
+const GATE_BAD_NULL = "GATEBADNULL";
+
+const gateHitSummary = {
+  at: "2026-11-06T05:00:00.000Z",
+  audit: { status: "ok", hit: true, lcs_len: 42, threshold: 0.8 },
+  rewrite: { status: "ok" },
+};
+const gateMissSummary = {
+  at: "2026-11-06T05:01:00.000Z",
+  audit: { status: "ok", hit: false, lcs_len: 0, threshold: 0.8 },
+  rewrite: { status: "not-tried" },
+};
+
+// undefined = 回包里没有 gate 这一格；其余值原样塞进 gate.summary（含垃圾形状，用来验不搬运）。
+const gateSummaryFor = (text: string): unknown => {
+  if (text.includes(GATE_HIT)) return gateHitSummary;
+  if (text.includes(GATE_MISS)) return gateMissSummary;
+  if (text.includes(GATE_BAD_STR)) return "hit";
+  if (text.includes(GATE_BAD_ARR)) return [1, 2, 3];
+  if (text.includes(GATE_BAD_NULL)) return null;
+  return undefined;
+};
+
+// 深等专用：键序稳定化，避免「同一个对象、不同键序」被误判成不等。
+const stableJson = (value: unknown): string => {
+  if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]";
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return (
+      "{" +
+      Object.keys(record)
+        .sort()
+        .map((key) => JSON.stringify(key) + ":" + stableJson(record[key]))
+        .join(",") +
+      "}"
+    );
+  }
+  return JSON.stringify(value) ?? "undefined";
+};
 const SPEAKER_A = 3100000001;
 const SPEAKER_B = 3100000002;
 const SPEAKER_C = 3100000003;
@@ -481,6 +526,27 @@ const decisionRowsSince = (path: string, sinceWall: number): DecisionRow[] =>
     return Number.isFinite(stamp) && stamp >= sinceWall - 100;
   });
 
+// 决策行现在带 machine.target：按目标归属比按时间窗可靠得多。
+// 时间窗只能筛掉「更早」的行，筛不掉**相邻用例还在飞的那一段**——那会让计数提前满足。
+const decisionRowsForTarget = (path: string, target: string, sinceWall: number): DecisionRow[] =>
+  decisionRowsSince(path, sinceWall).filter((row) => row.machine?.target === target);
+
+const waitForTargetDecisionRows = async (
+  path: string,
+  target: string,
+  sinceWall: number,
+  want: number,
+  ms: number,
+): Promise<DecisionRow[]> => {
+  const deadline = Date.now() + ms;
+  let rows = decisionRowsForTarget(path, target, sinceWall);
+  while (rows.length < want && Date.now() < deadline) {
+    await sleep(50);
+    rows = decisionRowsForTarget(path, target, sinceWall);
+  }
+  return rows;
+};
+
 const waitForDecisionRows = async (
   path: string,
   sinceWall: number,
@@ -515,7 +581,7 @@ const startFakeCore = async (): Promise<FakeCore> => {
       }
       hits.push({ t: Date.now(), body });
       const text = typeof body.text === "string" ? body.text : "";
-      const payload = text.includes(LONG_MARK)
+      const base = text.includes(LONG_MARK)
         ? { ok: true, chunks: [{ text: "长".repeat(600), gap_before: 0, send_at: 0 }] }
         : text.includes(SILENT_MARK)
           ? { ok: true, chunks: [], send: false, reason: "刚在忙" }
@@ -524,6 +590,9 @@ const startFakeCore = async (): Promise<FakeCore> => {
             : text.includes(TWO_MARK)
               ? { ok: true, chunks: [{ text: "第一泡", gap_before: 0, send_at: 0 }, { text: "第二泡", gap_before: 0, send_at: 0 }] }
               : { ok: true, chunks: [{ text: "在的", gap_before: 0, send_at: 0 }] };
+      // 闸判摘要只在打了标记时挂上去：没标记的回包连 gate 这个键都不该有（那才是「没进闸」）。
+      const summary = gateSummaryFor(text);
+      const payload = summary === undefined ? base : { ...base, gate: { summary } };
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(payload));
     });
@@ -1152,6 +1221,87 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
     }
 
+    // ---- G19：决策账带「核的闸判摘要」（原样抄；缺了是 null，绝不拼空壳） ----
+    {
+      // ① 命中：audit.hit=true + lcs_len=42
+      const hitGroup = nextGroup();
+      const hitStart = Date.now();
+      post(hitGroup, SPEAKER_A, "这轮命中闸 " + GATE_HIT);
+      const hitRows = await waitForTargetDecisionRows(config.decisions, "group:" + hitGroup, hitStart, 1, 12000);
+      await sleep(300);
+      const hitRow = hitRows[hitRows.length - 1];
+      add(
+        "G19a",
+        "命中（audit.hit=true）：machine.gate 与回包 summary 深等，含 lcs_len=42",
+        stableJson(hitRow?.machine?.gate) === stableJson(gateHitSummary) &&
+          (hitRow?.machine?.gate as any)?.audit?.lcs_len === 42,
+        "gate=" + JSON.stringify(hitRow?.machine?.gate),
+      );
+
+      // ② 未命中：hit=false、rewrite.status=not-tried
+      const missGroup = nextGroup();
+      const missStart = Date.now();
+      post(missGroup, SPEAKER_A, "这轮没命中闸 " + GATE_MISS);
+      const missRows = await waitForTargetDecisionRows(config.decisions, "group:" + missGroup, missStart, 1, 12000);
+      await sleep(300);
+      const missRow = missRows[missRows.length - 1];
+      add(
+        "G19b",
+        "未命中（hit=false、rewrite.status=not-tried）：同样深等带过去",
+        stableJson(missRow?.machine?.gate) === stableJson(gateMissSummary) &&
+          (missRow?.machine?.gate as any)?.rewrite?.status === "not-tried",
+        "gate=" + JSON.stringify(missRow?.machine?.gate),
+      );
+
+      // ③ 回包里根本没有 gate 这一格 → null（不是 {}、不是 undefined）
+      const noneGroup = nextGroup();
+      const noneStart = Date.now();
+      post(noneGroup, SPEAKER_A, "没进闸的那一轮 " + GATE_NONE);
+      const noneRows = await waitForTargetDecisionRows(config.decisions, "group:" + noneGroup, noneStart, 1, 12000);
+      await sleep(300);
+      const noneRow = noneRows[noneRows.length - 1];
+      add(
+        "G19c",
+        "回包里没有 gate → machine.gate === null（不是 {}、不是 undefined）",
+        noneRows.length === 1 && noneRow?.machine?.gate === null,
+        "gate=" + JSON.stringify(noneRow?.machine?.gate) + " typeof=" + typeof noneRow?.machine?.gate,
+      );
+
+      // ④ 垃圾形状：字符串 / 数组 / null → 一律 null（不搬运垃圾）。每种各用一个新的群，互不并批。
+      const badGates: Array<Record<string, unknown> | null | undefined> = [];
+      for (const marker of [GATE_BAD_STR, GATE_BAD_ARR, GATE_BAD_NULL]) {
+        const groupId = nextGroup();
+        const caseStart = Date.now();
+        post(groupId, SPEAKER_A, "垃圾形状 " + marker);
+        const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 1, 12000);
+        await sleep(200);
+        badGates.push(rows[rows.length - 1]?.machine?.gate);
+      }
+      add(
+        "G19d",
+        "垃圾形状（summary 是字符串 / 数组 / null）一律 null",
+        badGates.length === 3 && badGates.every((gate) => gate === null),
+        "3 段 gate=[" + badGates.map((gate) => JSON.stringify(gate)).join(",") + "]",
+      );
+
+      // ⑤ /say：这条路不调核 → gate 恒 null
+      const sayStart = Date.now();
+      const sayGroup = nextGroup();
+      const sayRes = await postJson("http://127.0.0.1:" + channel.port + "/say", {
+        scene: "group",
+        target: sayGroup,
+        chunks: [{ text: "主动开口没有闸判" }],
+      });
+      const sayRows = await waitForTargetDecisionRows(config.decisions, "group:" + sayGroup, sayStart, 1, 12000);
+      const sayRow = sayRows[sayRows.length - 1];
+      add(
+        "G19e",
+        "/say 那条：machine.gate === null（不调核就没有闸判）",
+        sayRes.json?.ok === true && sayRow?.machine?.gate === null,
+        "ok=" + String(sayRes.json?.ok) + " gate=" + JSON.stringify(sayRow?.machine?.gate),
+      );
+    }
+
     // ---- G8：同群连发超过配额上限 → 第 N+1 段不出手、quota_exceeded ----
     {
       const groupId = nextGroup();
@@ -1162,13 +1312,13 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         post(groupId, SPEAKER_A, "配额" + (index + 1) + "-a");
         await sleep(120);
         post(groupId, SPEAKER_B, "配额" + (index + 1) + "-b");
-        await waitForDecisionRows(config.decisions, caseStart, index + 1, 6000);
+        await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, index + 1, 8000);
         await sleep(150);
       }
       await sleep(500);
       const actions = actionsSince(start);
       const hits = hitsOf(groupId);
-      const rows = decisionRowsSince(config.decisions, caseStart);
+      const rows = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart);
       add(
         "G8a",
         "前 " + perGroupMax + " 段各回一条，第 " + segments + " 段不出手",
@@ -1193,7 +1343,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         post(groupId, SPEAKER_A, "沉默" + (index + 1) + "-a " + SILENT_MARK);
         await sleep(100);
         post(groupId, SPEAKER_B, "沉默" + (index + 1) + "-b");
-        await waitForDecisionRows(config.decisions, caseStart, index + 1, 8000);
+        await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, index + 1, 8000);
         await sleep(120);
       }
       const afterSilent = quotaStamps(groupId);
@@ -1204,7 +1354,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       post(groupId, SPEAKER_A, "第七段该说话了-a");
       await sleep(100);
       post(groupId, SPEAKER_B, "第七段该说话了-b");
-      await waitForDecisionRows(config.decisions, caseStart, 7, 8000);
+      await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, 7, 8000);
       await sleep(400);
       const seventhActions = actionsSince(startSeventh).length;
       const afterSeventh = quotaStamps(groupId);
@@ -1216,13 +1366,13 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
 
       // 对照组：这一群接着连打 5 段正常回包（累计 6 次），第 7 次必须被配额挡住。
-      let want = decisionRowsSince(config.decisions, caseStart).length;
+      let want = decisionRowsForTarget(config.decisions, "group:" + groupId, caseStart).length;
       for (let index = 0; index < 5; index += 1) {
         post(groupId, SPEAKER_A, "对照" + (index + 1) + "-a");
         await sleep(100);
         post(groupId, SPEAKER_B, "对照" + (index + 1) + "-b");
         want += 1;
-        await waitForDecisionRows(config.decisions, caseStart, want, 8000);
+        await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, want, 8000);
         await sleep(120);
       }
       const beforeRefusal = mark();
@@ -1230,7 +1380,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       await sleep(100);
       post(groupId, SPEAKER_B, "超额这一段-b");
       want += 1;
-      const rows = await waitForDecisionRows(config.decisions, caseStart, want, 8000);
+      const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, caseStart, want, 8000);
       await sleep(400);
       const refusedActions = actionsSince(beforeRefusal).length;
       const lastRow = rows[rows.length - 1];
@@ -1255,7 +1405,18 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       post(groupA, SPEAKER_A, "A 群第 2 句");
       await sleep(150);
       post(groupB, SPEAKER_B, "B 群第 2 句");
-      const decisions = await waitForDecisionRows(config.decisions, caseStart, 2, 14000);
+      const bothTargets = (): DecisionRow[] =>
+        decisionRowsSince(config.decisions, caseStart).filter(
+          (row) => row.machine?.target === "group:" + groupA || row.machine?.target === "group:" + groupB,
+        );
+      let decisions = bothTargets();
+      {
+        const deadline = Date.now() + 14000;
+        while (decisions.length < 2 && Date.now() < deadline) {
+          await sleep(50);
+          decisions = bothTargets();
+        }
+      }
       await sleep(500);
       const hitsA = hitsOf(groupA);
       const hitsB = hitsOf(groupB);

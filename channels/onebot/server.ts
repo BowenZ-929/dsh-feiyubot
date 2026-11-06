@@ -28,7 +28,7 @@ import { loadPolicy, type Policy } from "./policy.ts";
 import { BatchHub, type BatchSnapshot } from "./batch.ts";
 import { renderSegment } from "./segment.ts";
 import { enforceLimits } from "./compose.ts";
-import { DECISIONS_RELATIVE_PATH, DecisionLog, type GateInput } from "./decide.ts";
+import { DECISIONS_RELATIVE_PATH, DecisionLog, readGateSummary, type GateInput } from "./decide.ts";
 import { QUOTA_RELATIVE_PATH, Quota } from "./quota.ts";
 
 const HOST = "127.0.0.1";
@@ -240,7 +240,7 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
   // 只有真扣过配额的那一段才谈得上退回：silent 不扣，所以也不退。
   let charged = false;
   // 一批只写一行：先到的那句实话就是这一段的结论，后面谁再想写都不许覆盖。
-  const decide = (extra: GateInput[], reason: string | null = null): void => {
+  const decide = (extra: GateInput[], reason: string | null = null, gate: Record<string, unknown> | null = null): void => {
     if (decided) return;
     decided = true;
     const all = [...gates, ...extra];
@@ -253,6 +253,8 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         source: "inbound",
         // 核给的理由是自由文本，由 machine.reason 单独承载；why 只描述门，不许再塞门名里。
         reason,
+        // 核的闸判摘要（原样）：和 gates（通道门链）两格并存，没拿到就是 null。
+        gate,
         // msgs 是条数，不是 segment.ts 里那份消息数组：名字撞了，写错会让面板把条数算成 NaN。
         batch: {
           id: snapshot.batchId,
@@ -366,6 +368,9 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         log: logOf,
       });
 
+    // 闸判摘要只从**原始回包**取：chunks / text 两路都要能读到它，所以别从 parseCoreResponse 的产物里取。
+    const gateSummary = attempt.kind === "payload" ? readGateSummary(attempt.payload) : null;
+
     if (attempt.kind !== "payload") {
       await settle(attempt);
       refund("核出错");
@@ -419,12 +424,14 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       // 措辞是「没确认」——不是「核坏了」，也不是「没发」。decided 仍是 silent，退款照旧只退一次。
       gates.push({ name: "outbound", code: "outbound_failed", hit: true });
     }
+    // 只有真的发出去（sent ≥ 1）才算「这一轮拿到了核的闸判并走完了」；出站全败 / 没出手一律 null。
+    const gateForRow = result.batch !== null && result.batch.sent > 0 ? gateSummary : null;
     if (limited.reason === "replaced_too_long") {
       // 她真发了一条（换成一句短的），这一次不算白占配额。
-      decide([{ name: "limits", code: "replaced_too_long", hit: true }]);
+      decide([{ name: "limits", code: "replaced_too_long", hit: true }], null, gateForRow);
       return;
     }
-    decide([{ name: "limits", code: "core_empty", hit: false }]);
+    decide([{ name: "limits", code: "core_empty", hit: false }], null, gateForRow);
   } catch (error) {
     // 认领早就放了，这一段也早就落过 batched 行；异常只补一行 error，不重试、不重发。
     const message = (error as Error).message;
@@ -678,6 +685,8 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
         target,
         source: "proactive",
         reason: null,
+        // /say 这条路不调核，没有闸判可抄。
+        gate: null,
         // msgs=0：这一段没有入站消息（别塞 chunks 数——那是「泡」，不是「消息」）。
         batch: { id, msgs: 0, waited_ms: 0, tier: "proactive", at: new Date().toISOString() },
         gates: [...gates, ...extra],

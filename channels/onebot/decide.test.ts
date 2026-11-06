@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DECISIONS_RELATIVE_PATH, DecisionLog, decidedOf, humanOf, makeDecision } from "./decide.ts";
+import {
+  DECISIONS_RELATIVE_PATH,
+  DecisionLog,
+  decidedOf,
+  humanOf,
+  makeDecision,
+  readGateSummary,
+} from "./decide.ts";
 import type { DecisionInput, GateInput } from "./decide.ts";
 
 const policy = {
@@ -59,6 +66,7 @@ test("决策：每批恰好一行，字段顺序固定", () => {
     "target",
     "reason",
     "source",
+    "gate",
   ]);
   assert.deepEqual(Object.keys(row.machine.batch), ["id", "msgs", "waited_ms", "tier", "at"]);
   assert.equal(row.kind, "decision");
@@ -179,6 +187,52 @@ test("决策：没有门拦时 why 说门全过；替换批次 why 说上限超�
     policy.decide.reasonCodes,
   );
   assert.match(replaced.machine.why, /三道上限超了/);
+});
+
+test("闸判摘要：readGateSummary 原样搬运，四种形状各一条", () => {
+  // ① 命中：整轮摘要原样进来，字段一个不少、一个不改
+  const hit = {
+    at: "2026-11-06T05:00:00.000Z",
+    audit: { status: "ok", hit: true, lcs_len: 42, threshold: 0.8 },
+    rewrite: { status: "ok" },
+  };
+  assert.deepEqual(readGateSummary({ gate: { summary: hit } }), hit);
+  assert.equal((readGateSummary({ gate: { summary: hit } }) as any).audit.lcs_len, 42);
+
+  // ② 没这一格：回包里根本没有 gate（或 gate 里没有 summary）→ null，绝不造空壳
+  assert.equal(readGateSummary({ ok: true, chunks: [] }), null);
+  assert.equal(readGateSummary({ gate: {} }), null);
+  assert.equal(readGateSummary({ gate: { summary: undefined } }), null);
+
+  // ③ 垃圾形状：字符串 / 数组 / null 一律 null（不搬运垃圾，也不包成 {status:…}）
+  assert.equal(readGateSummary({ gate: { summary: "hit" } }), null);
+  assert.equal(readGateSummary({ gate: { summary: [1, 2, 3] } }), null);
+  assert.equal(readGateSummary({ gate: { summary: null } }), null);
+
+  // ④ payload 本身不是对象（null / 数组 / 字符串）→ null
+  assert.equal(readGateSummary(null), null);
+  assert.equal(readGateSummary([{ gate: { summary: hit } }]), null);
+  assert.equal(readGateSummary("gate"), null);
+});
+
+test("决策：machine.gate 缺省是 null（账里必须看得见 \"gate\":null），给了就原样进账", () => {
+  const plain = makeDecision(input(), "t", policy.decide.reasonCodes);
+  assert.equal(plain.machine.gate, null);
+  assert.match(JSON.stringify(plain), /"gate":null/);
+
+  const summary = { at: "t", audit: { status: "ok", hit: true, lcs_len: 42, threshold: 0.8 }, rewrite: { status: "ok" } };
+  const withGate = makeDecision(input({ gate: summary }), "t", policy.decide.reasonCodes);
+  assert.deepEqual(withGate.machine.gate, summary);
+  // gates（通道门链）与 gate（核的闸判）是两格，互不覆盖
+  assert.deepEqual(withGate.machine.gates, [
+    { name: "silent", hit: false },
+    { name: "mention", hit: false },
+  ]);
+
+  assert.throws(
+    () => makeDecision(input({ gate: "hit" as unknown as Record<string, unknown> }), "t", policy.decide.reasonCodes),
+    /machine.gate 必须是 JSON 对象或 null/,
+  );
 });
 
 test("决策：source 必须显式区分入站与主动开口，缺省是 inbound", () => {
