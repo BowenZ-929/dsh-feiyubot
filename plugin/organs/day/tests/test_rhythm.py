@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from typing import Any
 
 from organs.day import night, plan, rhythm
@@ -13,6 +14,23 @@ from organs.day.tests.helpers import (at, brain, candidates, offline_night, seed
 def night_adapter_steps():
     """夜的五步名单只有一处定义（night.STEPS），测试不另抄一份。"""
     return night.STEPS
+
+
+def settled(root: Path, *days: str) -> None:
+    """先把这几天"定下要做什么"：tick 里那次动念就没有"今天还没定"这个由头。
+
+    日子线第五轮起 tick 每步都会动念一次（有由头才落账、才排计划）。这些测试断言的
+    是"tick 只做那几件事"，所以前提要写明：这几天已经定过了。
+    """
+    path = Path(root) / "schedule_log.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        for day in days:
+            handle.write(json.dumps({"day": day}, ensure_ascii=False) + "\n")
+
+
+def night_only(rows):
+    """只留夜那一条：主动开口的计划由 organs/day/tests/test_proactive.py 管，这里不数它。"""
+    return [row for row in rows if row.get("kind") != "proactive"]
 
 NOW = "2026-11-05T09:30:00"
 # 关掉自动排程的那份配置：验证"tick 只数到点"这条纯算术判据要靠它
@@ -43,8 +61,12 @@ class TickTest(unittest.TestCase):
 
     def test_first_tick_schedules_todays_night(self):
         """空账第一次 tick 就给"当天"排一条 night（03:30），排的是明天凌晨、现在不到点。"""
+        settled(self.root, "2026-11-05")
         payload = rhythm.tick(at(NOW), root=self.root)
-        self.assertEqual(["night"], payload["ensured"]["kinds"])
+        # 实盘 limits.json 的 kinds 里还有 proactive：它没有 at，ensure 跳过它
+        # （事件驱动的那一类不由钟点排），所以它出现在 skipped 里、不在 added 里
+        self.assertEqual(["night", "proactive"], payload["ensured"]["kinds"])
+        self.assertEqual(["proactive"], payload["ensured"]["skipped"])
         self.assertEqual(1, len(payload["ensured"]["added"]))
         pending = plan.listing(self.root)["pending"]
         self.assertEqual(1, len(pending))
@@ -57,6 +79,7 @@ class TickTest(unittest.TestCase):
 
     def test_next_day_rerolls_and_retires_yesterdays_night(self):
         """跨天重排新的一天；前一天那条没人跑过 → 标 expired（不补跑），内容不改写。"""
+        settled(self.root, "2026-11-05", "2026-11-06")
         rhythm.tick(at(NOW), root=self.root)
         before = plan.listing(self.root)["pending"][0]
         payload = rhythm.tick(at("2026-11-06T05:00:00"), root=self.root)
@@ -74,6 +97,7 @@ class TickTest(unittest.TestCase):
         self.assertEqual("2026-11-06", fresh["day"])
 
     def test_no_kinds_means_no_automatic_plan(self):
+        settled(self.root, "2026-11-05")
         """kinds 空着就不自动排：这时 tick 只数到点、不造任何计划。"""
         payload = rhythm.tick(at(NOW), root=self.root, config=NO_KINDS)
         self.assertEqual([], payload["plan_ids"])
@@ -98,6 +122,7 @@ class TickTest(unittest.TestCase):
         self.assertEqual("2026-11-06", again["day"])
 
     def test_due_and_next_at_are_plain_arithmetic(self):
+        settled(self.root, "2026-11-05")
         plan.add(candidates(("diary", "2026-11-05T09:00:00"), ("diary", "2026-11-05T10:00:00")),
                  root=self.root, now_ts=at("2026-11-05T08:00:00"))
         payload = rhythm.tick(at(NOW), root=self.root)
@@ -111,10 +136,16 @@ class TickTest(unittest.TestCase):
         self.assertEqual(30, payload["interval_seconds"])
         self.assertEqual(at("2026-11-05T09:30:30"), payload["next_tick_at"])
 
-    def test_state_and_ledger_are_the_only_things_written(self):
+    def test_state_and_registers_are_the_only_things_written(self):
         rhythm.tick(at(NOW), root=self.root)
-        self.assertEqual(["plans.json", rhythm.STATE_FILE],
-                         sorted(path.name for path in self.root.iterdir()))
+        # 动念账也是日子线自己的账（一行一次"她想开口"），一并列进来：这一条断言的是
+        # "tick 不写别人的东西"（不碰脑、不碰家、不碰实盘的心），条数不该悄悄变。
+        # heart/ 是心的根按 <root>/heart 派生出来的（root 给了就绝不去读真实的心）。
+        self.assertEqual(["plans.json", "proactive_log.jsonl", rhythm.STATE_FILE],
+                         sorted(path.name for path in self.root.iterdir()
+                                if path.name != "heart"))
+        self.assertTrue((self.root / "heart").is_dir(),
+                        "心的根派生在注入的 root 底下，实盘的心一个字节不动")
 
 
 class NightLoopTest(unittest.TestCase):
@@ -144,9 +175,11 @@ class NightLoopTest(unittest.TestCase):
         self.assertEqual([], executed["summary"]["failed"])
         self.assertEqual(1, len(self._log_lines()))
         listing = plan.listing(self.root)
-        self.assertEqual([], listing["pending"])
-        self.assertEqual(1, len(listing["consumed"]))
-        row = listing["consumed"][0]
+        self.assertEqual([], night_only(listing["pending"]),
+                         "夜那一条跑完就下账（主动开口的计划另算）")
+        consumed = night_only(listing["consumed"])
+        self.assertEqual(1, len(consumed))
+        row = consumed[0]
         self.assertEqual(plan.STATUS_CONSUMED, row["status"])
         self.assertTrue(row["consumed_at"])
         # 账是一份会落盘的表，键按字典序存；四步的顺序由 night_log 那一行守着
@@ -182,7 +215,7 @@ class NightLoopTest(unittest.TestCase):
         self.assertEqual("night_running", payload["night"]["skipped"])
         self.assertEqual([], payload["night"]["executed"])
         self.assertEqual([], self._log_lines())
-        self.assertEqual(1, len(plan.listing(self.root)["pending"]),
+        self.assertEqual(1, len(night_only(plan.listing(self.root)["pending"])),
                          "被跳过的计划留在 pending，等下一 tick")
 
     def test_no_execution_without_brain_stays_pending_not_consumed(self):
@@ -198,11 +231,12 @@ class NightLoopTest(unittest.TestCase):
         self.assertEqual(0, retried["attempt"])
         self.assertEqual(1, retried["next_attempt"])
         listing = plan.listing(self.root)
-        self.assertEqual([], listing["consumed"])
-        self.assertEqual(1, len(listing["pending"]))
-        self.assertEqual(0, listing["pending"][0]["night"]["attempts"])
+        self.assertEqual([], night_only(listing["consumed"]))
+        pending = night_only(listing["pending"])
+        self.assertEqual(1, len(pending))
+        self.assertEqual(0, pending[0]["night"]["attempts"])
         self.assertEqual(["brain_compact", "home_diary", "home_dream"],
-                         listing["pending"][0]["night"]["failed_steps"],
+                         pending[0]["night"]["failed_steps"],
                          "没有脑就留不了一行索引：日记与梦都不写半份")
 
 
@@ -301,11 +335,12 @@ class NightRetryTest(unittest.TestCase):
         payload = self._tick(now=self.SCHEDULE[1], break_step=None)   # 第二次治好，五步全成
         self.assertEqual(1, len(payload["night"]["executed"]))
         listing = plan.listing(self.root)
-        self.assertEqual([], listing["pending"])
-        self.assertEqual(1, len(listing["consumed"]))
-        self.assertEqual(set(night.STEPS), set(listing["consumed"][0]["result"]["steps"]))
+        self.assertEqual([], night_only(listing["pending"]))
+        consumed = night_only(listing["consumed"])
+        self.assertEqual(1, len(consumed))
+        self.assertEqual(set(night.STEPS), set(consumed[0]["result"]["steps"]))
         self.assertEqual({"ok": 4, "stubbed": 1},
-                         listing["consumed"][0]["result"]["statuses"])
+                         consumed[0]["result"]["statuses"])
 
     def test_four_attempts_then_never_ran_with_one_audit_line(self):
         for now in self.SCHEDULE[:3]:
@@ -314,7 +349,7 @@ class NightRetryTest(unittest.TestCase):
         self.assertEqual(1, len(last["night"]["never_ran"]))
         self.assertEqual([], last["night"]["executed"])
         listing = plan.listing(self.root)
-        self.assertEqual([], listing["pending"], "试满次数不再留 pending")
+        self.assertEqual([], night_only(listing["pending"]), "试满次数不再留 pending")
         self.assertEqual(1, len(listing["never_ran"]))
         row = listing["never_ran"][0]
         self.assertEqual(plan.STATUS_NEVER_RAN, row["status"])

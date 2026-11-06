@@ -1,4 +1,4 @@
-"""日子线的 HTTP 层：十条路由，方法与懒加载都在这里。
+"""日子线的 HTTP 层：十三条路由，方法与懒加载都在这里。
 
 判据：
 - 方法错一律 405（措辞在 core.handle 的 day 分支）；本模块只认表里那一个方法。
@@ -39,11 +39,14 @@ DAY_ROUTES = {
     "/day/deliver": "POST",
     "/day/ack": "POST",
     "/day/reconcile": "POST",
+    "/day/proactive": "GET",
+    "/day/proactive/consider": "POST",
+    "/day/proactive/outcome": "POST",
 }
 
 DEFAULT_LOG_LIMIT = 20
 
-# 哪条路由要先懒导入哪个模块：这是路由与后继模块的契约（十条里的六条）。
+# 哪条路由要先懒导入哪个模块：这是路由与后继模块的契约（十三条里的九条）。
 # 注意：这张表不是"未接入"的判定——判定一律靠 unconnected_routes() 真去导入。
 _REQUIRES = {
     "/day/schedule": "organs.day.schedule",
@@ -52,6 +55,9 @@ _REQUIRES = {
     "/day/deliver": "organs.day.delivery",
     "/day/ack": "organs.day.delivery",
     "/day/reconcile": "organs.day.delivery",
+    "/day/proactive": "organs.day.proactive",
+    "/day/proactive/consider": "organs.day.proactive",
+    "/day/proactive/outcome": "organs.day.proactive",
 }
 
 
@@ -206,7 +212,7 @@ def unconnected_routes() -> List[str]:
     return out
 
 
-# ---- 十条路由 -------------------------------------------------------------
+# ---- 十三条路由 -----------------------------------------------------------
 
 
 def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
@@ -305,6 +311,53 @@ def _reconcile(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -
     return 200, dict(_invoke(module, "reconcile", now_ts=_now(params), root=_root(params)))
 
 
+def _proactive(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
+    """GET /day/proactive：动念账尾部 + 此刻的读数（给谁、降权前后、额度、静音、streak）。
+
+    纯读：不动念、不排计划、不调核（GET 不该写盘，那是写动作）。
+    """
+    module = _module("organs.day.proactive")
+    roots = _roots(params)
+    return 200, dict(_invoke(module, "overview", now_ts=_now(params), brain=brain,
+                             limit=_int(params, "limit"), **roots))
+
+
+def _proactive_consider(params: Mapping[str, str], body: Mapping[str, Any],
+                        brain: Any) -> Result:
+    """POST /day/proactive/consider：手工评估一次（支持 ?now=）。
+
+    最多落一行动念账、最多排一条计划；判 SILENT 时计划仍然生成（标 held），
+    静音 / 超额度则不排计划——三种"没开口"在账上是三个不同的 action。
+    """
+    module = _module("organs.day.proactive")
+    roots = _roots(params)
+    raw = _value(body, params, "idle_only")
+    idle = str(raw).strip().lower() in ("1", "true", "yes") if raw is not None else None
+    return 200, dict(_invoke(module, "consider", now_ts=_now(params), brain=brain,
+                             idle_only=idle, **roots))
+
+
+def _proactive_outcome(params: Mapping[str, str], body: Mapping[str, Any],
+                       brain: Any) -> Result:
+    """POST /day/proactive/outcome：结算最新那次主动开口（replied / ignored）。
+
+    刚进静音那一次会顺带落一行 cold（同一次静音只落一次）。result 缺了是 400，
+    不是 replied/ignored 也是 400——结算不认识的词只会把账改坏。
+    """
+    module = _module("organs.day.proactive")
+    result = _text(body, params, "result")
+    if not result:
+        return 400, {"ok": False, "message": "outcome 要一个 result（replied 或 ignored）"}
+    roots = _roots(params)
+    try:
+        payload = module.settle(result, _now(params), who=_text(body, params, "who"),
+                                brain=brain, root=roots["root"],
+                                heart_root=roots["heart_root"])
+    except module.ProactiveError as exc:
+        return 400, {"ok": False, "message": str(exc)}
+    return 200, dict(payload)
+
+
 _ROUTES = {
     "/day/tick": _tick,
     "/day/plan": _plan,
@@ -316,12 +369,15 @@ _ROUTES = {
     "/day/deliver": _deliver,
     "/day/ack": _ack,
     "/day/reconcile": _reconcile,
+    "/day/proactive": _proactive,
+    "/day/proactive/consider": _proactive_consider,
+    "/day/proactive/outcome": _proactive_outcome,
 }
 
 
 def dispatch(route: str, params: Mapping[str, str], body: Optional[Mapping[str, Any]] = None,
              store: Any = None, brain: Any = None) -> Result:
-    """十条路由的实际分派；store 不用（日子线自带账），brain 喂夜与日程。"""
+    """十三条路由的实际分派；store 不用（日子线自带账），brain 喂夜 / 日程 / 动念。"""
     handler = _ROUTES.get(route)
     if handler is None:
         return 404, {"ok": False, "message": "没有这个端点：%s" % route}

@@ -71,7 +71,9 @@ def valid_who(who: str) -> bool:
 
 
 # 人名录不建卡的占位 who：不知道是谁 ≠ 有一个人叫"人"
-PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知")
+# "她自己"也是占位：日程模拟写的是她自己的一天（organs/day/schedule.py 的 BRAIN_WHO），
+# 她不该在自己的名录里占一张卡——那不是"一个人"，是"她自己"。
+PLACEHOLDER_WHOS = ("", "人", "human", "unknown", "未知", "她自己")
 
 # 来源类型：亲历 = 真实对话；日程模拟 = 程序模拟她的一天；迁移 = 旧家摘要搬进来——
 # 那是**她当时的理解**，不是她的亲眼所见：quote 一栏为空、正文落在 note，两条都不作证词。

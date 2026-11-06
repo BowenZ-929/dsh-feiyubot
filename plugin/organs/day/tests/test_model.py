@@ -62,9 +62,17 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(4, values["day_cutover_hour"])
         # 自动排程表也在这份文件里：删掉它就没有自动排程，所以包内那份必须真的带着 night
         # （required: true 是这一版新加的：夜是"必须跑的"，不受额度管）
+        # proactive 是事件驱动的那一类：**没有 at**，ensure 会跳过它（由动念自己入账），
+        # 每人每日上限（per_who_daily_cap）也在这份文件里，不许写死在代码里
         self.assertEqual({"night": {"at": "03:30", "min_gap_minutes": 10, "daily_cap": 1,
-                                    "required": True}},
+                                    "required": True},
+                          "proactive": {"required": False, "min_gap_minutes": 10,
+                                        "daily_cap": 20}},
                          values["kinds"])
+        self.assertNotIn("at", values["kinds"]["proactive"],
+                         "有 at 的才由 ensure 按钟点排；proactive 是事件驱动的")
+        # 每人每日上限与 night.max_retries 同一套摆法：顶层一节放这一类自己的参数
+        self.assertEqual({"per_who_daily_cap": 3}, values["proactive"])
         # 重试口径也在数据文件里：次数与退避都从这里读，代码只留兜底
         self.assertEqual(3, values["night"]["max_retries"])
         self.assertEqual([1, 5, 15], values["night"]["backoff_minutes"])

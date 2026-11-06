@@ -11,13 +11,16 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from unittest import mock
 from urllib.parse import urlencode
 
 from api import api
 from api.day import DAY_ROUTES, unconnected_routes
 from organs.brain import BrainStore
-from organs.day import model, plan
+from organs.day import model, plan, proactive_ask
 from organs.day.tests.helpers import offline_night, seed_today
+from organs.heart import model as heart_model
+from organs.heart import proactive as heart_proactive
 
 NOW = "2026-11-05T09:30:00"
 # 本波只做壳的两条线：未接入的路由一定出自这两个模块（落地后 unconnected_routes() 会变空）
@@ -54,8 +57,8 @@ class DayApiTest(unittest.TestCase):
         json.dumps(payload, ensure_ascii=False)
         return status, payload
 
-    def test_ten_routes_registered_with_one_method_each(self):
-        self.assertEqual(10, len(DAY_ROUTES))
+    def test_thirteen_routes_registered_with_one_method_each(self):
+        self.assertEqual(13, len(DAY_ROUTES))
         for route, method in DAY_ROUTES.items():
             self.assertIn(route, api.ROUTES, "日子线的表没并进 core.ROUTES")
             self.assertEqual(method, api.ROUTES[route], route)
@@ -85,7 +88,9 @@ class DayApiTest(unittest.TestCase):
             self.assertIn(payload["module"], SUCCESSOR_MODULES)
 
     def test_routes_with_modules_are_never_in_the_unconnected_set(self):
-        for route in ("/day/tick", "/day/plan", "/day/night", "/day/log"):
+        for route in ("/day/tick", "/day/plan", "/day/night", "/day/log",
+                      "/day/proactive", "/day/proactive/consider",
+                      "/day/proactive/outcome"):
             self.assertNotIn(route, unconnected_routes())
 
     def test_tick_is_idempotent_over_http(self):
@@ -161,8 +166,10 @@ class DayApiTest(unittest.TestCase):
         self.assertEqual(["brain_decay"], payload["night"]["retried"][0]["failed_steps"])
         self.assertEqual([], payload["night"]["never_ran"])
         status, plan_payload = self._call("GET", "/day/plan")
-        self.assertEqual(1, len(plan_payload["pending"]))
-        self.assertEqual(0, plan_payload["pending"][0]["night"]["attempts"])
+        # 只数夜那一条：tick 现在末尾还会动念一次，主动开口的计划另算（见下一条测试）
+        night = [row for row in plan_payload["pending"] if row["kind"] == "night"]
+        self.assertEqual(1, len(night))
+        self.assertEqual(0, night[0]["night"]["attempts"])
         self.assertEqual([], plan_payload["consumed"], "失败的那次不许静默 consume")
 
     def test_plan_route_exposes_the_never_ran_column(self):
@@ -177,7 +184,9 @@ class DayApiTest(unittest.TestCase):
         status, plan_payload = self._call("GET", "/day/plan")
         self.assertEqual(200, status)
         self.assertIn("never_ran", plan_payload)
-        self.assertEqual([], plan_payload["pending"])
+        self.assertEqual([], [row for row in plan_payload["pending"]
+                              if row["kind"] == "night"],
+                         "夜那一条进了 never_ran，不在 pending 里了")
         self.assertEqual(1, len(plan_payload["never_ran"]))
         self.assertIn("brain_decay", plan_payload["never_ran"][0]["reason"])
         self.assertIn("4 次尝试", plan_payload["never_ran"][0]["reason"])
@@ -225,6 +234,89 @@ class DayApiTest(unittest.TestCase):
         self.assertEqual([True, False], [row["required"] for row in payload["pending"]])
         self.assertEqual(["fuse-tripped"], [row["reason"] for row in payload["blocked"]])
         self.assertEqual([False], [row["required"] for row in payload["blocked"]])
+
+    # ---- 主动开口：三条新路由（读 / 动念 / 结算回执） ----------------------
+
+    def test_proactive_reads_without_writing(self):
+        """GET /day/proactive：账尾 + 此刻的读数，一个字节都不落盘（GET 不写）。"""
+        before = sorted(path.name for path in self.root.iterdir())
+        status, payload = self._call("GET", "/day/proactive", query={"now": at(NOW)})
+        self.assertEqual(200, status)
+        self.assertEqual(before, sorted(path.name for path in self.root.iterdir()))
+        for key in ("who", "priority", "quota", "muted", "streak", "log", "counts"):
+            self.assertIn(key, payload)
+        self.assertEqual([], payload["log"])
+        self.assertEqual({"before", "after"}, set(payload["priority"]["unfinished"]))
+
+    def test_consider_makes_one_plan_that_the_plan_route_can_read(self):
+        """动念 → 一行动念账 + 一条计划，priority 与 who 在 /day/plan 上读得出来。"""
+        self.brain.ingest(who="qq:3425635473", text="晚上有空吗", ts=at(NOW))
+        status, payload = self._call("POST", "/day/proactive/consider",
+                                     query={"now": at(NOW)})
+        self.assertEqual(200, status, payload)
+        self.assertTrue(payload["fired"])
+        self.assertEqual("qq:3425635473", payload["who"])
+        self.assertEqual("planned", payload["action"])
+        status, plan_payload = self._call("GET", "/day/plan")
+        planned = [row for row in plan_payload["pending"] if row["kind"] == "proactive"]
+        self.assertEqual(1, len(planned))
+        self.assertEqual("qq:3425635473", planned[0]["who"])
+        self.assertIsInstance(planned[0]["priority"], int)
+        self.assertFalse(planned[0]["held"])
+        status, tail = self._call("GET", "/day/proactive", query={"now": at(NOW)})
+        row = tail["log"][-1]
+        self.assertEqual("unfinished", row["reason_code"])
+        self.assertIn("晚上有空吗", row["because"])
+        self.assertEqual({"planned": 1}, tail["counts"])
+
+    def test_consider_at_night_keeps_the_plan_but_calls_nothing(self):
+        """夜里判 SILENT：计划仍然生成、标 held，核一次都不调、一条也不发。"""
+        self.brain.ingest(who="qq:3425635473", text="晚上有空吗", ts=at("2026-11-05T23:00:00"))
+        with mock.patch.object(proactive_ask, "ask",
+                               side_effect=AssertionError("夜里不许调核")) as asked:
+            status, payload = self._call("POST", "/day/proactive/consider",
+                                         query={"now": at("2026-11-05T23:30:00")})
+        self.assertEqual(200, status, payload)
+        self.assertEqual(0, asked.call_count)
+        self.assertEqual("held", payload["action"])
+        self.assertEqual({"state": heart_model.STATE_SILENT,
+                          "reason": heart_model.REASON_NIGHT}, payload["row"]["engage"])
+        status, plan_payload = self._call("GET", "/day/plan")
+        held = [row for row in plan_payload["pending"] if row["kind"] == "proactive"]
+        self.assertEqual(1, len(held), "判 SILENT 仍然生成计划")
+        self.assertTrue(held[0]["held"])
+        status, queue = self._call("GET", "/day/pending")
+        self.assertEqual([], queue["items"], "没发送")
+
+    def test_outcome_without_result_is_400(self):
+        status, payload = self._call("POST", "/day/proactive/outcome", {})
+        self.assertEqual(400, status)
+        self.assertIn("result", payload["message"])
+        status, payload = self._call("POST", "/day/proactive/outcome", {"result": "随便"})
+        self.assertEqual(400, status)
+        self.assertIn("replied", payload["message"])
+        self.assertFalse((self.root / "proactive_log.jsonl").exists(), "400 不许落账")
+
+    def test_outcome_lands_cold_once_per_mute(self):
+        """连三次没人接：streak=3、静音、动念账上多一行 cold；第二次不再落。"""
+        for _ in range(3):
+            heart_proactive.sent(self.heart, at(NOW))
+            status, payload = self._call("POST", "/day/proactive/outcome",
+                                        {"result": "ignored", "who": "qq:3425635473"},
+                                        query={"now": at(NOW)})
+            self.assertEqual(200, status, payload)
+        self.assertEqual(3, payload["readings"]["streak"])
+        self.assertTrue(payload["readings"]["muted"])
+        self.assertIsNotNone(payload["cold"])
+        status, tail = self._call("GET", "/day/proactive", query={"now": at(NOW)})
+        self.assertEqual(1, tail["counts"]["cold"])
+        heart_proactive.sent(self.heart, at(NOW))
+        status, again = self._call("POST", "/day/proactive/outcome",
+                                   {"result": "ignored"}, query={"now": at(NOW)})
+        self.assertEqual(200, status)
+        self.assertIsNone(again["cold"], "同一段静音只落一次 cold")
+        status, tail = self._call("GET", "/day/proactive", query={"now": at(NOW)})
+        self.assertEqual(1, tail["counts"]["cold"])
 
     def test_bad_now_is_400_and_points_at_the_plus_trap(self):
         status, payload = self._call("POST", "/day/tick", query={"now": "2026-11-05T09:00:00 09:00"})

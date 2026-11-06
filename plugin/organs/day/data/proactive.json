@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "owner": "主人",
+  "because_chars": 40,
+  "plan_delay_minutes": 5,
+  "base_priority": 50,
+  "reason_priority": {
+    "thought": 60,
+    "unfinished": 50,
+    "unscheduled": 40
+  },
+  "lately_talked_hours": 24,
+  "lately_talked_downgrade": 20,
+  "ask": {
+    "temperature": 0.7,
+    "max_chunks": 6,
+    "chunk_join": "\n",
+    "send_key": "send",
+    "chunks_key": "chunks",
+    "strip_fences": true,
+    "system": "你是{who}身边那个人。你想主动找{who}说句话。语气档：{tone}（空着就是没有特别要求）。说人话，一到两段，别客套，别解释你为什么突然来。",
+    "user": "你想开口的由头（真事，不许编）：{because}\n这一刻你要是并不想说，就给 send=false。要说就给 1-{max_chunks} 段短句。\n只回一个 JSON：{\"send\": true, \"chunks\": [\"第一段\", \"第二段\"]}"
+  },
+  "note": "日子线·主动开口的参数与提示词全在这份文件里（改文件即生效，不用重启）：owner 是没人可找时的退路；because_chars 是动念账里「由头」取真话前几个字；plan_delay_minutes 是动念到计划到点之间隔几分钟；base_priority / reason_priority 是计划行上的 priority；lately_talked_hours / lately_talked_downgrade 是「对方最近这么久内主动找过她 → priority 减这么多」的降权口径。per_reason_daily_cap 是「每个理由码一天最多动念几次」——同一个由头一天只用几次，超了记 quota（账上 scope=reason，能看出被哪条额度挡的），0 表示这条由头这一版不用。unscheduled_window 是 unscheduled 这条由头成立的时间窗（本地时区整点、左闭右开、from>to 表示跨零点）：「今天还没定下要做什么」是个常驻条件，只在上午成立才像话，窗外它不算由头——否则等于每天固定时间硬灌。ask 一整块是交给核的东西：system / user 两个模板（占位符 {who} {because} {tone} {max_chunks} 由日子线填）、temperature、max_chunks、chunk_join、send_key / chunks_key、strip_fences。核只回 JSON，解析不出就是 error_kind=parse，不猜、不重试。",
+  "per_reason_daily_cap": {
+    "thought": 3,
+    "unfinished": 3,
+    "unscheduled": 1
+  },
+  "unscheduled_window": {
+    "from": 9,
+    "to": 12
+  }
+}

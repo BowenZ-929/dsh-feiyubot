@@ -31,17 +31,20 @@ from __future__ import annotations
 import json
 import os
 import threading
+import warnings
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import model, night, plan
+from . import model, night, plan, proactive
 
 STATE_FILE = "rhythm.json"
 VERSION = 1
 THREAD_NAME = "day-rhythm"
 NIGHT_KIND = "night"
+#: 主动开口那一类计划的 kind（到点要再判一次 engage，然后要么说、要么只记账）。
+PROACTIVE_KIND = "proactive"
 # 兜底：真正的取值在 limits.json 的 night.max_retries（首跑 1 次 + 重试这么多次）。
 # 代码里只留这一份兜底，别处不许再写第二份阈值。
 DEFAULT_MAX_RETRIES = 3
@@ -252,7 +255,7 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
 def tick(now_ts: Any = None, *, root: Any = None,
          config: Optional[Dict[str, Any]] = None, brain: Any = None,
          heart_root: Any = None, break_step: Optional[int] = None) -> Dict[str, Any]:
-    """一次 tick：排当天（幂等）→ 数到点 → 到点的夜真跑并结账 → 算下一次 → 换日记账。
+    """一次 tick：排当天（幂等）→ 数到点 → 夜与主动开口各自结账 → 再动念一次 → 算下一次 → 换日记账。
 
     "到夜按固定顺序调四步"就是这一条路：tick 自己排、自己执行、自己下账。
     brain / heart_root 是注入给 night.run 的那两个根（缺省由各器官走自己的默认根）。
@@ -261,6 +264,10 @@ def tick(now_ts: Any = None, *, root: Any = None,
     """
     cfg = config or model.load_limits()
     at = model.iso(now_ts) if now_ts is not None else model.now_iso()
+    # root 给了而 heart_root 没给：按 <root>/heart 派生（与 api/day 的 _roots 同一条规矩）。
+    # 动念要读心的念头与读数——忘了传心根就去读真实的心，测试会悄悄碰到实盘数据。
+    if heart_root is None and root is not None:
+        heart_root = Path(root) / "heart"
     day = model.day_key(at)
     state = load_state(root)
     rolled = bool(state["day"]) and state["day"] != day
@@ -276,7 +283,27 @@ def tick(now_ts: Any = None, *, root: Any = None,
     due_rows = plan.due(at, root=root, data=ledger)
     nightly = _settle_night(due_rows, at, root=root, brain=brain, heart_root=heart_root,
                             config=cfg, break_step=break_step)
-    ledger = plan.load(root)   # 夜跑完账变了（consumed / expired），重读一遍再算
+    # 到点的主动开口：夜跑完再轮它（夜是固定的那几件事，她想说话不是议程的一部分）。
+    # 这里**不**把 limits.json 那份额配置传下去：主动开口的参数在 data/proactive.json，
+    # 两份配置混着传就是两处真源。
+    proactive_out = proactive.settle_due(due_rows, at, root=root, brain=brain,
+                                        heart_root=heart_root)
+    # 到点的跑完，再问一次"她想不想开口"。**硬灌的是时钟，驱动它的是由头**：consider 里
+    # 没有由头就不动念、有 pending 计划就不叠（idle_only=True）、超每人每日上限就不排，
+    # 而且它一次都不调核、一条都不发——每 tick 问一次不等于每 tick 说一次。
+    # 动念坏了不许让节律停摆：错记进 state.last_error 并 WARN，tick 照常返回。
+    considered: Dict[str, Any] = {}
+    try:
+        considered = proactive.consider(at, root=root, brain=brain, heart_root=heart_root,
+                                        limits=cfg, idle_only=True)
+    except Exception as exc:  # noqa: BLE001 - 动念是旁支，坏了要报出来而不是静默吞掉
+        message = "proactive: %s: %s" % (type(exc).__name__, exc)
+        considered = {"ok": False, "error": message}
+        state["last_error"] = message
+        _save_state(state, root)
+        warnings.warn("日子·节律：这一 tick 的动念失败了（%s），tick 照常返回" % message,
+                      RuntimeWarning, stacklevel=2)
+    ledger = plan.load(root)   # 夜与主动开口都动过账了（consumed / expired），重读一遍再算
     ahead = plan.next_at(at, root=root, data=ledger)
     every = int(cfg["tick_seconds"])
     return {
@@ -292,6 +319,12 @@ def tick(now_ts: Any = None, *, root: Any = None,
         # 到点的夜怎么处置了：executed（跑成了并 consume）/ retried（失败了，留 pending 等重试）/
         # never_ran（试满次数仍失败，进第五栏 + 一条审计）/ expired（过期不补）/ skipped（有人在跑）
         "night": nightly,
+        # 到点的主动开口怎么处置了：rows 逐条（action 是 held/declined/empty/error/sent），
+        # actions 是这一次的计数。它不调核就什么也不发——判 SILENT 的那条只记账
+        "proactive": proactive_out,
+        # 这一 tick 的动念：fired=False 就是没有由头（skipped=no-source / pending-plan），
+        # 有由头才有 action（planned / held / quota / muted / blocked）
+        "proactive_consider": considered,
         "next_at": ahead,
         # 没有待办就不是"没有下一次"，而是"下一次按节律再问一遍"：纯算术，不猜内容
         "next_tick_at": model.iso(model.parse_ts(at) + timedelta(seconds=every)),
@@ -299,6 +332,8 @@ def tick(now_ts: Any = None, *, root: Any = None,
         "plan_ids": plan.plan_ids(ledger),
         # 这一 tick 为"当天"排了什么：added 是新建的，duplicates 是本来就在（幂等）
         "ensured": {"day": scheduled["day"], "kinds": scheduled["kinds"],
+                    # skipped：没有 at 的 kind（事件驱动的那一类），ensure 不替它编钟点
+                    "skipped": list(scheduled.get("skipped") or []),
                     "added": [row["id"] for row in scheduled["added"]],
                     "duplicates": scheduled["duplicates"],
                     "blocked": scheduled["blocked"]},

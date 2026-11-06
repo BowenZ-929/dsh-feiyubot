@@ -20,6 +20,8 @@
    **恰有一条** pending（已有就一条不新增），跨天自然重排。本期 kinds 只有 night
    （03:30，min_gap 10 分钟、每天 1 条）。日程**不进**计划：这一期由 /day/schedule/draw
    手工触发，等壳线有心/嘴的意愿再接计划。
+   **没有 at 的 kind 不由钟点排**（proactive 是事件驱动的：由它自己的触发者调 add 入账）：
+   ensure 跳过它，并把它列在回执的 skipped 里——"没排"与"排了"必须分得清。
 5. 计划有五种结局，分五栏存，不许混：pending（还没到点/还没跑）、consumed（跑过了，
    带 result 摘要）、blocked（被闸门拦下，带 reason）、expired（关机错过，**不补跑**）、
    never_ran（到了点、该跑，但首跑 + 重试都没跑成，带 reason 与重试快照）。
@@ -34,6 +36,8 @@
     {"version": 1, "pending": [行], "consumed": [行], "blocked": [行],
      "expired": [行], "never_ran": [行]}
     行：{id, kind, at, day, status, required, note, created_at, consumed_at}
+        + 候选带上来的附加字段（见 EXTRA_KEYS：priority / who / held / held_reason /
+          reason_code / thought_id）：本文件只搬运，不解释
     blocked 行：{id, kind, at, day, required, reason, message, blocked_at}
     never_ran 行：/ expired 行 = 原行 + {status, reason, expired_at|never_ran_at}
     pending 行里的夜间快照：night = {"attempts": 0..n, "steps": {名字: {status, detail}},
@@ -72,6 +76,9 @@ STATUS_EXPIRED = "expired"
 STATUS_NEVER_RAN = "never_ran"
 # 计划行里的夜间快照：下一 tick 靠它决定"只重跑哪几步、沿用哪几步的结果"
 NIGHT_KEY = "night"
+# 候选能带上来的附加字段：本文件不认识它们的含义（priority 是排序、who 是对谁说、
+# held 是"想说但因为夜里/双低没说"），只负责**不丢**——丢了它们，情计划就只剩 id 与时刻。
+EXTRA_KEYS = ("priority", "who", "held", "held_reason", "reason_code", "thought_id")
 
 
 class PlanError(ValueError):
@@ -252,10 +259,36 @@ def next_at(now_ts: Any = None, *, root: Any = None,
 # ---- 写 -------------------------------------------------------------------
 
 
+def _extras(item: Any) -> Dict[str, Any]:
+    """候选带上来要原样落账的附加字段（见 EXTRA_KEYS）；坏值跳过，不猜。
+
+    priority / held 转成本来的类型（整数、布尔），其余按字符串抄；没有的键不写——
+    计划行的形状不该因为候选顺手带了几个 None 就长出空字段。
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(item, dict):
+        return out
+    for key in EXTRA_KEYS:
+        value = item.get(key)
+        if value is None:
+            continue
+        try:
+            if key == "priority":
+                out[key] = int(value)
+            elif key == "held":
+                out[key] = value is True
+            else:
+                out[key] = str(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _candidate(item: Any) -> Dict[str, Any]:
-    """候选 → {kind, at, note, required}；at 归一成绝对时刻，kind 不许空。
+    """候选 → {kind, at, note, required, extras}；at 归一成绝对时刻，kind 不许空。
 
     required 只有候选自己明确写了才是 True/False，没写就是 None（到 add 里再按配置定）。
+    extras 是候选顺手带上来的那几个字段（priority / who / held ...），本文件只管搬运。
     """
     declared: Any = None
     if isinstance(item, dict):
@@ -272,7 +305,8 @@ def _candidate(item: Any) -> Dict[str, Any]:
     if not kind:
         raise ValueError("候选计划缺 kind：%r" % (item,))
     return {"kind": kind, "at": model.iso(raw_at), "note": note,
-            "required": None if declared is None else declared is True}
+            "required": None if declared is None else declared is True,
+            "extras": _extras(item)}
 
 
 def thresholds(config: Optional[Dict[str, Any]], kind: str) -> Tuple[int, int]:
@@ -333,13 +367,21 @@ def ensure(now_ts: Any = None, *, root: Any = None,
     kinds = cfg.get(KINDS_KEY) or {}
     cutover = int(cfg["day_cutover_hour"])
     rows: List[Dict[str, Any]] = []
+    skipped: List[str] = []
     for kind in sorted(kinds):
         entry = kinds[kind] if isinstance(kinds[kind], dict) else {}
-        rows.append({"kind": kind, "at": kind_at(day, entry.get("at"), cutover),
-                     "note": "自动排：%s %s" % (day, entry.get("at"))})
+        clock = entry.get("at")
+        if clock is None or not str(clock).strip():
+            # 没有 at 的 kind 不由钟点排（proactive 这类事件驱动的就在这儿被跳过）：
+            # 它的计划由它自己的触发者调 add() 入账，ensure 不许替它编一个钟点。
+            skipped.append(kind)
+            continue
+        rows.append({"kind": kind, "at": kind_at(day, clock, cutover),
+                     "note": "自动排：%s %s" % (day, clock)})
     out = add(rows, root=root, now_ts=at, config=cfg)
     out["day"] = day
     out["kinds"] = sorted(kinds)
+    out["skipped"] = skipped
     return out
 
 
@@ -414,6 +456,7 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
             row = {"id": pid, "kind": item["kind"], "at": item["at"], "day": day,
                    REQUIRED_KEY: required, "reason": reason, "message": message,
                    "blocked_at": created}
+            row.update(item["extras"])
             if fuse is not None:
                 row["count"], row["cap"] = fuse
             data["blocked"].append(row)
@@ -423,6 +466,7 @@ def add(candidates: Iterable[Any], *, root: Any = None, now_ts: Any = None,
         row = {"id": pid, "kind": item["kind"], "at": item["at"], "day": day,
                "status": STATUS_PENDING, REQUIRED_KEY: required, "note": item["note"],
                "created_at": created, "consumed_at": None}
+        row.update(item["extras"])
         data["pending"].append(row)
         taken[pid] = STATUS_PENDING
         same_kind.setdefault(item["kind"], []).append(at)

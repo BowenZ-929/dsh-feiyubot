@@ -46,13 +46,14 @@ plugin/organs/home/data/*/*
 # 额度文件记的是「两本账各给多少次」这个决定，不是运行账：入库，改它要能被 diff 看见
 !plugin/organs/home/data/limits.json
 
-# 日子线：四份参数（limits / schedule / delivery / writing）入库；
-# 跑出来的账（plans / rhythm / 夜日志 / 日程日志 / 送达待发 / 回滚点）不入库。
+# 日子线：五份参数（limits / schedule / delivery / writing / proactive）入库；
+# 跑出来的账（plans / rhythm / 夜日志 / 日程日志 / 送达待发 / 回滚点 / 动念账）不入库。
 plugin/organs/day/data/*
 !plugin/organs/day/data/limits.json
 !plugin/organs/day/data/schedule.json
 !plugin/organs/day/data/delivery.json
 !plugin/organs/day/data/writing.json
+!plugin/organs/day/data/proactive.json
 
 # 嘴：三份参数（audit 阈值 / refusal 说法 / style_target 区间）入库；
 # 运行时账本（弃言账、拒绝账、超长账）不入库——它们是状态，天天变。
