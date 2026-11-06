@@ -436,8 +436,9 @@ class ConversationAnswerTest(unittest.TestCase):
                         "最近几轮跑到了脑装包后面：%r" % (order,))
         got = self._answer()
         self.assertEqual(order, got["assembly"]["order"])
-        # 抽屉那一节是**有条件**的：没翻就整节不加（不留一个空标题）。这一轮没给 scene
-        # （归一成 unknown，drawer.scene 里它是 false），所以它不该出现；别的节仍与 order 一一对上。
+        # 抽屉那一节是**有条件**的：没翻就整节不加（不留一个空标题）。这一轮没给 scene（归一成
+        # unknown），但翻不翻不看场合——「还记得」命中了关键词，所以它真去翻了；只是临时家里一颗
+        # 日记都没有，读不出 → 整节不加。别的节仍与 order 一一对上。
         rendered = [row["key"] for row in got["assembly"]["sections"]]
         self.assertNotIn(conversation.DRAWER_KEY, rendered, "没命中抽屉却多出那一节")
         self.assertEqual([key for key in order if key in rendered], rendered,

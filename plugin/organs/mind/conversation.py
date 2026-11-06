@@ -72,9 +72,11 @@ assembly.json 的 anchors.guard 里，本文件一个数都不写。
           recalled[]（页面要显示「想起了什么 + 证据指针 + 她的理解」）。每条记忆进提示词是
           两行：原文一行（括号里是来源｜来源类型｜证据），她的理解 note_display 另起一行、
           缩进两格——原话与她的理解不许糊成一行，那是脑里分开写的两栏
-  drawer  抽屉：装配前按 drawer.keywords 判一次意图（问句里出现任一词才翻），场合在
-          drawer.scene 里为 false（群聊 / unknown）就整节不加；命中才向家读一次 cards.list_room
-          （room / kind / shelves 全在数据里），按相关性 + 日期挑到 max_entries 篇、逐篇
+  drawer  抽屉：装配前按 drawer.keywords 判一次意图（问句里出现任一词才翻）——**翻不翻只看
+           意图，不看场合**；场合只决定能取哪几格（drawer.shelves：private 普通 + 恋爱，group 与
+           unknown 只取普通；unknown 那档在节内多插一行 drawer.unknown_note「来源未定」，绝不把
+           unknown 猜成 group / private）。命中才向家读一次 cards.list_room
+           （room / kind / shelves 全在数据里），按相关性 + 日期挑到 max_entries 篇、逐篇
           cards.read_item 取正文，每篇一行压进 sections.drawer.cap。节尾那句 testimony_note 是
           这一节的要害：那些字是她自己写下的（testimony=false），只能说「我写过」，不许说成
           对方说过。**只进提示词，绝不进脑**：这一节不交给 brain.ingest 一个字。
@@ -200,6 +202,11 @@ SCENE_CAP_MAX = 200                       # 场合那节的上限：数据里可
 CALLER_SHAPES = ("known", "unknown", "missing")   # 「这一轮是谁」三种形状：数据里一句都不许缺
 DRAWER_KEY = "drawer"                     # 抽屉那一节在 order / sections 里的键（空着就整节不加）
 LINE_JOIN = "\n"                          # 抽屉每篇一行、行与行之间的分隔（也用来隔开节尾那句说明）
+# 抽屉那一块认得的键（装配时多余的一律报错）：翻不翻只看 enabled + keywords，**没有「场合: 翻不翻」
+# 那种开关**——场合只经 shelves 决定能取哪几格，猜错场合就等于在群里说私话。
+DRAWER_KEYS = ("enabled", "keywords", "shelves", "unknown_note", "max_entries", "cap", "label",
+               "kind", "room", "testimony_note", "note", "line", "more", "date_pattern",
+               "list_limit", "date_chars", "line_chars", "topic_min_chars", "month_words")
 WORD_JOIN = " "                           # 正文里的换行压成空格：一篇只占一行，行首才认得出日期
 TONE_LOG = "tone_log.jsonl"               # 语气账的文件名（落在 <器官目录>/mind 下，只追加）
 # 每轮那一行的字段（冻结，人事后照这个核对）：四个旋钮落到哪儿、心与嘴各在哪一档、软度与称呼。
@@ -342,15 +349,27 @@ def _check_assembly(data: Any, where: str) -> Dict[str, Any]:
 def _check_drawer(spec: Any, where: str) -> Optional[Dict[str, Any]]:
     """抽屉那一格：**可以没有**（没有就是「不翻」），写了就要写全。
 
-    这里一个中文词都没有：关键词、格子名、行模板、月份词、节尾那句说明全在数据里。
-    「有没有写全」当场报——少了哪个键，这一轮要么白翻一次抽屉，要么在提示词里拼出一节
-    半截的旧事，两种都比报错难查。cap 与 label 还要与 sections.drawer 对得上：一处写 300、
-    一处写 200，人改的到底是哪一处就说不清了。
+    这里一个中文词都没有：关键词、格子名、行模板、月份词、节尾那句说明、unknown 那档的
+    标注全在数据里。「有没有写全」当场报——少了哪个键，这一轮要么白翻一次抽屉，要么在提示词里
+    拼出一节半截的旧事，两种都比报错难查。cap 与 label 还要与 sections.drawer 对得上：一处写
+    300、一处写 200，人改的到底是哪一处就说不清了。
+
+    **拆掉的开关不许悄悄留着**：旧数据里那份「场合: 翻不翻」（scene）已经删了，翻不翻只看
+    enabled 与 keywords；再出现它（或任何不认得的键）就当场报，不静默忽略。
     """
     if spec is None:
         return None
     if not isinstance(spec, dict):
-        raise ValueError("drawer 要一份对象（keywords / shelves / scene / cap / label …）：%s" % where)
+        raise ValueError("drawer 要一份对象（keywords / shelves / unknown_note / cap / label …）：%s"
+                         % where)
+    # 多余的键当场报：旧的那份「场合: 翻不翻」的开关已经删了，留着不许静默忽略——
+    # 人改了它却什么也没变，比报错难查。
+    extra = sorted(set(spec) - set(DRAWER_KEYS))
+    if extra:
+        hint = ("（「场合: 翻不翻」那份开关已经删了：翻不翻只看 enabled + keywords，"
+                "场合只经 shelves 决定能取哪几格）" if "scene" in extra else "")
+        raise ValueError("drawer 里有多余的键 %s%s（认得的只有 %s）：%s"
+                         % (extra, hint, sorted(DRAWER_KEYS), where))
     clean: Dict[str, Any] = {}
     enabled = spec.get("enabled")
     if not isinstance(enabled, bool):
@@ -371,7 +390,7 @@ def _check_drawer(spec: Any, where: str) -> Optional[Dict[str, Any]]:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError("drawer.%s 要正整数：%s" % (name, where))
         clean[name] = value
-    for name in ("label", "kind", "room", "testimony_note", "note"):
+    for name in ("label", "kind", "room", "testimony_note", "note", "unknown_note"):
         text = spec.get(name)
         if not isinstance(text, str) or not text.strip():
             raise ValueError("drawer.%s 要一段非空的字：%s" % (name, where))
@@ -392,17 +411,6 @@ def _check_drawer(spec: Any, where: str) -> Optional[Dict[str, Any]]:
     except re.error as exc:
         raise ValueError("drawer.date_pattern 不是正则：%s：%s" % (pattern, exc)) from exc
     clean["date_pattern"] = pattern
-    scene = spec.get("scene")
-    if not isinstance(scene, dict):
-        raise ValueError("drawer.scene 要一份 {场景: 翻不翻} 的表：%s" % where)
-    clean_scene: Dict[str, bool] = {}
-    for name in brain_model.SCENE_TYPES:
-        value = scene.get(name)
-        if not isinstance(value, bool):
-            raise ValueError("drawer.scene.%s 要么 true 要么 false（全是 false 就是不翻）：%s"
-                             % (name, where))
-        clean_scene[name] = value
-    clean["scene"] = clean_scene
     shelves = spec.get("shelves")
     if not isinstance(shelves, dict):
         raise ValueError("drawer.shelves 要一份 {场景: [允许翻的格子]} 的表：%s" % where)
@@ -1696,21 +1704,26 @@ def _scene_text(conf: Mapping[str, Any], scene: str) -> str:
     return str(conf["scene"]["lines"].get(scene) or "")
 
 
-def _drawer_due(spec: Mapping[str, Any], said: str, scene: str) -> bool:
-    """装配前判一次意图：关键词命中、且这个场合允许翻——两条都成立才去家里读。
+def _drawer_due(spec: Mapping[str, Any], said: str) -> bool:
+    """装配前判一次意图：**翻不翻只看意图**——enabled 为 true，且问句里出现关键词表里任一个词。
 
-    判在这两处之外一个字节都不读：没命中就一次 IO 都不做（不 list、不 read），这一节也就
-    压根不进提示词。被动与主动（她自己开口那一轮，由头就是这一问）用的是同一把尺子。
+    场合在这儿一个字都不看（场合只经 _drawer_rows 决定能取哪几格）：群里问到旧事同样会翻，
+    只是取不到私密那几格。判在这两处之外一个字节都不读：没命中就一次 IO 都不做（不 list、
+    不 read），这一节也就压根不进提示词。被动与主动（她自己开口那一轮，由头就是这一问）用的
+    是同一把尺子。
     """
     if not spec.get("enabled"):
-        return False
-    if not spec["scene"].get(scene):
         return False
     return any(word in said for word in spec["keywords"])
 
 
 def _drawer_rows(spec: Mapping[str, Any], scene: str) -> List[Mapping[str, Any]]:
     """家·抽屉的清单：一格一次 list_room，只读，一个字都不写回去。
+
+    **场合在这一层才起作用**：只取 spec["shelves"][scene] 里列的那几格——private 是普通 + 恋爱，
+    group 与 unknown 只有普通那格（私密内容不进退群上下文）。scene 是归一化之后的值（只认脑那
+    三个），所以这里不做第二遍判；不认的场合在归一化那一步已经是 unknown，不会被猜成 group 或
+    private。
 
     读不出来（没这间房 / 没这一格 / 格子坏行）就跳过那一格、回空表：这一节不加，
     整轮照旧说得出口——旧事读不到，不该把她这一轮也拖哑。
@@ -1843,25 +1856,33 @@ def _drawer(conf: Mapping[str, Any], said: str, scene: str) -> Tuple[Dict[str, A
     """抽屉这一节：装配前判一次意图，命中才向家取 2–3 篇旧事，整节压进 sections.drawer.cap。
 
     次序（挑法是这一节的判据，常数全在 assembly.json 的 drawer 里）：
-      1. _drawer_due 判意图与场合——不成立直接回空串，**一次 IO 都不做**；
-      2. list_room 按 room / kind / shelves 筛出她要的那一类，相关性优先、再按日期从新到旧取
-         max_entries 篇（见 _drawer_pick）；
+      1. _drawer_due 判意图（enabled + 关键词，**不看场合**）——不成立直接回空串，**一次 IO 都不做**；
+      2. list_room 按 room / kind / shelves[场合] 筛出她要的那一类（场合只决定能取哪几格），
+         相关性优先、再按日期从新到旧取 max_entries 篇（见 _drawer_pick）；
       3. 逐篇 read_item 取正文，每篇一行（行模板 drawer.line：行首日期 + 正文）；
-      4. 节尾接 drawer.testimony_note：那些是她自己写下的，只能说「我写过」。
-    整节（含那句说明）用 len 量的总字数 ≤ cap：放不下的那篇这一次就不放。
+      4. 场合是 unknown 时，**节内第一行**（节标题之后、条目之前）插一句 drawer.unknown_note：
+         别读成私聊，这一轮只翻了普通那几格。private / group 都不插这一行；
+      5. 节尾接 drawer.testimony_note：那些是她自己写下的，只能说「我写过」。
+    整节（含 unknown 那行与节尾那句说明）用 len 量的总字数 ≤ cap：放不下的那篇这一次就不放。
+    unknown 那句先占位（跟节尾那句同一个道理：它是这一档的要害，被 cap 锯掉就等于没写）。
     回包那一格只带 key 与 count——正文进提示词，**不进长期记忆**。
     """
     blank: Dict[str, Any] = {"key": DRAWER_KEY, "count": 0}
     spec = conf.get("drawer")
-    if not isinstance(spec, Mapping) or not _drawer_due(spec, said, scene):
+    if not isinstance(spec, Mapping) or not _drawer_due(spec, said):
         return blank, ""
     picked = _drawer_pick(_drawer_rows(spec, scene), spec, said)
     if not picked:
         return blank, ""
     ends = str(conf["tone_rules"]["sentence_end_chars"])
     note = spec["testimony_note"]
-    # 节尾那句说明先占位：它是这一节的要害，被 cap 锯掉就等于没写这一句。
-    budget = spec["cap"] - len(note) - len(LINE_JOIN)
+    # 来源未定那一档：节内第一行（节标题之后、条目之前）明说这一轮不是私聊，**不猜场合**。
+    # 只认 unknown 这一个值：group / private 一个字都不加（群里那句「来源未定」本身就是噪声）。
+    head_lines: List[str] = ([spec["unknown_note"]]
+                             if scene == brain_model.SCENE_UNKNOWN else [])
+    # 这两行先占位：它们是这一档的要害，被 cap 锯掉就等于没写。
+    budget = (spec["cap"] - len(note) - len(LINE_JOIN)
+              - sum(len(row) + len(LINE_JOIN) for row in head_lines))
     lines: List[str] = []
     used = 0
     for item, date in picked:
@@ -1881,7 +1902,7 @@ def _drawer(conf: Mapping[str, Any], said: str, scene: str) -> Tuple[Dict[str, A
         used += sep + len(line)
     if not lines:
         return blank, ""
-    body_text = LINE_JOIN.join(lines) + LINE_JOIN + note
+    body_text = LINE_JOIN.join(head_lines + lines) + LINE_JOIN + note
     return {"key": DRAWER_KEY, "count": len(lines)}, body_text
 
 

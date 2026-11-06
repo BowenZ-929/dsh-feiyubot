@@ -95,11 +95,7 @@
       "private": ["日记-普通", "日记-恋爱"],
       "unknown": ["日记-普通"]
     },
-    "scene": {
-      "group": false,
-      "private": true,
-      "unknown": false
-    },
+    "unknown_note": "（来源未定：这一轮没有判定是私聊还是群聊，只翻了普通那几格，没碰私下的日记；读的时候别当私聊说。）",
     "max_entries": 3,
     "cap": 300,
     "label": "（旧家日记）",
@@ -125,7 +121,7 @@
       "12": "十二月"
     },
     "testimony_note": "这些是我自己写下的，不是他说的；可以说「我写过」，不许说成「你说过」。",
-    "note": "抽屉那一节：装配前按 keywords 判一次意图——问句里一个词都不出现，就一节都不加、一次 IO 都不做（缺这一块也等于不翻，不是每轮翻）。命中之后先看场合：scene 里为 false 的场合（群聊 / unknown）整节不加，只有为 true 的场合才翻；shelves 是各场合允许翻的格子，恋爱日记只在私聊可被选中（其它场合压根不翻，这一栏是给以后放开留的口）。从家里 list_room 按 kind + shelves 筛出日记，挑法两条：相关性（month_words 里的月份词整词出现在问句里，或 name / at / note 与问句连续重合 topic_min_chars 字）先选，再按日期从新到旧补足到 max_entries。每篇一行：line 是行模板（行首日期取 name 前 date_chars 字、不像日期就取 at 前那几个字），正文最多 line_chars 字，放不下就截到整句（句末看 tone_rules.sentence_end_chars）、末尾接 more；整节渲染完的总字数 ≤ cap（与 sections.drawer.cap 是同一格，两处不等当场报），放不下的那篇这一次就不放，不硬塞。节尾必带 testimony_note：日记是她自己写下的（testimony=false），只能说「我写过」，不许说成对方说过。**这一节只进提示词，日记正文一个字都不落进长期记忆**。"
+    "note": "抽屉那一节：装配前按 enabled + keywords 判一次意图——关着，或问句里一个关键词都不出现，就一节都不加、一次 IO 都不做（缺这一块也等于不翻，不是每轮翻）。**翻不翻只看意图，不看场合**：群里或场合不明时问到旧事，一样会翻。场合只决定能取哪几格（shelves）：private 普通 + 恋爱两格都能取，group 只取普通那格（私密内容不进退群上下文），unknown 也只取普通那格（保守），且在节内第一行插一句 unknown_note 标明「来源未定」；unknown 绝不推断成 group 或 private（猜错场合就是让她在群里说私话）。从家里 list_room 按 kind + shelves 筛出日记，挑法两条：相关性（month_words 里的月份词整词出现在问句里，或 name / at / note 与问句连续重合 topic_min_chars 字）先选，再按日期从新到旧补足到 max_entries。每篇一行：line 是行模板（行首日期取 name 前 date_chars 字、不像日期就取 at 前那几个字），正文最多 line_chars 字，放不下就截到整句（句末看 tone_rules.sentence_end_chars）、末尾接 more；整节渲染完的总字数 ≤ cap（与 sections.drawer.cap 是同一格，两处不等当场报），放不下的那篇这一次就不放，不硬塞。节尾必带 testimony_note：日记是她自己写下的（testimony=false），只能说「我写过」，不许说成对方说过。**这一节只进提示词，日记正文一个字都不落进长期记忆**。"
   },
   "prompt": {
     "system": "你正在装配这一轮对话的上下文：下面几段按顺序拼好，一个字都不许改。\n\n{sections}\n\n这一次回复不超过 {reply_budget} 个字。{reply_instruction}",
