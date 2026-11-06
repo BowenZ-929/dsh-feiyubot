@@ -11,7 +11,8 @@
     "mentionCapMs": 1000,
     "bareImageMs": 4000,
     "stickerMs": 500,
-    "privateCapMs": 1000
+    "privateCapMs": 3500,
+    "sameSpeaker": 3500
   },
   "outbound": {
     "maxChars": 512,
