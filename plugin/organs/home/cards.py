@@ -33,7 +33,7 @@ INDEX_NAME = "index.jsonl"
 # 七种卡：物件（放着的）、痕迹（写下的经过）、名片（一人一卡）、借阅条（借来的一份语料）、
 # 素材（画风与参考图）、自画像（画出来的那张）、提到（只在旧卡上加一句，不新建）。
 CARD_KINDS: Tuple[str, ...] = ("物件", "痕迹", "名片", "借阅条", "素材", "自画像", "提到", "消费",
-                               "进度", "日记", "梦", "人设卡")
+                               "进度", "日记", "梦", "人设卡", "任务")
 #: 抽屉里的「格子」：这四个 kind 各自落一个子目录，各一份 index.jsonl。
 #: 房名表不变（还是十间）——格子是**一间房里的抽屉分格**，不是新房间。
 SHELF_KINDS: Tuple[str, ...] = ("自画像", "人设卡", "日记", "梦")
@@ -52,6 +52,11 @@ TEXT_SUFFIXES: Tuple[str, ...] = (".md", ".jsonl")
 MENTION_KIND = "提到"
 CONSUME_KIND = "消费"
 PROGRESS_KIND = "进度"
+TASK_KIND = "任务"
+#: 任务卡只落工作台：手头的事只在干活那张桌上，不进别的房（与日记只落抽屉同一条纪律）。
+TASK_ROOM = "工作台"
+#: 完成那一行的审计名字前缀。与「消费:」分开，免得完成任务偷吃这一间的拿取额度。
+TASK_DONE_AUDIT_PREFIX = "任务完成:"
 
 #: 进度是 **0-100 的整数**，不是文本、不是任意数。只选一套：可校验、可排序、面板能一眼读到「到哪一步」；
 #: 文字说明已经在 `note` 里，再开一套自由文本就是第二个真源。
@@ -190,6 +195,24 @@ def _check_progress(value: Any, *, where: str) -> Optional[int]:
     return value
 
 
+def _check_due(value: str, *, kind: str) -> str:
+    """截止时间只收 ISO8601 **带时区**的串（2026-11-06T12:00:00+08:00）。
+
+    「什么时候到期」猜错就是把事误了，所以不带时区的串**不替它补一个时区**，直接拒。
+    """
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        raise CardError("BAD_DUE", {"kind": kind, "due": value},
+                        "%s 的 due 解析不了，要 2026-11-06T12:00:00+08:00 这样：%r"
+                        % (kind, value)) from None
+    offset = stamp.tzinfo.utcoffset(stamp) if stamp.tzinfo is not None else None
+    if offset is None:
+        raise CardError("BAD_DUE", {"kind": kind, "due": value, "reason": "no_timezone"},
+                        "%s 的 due 没带时区，读不出是什么时候：%r" % (kind, value))
+    return value
+
+
 def _identity_keys(card: Dict[str, Any]) -> List[Tuple[Any, ...]]:
     """判同件：sha256 相同算同一件；没有 sha256 时退到 (房、路径、名字)。"""
     keys: List[Tuple[Any, ...]] = []
@@ -282,6 +305,23 @@ def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
     elif kind == "人设卡" and strict and not params:
         raise CardError("KIND_FIELD_MISSING", {"kind": kind},
                         "人设卡要带上它的参考内容（params 不能空）")
+    elif kind == TASK_KIND:
+        # 任务卡：截止时间必填、done 必填且只收 bool、note 可选。**缺就报、错就报，不补默认值**——
+        # 替她补一个 due 等于替她决定什么时候到期。
+        if room_name != TASK_ROOM:
+            raise CardError("KIND_WRONG_ROOM", {"kind": kind, "room": room_name},
+                            "%s 只落%s：手头的事只在干活那张桌上" % (kind, TASK_ROOM))
+        params["due"] = _check_due(_need(params, "due", kind), kind=kind)
+        if "done" not in params:
+            raise CardError("KIND_FIELD_MISSING", {"kind": kind, "field": "done"},
+                            "%s 这张卡缺 done（true/false）" % kind)
+        if not isinstance(params.get("done"), bool):
+            raise CardError("BAD_DONE", {"kind": kind, "done": params.get("done")},
+                            "%s 的 done 只收 true/false：%r" % (kind, params.get("done")))
+        note = params.get("note")
+        if note is not None and not isinstance(note, str):
+            raise CardError("BAD_NOTE", {"kind": kind, "note": note},
+                            "%s 的 note 只收字符串：%r" % (kind, note))
     return params
 
 
@@ -393,6 +433,10 @@ def fold(rows: list, *, stats: Optional[Dict[str, Any]] = None) -> list:
         card["consumed"] = False
         card["left"] = 1
 
+        if card.get("kind") == TASK_KIND:
+            # done 是**折出来的**：创建那一行写着 false，完成那一行（params.ref 指着这张卡）在后面。
+            card["done"] = bool(card["params"].get("done"))
+
         if card.get("kind") == PROGRESS_KIND:
             target = _event_target(card, items, by_card, by_key)
             if target is None:
@@ -441,6 +485,19 @@ def fold(rows: list, *, stats: Optional[Dict[str, Any]] = None) -> list:
                     break
             if target is not None:
                 target["mentions"] += 1
+            continue
+
+        if card.get("kind") == TASK_KIND and isinstance(card["params"].get("ref"), str):
+            # 完成也是一行事件（与消费、进度同一手法）：指向那张卡，折的时候把它标成 done。
+            target = by_card.get(card["params"]["ref"])
+            if target is None:
+                if stats is not None:
+                    stats["orphan_tasks"] = int(stats.get("orphan_tasks", 0)) + 1
+                continue
+            target["done"] = True
+            target["done_at"] = card.get("at")
+            target["done_by"] = card.get("by")
+            target["done_count"] = int(target.get("done_count") or 0) + 1
             continue
 
         existing = None
@@ -667,6 +724,66 @@ def consume(root=None, *, role: str, by: str, room: str, card_id: Optional[str] 
                                chars=len(reason), bytes=0)
     return {"room": target_room.name, "card": card, "target": target,
             "left": 0, "audit": entry}
+
+
+def add_task(root=None, *, role: str, by: str, title: str, due: str, note: str = "",
+             at: Optional[str] = None) -> dict:
+    """往工作台放一张带截止时间的任务卡：过 append_cards 那两道门，落**一行**、记一行审计。
+
+    校验走 _check_kind_fields 的 任务 分支，所以 due／done／note 的规矩只有那一处。
+    """
+    size = len(title) + len(note) if isinstance(title, str) and isinstance(note, str) else 0
+    written = append_cards(root, role=role, by=by, cards=[
+        {"room": TASK_ROOM, "kind": TASK_KIND, "name": title, "chars": size, "at": at,
+         "params": {"due": due, "done": False, "note": note}}])
+    return written["cards"][0]
+
+
+def complete_task(root=None, *, role: str, by: str, card_id: str,
+                  at: Optional[str] = None) -> dict:
+    """把一张任务卡标成完成：往同一份流水**再追加一行**，读时折成 done=true。**盘上一个字不删。**
+
+    set_progress／consume 的老手法：卡片本体不动，完成是流水里的一行事件（params.ref）。
+    """
+    if not isinstance(card_id, str) or not card_id.strip():
+        raise CardError("BAD_ARGUMENT", {"card_id": card_id},
+                        "完成任务要指定一张卡：给 card_id")
+    # 门先于找件：与消费、改进度同一条纪律（否则等于允许从门外探测房间里有什么）。
+    access.check_write(role=role, room=TASK_ROOM, name=card_id, chars=0, root=root)
+
+    home = store_module.home_root(root)
+    path = _index_path(home, TASK_ROOM)
+    rows, _bad = _read_room_rows(home, TASK_ROOM)
+    tasks = [card for card in fold(rows) if card.get("kind") == TASK_KIND]
+    target = _pick_target(tasks, card_id=card_id, name=None, room_name=TASK_ROOM)
+
+    store_module.ensure_dir(home / TASK_ROOM)
+    event = _new_card({"kind": TASK_KIND, "name": target.get("name"), "at": at,
+                       "params": {"ref": target.get("card_id"), "done": True}},
+                      role=role, by=by, room_name=TASK_ROOM, seq=_line_count(path) + 1)
+    store_module.append_line(path, event)
+    entry = audit.append_entry(root=root, role=role, by=by, room=TASK_ROOM,
+                               name="%s%s" % (TASK_DONE_AUDIT_PREFIX, event["name"]),
+                               chars=0, bytes=0)
+
+    after, _bad = _read_room_rows(home, TASK_ROOM)
+    done = next((card for card in fold(after) if card.get("card_id") == card_id), None)
+    if done is None:            # 行刚落下去必然折得回来；折不上是盘坏了，如实报，不拿旧卡充数。
+        raise CardError("CARD_DISK_MISMATCH", {"room": TASK_ROOM, "card_id": card_id},
+                        "完成行写下去了，读回来却折不上这张卡：%s" % card_id)
+    return {"room": TASK_ROOM, "card": done, "event": event, "audit": entry}
+
+
+def list_tasks(root=None, *, room: str = TASK_ROOM) -> list:
+    """这一间里还没被拿走的任务卡（折叠后）。
+
+    done／done_at／done_by 都是折出来的：流水只增，读时才成为「完成了」。
+    """
+    target = _target_room(room)
+    home = store_module.home_root(root)
+    rows, _bad = _read_room_rows(home, target.name)
+    return [card for card in fold(rows)
+            if card.get("kind") == TASK_KIND and not card.get("consumed")]
 
 
 def _excerpt(card: Dict[str, Any], chars: int) -> Dict[str, Any]:

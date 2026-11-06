@@ -20,8 +20,8 @@ from .access import (AccessDenied, Limits, Whitelist, check_consume, check_path_
 from .anchors import (AnchorError, append_anchors, latest_by_scene, read_all as read_anchors,
                        read_seed, seed_path)
 from .audit import AuditShrunk, Entry, append_entry, read_tail, verify
-from .cards import (CardError, append_cards, consume, fold, list_room, read_item,
-                     set_progress)
+from .cards import (CardError, add_task, append_cards, complete_task, consume, fold,
+                     list_room, list_tasks, read_item, set_progress)
 from .residents import (borrow_ledger, read_drawer, read_learned, register_artwork,
                         register_asset, register_borrow, seed_mouth_pointers,
                         warehouse_pointers)
@@ -36,8 +36,8 @@ __all__ = [
     "check_write", "limits_seed_path", "load_limits", "read_limits_seed",
     "load_whitelist",
     "AuditShrunk", "Entry", "append_entry", "read_tail", "verify",
-    "CardError", "append_cards", "consume", "fold", "list_room", "read_item",
-    "set_progress",
+    "CardError", "add_task", "append_cards", "complete_task", "consume", "fold",
+    "list_room", "list_tasks", "read_item", "set_progress",
     "borrow_ledger", "read_drawer", "read_learned", "register_artwork", "register_asset",
     "register_borrow", "seed_mouth_pointers", "warehouse_pointers",
     "DEFAULT_WRITABLE", "READONLY_ROOMS", "ROOM_NAMES", "ROOMS", "Room", "RoomMiss", "find",

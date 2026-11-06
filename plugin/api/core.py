@@ -46,14 +46,16 @@ def _merge(*tables: Mapping[str, str]) -> Dict[str, str]:
 
 
 # 器官文件要 import 上面的公共件，所以汇总放最后：否则 core 还没定义完就被回头拿走。
-from . import brain as brain_api, chat as chat_api, day as day_api, heart as heart_api  # noqa: E402
+from . import brain as brain_api, chat as chat_api, day as day_api, hand as hand_api  # noqa: E402
+from . import heart as heart_api  # noqa: E402
 from . import home as home_api  # noqa: E402
 from . import mouth as mouth_api, pages as page_api, soul as soul_api  # noqa: E402
 from . import version as version_api  # noqa: E402
 
 ROUTES = _merge(soul_api.SOUL_ROUTES, brain_api.BRAIN_ROUTES, page_api.PAGE_ROUTES,
                 mouth_api.MOUTH_ROUTES, home_api.HOME_ROUTES, heart_api.HEART_ROUTES,
-                version_api.VERSION_ROUTES, day_api.DAY_ROUTES, chat_api.CHAT_ROUTES)
+                hand_api.HAND_ROUTES, version_api.VERSION_ROUTES, day_api.DAY_ROUTES,
+                chat_api.CHAT_ROUTES)
 
 
 def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
@@ -75,6 +77,12 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
             return 405, {"ok": False,
                          "message": "%s 是心的只读端点：只收 GET，POST/PUT/DELETE 一律 405"
                                     "（人不能改心）" % route}
+        if route in hand_api.HAND_ROUTES:
+            # 手与心同一条口径：这一层是读数，记下一件事／标完成是动作，不是查询。
+            return 405, {"ok": False,
+                         "message": "%s 是手的只读读数：只收 GET，POST/PUT/DELETE 一律 405"
+                                    "（记下事与标完成是动作，不是查询——面板读得着，改不着）"
+                                    % route}
         if route in brain_api.BRAIN_ROUTES:
             return 405, {"ok": False,
                          "message": "%s 是只读页：只收 GET，POST/PUT/DELETE 一律 405（人不能改心与脑）"
@@ -104,6 +112,8 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
         return chat_api.dispatch(route, body, store, brain)
     if route in heart_api.HEART_ROUTES:
         return heart_api.dispatch(route, params, store, brain)
+    if route in hand_api.HAND_ROUTES:
+        return hand_api.dispatch(route, params, store, brain)
     if route in brain_api.BRAIN_ROUTES:
         return brain_api.dispatch(route, params, body, brain)
     if route in mouth_api.MOUTH_ROUTES:

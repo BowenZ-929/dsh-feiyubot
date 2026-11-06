@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "per_person_per_day": 20,
+  "note": "手的出厂默认额度：每人每天 20 次。这是出厂默认参数，不是真源——实盘 <器官根>/hand/limits.json 在就一律按它。"
+}

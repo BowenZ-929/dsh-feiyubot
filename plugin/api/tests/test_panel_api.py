@@ -77,6 +77,8 @@ REQUIRED_ROUTES = (
     ("GET", "/heart/proactive"),
     # 第七轮接线段：/heart/gate 把出站闸的只读判读搬上端点（人级在前、群级在后）
     ("GET", "/heart/gate"),
+    # 第四轮手线：手的三条只读读数（判据快照／任务与到点没做／手账尾读）
+    ("GET", "/hand"), ("GET", "/hand/tasks"), ("GET", "/hand/ledger"),
     ("GET", "/brain"), ("GET", "/brain/overview"), ("GET", "/brain/today"),
     ("GET", "/brain/people"), ("GET", "/brain/recall"),
     ("GET", "/brain/selfnarration"), ("GET", "/brain/proposals"),
@@ -386,6 +388,9 @@ class PanelSourceTest(unittest.TestCase):
 
         口径变更（2026-11-05 说话线）：多第七组「说话」（/chat，CHAT_ROUTES 那一张表：
         核上唯一一条真会说话的写）。它不复用嘴的干跑端点那张表——干跑只算不发，说话是真发。
+
+        口径变更（2026-11-06 第四轮手线）：多第八组「手」（/hand*，HAND_ROUTES 那一张表，
+        三条全 GET）。手是读数不是动作：记下事／标完成那两条动作没有 HTTP 入口。
         """
         soul = {path for path in api.ROUTES if path.startswith("/soul")}
         brain = {path for path in api.ROUTES if path.startswith("/brain")}
@@ -393,7 +398,8 @@ class PanelSourceTest(unittest.TestCase):
         heart = {path for path in api.ROUTES if path.startswith("/heart")}
         day = {path for path in api.ROUTES if path.startswith("/day")}
         chat = {path for path in api.ROUTES if path.startswith("/chat")}
-        rest = set(api.ROUTES) - soul - brain - family - heart - day - chat
+        hand = {path for path in api.ROUTES if path.startswith("/hand")}
+        rest = set(api.ROUTES) - soul - brain - family - heart - day - chat - hand
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
         self.assertEqual({"/home/write", "/home/anchors/append", "/home/consume",
@@ -409,6 +415,10 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(core.heart_api.HEART_ROUTES), heart,
                          "心的路由就是 HEART_ROUTES 那一张表")
         self.assertEqual({"GET"}, {api.ROUTES[path] for path in heart}, "心只有只读端点")
+        self.assertEqual(set(core.hand_api.HAND_ROUTES), hand,
+                         "手的路由就是 HAND_ROUTES 那一张表")
+        self.assertEqual({"GET"}, {api.ROUTES[path] for path in hand},
+                         "手只有只读读数：记下事／标完成是动作，不上 HTTP")
         self.assertEqual(set(core.day_api.DAY_ROUTES), day,
                          "日子的路由就是 DAY_ROUTES 那一张表")
         self.assertEqual({"GET", "POST"}, {api.ROUTES[path] for path in day},
@@ -447,8 +457,9 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(), day & (soul | brain | family | heart | rest), "日子与别的组有重叠")
         self.assertEqual(set(), chat & (soul | brain | family | heart | day | rest),
                          "说话与别的组有重叠")
-        self.assertEqual(set(api.ROUTES), soul | brain | family | heart | day | chat | rest,
-                         "路由表分不成七组：有端点没归属")
+        self.assertEqual(set(api.ROUTES),
+                         soul | brain | family | heart | hand | day | chat | rest,
+                         "路由表分不成八组：有端点没归属")
         self.assertEqual(set(REQUIRED_ROUTES),
                          {(api.ROUTES[path], path) for path in api.ROUTES},
                          "路由表就是那张关键端点表：多了少了都得在这儿说清楚")
@@ -946,7 +957,8 @@ class RouteRegistryTest(unittest.TestCase):
         home_api.HOME_ROUTES（家：九条只读 + 一条 POST /home/write）/
         heart_api.HEART_ROUTES（心：七条只读）/
         day_api.DAY_ROUTES（日子：四条只读 + 六条 POST，内容归 schedule、送达归 delivery）/
-        version_api.VERSION_ROUTES（核自报身份）/ chat_api.CHAT_ROUTES（说话：POST /chat）。
+        version_api.VERSION_ROUTES（核自报身份）/ chat_api.CHAT_ROUTES（说话：POST /chat）/
+        hand_api.HAND_ROUTES（手：三条只读读数，记下事／标完成那两条动作没有 HTTP 入口）。
         """
         tables = (("soul_api.SOUL_ROUTES", core.soul_api.SOUL_ROUTES),
                   ("brain_api.BRAIN_ROUTES", core.brain_api.BRAIN_ROUTES),
@@ -956,7 +968,8 @@ class RouteRegistryTest(unittest.TestCase):
                   ("heart_api.HEART_ROUTES", core.heart_api.HEART_ROUTES),
                   ("day_api.DAY_ROUTES", core.day_api.DAY_ROUTES),
                   ("version_api.VERSION_ROUTES", core.version_api.VERSION_ROUTES),
-                  ("chat_api.CHAT_ROUTES", core.chat_api.CHAT_ROUTES))
+                  ("chat_api.CHAT_ROUTES", core.chat_api.CHAT_ROUTES),
+                  ("hand_api.HAND_ROUTES", core.hand_api.HAND_ROUTES))
         sources = " / ".join(name for name, _ in tables)
         merged = core._merge(*[table for _, table in tables])
         self.assertEqual(merged, core.ROUTES, "汇总表不是这六张表的拼接：%s" % sources)

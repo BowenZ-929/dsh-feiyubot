@@ -204,5 +204,136 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(listed["slug"], rooms.find("工作台").slug)
 
 
+class TaskCardTest(unittest.TestCase):
+    """任务卡：带截止时间、写成一行；完成也是追加一行，done 是读出来折的。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "home"
+        self.root.mkdir()
+        (self.root / "access.json").write_text(
+            (ORGAN_DATA / "access.json").read_text(encoding="utf-8"), encoding="utf-8")
+        self.due = "2026-11-06T12:00:00+08:00"
+
+    def index_path(self, room: str = "工作台") -> Path:
+        return self.root / room / INDEX
+
+    def lines(self, room: str = "工作台") -> list:
+        """直接读盘数行：不借被测代码数，好让「盘上到底几行」是独立证据。"""
+        path = self.index_path(room)
+        if not path.exists():
+            return []
+        return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def test_add_task_lands_one_line_and_list_tasks_reads_it_back(self):
+        """① 放一张任务卡：盘上多一行、审计多一行、list_tasks 读得到。"""
+        card = cards.add_task(root=self.root, role="agent", by="手", title="把第三章写完",
+                              due=self.due, note="先写提纲")
+        self.assertEqual(card["kind"], "任务")
+        self.assertEqual(card["room"], "工作台")
+        self.assertEqual(card["card_id"], "工作台-1")
+        self.assertEqual(card["params"]["due"], self.due)
+        self.assertIs(card["params"]["done"], False)
+        self.assertEqual(card["params"]["note"], "先写提纲")
+
+        self.assertEqual(len(self.lines()), 1)
+        tail = audit.read_tail(root=self.root, limit=10)
+        self.assertEqual(len(tail), 1)
+        self.assertEqual(tail[0].room, "工作台")
+        self.assertTrue(tail[0].ok)
+
+        listed = cards.list_tasks(root=self.root)
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["card_id"], "工作台-1")
+        self.assertIs(listed[0]["done"], False)
+        self.assertEqual(listed[0]["params"]["due"], self.due)
+
+    def test_complete_task_appends_a_line_and_folds_to_done(self):
+        """② 完成后 list 里 done=true，且**盘上行数只增不减**：两行都在。"""
+        made = cards.add_task(root=self.root, role="agent", by="手", title="回她的信",
+                              due=self.due)
+        done = cards.complete_task(root=self.root, role="agent", by="手",
+                                   card_id=made["card_id"])
+        self.assertIs(done["card"]["done"], True)
+        self.assertEqual(done["card"]["done_by"], "手")
+        self.assertEqual(done["card"]["card_id"], made["card_id"])
+
+        rows = self.lines()
+        self.assertEqual(len(rows), 2)                      # 只增：两行都在
+        first, second = [json.loads(row) for row in rows]
+        self.assertIs(first["params"]["done"], False)        # 创建那一行原样还在
+        self.assertEqual(first["card_id"], made["card_id"])
+        self.assertIs(second["params"]["done"], True)        # 完成那一行是追加的
+        self.assertEqual(second["params"]["ref"], made["card_id"])
+
+        listed = cards.list_tasks(root=self.root)
+        self.assertEqual(len(listed), 1)                     # 折成一张卡，不是两张
+        self.assertIs(listed[0]["done"], True)
+        self.assertEqual(listed[0]["done_at"], second["at"])
+        self.assertEqual(len(audit.read_tail(root=self.root, limit=10)), 2)
+
+    def test_task_without_due_is_refused(self):
+        """③ 缺 due → KIND_FIELD_MISSING，盘上一行都不落。"""
+        with self.assertRaises(cards.CardError) as caught:
+            cards.add_task(root=self.root, role="agent", by="手", title="没写截止的事", due="")
+        self.assertEqual(caught.exception.code, "KIND_FIELD_MISSING")
+        self.assertEqual(caught.exception.detail.get("field"), "due")
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(audit.read_tail(root=self.root, limit=10), [])
+
+        with self.assertRaises(cards.CardError) as caught:
+            cards.append_cards(root=self.root, role="agent", by="手", cards=[
+                {"room": "工作台", "kind": "任务", "name": "直接塞一张",
+                 "params": {"done": False}}])
+        self.assertEqual(caught.exception.code, "KIND_FIELD_MISSING")
+        self.assertEqual(caught.exception.detail.get("field"), "due")
+
+    def test_unknown_kind_is_still_refused(self):
+        """④ 任务进了 CARD_KINDS，别的名字照旧 BAD_KIND。"""
+        self.assertIn("任务", cards.CARD_KINDS)
+        with self.assertRaises(cards.CardError) as caught:
+            cards.append_cards(root=self.root, role="agent", by="手", cards=[
+                {"room": "工作台", "kind": "待办", "name": "换个名字",
+                 "params": {"due": self.due, "done": False}}])
+        self.assertEqual(caught.exception.code, "BAD_KIND")
+        self.assertEqual(self.lines(), [])
+
+    def test_bad_due_is_refused_with_its_own_code(self):
+        """⑤ due 格式错 → 带码拒（BAD_DUE）；不带时区的串也不替它补时区。"""
+        for bad in ("下周五", "2026-11-06 12:00", "2026-11-06T12:00:00", "2026-11-06"):
+            with self.assertRaises(cards.CardError) as caught:
+                cards.add_task(root=self.root, role="agent", by="手", title="快到的事",
+                               due=bad)
+            self.assertEqual(caught.exception.code, "BAD_DUE", bad)
+            self.assertEqual(caught.exception.detail.get("due"), bad)
+        self.assertEqual(self.lines(), [])
+
+    def test_task_only_lands_on_the_desk(self):
+        """任务卡只落工作台：塞到玄关是 KIND_WRONG_ROOM，不是悄悄落下去。"""
+        with self.assertRaises(cards.CardError) as caught:
+            cards.append_cards(root=self.root, role="agent", by="手", cards=[
+                {"room": "玄关", "kind": "任务", "name": "放错屋的事",
+                 "params": {"due": self.due, "done": False}}])
+        self.assertEqual(caught.exception.code, "KIND_WRONG_ROOM")
+        self.assertEqual(self.lines("玄关"), [])
+
+    def test_task_done_must_be_a_bool(self):
+        """done 只收 bool：缺了报 KIND_FIELD_MISSING，写错类型报 BAD_DONE，都不补默认值。"""
+        with self.assertRaises(cards.CardError) as caught:
+            cards.append_cards(root=self.root, role="agent", by="手", cards=[
+                {"room": "工作台", "kind": "任务", "name": "没说做没做",
+                 "params": {"due": self.due}}])
+        self.assertEqual(caught.exception.code, "KIND_FIELD_MISSING")
+        self.assertEqual(caught.exception.detail.get("field"), "done")
+
+        with self.assertRaises(cards.CardError) as caught:
+            cards.append_cards(root=self.root, role="agent", by="手", cards=[
+                {"room": "工作台", "kind": "任务", "name": "做没做写成字",
+                 "params": {"due": self.due, "done": "yes"}}])
+        self.assertEqual(caught.exception.code, "BAD_DONE")
+        self.assertEqual(self.lines(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
