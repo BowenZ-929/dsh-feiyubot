@@ -257,7 +257,8 @@ class SoulMechanismsApiTest(unittest.TestCase):
 
     def test_check_reports_the_redline_assertion(self):
         payload = self._call("GET", "/soul/check")[1]
-        self.assertEqual([], payload["issues"])
+        # 这份卡是从 fixtures/valid 拷的：红线 id 与出厂本来就不是同一份，只剩那条对照
+        self.assertEqual(["FACTORY_LIVE_ID_DRIFT"], [issue["code"] for issue in payload["issues"]])
         path = self.root / "bounds.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         data["items"][0]["rule"] = "尽量避免嘲讽"

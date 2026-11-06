@@ -1020,21 +1020,21 @@ class BrainStore:
         people = data.setdefault("people", {})
         person = people.get(who)
         if person is None:
-            person = {"id": who, "display": display or who, "aliases": [],
+            # display 是关系（人写的称呼），通道昵称只是标签：新卡 display 留空，
+            # 通道来的昵称进 nickname + aliases，绝不盖 display。
+            person = {"id": who, "display": "", "nickname": display or "",
+                      "aliases": ([display] if display else []),
                       "first_seen": ts, "last_interaction": ts, "cold": True,
                       "shadow": False, "interactions": {}, "topics": [],
                       "prefs": [], "notes": []}
             people[who] = person
         else:
-            # 群昵称 ≠ 真实姓名：display 用当前群昵称，见过的旧叫法进 aliases 累积。
-            if display and display != person.get("display"):
-                old_display = person.get("display", "")
+            # 通道 upsert：昵称只进 aliases 与 nickname；display 只有人能改（patch_card）。
+            if display:
                 aliases = person.setdefault("aliases", [])
-                if old_display and old_display != who and old_display not in aliases:
-                    aliases.append(old_display)
-                if display != who and display not in aliases:
+                if display != person.get("display") and display not in aliases:
                     aliases.append(display)
-                person["display"] = display
+                person["nickname"] = display
             person["last_interaction"] = ts
             if person.get("shadow"):
                 person["shadow"] = False
@@ -1162,6 +1162,8 @@ class BrainStore:
             return None
         return {"id": person.get("id", ""),
                 "display": person.get("display", ""),
+                "nickname": person.get("nickname", "") or "",
+                "aliases": _as_list(person.get("aliases")),
                 "prefs": _as_list(person.get("prefs")),
                 "notes": _as_list(person.get("notes")),
                 "birthday": person.get("birthday", "") or "",

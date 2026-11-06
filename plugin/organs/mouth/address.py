@@ -77,6 +77,7 @@ class Addressee:
     note: str = ""
     renamed: bool = False
     source: str = ""
+    nickname: str = ""
 
 
 class SessionAddressBook:
@@ -182,11 +183,13 @@ def resolve(person: Optional[dict], table: dict,
     key = (_text(holder.get("id")) if holder else "") or _text(who)
     who = key
     display = _text(holder.get("display")) if holder else ""
+    nickname = _text(holder.get("nickname")) if holder else ""
+    name = display or nickname   # 人写的称呼优先；没有就用通道昵称当名字叫
     reading = _reading(holder.get("familiarity")) if holder else 0.0
     tier_name = tier_of(reading, table)
     entry = _entry(table, tier_name)
     relation = int(need(entry, "relation"))
-    candidate, note = _candidate(holder, entry, table, tier_name, who, display)
+    candidate, note = _candidate(holder, entry, table, tier_name, who, name)
     source = str(need(labels, "directory"))
     renamed = False
     override = _session_override(session, key)
@@ -209,8 +212,8 @@ def resolve(person: Optional[dict], table: dict,
     if not candidate:
         candidate = fallback
         source = str(need(labels, "fallback"))
-    return Addressee(who=who, display=display, tier=tier_name, relation=relation,
-                     address=candidate, frequency=frequency,
+    return Addressee(who=who, display=display, nickname=nickname, tier=tier_name,
+                     relation=relation, address=candidate, frequency=frequency,
                      banned_self=banned, note=note, renamed=renamed, source=source)
 
 

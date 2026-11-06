@@ -49,7 +49,8 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertIsInstance(payload["issues"], list)
         for issue in payload["issues"]:
-            self.assertEqual(["code", "level", "message"], sorted(issue))
+            # blocking 也是对外形状的一部分（非阻塞的 error 只报不拦），别只认三键
+            self.assertEqual(["blocking", "code", "level", "message"], sorted(issue))
 
     def test_get_soul_history_is_the_ledger(self):
         status, payload = self._call("GET", "/soul/history")

@@ -659,6 +659,7 @@ def _addressee(called: Any, note: str) -> Dict[str, Any]:
     return {
         "who": called.who,
         "display": called.display,
+        "nickname": getattr(called, "nickname", ""),
         "tier": called.tier,
         "relation": called.relation,
         "address": called.address,

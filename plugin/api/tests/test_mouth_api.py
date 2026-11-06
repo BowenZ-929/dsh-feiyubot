@@ -161,7 +161,8 @@ class MouthApiTest(unittest.TestCase):
                     "address", "frequency", "banned_self", "note"):
             self.assertIn(key, payload)
         self.assertEqual("aiocqhttp:1002", payload["who"])
-        self.assertEqual("小林", payload["display"])
+        self.assertEqual("", payload["display"], "display 归人：通道昵称不落 display")
+        self.assertEqual("小林", payload.get("nickname"), "通道昵称落 nickname")
         self.assertIsInstance(payload["relation"], int)
 
     def test_tone_returns_full_shape(self):
@@ -415,7 +416,7 @@ class MouthApiTest(unittest.TestCase):
         """没给 rename：返回与从前一致——不多 renamed/memory_draft，addressee 只多两个可选字段。"""
         status, payload = self._call("GET", "/mouth/address?who=aiocqhttp:1002")
         self.assertEqual(200, status)
-        self.assertEqual({"ok", "readonly", "agent", "who", "display", "tier", "relation",
+        self.assertEqual({"ok", "readonly", "agent", "who", "display", "nickname", "tier", "relation",
                           "address", "frequency", "banned_self", "note",
                           "renamed", "source"}, set(payload))
         self.assertFalse(payload["renamed"])

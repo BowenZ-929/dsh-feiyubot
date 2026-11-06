@@ -23,7 +23,8 @@ class WhoKeyTest(unittest.TestCase):
         people = store.people_list("2026-11-03T10:05:00+00:00")
         self.assertEqual(1, len(people))
         self.assertEqual("3425635473", people[0]["id"])
-        self.assertEqual("主人", people[0]["display"])
+        self.assertEqual("", people[0]["display"], "display 归人：通道只写 aliases/nickname")
+        self.assertEqual("主人", people[0]["nickname"])
         self.assertEqual(["老大", "主人"], people[0]["aliases"])
 
     def test_nickname_as_who_rejected_with_reason(self):
@@ -78,7 +79,8 @@ class OldHomeBackfillTest(unittest.TestCase):
         by_id = {p["id"]: p for p in people}
         self.assertTrue(by_id["970782150"]["from_old_home"])
         self.assertTrue(by_id["970782150"]["familiarity_estimated"])
-        self.assertEqual("张云鹏", by_id["970782150"]["display"])
+        self.assertEqual("", by_id["970782150"]["display"], "旧日记里没有人写的称呼")
+        self.assertEqual("张云鹏", by_id["970782150"]["nickname"])
         self.assertEqual(["Ben Brode", "canxueqq"], by_id["970782150"]["aliases"])
         self.assertEqual(["老大（可以叫主人）", "主人"], by_id["3425635473"]["aliases"])
 

@@ -2735,7 +2735,8 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(200, status)
         person = self.brain.lookup(CHANNEL_WHO_ID)
         self.assertIsNotNone(person, "号下没有卡：别名没登记进人名录")
-        self.assertEqual(CHANNEL_WHO["nickname"], person.get("display"), "昵称没落成显示名")
+        self.assertEqual(CHANNEL_WHO["nickname"], person.get("nickname"), "昵称该落成 nickname")
+        self.assertEqual("", person.get("display"), "display 归人：通道不许盖")
         self.assertIn(CHANNEL_WHO["card"], person.get("aliases") or [], "群名片没进别名表")
         self.assertEqual(CHANNEL_WHO_ID, person.get("id"), "身份被别名顶掉了")
         # 登记别名不许写记忆条：一轮两人各一条，一条都不许多。

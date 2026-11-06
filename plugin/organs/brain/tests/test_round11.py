@@ -40,13 +40,14 @@ class RecognitionTest(unittest.TestCase):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
         ingest(store, "123456789", "第一句", "2026-11-03T10:00:00+00:00",
-               display="123456789")
+               display="小明")
         ingest(store, "123456789", "第二句", "2026-11-03T10:01:00+00:00",
                display="小明同学")
         people = store.people_list("2026-11-03T10:02:00+00:00")
         self.assertEqual(1, len(people))
-        self.assertEqual("小明同学", people[0]["display"])
-        self.assertIn("小明同学", people[0]["aliases"], "见过的群昵称进别名")
+        self.assertEqual("", people[0]["display"], "display 归人：通道不许盖")
+        self.assertEqual("小明同学", people[0]["nickname"])
+        self.assertEqual(["小明", "小明同学"], people[0]["aliases"])
 
     def test_memories_hang_under_real_sender(self):
         store, tmp = fresh_store()
