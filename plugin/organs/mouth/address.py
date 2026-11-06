@@ -148,7 +148,8 @@ def tier_of(familiarity: float, table: dict) -> str:
 
 def resolve(person: Optional[dict], table: dict,
             allowed_self: Optional[Sequence[str]] = None,
-            session: Optional[Any] = None) -> Addressee:
+            session: Optional[Any] = None,
+            who: Optional[str] = None) -> Addressee:
     """把一个「人名录读数」落成一次称呼。
 
     person 是脑人名录的一份读数（id / display / interactions / familiarity / rename_request …，
@@ -175,7 +176,11 @@ def resolve(person: Optional[dict], table: dict,
     guard = section(table, "self_guard")
     labels = section(table, "source")
     holder = person if isinstance(person, Mapping) else None
-    who = _text(holder.get("id")) if holder else ""
+    # 会话账的键：名录里查得到人就用名录的 id，查不到就用调用方给的那个 id。
+    # 只从 person 里取的话，名录一失手（冷/影子/新人/脑那边 lookup 抖动）会话账就形同不存在，
+    # 于是「他明明让我叫他老李」下一轮又退回「你」——那是真坏，不是回显问题。
+    key = (_text(holder.get("id")) if holder else "") or _text(who)
+    who = key
     display = _text(holder.get("display")) if holder else ""
     reading = _reading(holder.get("familiarity")) if holder else 0.0
     tier_name = tier_of(reading, table)
@@ -184,7 +189,7 @@ def resolve(person: Optional[dict], table: dict,
     candidate, note = _candidate(holder, entry, table, tier_name, who, display)
     source = str(need(labels, "directory"))
     renamed = False
-    override = _session_override(session, who)
+    override = _session_override(session, key)
     rename = _rename_request(holder)
     if override:
         candidate = override

@@ -564,7 +564,7 @@ def _address_round(payload: Dict[str, Any], asked: str, brain: Any, who: str) ->
         if wanted:
             view = dict(view or {})
             view["rename_request"] = wanted
-        called = address.resolve(view, table, session=ADDRESS_BOOK)
+        called = address.resolve(view, table, session=ADDRESS_BOOK, who=who)
         key = called.who or who
         if wanted and key and called.renamed and not called.banned_self:
             _remember_rename(brain, key, wanted)

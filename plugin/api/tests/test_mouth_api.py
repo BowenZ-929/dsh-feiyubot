@@ -100,7 +100,7 @@ class MouthApiTest(unittest.TestCase):
         self.store = load(copy_fixture("valid", self._tmp.name))
         self.brain = BrainStore(Path(self._tmp.name) / "brain")
         for _ in range(20):                      # 今天连续二十次互动 → 读数 20 → 挚友档
-            self.brain.interact("u-familiar", display="小林")
+            self.brain.interact("aiocqhttp:1002", display="小林")
         # 心也用这一套临时根：投心真写盘（refusals.json），但只写临时目录
         self._env_heart = os.environ.get("HEART_ROOT")
         self._env_topics = os.environ.get("HEART_TOPICS_FILE")
@@ -155,17 +155,17 @@ class MouthApiTest(unittest.TestCase):
                 self.assertIn(key, part)
 
     def test_address_returns_full_shape(self):
-        status, payload = self._call("GET", "/mouth/address?who=u-familiar")
+        status, payload = self._call("GET", "/mouth/address?who=aiocqhttp:1002")
         self.assertEqual(200, status)
         for key in ("ok", "readonly", "agent", "who", "display", "tier", "relation",
                     "address", "frequency", "banned_self", "note"):
             self.assertIn(key, payload)
-        self.assertEqual("u-familiar", payload["who"])
+        self.assertEqual("aiocqhttp:1002", payload["who"])
         self.assertEqual("小林", payload["display"])
         self.assertIsInstance(payload["relation"], int)
 
     def test_tone_returns_full_shape(self):
-        status, payload = self._call("GET", "/mouth/tone?who=u-familiar")
+        status, payload = self._call("GET", "/mouth/tone?who=aiocqhttp:1002")
         self.assertEqual(200, status)
         for key in ("ok", "readonly", "agent", "addressee", "tone", "heart", "note"):
             self.assertIn(key, payload)
@@ -249,14 +249,14 @@ class MouthApiTest(unittest.TestCase):
 
     def test_brain_none_reports_unconnected(self):
         for route in ("/mouth/address", "/mouth/tone"):
-            status, payload = self._call("GET", route + "?who=u-familiar", brain=None)
+            status, payload = self._call("GET", route + "?who=aiocqhttp:1002", brain=None)
             self.assertEqual(200, status, route)
             self.assertEqual("未接入", payload["status"])
             self.assertTrue(payload["readonly"])
             self.assertIn("未接入", payload["message"])
 
     def test_store_none_reports_unconnected(self):
-        status, payload = self._call("GET", "/mouth/tone?who=u-familiar", store=None)
+        status, payload = self._call("GET", "/mouth/tone?who=aiocqhttp:1002", store=None)
         self.assertEqual(200, status)
         self.assertEqual("未接入", payload["status"])
         self.assertTrue(payload["readonly"])
@@ -264,14 +264,14 @@ class MouthApiTest(unittest.TestCase):
     # —— 7. 心的读数只从查询参数来 ——————————————————————
 
     def test_tone_heart_unconnected_by_default(self):
-        status, payload = self._call("GET", "/mouth/tone?who=u-familiar")
+        status, payload = self._call("GET", "/mouth/tone?who=aiocqhttp:1002")
         self.assertEqual(200, status)
         self.assertIsNone(payload["heart"])
         self.assertIn("未接入", payload["tone"]["heart_source"])
 
     def test_tone_heart_from_query_changes_softness(self):
-        _, plain = self._call("GET", "/mouth/tone?who=u-familiar")
-        status, tired = self._call("GET", "/mouth/tone?who=u-familiar&energy=15")
+        _, plain = self._call("GET", "/mouth/tone?who=aiocqhttp:1002")
+        status, tired = self._call("GET", "/mouth/tone?who=aiocqhttp:1002&energy=15")
         self.assertEqual(200, status)
         self.assertIn("已接入", tired["tone"]["heart_source"])
         self.assertNotEqual(plain["tone"]["softness"], tired["tone"]["softness"])
@@ -280,7 +280,7 @@ class MouthApiTest(unittest.TestCase):
     # —— 8. 熟人与生人：同一条路径，读数不同 ————————————————————
 
     def test_tone_familiar_vs_stranger_differ(self):
-        _, familiar = self._call("GET", "/mouth/tone?who=u-familiar")
+        _, familiar = self._call("GET", "/mouth/tone?who=aiocqhttp:1002")
         _, stranger = self._call("GET", "/mouth/tone?who=nobody-at-all")
         self.assertNotEqual(familiar["addressee"]["address"],
                             stranger["addressee"]["address"])
@@ -387,7 +387,7 @@ class MouthApiTest(unittest.TestCase):
 
     def test_address_rename_switches_and_hands_out_memory_draft(self):
         """rename 给了就当场换：返回里 renamed=true、source=本轮改名、外加一份投给脑的草稿。"""
-        status, payload = self._call("GET", "/mouth/address?who=u-familiar&rename=小王")
+        status, payload = self._call("GET", "/mouth/address?who=aiocqhttp:1002&rename=小王")
         self.assertEqual(200, status)
         table = mouth_api.address.load_table()
         self.assertEqual("小王", payload["address"])
@@ -395,32 +395,32 @@ class MouthApiTest(unittest.TestCase):
         self.assertEqual(table["source"]["rename"], payload["source"])
         draft = payload["memory_draft"]
         self.assertEqual({"who", "text", "source_type", "ts"}, set(draft))
-        self.assertEqual("u-familiar", draft["who"])
+        self.assertEqual("aiocqhttp:1002", draft["who"])
         self.assertEqual(table["self_guard"]["rename_memory_text"].format(address="小王"), draft["text"])
         self.assertEqual("亲历", draft["source_type"])
 
     def test_tone_rename_changes_the_line(self):
         """同一句语气口径行，带上 rename 之后「对谁」那一格跟着换，档位不动。"""
-        _, plain = self._call("GET", "/mouth/tone?who=u-familiar")
-        status, called = self._call("GET", "/mouth/tone?who=u-familiar&rename=小王")
+        _, plain = self._call("GET", "/mouth/tone?who=aiocqhttp:1002")
+        status, called = self._call("GET", "/mouth/tone?who=aiocqhttp:1002&rename=小王")
         self.assertEqual(200, status)
         self.assertEqual(plain["tone"]["tier"], called["tone"]["tier"], "换称呼不许连档位一起换")
         self.assertNotEqual(plain["tone"]["line"], called["tone"]["line"])
         self.assertIn("小王", called["tone"]["line"])
         self.assertEqual("小王", called["addressee"]["address"])
         self.assertTrue(called["renamed"])
-        self.assertEqual("u-familiar", called["memory_draft"]["who"])
+        self.assertEqual("aiocqhttp:1002", called["memory_draft"]["who"])
 
     def test_without_rename_nothing_is_added_but_the_new_fields(self):
         """没给 rename：返回与从前一致——不多 renamed/memory_draft，addressee 只多两个可选字段。"""
-        status, payload = self._call("GET", "/mouth/address?who=u-familiar")
+        status, payload = self._call("GET", "/mouth/address?who=aiocqhttp:1002")
         self.assertEqual(200, status)
         self.assertEqual({"ok", "readonly", "agent", "who", "display", "tier", "relation",
                           "address", "frequency", "banned_self", "note",
                           "renamed", "source"}, set(payload))
         self.assertFalse(payload["renamed"])
         self.assertEqual("人名录", payload["source"])
-        status, voice = self._call("GET", "/mouth/tone?who=u-familiar")
+        status, voice = self._call("GET", "/mouth/tone?who=aiocqhttp:1002")
         self.assertEqual({"ok", "readonly", "agent", "addressee", "tone", "heart", "note"},
                          set(voice))
         self.assertFalse(voice["addressee"]["renamed"])
@@ -428,8 +428,8 @@ class MouthApiTest(unittest.TestCase):
 
     def test_get_never_remembers_the_rename(self):
         """端点只干跑：查过一次改了名的称呼，下一次不带 rename 时仍是名录原样（会话不落账）。"""
-        self._call("GET", "/mouth/address?who=u-familiar&rename=小王")
-        _, again = self._call("GET", "/mouth/address?who=u-familiar")
+        self._call("GET", "/mouth/address?who=aiocqhttp:1002&rename=小王")
+        _, again = self._call("GET", "/mouth/address?who=aiocqhttp:1002")
         self.assertEqual("小林", again["address"], "GET 把改名记下来了")
         self.assertEqual("人名录", again["source"])
         self.assertNotIn("remember(", SOURCE, "api 层不许调 remember：会话覆盖只在库层提供")
@@ -438,7 +438,7 @@ class MouthApiTest(unittest.TestCase):
         """改名不许绕过自称红线：rename 落在违禁自称里 → 仍是回退词，note 说明被哪条拦下。"""
         table = mouth_api.address.load_table()
         banned_word = table["self_guard"]["words"][0]
-        status, payload = self._call("GET", "/mouth/address?who=u-familiar&rename=" + banned_word)
+        status, payload = self._call("GET", "/mouth/address?who=aiocqhttp:1002&rename=" + banned_word)
         self.assertEqual(200, status)
         self.assertEqual(table["fallback"]["address"], payload["address"])
         self.assertEqual(banned_word, payload["banned_self"])

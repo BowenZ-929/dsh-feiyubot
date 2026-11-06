@@ -32,7 +32,7 @@ TABLE = load("address_table")
 
 def _person(reading: float, display: str = "老王", interactions=None, **extra) -> dict:
     """一份人名录读数：形状照 BrainStore._person_view 来（familiarity 是脑现算的读数）。"""
-    person = {"id": "u-1", "display": display, "aliases": [],
+    person = {"id": "aiocqhttp:1001", "display": display, "aliases": [],
               "first_seen": "2024-04-01T09:00:00+00:00",
               "last_interaction": "2024-05-06T21:00:00+00:00",
               "cold": False, "shadow": False, "interactions": interactions or {},
@@ -109,6 +109,21 @@ class AddressTest(unittest.TestCase):
         self.assertEqual("", nobody.display)
         self.assertEqual(nobody, address.resolve(None, TABLE), "两次取不到人，结果不一致：有东西被记住了")
 
+    def test_the_session_book_answers_even_when_the_roster_misses(self):
+        """名录里查不到这个人（冷/影子/新人/脑那边 lookup 抖动），会话账照样生效。
+
+        反例就是「他明明让我叫他老李，下一轮又退回『你』」——那是真坏，不是回显问题。
+        会话账的键不再只从 person 里取：调用方给的 who 也能当键。
+        """
+        book = address.SessionAddressBook()
+        book.remember("aiocqhttp:1001", "老李")
+        got = address.resolve(None, TABLE, session=book, who="aiocqhttp:1001")
+        self.assertEqual("老李", got.address, "名录查不到人，会话账就失效了")
+        self.assertEqual(TABLE["source"]["session"], got.source)
+        self.assertEqual("aiocqhttp:1001", got.who, "回显要带上调用方给的 id")
+        # 没给 who、名录也没有 → 仍按「查不到这个人」回退，不许把上一轮的账赖给别人
+        self.assertEqual(TABLE["fallback"]["address"], address.resolve(None, TABLE, session=book).address)
+
     def test_brain_familiarity_chain(self):
         """真脑店 + 真 interact()：familiarity → 档位 → 称呼，一条链跑下来。"""
         days = ["2024-05-01", "2024-05-02", "2024-05-03",
@@ -116,9 +131,9 @@ class AddressTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store = brain_store.load(Path(tmp))
             for day in days:
-                store.interact("u-1", display="老王", ts="%sT10:00:00+00:00" % day)
-                store.interact("u-1", display="老王", ts="%sT20:00:00+00:00" % day)
-            view = store.lookup("老王", now_ts="2024-05-07T12:00:00+00:00")
+                store.interact("aiocqhttp:1001", display="老王", ts="%sT10:00:00+00:00" % day)
+                store.interact("aiocqhttp:1001", display="老王", ts="%sT20:00:00+00:00" % day)
+            view = store.lookup("aiocqhttp:1001", now_ts="2024-05-07T12:00:00+00:00")
         self.assertIsNotNone(view, "人名录里没造出这个人")
         reading = view["familiarity"]
         self.assertGreater(reading, 0.0, "六天互动算出来的熟稔读数还是 0")
@@ -195,18 +210,18 @@ class AddressTest(unittest.TestCase):
         person = _person(20.0)
         plain = address.resolve(person, TABLE)
         book = address.SessionAddressBook()
-        book.remember("u-1", "阿宝")
+        book.remember("aiocqhttp:1001", "阿宝")
         got = address.resolve(person, TABLE, session=book)
         self.assertEqual("阿宝", got.address)
         self.assertEqual(TABLE["source"]["session"], got.source)
         self.assertFalse(got.renamed, "会话覆盖不是这一轮的改名")
         self.assertEqual(plain.tier, got.tier, "覆盖换的只是叫法，不许连档位一起换")
-        self.assertTrue(book.forget("u-1"))
-        self.assertFalse(book.forget("u-1"), "本来就忘干净了还回 True")
+        self.assertTrue(book.forget("aiocqhttp:1001"))
+        self.assertFalse(book.forget("aiocqhttp:1001"), "本来就忘干净了还回 True")
         back = address.resolve(person, TABLE, session=book)
         self.assertEqual(plain.address, back.address)
         self.assertEqual(TABLE["source"]["directory"], back.source)
-        book.remember("u-1", "阿宝")
+        book.remember("aiocqhttp:1001", "阿宝")
         book.clear()
         self.assertEqual(plain.address, address.resolve(person, TABLE, session=book).address)
 
@@ -214,7 +229,7 @@ class AddressTest(unittest.TestCase):
         """优先级写死三条：会话里有覆盖 > 这一轮的 rename_request > 人名录档位。"""
         person = _person(20.0, rename_request="小王")
         book = address.SessionAddressBook()
-        book.remember("u-1", "阿宝")
+        book.remember("aiocqhttp:1001", "阿宝")
         got = address.resolve(person, TABLE, session=book)
         self.assertEqual("阿宝", got.address)
         self.assertEqual(TABLE["source"]["session"], got.source)
@@ -225,7 +240,7 @@ class AddressTest(unittest.TestCase):
         """会话覆盖同样过 self_guard：别拿「记下来的」当绕过自称红线的后门。"""
         banned_word = TABLE["self_guard"]["words"][0]
         book = address.SessionAddressBook()
-        book.remember("u-1", banned_word)
+        book.remember("aiocqhttp:1001", banned_word)
         got = address.resolve(_person(20.0), TABLE, allowed_self=(), session=book)
         self.assertEqual(TABLE["fallback"]["address"], got.address)
         self.assertEqual(banned_word, got.banned_self)
@@ -233,10 +248,10 @@ class AddressTest(unittest.TestCase):
     def test_session_book_lives_only_in_this_process(self):
         """进程重启即丢：换一个实例（＝重启）读不到上一本记的东西，账上也没留盘。"""
         first = address.SessionAddressBook()
-        first.remember("u-1", "阿宝")
-        self.assertEqual({"u-1": "阿宝"}, first.snapshot())
+        first.remember("aiocqhttp:1001", "阿宝")
+        self.assertEqual({"aiocqhttp:1001": "阿宝"}, first.snapshot())
         second = address.SessionAddressBook()
-        self.assertEqual("", second.get("u-1"), "新实例读到了旧覆盖：这不是纯内存的会话覆盖")
+        self.assertEqual("", second.get("aiocqhttp:1001"), "新实例读到了旧覆盖：这不是纯内存的会话覆盖")
         self.assertEqual({}, second.snapshot())
         self.assertEqual(TABLE["source"]["directory"],
                          address.resolve(_person(20.0), TABLE, session=second).source)
@@ -245,9 +260,9 @@ class AddressTest(unittest.TestCase):
         """空 who / 空叫法都不记：空叫法等于是「退到中性」，那是 resolve 的事，不是这本账的事。"""
         book = address.SessionAddressBook()
         book.remember("", "阿宝")
-        book.remember("u-1", "   ")
+        book.remember("aiocqhttp:1001", "   ")
         self.assertEqual({}, book.snapshot())
-        self.assertEqual("", book.get("u-1"))
+        self.assertEqual("", book.get("aiocqhttp:1001"))
 
     def test_resolve_never_writes_the_session_book(self):
         """resolve 是纯的：它读 session，不往 session 里写（落 book 是调用方的事）。"""
@@ -258,7 +273,7 @@ class AddressTest(unittest.TestCase):
 
     def test_rename_memory_draft_feeds_brain_ingest(self):
         """投递给脑：草稿的形状就是 ingest 的入参，措辞取自数据，投进去查得到、source_type=亲历。"""
-        draft = address.rename_memory("u-1", "小王", ts="2024-05-07T12:00:00+00:00")
+        draft = address.rename_memory("aiocqhttp:1001", "小王", ts="2024-05-07T12:00:00+00:00")
         self.assertEqual({"who", "text", "source_type", "ts"}, set(draft), "草稿多了 ingest 不认的键")
         self.assertEqual(TABLE["self_guard"]["rename_memory_text"].format(address="小王"), draft["text"],
                          "这句措辞不是从数据里来的")
@@ -273,7 +288,7 @@ class AddressTest(unittest.TestCase):
                     if row["id"] == entry["id"]]
         self.assertEqual(1, len(kept), "投进去的记忆查不回来")
         self.assertEqual("他要求过叫他小王", kept[0]["text"])
-        self.assertEqual("u-1", kept[0]["who"])
+        self.assertEqual("aiocqhttp:1001", kept[0]["who"])
 
     def test_easter_egg_fires_only_above_data_threshold(self):
         """彩蛋改口：进了那一档、且累计互动够数才改口，没到数还是叫人名。"""
@@ -324,7 +339,7 @@ class RequestedNameIsReadFromTheData(unittest.TestCase):
         self.assertIn("昵称", note, "数据里要有一句「不许凭昵称猜人」")
         wanted = address.requested_name("以后叫我老李", TABLE)
         got = address.resolve(_person(20.0, rename_request=wanted), TABLE)
-        self.assertEqual("u-1", got.who, "who 只从 person.id 来，与昵称无关")
+        self.assertEqual("aiocqhttp:1001", got.who, "who 只从 person.id 来，与昵称无关")
         self.assertEqual("老李", got.address)
 
     def test_broken_table_raises_instead_of_reading_as_none(self):
