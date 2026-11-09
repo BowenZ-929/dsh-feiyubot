@@ -1,6 +1,7 @@
-# 七器官与一个家 · QQAgent
+# 七器官与一个家 · feiyubot
 
 > 一个跑在 QQ 上的机器人。她不是一段提示词，是十个模块分权、一本只增的账，和一套读时现算的状态。
+> 代码由deepseek和gpt共同实现，本人只负责许愿（bushi），后续会继续更新。
 
 *A personality architecture for a QQ chatbot: organs with disjoint write rights, an append-only ledger for everything outside her body, and state computed on read instead of stored and mutated.*
 
