@@ -9,6 +9,17 @@ from api import api
 
 
 class ObserveApiTest(unittest.TestCase):
+    def test_accounting_only_voice_attempt_is_not_a_synthesis_record(self):
+        path=self.root/'mouth/voice.jsonl';path.parent.mkdir(parents=True)
+        path.write_text('\n'.join(json.dumps(r) for r in [
+            {'at':'2026-11-09T10:00:00+09:00','kind':'attempt','accounting_only':True},
+            {'at':'2026-11-09T14:00:00+09:00','kind':'attempt'}]))
+        before=path.read_bytes()
+        code,data=self.get('?source=voice')
+        self.assertEqual(200,code);self.assertEqual(1,data['total'])
+        self.assertEqual('2026-11-09T14:00:00+09:00',data['rows'][0]['record']['at'])
+        self.assertEqual(before,path.read_bytes())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -348,3 +359,104 @@ class ObserveApiTest(unittest.TestCase):
         self.assertTrue(data['balance']['stale'])
         self.assertEqual(api.handle("GET", "/observe/rice?date=bad", None, None)[0], 400)
         self.assertEqual(api.handle("POST", "/observe/rice", {}, None)[0], 405)
+
+    def ledger(self, rows, trailing=""):
+        path = self.root / "hand"
+        path.mkdir(parents=True, exist_ok=True)
+        target = path / "ledger.jsonl"
+        target.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n" + trailing)
+        return target
+
+    def test_lookup_account_reads_four_states_from_hand_ledger_and_leaves_unknowns_blank(self):
+        def entry(ledger_id, state, code, params, *, at="2026-11-07T12:00:00+09:00", elapsed=0, action="lookup"):
+            return {"ledger_id": ledger_id, "at": at, "who": "42", "action": action,
+                    "params": params, "state": state, "code": code, "elapsed_ms": elapsed,
+                    "origin": code, "grant_id": None}
+        rows = [
+            entry("lg-reserved", "reserved", "OK", {"count": 5, "query_sha256": "aa", "query_chars": 4}),
+            entry("lg-not", "refused", "MISSING_QUERY",
+                  {"calls": 0, "state": "error", "results_count": 0, "http": None, "landed": False}, elapsed=2),
+            entry("lg-failed", "failed", "LOOKUP_TIMEOUT",
+                  {"calls": 1, "state": "error", "results_count": 0, "http": None, "landed": False}, elapsed=15000),
+            entry("lg-unsaved", "done", "OK",
+                  {"calls": 1, "state": "ok", "results_count": 3, "http": 200, "landed": False}, elapsed=820),
+            entry("lg-landed", "done", "OK",
+                  {"calls": 1, "state": "ok", "results_count": 2, "http": 200, "landed": True,
+                   "card_id": "web-1", "gate": "privacy", "action": "search"}, elapsed=700),
+            entry("lg-task", "done", "OK", {"calls": 9}, action="add_task"),
+            entry("lg-undated", "done", "OK",
+                  {"calls": 1, "state": "ok", "results_count": 1, "landed": False}, at=""),
+        ]
+        target = self.ledger(rows, trailing="not json\n")
+        before = target.read_bytes()
+        status, data = self.get("?source=lookup")
+        self.assertEqual(200, status)
+        self.assertEqual(("lookup", 6, 1, 1), (data["source"], data["total"], data["invalid_lines"],
+                                                data["undated_records"]))
+        # 账是只增的：新的一行在最后，观察页先给最近的。
+        self.assertEqual(["lg-undated", "lg-landed", "lg-unsaved", "lg-failed", "lg-not", "lg-reserved"],
+                         [item["ledger_id"] for item in data["rows"]])
+        seen = {item["ledger_id"]: item["record"] for item in data["rows"]}
+        self.assertEqual({"lg-not": "not_requested", "lg-failed": "requested_failed",
+                          "lg-unsaved": "looked_up_not_saved", "lg-landed": "landed"},
+                         {key: seen[key]["outcome"] for key in ("lg-not", "lg-failed", "lg-unsaved", "lg-landed")})
+        self.assertEqual("已查到未落盘", seen["lg-unsaved"]["outcome_label"])
+        self.assertEqual({"gate": None, "action": None, "reason": None, "status": "ok", "code": "OK",
+                          "http": 200, "results_count": 3, "elapsed_ms": 820, "calls": 1, "landed": False,
+                          "card_id": None, "turn_id": None, "outcome": "looked_up_not_saved",
+                          "billed_calls": None, "billing_status": None, "currency": None, "cost": None,
+                          "price_url": None, "query": None, "query_sha256": None,
+                          "outcome_label": "已查到未落盘"}, seen["lg-unsaved"])
+        self.assertEqual(("privacy", "search", "web-1", "landed"),
+                         (seen["lg-landed"]["gate"], seen["lg-landed"]["action"],
+                          seen["lg-landed"]["card_id"], seen["lg-landed"]["outcome"]))
+        # 老账行缺字段＝未知：留空，不拿默认值凑成某一态。
+        self.assertEqual((None, None, None), (seen["lg-reserved"]["outcome"],
+                                             seen["lg-reserved"]["outcome_label"],
+                                             seen["lg-reserved"]["calls"]))
+        self.assertNotIn("lg-task", seen, "别的动作不进检索账")
+        with patch("api.observe.day_model.local_tz", return_value=timezone(timedelta(hours=9))):
+            dated = self.get("?source=lookup&date=2026-11-07")[1]
+            self.assertEqual(5, dated["total"])
+            self.assertEqual(["2026-11-07"], dated["dates"])
+        page = self.get("?source=lookup&limit=2&offset=1")[1]
+        self.assertEqual(["lg-landed", "lg-unsaved"], [item["ledger_id"] for item in page["rows"]])
+        self.assertTrue(page["has_older"])
+        self.assertEqual(before, target.read_bytes())
+        for bad in ("?source=lookup&date=bad", "?source=lookup&limit=101", "?source=lookup&offset=-1",
+                    "?source=lookup&turn_id=../../env", "?source=lookup&session_id=qq:private:1"):
+            self.assertEqual(400, self.get(bad)[0], bad)
+        self.assertEqual(405, api.handle("POST", "/observe/records", {}, None)[0])
+
+    def test_lookup_account_keeps_privacy_block_to_reason_and_turn_only(self):
+        secret, turn = "我的手机号是 13800000000", "a" * 32
+        rows = [{"ledger_id": "lg-private", "at": "2026-11-07T12:00:00+09:00", "who": "42",
+                 "action": "lookup", "state": "refused", "code": "PRIVACY_BLOCKED",
+                 "elapsed_ms": 0, "origin": "privacy", "grant_id": None,
+                 "params": {"gate": "privacy", "action": "deny",
+                            "reason": "query 含号码，按门0 不查", "turn_id": turn,
+                            "query": secret, "query_sha256": "deadbeefdeadbeef",
+                            "calls": 0, "results_count": 0, "state": "error", "landed": False}},
+                {"ledger_id": "lg-normal", "at": "2026-11-07T12:05:00+09:00", "who": "42",
+                 "action": "lookup", "state": "done", "code": "OK", "elapsed_ms": 300,
+                 "origin": "OK", "grant_id": None,
+                 "params": {"gate": "privacy", "action": "search", "turn_id": "b" * 32,
+                            "calls": 1, "state": "ok", "results_count": 1, "http": 200,
+                            "landed": False}}]
+        target = self.ledger(rows)
+        before = target.read_bytes()
+        status, data = self.get("?source=lookup")
+        self.assertEqual(200, status)
+        seen = {item["ledger_id"]: item["record"] for item in data["rows"]}
+        self.assertEqual({"gate": "privacy", "action": "deny", "reason": "query 含号码，按门0 不查",
+                          "turn_id": turn, "redacted": True}, seen["lg-private"])
+        body = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("13800000000", body)
+        self.assertNotIn("deadbeefdeadbeef", body)
+        self.assertEqual(("privacy", "search", "b" * 32), (seen["lg-normal"]["gate"],
+                                                           seen["lg-normal"]["action"],
+                                                           seen["lg-normal"]["turn_id"]))
+        self.assertEqual(["lg-private"], [item["ledger_id"] for item in
+                                          self.get("?source=lookup&turn_id=" + turn)[1]["rows"]])
+        self.assertEqual(0, self.get("?source=lookup&turn_id=" + "c" * 32)[1]["total"])
+        self.assertEqual(before, target.read_bytes())

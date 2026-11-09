@@ -11,7 +11,7 @@ from organs import paths
 from organs.mind import recent, events, conversation
 from organs.home import knowledge
 from organs.day import model as day_model
-from organs.hand import channel as hand_channel
+from organs.hand import channel as hand_channel, ledger as hand_ledger
 
 OBSERVE_ROUTES = {"/observe/records": "GET", "/observe/activity": "GET", "/observe/rice": "GET",
                   "/observe/participation": "GET", "/observe/channel": "GET", "/observe/channel-runtime": "GET"}
@@ -171,10 +171,126 @@ def participation(query):
                  'groups': ordered, 'total': total}
 
 
+# ---- 检索账 --------------------------------------------------------------
+# 账只有一本：手账里 `action=lookup` 的那些折叠行。观察页不另存一份——存一份就等于给
+# 「查了几次、花了没有」留两个答案，对账时第一步就得先问信谁。
+# 被门0 挡下来的那一轮也在这本账上（brief §5 第 3 条：零外部请求 ≠ 零记录），否则永远分不清
+# 「判了不查」和「根本没判」；但那一行只留原因与回合编号，被拒的那句话既不落账，也不在这里重拼。
+LOOKUP_NOT_REQUESTED = "not_requested"
+LOOKUP_FAILED = "requested_failed"
+LOOKUP_UNSAVED = "looked_up_not_saved"
+LOOKUP_LANDED = "landed"
+LOOKUP_OUTCOME_LABELS = {LOOKUP_NOT_REQUESTED: "未请求", LOOKUP_FAILED: "已请求失败",
+                         LOOKUP_UNSAVED: "已查到未落盘", LOOKUP_LANDED: "已落盘"}
+
+#: 检索账准露的格子。**白名单**而不是黑名单：账行将来多一个字段（摘要、原文、定位），
+#: 它默认不出现在观察页，而不是默认漏出去——隐私口径不能靠"记得把它删掉"。
+#: 门与裁决用判据层（`mind/search.py` 的 `decide()`）那两个名字 `gate`/`action`，
+#: 观察页与判据读同一套词；`door`/`verdict` 只作旧写法的兼容别名。
+LOOKUP_FIELDS = ("gate", "action", "reason", "status", "code", "http", "results_count",
+                 "elapsed_ms", "calls", "landed", "card_id", "turn_id", "billed_calls",
+                 "billing_status", "currency", "cost", "price_url", "query", "query_sha256")
+#: 门0 挡下的那一行：只留原因与回合编号，明细一格不给。
+LOOKUP_PRIVACY = "privacy"
+LOOKUP_DENY = ("deny", "block")
+
+
+def _lookup_outcome(calls, status, landed):
+    """四态只由账上的事实判；缺一格就回未知，不许拿默认值把它凑成某一态。"""
+    if type(calls) is not int or calls < 0:
+        return None
+    if landed is True:
+        return LOOKUP_LANDED
+    if calls == 0:
+        return LOOKUP_NOT_REQUESTED
+    if status == "error":
+        return LOOKUP_FAILED
+    if status == "empty":
+        return LOOKUP_FAILED
+    if status == "ok":
+        return LOOKUP_UNSAVED
+    return None
+
+
+def _lookup_record(row):
+    """账行 → 观察页那几格。缺的留空（None），不按「大概是什么」补。"""
+    params = row.get("params") if isinstance(row.get("params"), dict) else {}
+    picked = {"gate": params.get("gate") or params.get("door"),
+              "action": params.get("action") or params.get("verdict"),
+              "reason": params.get("reason"), "status": params.get("state"),
+              "code": row.get("code"), "http": params.get("http"),
+              "results_count": params.get("results_count"), "elapsed_ms": row.get("elapsed_ms"),
+              "calls": params.get("calls"), "landed": params.get("landed"),
+              "card_id": params.get("card_id"),
+              "turn_id": row.get("turn_id") or params.get("turn_id")}
+    record = {key: picked.get(key, params.get(key)) for key in LOOKUP_FIELDS}
+    if record["gate"] == LOOKUP_PRIVACY and record["action"] in LOOKUP_DENY:
+        return {"gate": record["gate"], "action": record["action"], "reason": record["reason"],
+                "turn_id": record["turn_id"], "redacted": True}
+    outcome = _lookup_outcome(record["calls"], record["status"], record["landed"])
+    record["outcome"] = outcome
+    record["outcome_label"] = LOOKUP_OUTCOME_LABELS.get(outcome)
+    return record
+
+
+def lookup_account(query):
+    """检索账：只读手账、只认 `action=lookup`、按日期与回合筛选；一行都不改盘。"""
+    zone = day_model.local_tz()
+    try:
+        limit, offset = int(query.get("limit", "20")), int(query.get("offset", "0"))
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError
+        selected = query.get("date", "")
+        if selected and date.fromisoformat(selected).isoformat() != selected:
+            raise ValueError
+        turn_id = query.get("turn_id", "")
+        if turn_id and (len(turn_id) > 160 or any(not (c.isalnum() or c in "-_:.") for c in turn_id)):
+            raise ValueError
+        if query.get("session_id"):
+            raise ValueError
+    except ValueError:
+        return 400, {"ok": False, "message": "检索账只收日期（YYYY-MM-DD）、回合编号（不含空白，最多160字）、"
+                                            "条数 1–100 与偏移量；会话编号不属于这本账"}
+    path = hand_ledger.store.ledger_path()
+    try:
+        # 折叠归 ledger 一处；坏行数只能从字节层数。宁可多读一遍，也不在观察页重写一遍折叠规矩。
+        rows = hand_ledger.read_all()
+        _, invalid = hand_ledger.store.read_lines(path)
+    except OSError as error:
+        return 500, {"ok": False, "message": "检索账读取失败：" + str(error)}
+    collected, undated, available_dates = [], 0, set()
+    for row in rows:
+        if row.get("action") != "lookup":
+            continue
+        record = _lookup_record(row)
+        try:
+            record_date = day_model.parse_ts(row.get("at")).astimezone(zone).date().isoformat()
+            available_dates.add(record_date)
+        except ValueError:
+            record_date = ""
+            undated += 1
+        if selected and record_date != selected:
+            continue
+        if turn_id and record.get("turn_id") != turn_id:
+            continue
+        collected.append({"ledger_id": row.get("ledger_id"), "at": row.get("at"), "record": record})
+    total = len(collected)
+    page = list(reversed(collected))[offset:offset + limit]
+    return 200, {"ok": True, "source": "lookup", "date": selected,
+                 "dates": sorted(available_dates, reverse=True), "timezone": str(zone),
+                 "undated_records": undated, "turn_id": turn_id, "exists": path.is_file(),
+                 "total": total, "invalid_lines": invalid, "session_id": "", "sessions": [],
+                 "offset": offset, "limit": limit, "has_older": total > offset + limit,
+                 "rows": page}
+
+
 def dispatch(query):
     source = query.get("source", "model")
-    if source not in ("model", "chat", "delivery", "decision", "eye", "voice", "ear", "learning", "emotion", "tone"):
+    if source not in ("model", "chat", "delivery", "decision", "eye", "voice", "ear",
+                      "learning", "emotion", "tone", "lookup"):
         return 400, {"ok": False, "message": "未知的记录来源"}
+    if source == "lookup":
+        return lookup_account(query)
     try:
         limit = int(query.get("limit", "20"))
         offset = int(query.get("offset", "0"))
@@ -231,6 +347,8 @@ def dispatch(query):
                             raise ValueError
                     except ValueError:
                         errors += 1
+                        continue
+                    if row.get('accounting_only') is True:
                         continue
                     record_session = row.get('session_id')
                     if source == 'emotion' and not record_session and isinstance(row.get('interpretation'), dict):

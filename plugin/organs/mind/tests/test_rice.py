@@ -9,6 +9,13 @@ from organs.mind import rice, llm
 
 
 class RiceTest(unittest.TestCase):
+    def test_timeout_keeps_billing_unknown(self):
+        rice.record_search({'calls': 1, 'http': None, 'results_count': 0}, now=self.now)
+        state = rice.snapshot(now=self.now)['search']
+        self.assertEqual(1, state['unknown_calls'])
+        row = json.loads((self.root / 'mind/rice-usage/2026-11-07.jsonl').read_text())
+        self.assertEqual('unknown', row['billing_status'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -75,3 +82,64 @@ class RiceTest(unittest.TestCase):
         self.assertIn('大白饭', text)
         self.assertNotIn('嘴硬', text)
         self.assertNotIn('性情', text)
+
+    def test_search_accounting_separates_calls_from_billed_and_keeps_both_published_prices(self):
+        for detail in ({'calls': 1, 'http': 200, 'results_count': 3},
+                       {'calls': 1, 'http': 200, 'results_count': 0},
+                       {'calls': 1, 'http': 500, 'results_count': 0},
+                       {'calls': 0, 'http': None, 'results_count': 0}):
+            rice.record_search(detail, now=self.now)
+        state = rice.snapshot(now=self.now)
+        # 调用次数与计费次数分列：只发了三次请求（本地就拒那次 calls=0 不算调用），
+        # 其中只有「200 且结果非空」那一次计费。
+        self.assertEqual((3, 1), (state['search']['calls'], state['search']['billed_calls']))
+        ledger = (self.root / 'mind/rice-usage/2026-11-07.jsonl').read_text().splitlines()
+        self.assertEqual(4, len(ledger), '四次都落在同一本日账上，靠 kind 分列')
+        self.assertEqual({'USD': '0.00075'}, state['search']['costs'])
+        self.assertEqual(0, state['daily']['calls'], '检索不许混进 token 那一本账')
+        self.assertEqual(0, state['daily']['total_tokens'])
+        price = state['search_price']
+        self.assertEqual('unconfirmed', price['status'])
+        self.assertEqual({'USD', 'CNY'}, set(price['quotes']))
+        self.assertEqual(('0.00075', '0.005'), (price['quotes']['USD']['unit_price'],
+                                                price['quotes']['CNY']['unit_price']))
+        for quote in price['quotes'].values():
+            self.assertTrue(quote['price_url'].startswith('https://api-docs.deepseek.com/'))
+            self.assertEqual('2026-11-09', quote['checked_at'])
+        self.assertIn('待确认', price['note'], '两版不一致时落账要看得出没核准')
+        first = json.loads((self.root / 'mind/rice-usage/2026-11-07.jsonl').read_text().splitlines()[0])
+        self.assertEqual(('search', 'USD', '0.00075', 'unconfirmed'),
+                         (first['kind'], first['currency'], first['unit_price'], first['price_status']))
+        self.assertEqual(('https://api-docs.deepseek.com/guides/search/', '2026-11-09'),
+                         (first['price_url'], first['checked_at']))
+        self.assertEqual((1, 1, '0.00075'), (first['calls'], first['billed_calls'], first['cost']))
+        self.assertIn('待确认', first['note'])
+
+    def test_search_price_can_be_overridden_with_source_page_and_check_date(self):
+        config = {'enabled': True, 'search_price': {
+            'currency': 'CNY', 'unit_price': '0.004',
+            'price_url': 'https://example.test/pricing', 'checked_at': '2026-11-10'}}
+        (self.root / 'mind/rice.json').write_text(json.dumps(config))
+        rice.record_search({'calls': 1, 'http': 200, 'results_count': 2}, now=self.now)
+        rice.record_search({'calls': 1, 'http': 200, 'results_count': 0}, now=self.now)
+        state = rice.snapshot(now=self.now)
+        self.assertEqual('configured', state['search_price']['status'])
+        self.assertEqual({'CNY': '0.004'}, state['search']['costs'])
+        self.assertEqual(0, state['search']['pending_billed'])
+        rows = [json.loads(line) for line in
+                (self.root / 'mind/rice-usage/2026-11-07.jsonl').read_text().splitlines()]
+        self.assertEqual({'currency': 'CNY', 'unit_price': '0.004', 'price_status': 'configured',
+                          'price_url': 'https://example.test/pricing', 'checked_at': '2026-11-10',
+                          'calls': 1, 'billed_calls': 1, 'cost': '0.004', 'note': None},
+                         {key: rows[0][key] for key in ('currency', 'unit_price', 'price_status',
+                                                        'price_url', 'checked_at', 'calls',
+                                                        'billed_calls', 'cost', 'note')})
+        # 配不全的覆盖（缺来源页）不抛也不静默：降级回 published 那一版，并标出来没核准。
+        (self.root / 'mind/rice.json').write_text(json.dumps({
+            'enabled': True, 'search_price': {'currency': 'USD', 'unit_price': '0.001'}}))
+        self.assertEqual((rice.SEARCH_QUOTES['USD'], 'configured_invalid'), rice.search_price())
+        rice.record_search({'calls': 1, 'http': 200, 'results_count': 1}, now=self.now)
+        last = [json.loads(line) for line in
+                (self.root / 'mind/rice-usage/2026-11-07.jsonl').read_text().splitlines()][-1]
+        self.assertEqual(('configured_invalid', 'USD', '0.00075'),
+                         (last['price_status'], last['currency'], last['unit_price']))

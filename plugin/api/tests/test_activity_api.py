@@ -9,6 +9,27 @@ from api import api
 
 
 class ActivityApiTest(unittest.TestCase):
+    def test_accounting_only_rows_are_not_experiences_or_unfinished_tasks(self):
+        self.write('day/proactive_idle_log.jsonl', [
+            {'at':'2026-11-07T10:00:00+09:00','event':'autonomy_attempt',
+             'model_turn_id':'prior-usage-0','accounting_only':True},
+            {'at':'2026-11-07T11:00:00+09:00','event':'autonomy_attempt',
+             'model_turn_id':'a'*32}], True)
+        self.write('mouth/voice.jsonl', [
+            {'at':'2026-11-07T10:00:00+09:00','kind':'attempt','accounting_only':True}], True)
+        self.write('day/proactive_log.jsonl', [
+            {'at':'2026-11-07T10:00:00+09:00','action':'held','reason_code':'unfinished',
+             'who':'10000011','accounting_only':True}], True)
+        before={p:p.read_bytes() for p in self.root.rglob('*.jsonl')}
+        for source, total in [('autonomy',1),('voice',0),('proactive',0)]:
+            code, data=self.get('date=2026-11-07&source='+source)
+            self.assertEqual(200, code)
+            self.assertEqual(total, data['total'], source)
+            self.assertEqual(0, data['invalid_records'], source)
+            if total:
+                self.assertEqual('a'*32, data['rows'][0]['model_turn_id'])
+        self.assertEqual(before,{p:p.read_bytes() for p in self.root.rglob('*.jsonl')})
+
     def test_preferences_timeline_links_real_evidence_and_cross_day_replacement(self):
         from organs.brain import BrainStore, preferences
         from urllib.parse import parse_qs, urlsplit, quote

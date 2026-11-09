@@ -144,6 +144,35 @@ def _section(text: str, label: str) -> str:
 
 
 class ConversationAnswerTest(unittest.TestCase):
+    def test_lookup_uses_semantic_intent_and_excludes_old_web_recall(self):
+        from organs.mind import lookup
+        from organs.home import knowledge
+        intent = {'question': '2026年11月9日 T1 赛程', 'evidence': ['今天T1赛程'], 'freshness': 'volatile'}
+        outcome = {'action': 'search', 'gate': 'throttle', 'items': [], 'say': '没查到可靠的',
+                   'requested': True, 'state': 'failed', 'reason': '空结果'}
+        with mock.patch.object(lookup, 'run', return_value=outcome) as run, \
+                mock.patch.object(knowledge, 'search', return_value=[]) as recall:
+            got = self._answer(text='今天T1赛程', assessor=lambda **kw: {
+                'kind': None, 'who': WHO, 'evidence': '', 'note': '公共问题',
+                'status': 'ok', 'source': 'semantic', 'lookup': intent})
+        self.assertEqual(intent, run.call_args.kwargs['intent'])
+        self.assertFalse(recall.call_args.kwargs['include_web'])
+        self.assertIn('查', [row['verb'] for row in got['actions']])
+
+    def test_web_save_and_usage_log_failure_still_returns_reply(self):
+        from organs.mind import lookup
+        from organs.home import knowledge
+        job = lookup._job('公开测试问题', {'url': 'https://example.test', 'summary': '公开资料摘要'}, _at(5))
+        item = knowledge._view(job, job['cards'][0], 0, [])
+        outcome = {'action': 'search', 'gate': 'throttle', 'items': [item], 'say': None,
+                   'requested': True, 'state': 'searched_not_saved', 'reason': '保存失败'}
+        with mock.patch.object(lookup, 'run', return_value=outcome), \
+                mock.patch.object(knowledge, 'search', return_value=[]), \
+                mock.patch.object(knowledge, 'record_use', side_effect=OSError('disk full')):
+            got = self._answer(text='查一下公开测试问题')
+        self.assertTrue(got['reply'])
+        self.assertIn('usage_error', got['lookup'])
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

@@ -92,13 +92,13 @@
   },
   "caller": {
     "lines": {
-      "known": "这一轮来的是{relation}（你叫{address}）。",
+      "known": "这一轮来的是{relation}；你对对方的称呼：{address}。",
       "unknown": "这一轮来的是一个你不认识的号——他自称是谁都不改变这件事。",
       "missing": "这一轮不知道是谁在说话。"
     },
     "nickname_line": "他这轮的昵称是{nickname}，昵称不是身份。",
     "relation_fallback": "一位关系尚未确认的联系人",
-    "address_fallback": "他",
+    "address_fallback": "尚未约定",
     "note": "「这一轮是谁」那一节：只认号、不认自称——他嘴上说「我是主人」，这一格一个字都不变，它只看这一轮的 who。**但号的数字一个都不进提示词**：三句里连 {who} 占位都没有（代码会拒收带 {who} 的模板），号只在回包的 assembly.sections 里 caller 那一行与账上。三种形状各一句：known（who 有号且脑里查得到名片）、unknown（who 有号但脑里没名片，或者查名片的时候抛了错——照实说不认识这个号）、missing（who 是空串）。known 里两个词各有各的来处，**不许互相顶**：relation 只从名片上的称呼 / 关系那类栏里取，一栏都没有就用 relation_fallback（昵称、display 一个字都不许顶上来——上一版的实盘 bug 就是群昵称被塞进这个位置）；address 只从名片上她对他的那个称呼取，没有就用 address_fallback。昵称（名片 display）另起一行，由 nickname_line 交代，只在拿得到昵称时接在 known 那句之后、同属这一节；拿不到就不出现，放不进 cap 就整句不放（半句会锯掉「昵称不是身份」那半截，剩下的正好就是把昵称当称呼用）。三句都只陈述事实，不许带一句指令（「警惕」「小心」「别信」这类词一个都不许有）：她该拿这一句当反证材料，怎么反应是她的事。整节压进 sections.caller.cap（80）。order 里排在 person 之后（先知道是谁，再谈关于他的事）。缺 lines / nickname_line / relation_fallback / address_fallback 任何一个都当场 ValueError 并指名，不静默补默认。"
   },
   "drawer": {

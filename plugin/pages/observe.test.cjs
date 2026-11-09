@@ -359,3 +359,11 @@ test('empty session results keep the requested selection available for clearing'
  await app.change('session','');
  assert.equal(app.url().searchParams.has('session_id'),false);
 });
+
+test('lookup is selectable and links a turn without leaking a previous session filter',async()=>{
+  const app=setup('/observe?source=lookup&turn_id='+turn+'&session_id=qq:private:42');await settle();
+  assert.equal(app.get('source').value,'lookup');
+  const query=new URL(app.recordsRequests()[0].path,'http://local').searchParams;
+  assert.equal(query.get('turn_id'),turn);assert.equal(query.get('session_id'),null);
+  assert.equal(app.get('session-label').hidden,true);
+});

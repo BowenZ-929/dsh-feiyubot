@@ -53,9 +53,10 @@ class StyleTest(unittest.TestCase):
 
 
 class WhitelistTest(StyleTest):
-    def test_whitelist_holds_exactly_five_actions(self):
-        self.assertEqual(5, len(whitelist.ACTIONS))
-        self.assertEqual(("add_task", "complete_task", "send_image", "draw", "set_style"),
+    def test_whitelist_holds_exactly_six_actions(self):
+        self.assertEqual(6, len(whitelist.ACTIONS))
+        self.assertEqual(("add_task", "complete_task", "send_image", "draw", "set_style",
+                          "lookup"),
                          whitelist.ACTIONS)
         self.assertTrue(whitelist.allowed("set_style"))
 

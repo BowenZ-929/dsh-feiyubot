@@ -1,8 +1,10 @@
-"""手：四个具名动作 + 三层许可 + 一本只增的手账。
+"""手：六个具名动作 + 三层许可 + 一本只增的手账。
 
 第四轮做「记下一件事」（`add_task` / `complete_task`）；第五轮（手线第二批）接上两个
 产物型动作：`send_image`（把一张图交给通道发出去）与 `draw`（画一张、落自己的盘、登记进仓库、再发出去）。
-四个动作共用同一套：白名单 → 单次授权 → 每人每天额度，先落 reserved 再动手，结果行写不进就改判 failed。
+第三批加了「怎么说话」的旋钮（`set_style`），第四批加了只读的 `lookup`（把一句公共 query 交给检索接口；
+地址与 key 由调用方注入，落不落卡不归它管）。六个动作共用同一套：白名单 → 单次授权 → 每人每天额度，
+先落 reserved 再动手，结果行写不进就改判 failed。
 
 模块各管一段，职责不重叠：whitelist 定名单，permit 判三层，quota 算额度，timelang 认最小时间词表，
 imgphrase 认「想看哪张图」那句短语，ledger 记手账，store 管路径与字节（图也落在这里），
@@ -10,6 +12,7 @@ assets 按家的房表与格子表取图的指针（仓库看卡，抽屉看格�
 channel 与 draw 是**仅有的两个能上网的模块**，actions 做动作并给统一回执，cli 是人可读的自检。
 **写盘只经 store 与 ledger**——别的模块一律调它们，不许自己 open 一个文件。
 `draw` 这个名字在包级指的是**模块**（网络那一层）；动作在 `actions.draw` 上，不在这里导出。
+`lookup` 照同一个先例：动作在 `actions.lookup` 上，包级不导出它。
 """
 from __future__ import annotations
 

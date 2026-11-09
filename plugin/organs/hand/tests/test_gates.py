@@ -11,9 +11,10 @@ from . import helpers
 
 
 class WhitelistTest(unittest.TestCase):
-    def test_exactly_five_named_actions_in_the_frozen_order(self):
+    def test_exactly_six_named_actions_in_the_frozen_order(self):
         self.assertEqual(whitelist.ACTIONS,
-                         ("add_task", "complete_task", "send_image", "draw", "set_style"))
+                         ("add_task", "complete_task", "send_image", "draw", "set_style",
+                          "lookup"))
 
     def test_generic_capabilities_are_not_on_the_list(self):
         for name in ("write_file", "read_file", "run", "shell", "exec", "delete", "register"):
@@ -37,7 +38,7 @@ class PermitTest(unittest.TestCase):
         self.assertEqual(permit.ACTION_RISK,
                          {"add_task": "可撤销", "complete_task": "可撤销",
                           "send_image": "可撤销", "draw": "可撤销",
-                          "set_style": "可撤销"})
+                          "set_style": "可撤销", "lookup": "可撤销"})
         for name in whitelist.ACTIONS:
             self.assertFalse(permit.needs_grant(name), name)
 

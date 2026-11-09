@@ -17,6 +17,25 @@ class GrowthApiTest(unittest.TestCase):
     def call(self, path, body=None):
         return day.dispatch('/day/growth' + path, {'root': self.root}, body, self.soul, self.brain)
 
+    def test_fresh_start_accounting_keeps_usage_without_becoming_activity(self):
+        from unittest.mock import patch
+        from organs.day import growth, solitude
+        growth.configure(True, root=self.root, daily_cap=4)
+        for at, accounting in [('2026-11-06T12:00:00+09:00', True),
+                               ('2026-11-07T10:00:00+09:00', True),
+                               ('2026-11-07T11:00:00+09:00', False),
+                               ('2026-11-07T13:00:00+09:00', True)]:
+            solitude.append_log(self.root, {'at':at, 'event':'autonomy_attempt',
+                'model_turn_id':'old-usage' if accounting else 'a'*32, 'accounting_only':accounting})
+        before = solitude.log_lines(self.root)
+        with patch('organs.day.model.now_iso', return_value='2026-11-07T12:00:00+09:00'):
+            code, data = self.call('')
+        self.assertEqual(200, code)
+        self.assertEqual({'day':'2026-11-07','used':2,'remaining':2,'accounting_only':1}, data['usage'])
+        self.assertEqual(['a'*32], [r['model_turn_id'] for r in data['log']])
+        self.assertEqual(4, len(data['opportunities']))
+        self.assertEqual(before, solitude.log_lines(self.root))
+
     def test_usage_counts_opportunities_across_life_day_without_counting_results(self):
         from unittest.mock import patch
         from organs.day import growth, solitude
@@ -34,8 +53,8 @@ class GrowthApiTest(unittest.TestCase):
                 for origin in ('automatic', 'manual', 'autonomy')]
         with patch('organs.day.phone_browse.view', return_value={'jobs':jobs}):
             for now, expected in [
-                ('2026-11-08T03:59:00+09:00', {'day':'2026-11-07','used':3,'remaining':0}),
-                ('2026-11-08T04:00:00+09:00', {'day':'2026-11-08','used':1,'remaining':1}),
+                ('2026-11-08T03:59:00+09:00', {'day':'2026-11-07','used':3,'remaining':0,'accounting_only':0}),
+                ('2026-11-08T04:00:00+09:00', {'day':'2026-11-08','used':1,'remaining':1,'accounting_only':0}),
             ]:
                 with self.subTest(now=now), patch('organs.day.model.now_iso', return_value=now):
                     code, data = self.call('')

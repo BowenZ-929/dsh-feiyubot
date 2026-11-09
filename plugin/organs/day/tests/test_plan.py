@@ -19,6 +19,21 @@ def same_day_stamps(count: int, start: str = "2026-11-05T05:00:00") -> list:
 
 
 class IdempotencyTest(unittest.TestCase):
+    def test_accounting_tombstones_keep_dedup_but_are_not_displayed_as_missed_plans(self):
+        first=plan.add([{'kind':'proactive','at':at('2026-11-05T07:00:00')}],root=self.root,now_ts=at(NOW))
+        data=plan.load(self.root)
+        row=data['pending'].pop()
+        row.update(status='expired',reason='fresh-start',accounting_only=True)
+        data['expired'].append(row)
+        plan.save(data,self.root)
+        before=plan.load(self.root)
+        result=plan.listing(self.root)
+        self.assertEqual([],result['expired'])
+        self.assertEqual(0,result['counts']['expired'])
+        self.assertEqual(before,plan.load(self.root))
+        again=plan.add([{'kind':'proactive','at':row['at']}],root=self.root,now_ts=at(NOW))
+        self.assertEqual([row['id']],again['duplicates'])
+
     def setUp(self) -> None:
         self.root = temp_root(self)
         self.items = candidates(("diary", "2026-11-05T09:00:00"), ("walk", "2026-11-05T10:00:00"))

@@ -128,6 +128,12 @@ html[data-theme="light"]{color-scheme:light}
 
 <main>
   <div>
+    <section aria-labelledby="web-h">
+      <h2 id="web-h">查到的公开资料</h2>
+      <p id="web-state" class="state">正在读取…</p>
+      <p class="note">只保存来源资料，不当作亲历记忆。<a href="observe?source=lookup">查看检索记录</a></p>
+      <div id="web-cards"></div>
+    </section>
     <section aria-labelledby="rooms-h">
       <h2 id="rooms-h">十间房<small id="rooms-total">载入中…</small></h2>
       <div id="room-grid"></div>
@@ -1122,6 +1128,29 @@ html[data-theme="light"]{color-scheme:light}
   }
 
   loadAll();
+  panelFetch('/learning/web', {method: 'GET'}).then(function (r) {
+    if (!r.ok) throw new Error('读取失败');
+    return r.json();
+  }).then(function (data) {
+    el('web-state').textContent = (data.enabled ? '联网检索已开启' : '联网检索关闭') + ' · 最近 ' + data.jobs.length + ' 份资料';
+    data.jobs.forEach(function (job) {
+      var detail = document.createElement('details'), title = document.createElement('summary');
+      title.textContent = job.cards[0].title || job.source.site_name || '网页资料';
+      detail.appendChild(title);
+      var body = document.createElement('p');
+      body.textContent = job.cards.map(function (card) { return card.claim; }).join('\n');
+      detail.appendChild(body);
+      var meta = document.createElement('p');
+      meta.textContent = '查询：' + job.source.query + ' · 页面时间：' + (job.source.published_at || '未注明') + ' · 获取：' + job.fetched_at;
+      detail.appendChild(meta);
+      if (/^https?:\/\//i.test(job.source.url)) {
+        var link = document.createElement('a');
+        link.href = job.source.url; link.textContent = '查看原文'; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        detail.appendChild(link);
+      }
+      el('web-cards').appendChild(detail);
+    });
+  }).catch(function () { el('web-state').textContent = '公开资料读取失败，请刷新重试。'; });
   showBuild();
 })();
 </script>

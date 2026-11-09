@@ -1,4 +1,4 @@
-"""五个动作 + 一个只读查询：把「做成一件事」做成能断言的回执。
+"""六个动作 + 一个只读查询：把「做成一件事」做成能断言的回执。
 
 统一信封（api 与面板就按这个读，**八键与三态冻结**）：
     {"state": "done"|"refused"|"failed", "action", "code", "say", "who",
@@ -15,6 +15,14 @@ failed ∈ {HOME_WRITE_FAILED, HOME_READ_FAILED, LEDGER_WRITE_FAILED,
 拿不到旧值还硬写，账上那句「原来是什么」就成了编的。）
 本批再加一个 refused 码 IMAGE_NOT_UNDERSTOOD：句子里认不出「想看哪张图」就反问——它是**没听懂**，
 不是**图没找着**（`IMAGE_NOT_FOUND` 是「听懂了、家里没有」）：两件事面板要分得开。）
+`lookup` 是本轮唯一一个**只读**动作（不落本地卡、不发任何对外消息），码也归它自己：
+refused ∈ {MISSING_QUERY, QUERY_TOO_LONG}（本地就拒，一次请求都没发）；
+failed ∈ {LOOKUP_UNAVAILABLE（没配入口／没 key）, LOOKUP_AUTH（401/402/403）,
+          LOOKUP_RATE_LIMITED（429）, LOOKUP_SERVER_ERROR（5xx）, LOOKUP_TIMEOUT,
+          LOOKUP_UNREACHABLE, LOOKUP_BAD_RESPONSE}。
+**查到了但一条都没有写成 done + code=LOOKUP_EMPTY**，不是 failed：通路是好的、也确实没查到，
+「没通路」与「没知识」是这件事里最要紧的一次分开。
+
 **「她拒绝」不许写成 failed**——拒绝是她的判断，失败是系统没办成，两件事面板要分得开。
 **「没发出去」也不许写成 done**：发图与画图都只认通道的 ok && sent>0，人话里带通道给的数与理由码，
 手自己从不声明「发过了」。
@@ -43,6 +51,7 @@ from organs.home import store as home_store
 
 from . import assets, channel, imgphrase, ledger, permit, quota, store, stylelang, timelang, whitelist
 from . import draw as draw_client
+from . import lookup as lookup_client
 
 #: 手替她动家：家的口径里 organ 不过白名单门（那是给 agent 的），但仍过路径形状与日额度。
 ROLE = "organ"
@@ -108,15 +117,21 @@ def _begin(*, who: str, action: str, params: Dict[str, Any], now: Any, root,
 def _settle(*, who: str, action: str, params: Dict[str, Any], now: Any, root,
             started: float, ledger_id: str, state: str, code: str, say: str,
             detail: Optional[Dict[str, Any]] = None, origin: str = "OK",
-            card_id: Optional[str] = None) -> Dict[str, Any]:
-    """追加结果行，并给出信封。结果行写不进去 → 改判 failed，**绝不说成功**。"""
+            card_id: Optional[str] = None,
+            result_say: Optional[str] = None) -> Dict[str, Any]:
+    """追加结果行，并给出信封。结果行写不进去 → 改判 failed，**绝不说成功**。
+
+    `result_say` 只在「结果行写不进去」时替换那句人话：已经动过手、可能已经花了钱的动作
+    （例如检索）必须自己说清这一层，不许借用写动作那句「账没记上」蒙过去。
+    """
     entry = ledger.make_entry(ledger_id=ledger_id, who=who, action=action, params=params,
                               state=state, code=code, elapsed_ms=_elapsed_ms(started),
                               origin=origin, at=store.now_iso(now))
     try:
         ledger.append(entry, root=root)
     except _LEDGER_ERRORS as exc:
-        return _envelope("failed", action, "LEDGER_WRITE_FAILED", LEDGER_RESULT_SAY, who=who,
+        return _envelope("failed", action, "LEDGER_WRITE_FAILED",
+                         result_say or LEDGER_RESULT_SAY, who=who,
                          detail=dict(detail or {}, stage="result", gate="ledger",
                                      wanted={"state": state, "code": code},
                                      error=_origin_of(exc)),
@@ -811,6 +826,134 @@ def set_style(*, who: str, key: Any = None, value: Any = None, utterance: Any = 
                 card_id=written_card_id, detail=detail),
         who=who, now=now, root=root)
 
+
+# ---- 查：一个只读动作（lookup） -------------------------------------------
+# 与其它动作同一条流：三层闸 → 先落 reserved 再动手 → 结果行写不进就改判 failed。
+# 不一样的只有三处：
+#   1. 它**不改本地任何东西**（本批连卡都不落），结果只活在回执与账上；
+#   2. 它**会花钱**（服务端按「200 且结果非空」计费），所以「根本没发请求」与「发了、没落账」
+#      必须在账上分得开：calls 记实际请求数，landed 记有没有落到本地；
+#   3. 账里**只放 query 的指纹与长度**，不放原文——门0 还没实现，但账不能先开一个照抄原文的口子。
+
+LOOKUP_MISSING_SAY = "查什么？给我一句话我就能查"
+LOOKUP_TOO_LONG_SAY = "这句太长，我一次最多查 %d 个字（这句 %d 字），你截一句关键的给我"
+LOOKUP_UNAVAILABLE_SAY = "我现在查不了（检索入口没配好）"
+LOOKUP_AUTH_SAY = "我现在查不了（检索那边不认这个凭据，或者额度没了）"
+LOOKUP_RATE_SAY = "我现在查不了（检索那边在限流，过会儿再问我）"
+LOOKUP_SERVER_SAY = "我现在查不了（检索那边出错了）"
+LOOKUP_TIMEOUT_SAY = "我现在查不了（等太久没回应）"
+LOOKUP_UNREACHABLE_SAY = "我现在查不了（网络没通）"
+LOOKUP_BAD_RESPONSE_SAY = "我现在查不了（回来的东西我不认得）"
+#: ③ 的说法：查到但空／无关。**绝不说「没有这件事」**——那两句话是两件不同的事。
+LOOKUP_EMPTY_SAY = "我没查到可靠的"
+#: 已经发出去、还没落账时的说法：这类动作可能已经花了钱，不能借用写动作那句蒙过去。
+LOOKUP_LEDGER_SAY = "查是查出去了（可能已经计费），但账没记上，这次不算数"
+
+#: 结果行额外记的账目（并进 params：账仍是「一行一动作」，不另加第九格）。
+#: 全是非敏感计数与判据——**没有一格是 query 原文**。
+LOOKUP_ACCOUNTING: Tuple[str, ...] = ("state", "calls", "results_count", "http", "landed")
+
+#: 检索那边的分类 → 回执码。分类是给面板与账看的判据，所以是映射，不是一串 if。
+LOOKUP_CODES: Dict[str, str] = {
+    lookup_client.QUERY_BLANK: "MISSING_QUERY",
+    lookup_client.QUERY_TOO_LONG: "QUERY_TOO_LONG",
+    lookup_client.NO_ENDPOINT: "LOOKUP_UNAVAILABLE",
+    lookup_client.NO_KEY: "LOOKUP_UNAVAILABLE",
+    lookup_client.AUTH: "LOOKUP_AUTH",
+    lookup_client.RATE_LIMITED: "LOOKUP_RATE_LIMITED",
+    lookup_client.SERVER_ERROR: "LOOKUP_SERVER_ERROR",
+    lookup_client.TIMEOUT: "LOOKUP_TIMEOUT",
+    lookup_client.UNREACHABLE: "LOOKUP_UNREACHABLE",
+    lookup_client.BAD_RESPONSE: "LOOKUP_BAD_RESPONSE",
+}
+
+#: 每一类各说各的：用户问「怎么又查不了」时，面板与账要能回答是哪一类。
+LOOKUP_SAYS: Dict[str, str] = {
+    lookup_client.NO_ENDPOINT: LOOKUP_UNAVAILABLE_SAY,
+    lookup_client.NO_KEY: LOOKUP_UNAVAILABLE_SAY,
+    lookup_client.AUTH: LOOKUP_AUTH_SAY,
+    lookup_client.RATE_LIMITED: LOOKUP_RATE_SAY,
+    lookup_client.SERVER_ERROR: LOOKUP_SERVER_SAY,
+    lookup_client.TIMEOUT: LOOKUP_TIMEOUT_SAY,
+    lookup_client.UNREACHABLE: LOOKUP_UNREACHABLE_SAY,
+    lookup_client.BAD_RESPONSE: LOOKUP_BAD_RESPONSE_SAY,
+}
+
+#: 本地就拒的那两类：一次请求都没发，所以是 refused（她的判断／参数不合规），不是 failed。
+LOOKUP_LOCAL_ERRORS: Tuple[str, ...] = (lookup_client.QUERY_BLANK, lookup_client.QUERY_TOO_LONG)
+
+
+def _lookup_say(kind: str, *, query_chars: int) -> str:
+    """一类一句话。本地那两类不带「查不了」——它们跟通路无关。"""
+    if kind == lookup_client.QUERY_BLANK:
+        return LOOKUP_MISSING_SAY
+    if kind == lookup_client.QUERY_TOO_LONG:
+        return LOOKUP_TOO_LONG_SAY % (lookup_client.MAX_QUERY_CHARS, query_chars)
+    return LOOKUP_SAYS.get(kind, LOOKUP_BAD_RESPONSE_SAY)
+
+
+def lookup(*, who: str, query: Any, count: Any = None, base_url: Any = None, key: Any = None,
+           timeout: Any = None, now: Any = None, root=None,
+           transport: Optional[Any] = None) -> Dict[str, Any]:
+    """查一次公共事实。地址、key、超时由调用方注入——手不读配置、不读环境变量。
+
+    本批**不落卡**（家·仓库那一段是下一批），所以成功也只到「已查到未落盘」：detail 里
+    landed=false 如实记着，不假装存过。transport 只为测试注入；生产走标准库那一个。
+    """
+    started = time.monotonic()
+    want = lookup_client.count_of(count)
+    mark = lookup_client.fingerprint(query)
+    params: Dict[str, Any] = {"count": want, "query_sha256": mark["query_sha256"],
+                              "query_chars": mark["query_chars"]}
+
+    permitted = permit.check("lookup", who=who, now=now, root=root)
+    if not permitted["allowed"]:
+        return _refuse(who=who, action="lookup", params=params, now=now, root=root,
+                       started=started, code=str(permitted["code"]), say=permitted["say"],
+                       detail=permitted["detail"])
+
+    ledger_id, failure = _begin(who=who, action="lookup", params=params, now=now, root=root,
+                                started=started)
+    if failure is not None:
+        # reserved 都写不进去 → 一次请求都不发：这一刻「没有请求」是可证的事实。
+        return failure
+
+    got = lookup_client.search(query, base_url=base_url, key=key, timeout=timeout,
+                               count=want, transport=transport)
+    detail: Dict[str, Any] = {"query_sha256": mark["query_sha256"],
+                              "query_chars": mark["query_chars"], "count": want,
+                              "state": got["state"], "calls": got["calls"],
+                              "results_count": len(got["results"]),
+                              "http": got.get("status"), "landed": False,
+                              "results": got["results"]}
+    params = _accounting(params, detail, LOOKUP_ACCOUNTING)
+    kind = str(got.get("error") or "")
+
+    if got["state"] == lookup_client.ERROR and kind in LOOKUP_LOCAL_ERRORS:
+        # 本地拒：calls=0 就是证据，账上不会被当成「发了、失败了」。
+        return _settle(who=who, action="lookup", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="refused",
+                       code=LOOKUP_CODES[kind],
+                       say=_lookup_say(kind, query_chars=detail["query_chars"]),
+                       origin=kind, detail=detail)
+
+    if got["state"] == lookup_client.ERROR:
+        return _settle(who=who, action="lookup", params=params, now=now, root=root,
+                       started=started, ledger_id=ledger_id, state="failed",
+                       code=LOOKUP_CODES.get(kind, "LOOKUP_BAD_RESPONSE"),
+                       say=_lookup_say(kind, query_chars=detail["query_chars"]),
+                       origin=kind, detail=detail, result_say=LOOKUP_LEDGER_SAY)
+
+    if got["state"] == lookup_client.EMPTY:
+        return _settle(who=who, action="lookup", params=params, now=now, root=root,
+                    started=started, ledger_id=ledger_id, state="done",
+                    code="LOOKUP_EMPTY", say=LOOKUP_EMPTY_SAY, detail=detail,
+                    result_say=LOOKUP_LEDGER_SAY)
+
+    return _settle(who=who, action="lookup", params=params, now=now, root=root,
+                started=started, ledger_id=ledger_id, state="done", code="OK",
+                say="查到 %d 条" % len(got["results"]), detail=detail,
+                result_say=LOOKUP_LEDGER_SAY)
 
 def due(now: Any = None, root=None) -> list:
     """**只读**：未完成且 `due <= now` 的任务卡。不接时钟、不 sleep、不起线程、不写盘。

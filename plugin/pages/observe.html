@@ -25,7 +25,7 @@ html[data-theme="light"]{color-scheme:light}
 <details><summary>用量明细与统计口径</summary><pre id="rice-detail"></pre></details>
 </article>
 <div class="toolbar">
-<label>记录来源<select id="source"><option value="model">模型调用与思考</option><option value="chat">近期对话记录</option><option value="delivery">QQ 发送账本</option><option value="decision">发言判断</option><option value="eye">图片观察</option><option value="ear">语音识别</option><option value="voice">语音合成</option><option value="learning">外部知识参考</option><option value="emotion">情绪事件判断</option><option value="tone">语气与回复限制</option></select></label>
+<label>记录来源<select id="source"><option value="model">模型调用与思考</option><option value="chat">近期对话记录</option><option value="delivery">QQ 发送账本</option><option value="decision">发言判断</option><option value="eye">图片观察</option><option value="ear">语音识别</option><option value="voice">语音合成</option><option value="learning">外部知识参考</option><option value="lookup">联网检索记录</option><option value="emotion">情绪事件判断</option><option value="tone">语气与回复限制</option></select></label>
 <label id="session-label">会话<select id="session"><option value="">全部会话</option></select></label>
 <label id="date-label">记录日期<select id="date" aria-label="记录日期"></select></label>
 <label id="turn-label">只看这一轮<input id="turn" type="search" placeholder="回合编号，留空查看全部"></label>
@@ -49,14 +49,14 @@ html[data-theme="light"]{color-scheme:light}
 "use strict";
 const $ = id => document.getElementById(id);
 let offset=0, page=null;
-const turnSources={model:"模型调用",chat:"对话与发送回执",emotion:"理解与情绪",tone:"语气与回复限制"};
+const turnSources={model:"模型调用",chat:"对话与发送回执",emotion:"理解与情绪",tone:"语气与回复限制",lookup:"联网检索"};
 const silenceLabels={"rest-deep":"彻底睡着","rest-asleep":"正在睡觉","rest-holding":"硬撑期间未参与这段",
  chitchat_skipped:"本段未抽中接话机会",core_empty:"本轮没有可发送的回复",core_error:"核心调用出错",
  outbound_failed:"发送未确认",superseded:"收到补充，旧回复已取消",burst_guard:"刚说过话，暂缓接话",
  quota_exceeded:"通道发言额度用尽",silent_mode:"通道处于静默模式",media_only:"纯图片段未触发接话",sticker:"纯表情段未触发接话"};
 const notes={model:"这里展示已保存的模型调用。新记录包含用途、回合编号、失败与重试；按回合查询跨日期，按发起次序排列。服务端返回的思考内容按原文展示；没有返回时不补写。旧记录没有回合编号，不能仅凭时间认定属于同一轮。",chat:"这里是核保存的对话底稿，可能含截断或历史补记。旧版回复不等于实际送达；QQ 最终发送结果请查看发送账本。",delivery:"sent 表示协议端确认发送；uncertain 表示回执不确定，不能视为失败后重发。其他状态按原账展示。",decision:"展示通道为什么发言或没有发言。记忆关联可在记忆星图查看。"};
 function block(parent,title,text,open=false){const d=document.createElement("details"),s=document.createElement("summary"),p=document.createElement("pre");s.textContent=title;p.textContent=typeof text==="string"?text:JSON.stringify(text,null,2);d.open=open;d.append(s,p);parent.append(d);}
-Object.assign(notes,{eye:"图片的识别结果与状态，不等于发图者的经历。",ear:"语音的机器转写与不确定状态。",voice:"语音合成记录；是否送达仍以 QQ 发送账本为准。",learning:"记录哪些外部知识交给了聊天模型参考。它不代表模型一定采用，也不代表已向 QQ 发出。",emotion:"展示整段互动的语义判断、逐字证据与是否影响心情；旧记录仍标为规则判断。模型判断也可能错，依据可展开核对。",tone:"这一轮的心情、精力、语气和回复限制读数。它不是全部参数的修改历史；新记录按回合关联；旧记录没有编号，不能仅凭时间与别的记录强行关联。"});
+Object.assign(notes,{lookup:"每轮是否查询、请求结果与保存状态。空结果不代表事情不存在；查询费用在饭账单列。公开资料可在家的资料区查看。",eye:"图片的识别结果与状态，不等于发图者的经历。",ear:"语音的机器转写与不确定状态。",voice:"语音合成记录；是否送达仍以 QQ 发送账本为准。",learning:"记录哪些外部知识交给了聊天模型参考。它不代表模型一定采用，也不代表已向 QQ 发出。",emotion:"展示整段互动的语义判断、逐字证据与是否影响心情；旧记录仍标为规则判断。模型判断也可能错，依据可展开核对。",tone:"这一轮的心情、精力、语气和回复限制读数。它不是全部参数的修改历史；新记录按回合关联；旧记录没有编号，不能仅凭时间与别的记录强行关联。"});
 function remember(){
  const query=new URLSearchParams({source:$("source").value});
  if(turnSources[$("source").value]&&recordSession)query.set("session_id",recordSession);
@@ -173,12 +173,12 @@ async function load(){
  $("refresh").disabled=true;$("newer").disabled=true;$("older").disabled=true;$("source").disabled=true;$("date").disabled=true;$("turn").disabled=true;$("session").disabled=true;
  $("status").textContent="正在读取…";
  const source=$("source").value,turn=turnSources[source]?$("turn").value.trim():"";$("date-label").hidden=!!turn;$("turn-label").hidden=!turnSources[source];
- $("session-label").hidden=!turnSources[source];
+ $("session-label").hidden=!turnSources[source]||source==="lookup";
  $("participation").hidden=source!=="decision";
  if(source==="decision")loadParticipation();
  const query=new URLSearchParams({source,offset:String(offset),limit:"20"});
  if(turn)query.set("turn_id",turn);
- if(turnSources[source]&&recordSession)query.set("session_id",recordSession);
+ if(source!=="lookup"&&turnSources[source]&&recordSession)query.set("session_id",recordSession);
  if(!turn&&recordDate)query.set("date",recordDate);
  remember();
  try{
@@ -250,10 +250,11 @@ async function loadRice(){
   $("rice-date").value=data.date;
   const d=data.daily,b=data.balance,low=Number(d.cost_cny_min).toFixed(6),high=Number(d.cost_cny_max).toFixed(6);
   $("rice-usage").textContent=`${data.enabled?"":"饭账尚未启用 · "}${d.calls} 次调用 · ${d.total_tokens.toLocaleString()} token 大白饭 · 饭钱估算 ¥${low}${low!==high?"–"+high:""}${d.unpriced_calls?` · 另有 ${d.unpriced_calls} 次未能计价`:""}`;
+  if(data.search){const s=data.search;$("rice-usage").textContent+=`；联网检索 ${s.calls} 次 · 有结果 ${s.billed_calls} 次 · 估算 ${Object.entries(s.costs||{}).map(([c,n])=>c+" "+n).join(" / ")||"0"}${s.unknown_calls?" · "+s.unknown_calls+" 次费用未确认":""}`;}
   const amounts=(b.data?.balance_infos||[]).map(r=>`${r.currency} ${r.total_balance}（赠额 ${r.granted_balance} / 充值 ${r.topped_up_balance}）`).join("；");
   $("rice-balance").textContent=amounts?`官方余粮：${amounts} · ${b.checked_at}${b.stale?" · 旧快照，当前查询未确认":""}${b.data.is_available?"":" · 官方标记账户不可用"}`:"官方余粮：尚未取得，不能当作余额为零。";
   $("rice-note").textContent=data.scope+" 余额约每 5 分钟查询，刷新页面不调用模型。";
-  $("rice-detail").textContent=JSON.stringify({输入:d.prompt_tokens,输出:d.completion_tokens,其中推理:d.reasoning_tokens,说明:"推理已包含在输出里，不重复计费；未记录不等于未消费。",损坏行:d.invalid_lines,价格来源:data.pricing_url},null,2);
+  $("rice-detail").textContent=JSON.stringify({输入:d.prompt_tokens,输出:d.completion_tokens,其中推理:d.reasoning_tokens,说明:"推理已包含在输出里，不重复计费；未记录不等于未消费。",损坏行:d.invalid_lines,价格来源:data.pricing_url,联网检索:data.search,检索单价:data.search_price},null,2);
  }catch(error){$("rice-usage").textContent="饭账读取失败："+error.message;}
  finally{$("rice-refresh").disabled=false;}
 }

@@ -20,6 +20,47 @@ def source():
 
 
 class NaturalnessTaskProbeTest(unittest.TestCase):
+    def test_materials_candidate_only_adds_evidence_expression_note(self):
+        payload=source()['calls'][0]['request']
+        current={'synthetic':True,'completed':True,'scenario':'materials',
+                 'calls':[{'index':i,'request':copy.deepcopy(payload)} for i in range(1,11)],
+                 'results':[{'case':i,'said':'虚构对话'+str(i),'criterion':'区分来源',
+                             'call_indices':[2*i-1,2*i]} for i in range(1,6)]}
+        original=copy.deepcopy(current)
+        cases=probe.prepare_materials(current)
+        self.assertEqual([1,3,4,5],[c['source_case'] for c in cases])
+        for case in cases:
+            baseline,candidate=case['requests']
+            self.assertEqual(payload,baseline)
+            self.assertEqual(candidate['messages'][0]['content'],
+                             baseline['messages'][0]['content']+'\n\n'+probe.NOTES['materials'])
+            restored=copy.deepcopy(candidate)
+            restored['messages'][0]['content']=baseline['messages'][0]['content']
+            self.assertEqual(baseline,restored)
+        self.assertEqual(original,current)
+
+    def test_format_comparison_preserves_current_context_and_changes_only_format(self):
+        payload=source()['calls'][0]['request']
+        payload['messages'][0]['content']+='\n一次说一到两句，分行说，别写成一大段。'
+        current={'synthetic':True,'completed':True,'scenario':'naturalness',
+                 'calls':[{'index':i,'request':copy.deepcopy(payload)} for i in range(1,21)],
+                 'results':[{'case':i,'said':'虚构对话'+str(i),'criterion':'保持连续性',
+                             'call_indices':[2*i-1,2*i]} for i in range(1,11)]}
+        before=copy.deepcopy(current)
+        cases=probe.prepare_format(current)
+        self.assertEqual(6,len(cases))
+        self.assertEqual([1,3,5,8,9,10],[c['source_case'] for c in cases])
+        for case in cases:
+            original,candidate=case['requests']
+            self.assertEqual(payload,original)
+            restored=copy.deepcopy(candidate)
+            restored['messages'][0]['content']=restored['messages'][0]['content'].replace(probe.FORMAT_CANDIDATE,probe.FORMAT_ORIGINAL)
+            self.assertEqual(original,restored)
+        self.assertEqual(before,current)
+        current['calls'][-1]['request']['messages'][0]['content']='格式已变化'
+        with self.assertRaisesRegex(ValueError,'格式'):
+            probe.prepare_format(current)
+
     def test_preparation_changes_only_target_task_note_and_keeps_source(self):
         original=source(); before=copy.deepcopy(original)
         cases=probe.prepare(original)

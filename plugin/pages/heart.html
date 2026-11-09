@@ -37,7 +37,7 @@
   li.greyed { color: var(--dim); }
   #engage, #sleep, #window { white-space: pre-line; margin: 0 0 var(--gap-1); }
   #hits { margin: 0; padding-left: var(--gap-2); color: var(--dim); }
-  canvas { width: 100%; height: auto; background: Canvas; border: 1px solid var(--line);
+  canvas { width: 100%; height: 220px; box-sizing:border-box; background: Canvas; border: 1px solid var(--line);
            border-radius: 8px; margin: var(--gap-1) 0; }
   .legend { margin: 0 0 var(--gap-1); color: var(--dim); }
   .back { margin-top: var(--gap-2); }
@@ -49,7 +49,7 @@
   .summary-card dd { margin:10px 0 0; font-size:1.45rem; font-weight:650; line-height:1.35; }
   .summary-card p { margin:10px 0 0; color:var(--dim); font-size:.83rem; }
   .work-grid { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); gap:16px; align-items:start; }
-  .side-cards { display:grid; gap:16px; min-width:0; }
+  .main-cards, .side-cards { display:grid; gap:16px; min-width:0; }
   .card h2 { margin-top:0; }
   .card .legend, .detail-card .legend { font-size:.87rem; }
   .detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-items:start; }
@@ -93,20 +93,34 @@ html[data-theme="light"]{color-scheme:light}
     <div class="summary-card"><dt>说话语气</dt><dd id="summary-voice">正在读……</dd><p id="summary-voice-note">她会带着怎样的语气说话</p></div>
   </dl>
   <div class="work-grid">
+  <div class="main-cards">
+  <section class="card" aria-label="心情趋势">
+    <h2>心情的走向</h2>
+    <p id="mood" class="legend">正在读取当前心情……</p>
+    <canvas id="curve" width="720" height="240" role="img" aria-label="按实际采样时间绘制的心情和基线曲线">心情曲线，采样范围见下方说明。</canvas>
+    <p class="legend">实线＝此刻，虚线＝基线。按实际采样时间排列；间隔中的连线不代表期间每一刻都有记录。</p>
+    <p id="traj-info" class="legend" role="status">正在读取轨迹……</p>
+  </section>
   <section class="card changes-card" aria-label="参数变化记录">
     <h2>最近怎样变了</h2>
-    <p class="legend">记录启用后的实际写入。前后值包含期间的自然回落与事件影响；没有记录的过去不会补猜。只读时计算的回落不记为新事件，心情采样仍在下方曲线。</p>
+    <p class="legend">记录启用后的实际写入。前后值包含期间的自然回落与事件影响；没有记录的过去不会补猜。只读时计算的回落不记为新事件。</p>
     <div class="change-tools">
       <label>日期 <input id="changes-date" type="date"></label>
-      <label>类别 <select id="changes-group"><option value="all">全部</option><option value="mood">心情与基线</option><option value="energy">精力</option><option value="offset">六轴偏移</option><option value="sleep">睡眠</option><option value="proactive">主动交流反馈</option></select></label>
+      <label>类别 <select id="changes-group"><option value="all">全部</option><option value="mood">心情与基线</option><option value="energy">精力</option><option value="baseline">性格基线</option><option value="offset">六轴偏移</option><option value="sleep">睡眠</option><option value="proactive">主动交流反馈</option></select></label>
       <button id="changes-refresh" type="button">刷新记录</button>
     </div>
     <p id="changes-info" class="legend" role="status">正在读变化记录……</p>
     <ul id="changes-list" class="change-list"></ul>
     <div class="change-tools"><button id="changes-newer" type="button">较新一页</button><button id="changes-older" type="button">较早一页</button></div>
   </section>
+  </div>
 
   <div class="side-cards">
+  <section class="card">
+    <h2>怎样影响这一轮对话</h2>
+    <p class="legend">上方是当前状态快照。某次回复实际用了什么心情和上下文，可以展开变化记录中的判断依据，再进入那一轮模型调用查看。</p>
+    <a id="model-input-link" href="observe?source=model">查看对话与模型输入 →</a>
+  </section>
   <section class="card">
     <h2>还惦记着什么</h2>
     <ul id="thoughts" class="axes"></ul>
@@ -134,14 +148,6 @@ html[data-theme="light"]{color-scheme:light}
     <p class="legend">保留原有“心里／面上”参数供内部计算与查看；聊天已不再把这组反差作为性格要求。当前性格以魂页的底色和自主自述为准。</p>
     <ul id="axes" class="axes"></ul>
     <p id="pending" class="legend"></p>
-  </details>
-
-  <details class="detail-card">
-    <summary>心情轨迹 · 此刻与基线</summary>
-    <p id="mood">……</p>
-    <canvas id="curve" width="720" height="200"></canvas>
-    <p class="legend">实线＝此刻，虚线＝基线；横轴是读取时刻，纵轴是心情刻度。</p>
-    <p id="traj-info" class="legend"></p>
   </details>
 
   <details class="detail-card">
@@ -211,6 +217,7 @@ html[data-theme="light"]{color-scheme:light}
 
   function el(id) { return document.querySelector("#" + id); }
   function say(id, text) { el(id).textContent = text; }
+  el("model-input-link").href = window.PANEL_BASE + "/observe?source=model";
 
   function fail(err) {
     say("status", "读不到：心的端点没有应答（" + err + "）");
@@ -314,6 +321,7 @@ html[data-theme="light"]{color-scheme:light}
     say("mood", "此刻 " + data.now + "（" + data.tier + "）· 基线 " + data.baseline +
         " · 方向 " + data.direction + " · 读数于 " + data.as_of);
     drawCurve(data.trajectory || []);
+    window.addEventListener("resize", function () { drawCurve(data.trajectory || []); });
   }
 
   function stroke(ctx, points, color, dashed) {
@@ -333,9 +341,12 @@ html[data-theme="light"]{color-scheme:light}
   function drawCurve(rows) {
     var canvas = el("curve");
     var ctx = canvas.getContext("2d");
-    var width = canvas.width;
-    var height = canvas.height;
-    var left = 36, right = width - 12, top = 12, bottom = height - 24;
+    var width = canvas.clientWidth || 720, height = 220;
+    var scale = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    var left = 36, right = width - 12, top = 12, bottom = height - 32;
     ctx.clearRect(0, 0, width, height);
     ctx.strokeStyle = "#cccccc";
     ctx.lineWidth = 1;
@@ -349,20 +360,29 @@ html[data-theme="light"]{color-scheme:light}
     ctx.fillText("100", 4, top + 8);
     ctx.fillText("0", 14, bottom + 2);
 
-    var points = rows.filter(function (row) { return typeof row.now === "number"; });
-    if (points.length < 2) {
-      say("traj-info", "轨迹只有 " + points.length + " 个采样点，还不能连线（多读几次就有了）。");
+    var points = rows.map(function (row) {
+      return {at:Date.parse(row.at), now:row.now, baseline:row.baseline};
+    }).filter(function (row) {
+      return Number.isFinite(row.at) && Number.isFinite(row.now) && Number.isFinite(row.baseline);
+    }).sort(function (a, b) { return a.at - b.at; });
+    if (points.length < 2 || points[0].at === points[points.length - 1].at) {
+      say("traj-info", "有效采样 " + points.length + " 条，不足两个不同时间的采样，暂不绘制趋势。");
       return;
     }
-    var span = points.length - 1;
-    function x(index) { return left + (right - left) * (index / span); }
+    var first = points[0].at, last = points[points.length - 1].at;
+    function x(row) { return left + (right - left) * ((row.at - first) / (last - first)); }
     function y(value) {
       var clipped = Math.max(0, Math.min(100, Number(value)));
       return bottom - (bottom - top) * (clipped / 100);
     }
-    stroke(ctx, points.map(function (row, index) { return [x(index), y(row.now)]; }), "#b0523a", false);
-    stroke(ctx, points.map(function (row, index) { return [x(index), y(row.baseline)]; }), "#5b7ea8", true);
-    say("traj-info", "轨迹 " + points.length + " 个采样点，来自 /heart/mood 的 trajectory。");
+    stroke(ctx, points.map(function (row) { return [x(row), y(row.now)]; }), "#b0523a", false);
+    stroke(ctx, points.map(function (row) { return [x(row), y(row.baseline)]; }), "#5b7ea8", true);
+    [first, last].forEach(function (at, index) {
+      ctx.textAlign = index ? "right" : "left";
+      ctx.fillText(new Date(at).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}), index ? right : left, height - 8);
+    });
+    say("traj-info", "轨迹 " + points.length + " 个采样点，按实际时间间隔绘制。范围：" +
+      new Date(first).toLocaleString() + " → " + new Date(last).toLocaleString() + "（浏览器本地时间）。");
   }
 
   function renderEnergy(data) {
@@ -504,8 +524,9 @@ html[data-theme="light"]{color-scheme:light}
       el("changes-date").value = data.date;
       say("changes-info", data.total + " 条 · " + data.timezone + (data.invalid_records ? " · 有 " + data.invalid_records + " 条损坏记录未展示" : ""));
       var list = el("changes-list"); list.textContent = "";
-      data.rows.forEach(function(row) {
+      data.rows.forEach(function(row, index) {
         var li = document.createElement("li"), details = document.createElement("details");
+        details.open = data.offset === 0 && index === 0;
         details.appendChild(changeNode("summary", new Date(row.at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}) + " · " + row.reason));
         Object.keys(row.changes).forEach(function(name) {
           var c = row.changes[name], delta = typeof c.before === "number" && typeof c.after === "number" ? c.after - c.before : null;
@@ -550,7 +571,7 @@ html[data-theme="light"]{color-scheme:light}
 
   panelFetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(function (err) { say("summary-voice", "读取失败"); fail(err); });
 
-  panelFetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(function (err) { say("summary-mood", "读取失败"); fail(err); });
+  panelFetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(function (err) { say("summary-mood", "读取失败"); say("mood", "当前心情读取失败"); say("traj-info", "轨迹读取失败，请刷新页面重试。"); fail(err); });
 
   panelFetch("/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(function (err) { say("summary-energy", "读取失败"); fail(err); });
 

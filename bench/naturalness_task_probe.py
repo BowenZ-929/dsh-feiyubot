@@ -5,13 +5,17 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'plugin'))
-from organs.mind import llm, recent
+from organs.mind import llm, recent, rice
 
 LIMIT = 12
+FORMAT_ORIGINAL = '一次说一到两句，分行说，别写成一大段。'
+FORMAT_CANDIDATE = '按内容自然长短，一句能接住就一句；需要时再分行，不必凑成两句。'
 NOTES = {
+    'materials': '平常聊作品或经历时，直接说内容，不用存储、流程、回执等内部说法；资料没写的细节，不代表丢失或没存全。被问运行或调试时仍可如实说明。',
     'sharing': '这一轮先理解对方是在分享，还是希望一起解决问题。只是分享近况时，回应其中你在意的细节即可，不必把话题转成指导、评判或提醒。确实在问怎么办、表达困扰时，按需要接着帮忙。无需每轮追问，也不要为了显得有用硬补一句建议。',
     'grounding': '对过去发生过什么，只使用所给对话原话或已确认的行动记录。对方的指责本身不等于事实已证实；也不因缺少记录就断言没发生。没有原话时可以接住对方的不舒服并问清是哪句；已有原话证实自己说错时就认具体那处。无需向对方解释检索、日志或上下文机制。',
 }
@@ -48,8 +52,54 @@ def prepare(source):
     return cases
 
 
-def run(source, *, live=False, output=None):
-    cases=prepare(source)
+def prepare_format(source):
+    if not (source.get('synthetic') is True and source.get('completed') is True
+            and source.get('scenario') == 'naturalness'):
+        raise ValueError('格式对照需要已完成的虚构 naturalness 连续聊天报告')
+    calls={c['index']:c for c in source['calls']}
+    cases=[]
+    for row in source['results']:
+        if row['case'] not in (1,3,5,8,9,10):
+            continue
+        baseline=copy.deepcopy(calls[row['call_indices'][-1]]['request'])
+        system=baseline['messages'][0]['content']
+        if system.count(FORMAT_ORIGINAL)!=1:
+            raise ValueError('格式原文不唯一或已变化，需重新核对来源')
+        candidate=copy.deepcopy(baseline)
+        candidate['messages'][0]['content']=system.replace(FORMAT_ORIGINAL,FORMAT_CANDIDATE,1)
+        cases.append({'name':'连续聊天第%d轮'%row['case'],'source_case':row['case'],
+                      'focus':'format','criterion':row['criterion'],'said':row['said'],
+                      'requests':[baseline,candidate]})
+    if len(cases)!=6:
+        raise ValueError('格式对照需要六个指定场景')
+    return cases
+
+
+def prepare_materials(source):
+    if not (source.get('synthetic') is True and source.get('completed') is True
+            and source.get('scenario') == 'materials'):
+        raise ValueError('材料对照需要已完成的虚构 materials 连续聊天报告')
+    calls={c['index']:c for c in source['calls']}
+    cases=[]
+    for row in source['results']:
+        if row['case'] not in (1,3,4,5):
+            continue
+        baseline=copy.deepcopy(calls[row['call_indices'][-1]]['request'])
+        candidate=copy.deepcopy(baseline)
+        candidate['messages'][0]['content']+='\n\n'+NOTES['materials']
+        cases.append({'name':'材料聊天第%d轮'%row['case'],'source_case':row['case'],
+                      'focus':'materials','criterion':row['criterion'],'said':row['said'],
+                      'requests':[baseline,candidate]})
+    if len(cases)!=4:
+        raise ValueError('材料对照需要四个指定场景')
+    return cases
+
+
+def run(source, *, live=False, output=None, focus='task'):
+    if live and output is not None and Path(output).exists():
+        raise ValueError('真实调用报告已存在，请先阅读结果，不覆盖重跑')
+    cases=(prepare_format(source) if focus=='format' else
+           prepare_materials(source) if focus=='materials' else prepare(source))
     report={'synthetic':True,'live':live,'source_sha256':hashlib.sha256(json.dumps(source,ensure_ascii=False,sort_keys=True).encode()).hexdigest(),
             'planned_calls':len(cases)*2,'limit':LIMIT,'real_calls':0,'cases':cases,'calls':[],
             'completed':False,'semantic_verdict':'not_evaluated',
@@ -70,6 +120,7 @@ def run(source, *, live=False, output=None):
                 call={'case':case['name'],'arm':['baseline','candidate'][arm],'request':case['requests'][arm]}
                 report['calls'].append(call)
                 report['real_calls']+=1
+                started=time.monotonic()
                 try:
                     status,body=llm.default_transport(config['base_url'].rstrip('/')+'/chat/completions',
                         {'Authorization':'Bearer '+key,'Content-Type':'application/json'},call['request'],config['timeout_ms']/1000)
@@ -78,7 +129,8 @@ def run(source, *, live=False, output=None):
                     if isinstance(exc,llm.LLMError):
                         call.update(error_kind=exc.kind,status=exc.status)
                     return report
-                call.update(status=status,response_text=body.decode('utf-8',errors='replace'))
+                call.update(status=status,response_text=body.decode('utf-8',errors='replace'),
+                            seconds=round(time.monotonic()-started,3))
                 try:
                     call['response']=json.loads(body)
                     call['reply']=call['response']['choices'][0]['message']['content']
@@ -88,6 +140,7 @@ def run(source, *, live=False, output=None):
                 if status!=200 or not isinstance(call['reply'],str) or not call['reply'].strip():
                     call['error']='http_or_empty'
                     return report
+                rice.record(call['response'],source='verification:naturalness-'+focus)
         report['completed']=True
         return report
     finally:
@@ -98,10 +151,11 @@ def run(source, *, live=False, output=None):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--live',action='store_true')
+    parser.add_argument('--focus',choices=('task','format','materials'),default='task')
     parser.add_argument('--source',type=Path,default=ROOT/'.scratch/relationship-dialogue-live.json')
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
-    report=run(json.loads(args.source.read_text()),live=args.live,output=args.output)
+    report=run(json.loads(args.source.read_text()),live=args.live,output=args.output,focus=args.focus)
     print(json.dumps({k:report[k] for k in ('planned_calls','real_calls','completed','semantic_verdict')},ensure_ascii=False))
     if args.live and not report['completed']:
         raise SystemExit(1)

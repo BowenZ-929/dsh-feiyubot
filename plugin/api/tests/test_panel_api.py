@@ -60,7 +60,7 @@ REQUIRED_ROUTES = (
     ("GET", "/phone/status"), ("POST", "/phone/connect"), ("POST", "/phone/inspect"),
     ("POST", "/phone/screen"), ("POST", "/phone/action"),
     ("GET", "/phone/browse"), ("POST", "/phone/browse/start"), ("POST", "/phone/browse/stop"), ("POST", "/phone/browse/settings"),
-    ("GET", "/learning/status"), ("GET", "/learning/read"),
+    ("GET", "/learning/status"), ("GET", "/learning/read"), ("GET", "/learning/web"),
     ("GET", "/learning/search"), ("POST", "/learning/start"),
     ("GET", "/learning/expressions"), ("POST", "/learning/expressions/set"),
     ("GET", "/api/graph/snapshot"),

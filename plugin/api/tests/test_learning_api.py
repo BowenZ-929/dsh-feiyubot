@@ -216,6 +216,58 @@ class LearningTest(unittest.TestCase):
         self.assertEqual(before, learning.llm.resolve_config())
         self.assertEqual("done", knowledge.read(started["id"])["status"])
 
+    def test_learning_page_lists_only_subtitles_and_refuses_web_resume(self):
+        started = learning.start(BV, reader=lambda _: copy.deepcopy(SOURCE),
+                                  complete=lambda _: json.dumps([CARD]))
+        learning._FUTURE.result(timeout=5)
+        subtitle = knowledge.read(started["id"])
+        legacy = {"id": "b" * 32, "created_at": "2026-11-09T10:00:00+09:00", "status": "partial",
+                  "reference": SOURCE["meta"]["url"], "next_segment": 2, "cards": [],
+                  "source": copy.deepcopy(SOURCE)}
+        web_id = "a" * 32
+        knowledge.save_web({"id": web_id, "created_at": "2026-11-10T09:00:00+09:00",
+                            "fetched_at": "2026-11-10T09:00:00+09:00",
+                            "source": {"url": "https://example.org/t1", "site_name": "示例站"},
+                            "cards": [{"id": "web-1", "claim": "T1 下一场在 11 月 10 日",
+                                        "tags": ["T1"]}]})
+        knowledge.save(legacy)
+        status, data = api.handle("GET", "/learning/status", None, None)
+        self.assertEqual(200, status)
+        # 网页卡更新，但它不属于这一页：字幕名单不许被它挤掉或混进它。
+        self.assertEqual({subtitle["id"], legacy["id"]}, {row["id"] for row in data["jobs"]})
+        self.assertNotIn(web_id, [row["id"] for row in data["jobs"]])
+        self.assertEqual(400, api.handle("GET", "/learning/read?id=" + web_id, None, None)[0])
+        status, web = api.handle("GET", "/learning/web", None, None)
+        self.assertEqual(200, status)
+        self.assertEqual([web_id], [row["id"] for row in web["jobs"]])
+        self.assertFalse(web["enabled"])
+        with mock.patch.object(learning, "start", return_value={"id": "x", "status": "running"}) as start:
+            status, refused = api.handle("POST", "/learning/start", {"id": web_id}, None)
+            self.assertEqual(400, status)
+            self.assertIn("网页知识", refused["message"])
+            start.assert_not_called()
+            self.assertEqual(202, api.handle("POST", "/learning/start", {"id": legacy["id"]}, None)[0])
+            self.assertEqual(legacy["id"], start.call_args.kwargs["ident"])
+
+    def test_legacy_record_without_kind_still_lists_and_resumes_without_migration(self):
+        legacy = {"id": "c" * 32, "created_at": "2026-11-01T10:00:00+09:00", "status": "partial",
+                  "reference": SOURCE["meta"]["url"], "next_segment": 1, "cards": [copy.deepcopy(CARD)],
+                  "source": copy.deepcopy(SOURCE)}
+        path = knowledge.library_root() / (legacy["id"] + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy, ensure_ascii=False))
+        before = path.read_bytes()
+        status, data = api.handle("GET", "/learning/status", None, None)
+        self.assertEqual(200, status)
+        self.assertIn(legacy["id"], [row["id"] for row in data["jobs"]])
+        status, detail = api.handle("GET", "/learning/read?id=" + legacy["id"], None, None)
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(detail["cards"]))
+        with mock.patch.object(learning, "start", return_value={"id": legacy["id"], "status": "running"}) as start:
+            self.assertEqual(202, api.handle("POST", "/learning/start", {"id": legacy["id"]}, None)[0])
+            start.assert_called_once()
+        # 缺 kind 只在读侧当字幕：不许顺手把它改写成新格式，否则分不清本来是什么来源。
+        self.assertEqual(before, path.read_bytes())
 
 if __name__ == "__main__":
     unittest.main()

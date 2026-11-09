@@ -33,6 +33,8 @@
         ' 次；闲着和失败也计入。 ' + (data.phone ? data.phone.reason : '手机连接状态未确认') + '。';
       if (data.usage) el('growth-state').textContent += '\n本生活日（' + data.usage.day + '）已用 ' +
         data.usage.used + ' 次，剩余 ' + data.usage.remaining + ' 次机会。剩余机会不代表一定执行。';
+      if (data.usage && data.usage.accounting_only) el('growth-state').textContent += '\n其中 ' +
+        data.usage.accounting_only + ' 次为重养前已用额度，只保留计数，不代表新生活里的活动。';
       el('growth-toggle').textContent = data.settings.enabled ? '关闭并恢复原有模式' : '开启自主成长';
       el('growth-toggle').disabled = false;
       if (limitsForm) {

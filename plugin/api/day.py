@@ -507,8 +507,9 @@ def dispatch(route: str, params: Mapping[str, str], body: Optional[Mapping[str, 
                 now = day_model.parse_ts(day_model.now_iso())
                 life_day = day_model.day_key(now)
                 limits = growth.limits(root)
-                used = sum(day_model.parse_ts(r['at']) <= now and day_model.day_key(r['at']) == life_day
-                           for r in opportunities)
+                used_today = [r for r in opportunities if day_model.parse_ts(r['at']) <= now
+                              and day_model.day_key(r['at']) == life_day]
+                used = len(used_today)
                 turns = {}
                 for row in night_mod.log_tail(0, root=root)['lines']:
                     result = row.get('result', {})
@@ -524,9 +525,11 @@ def dispatch(route: str, params: Mapping[str, str], body: Optional[Mapping[str, 
                     'versions': versions,
                     'persona': persona_mod.render(store, brain, root=root),
                     'intentions': intentions.listing(solitude._home_root(root)),
-                    'log': [r for r in solitude.log_lines(root) if r.get('event', '').startswith('autonomy_')][-30:],
+                    'log': [r for r in solitude.log_lines(root) if r.get('event', '').startswith('autonomy_')
+                            and r.get('accounting_only') is not True][-30:],
                     **limits,
-                    'usage': {'day': life_day, 'used': used, 'remaining': max(0, limits['daily_cap'] - used)},
+                    'usage': {'day': life_day, 'used': used, 'remaining': max(0, limits['daily_cap'] - used),
+                              'accounting_only': sum(r.get('accounting_only') is True for r in used_today)},
                     'phone_available': phone_state['available'], 'phone': phone_state,
                     'opportunities': opportunities[-30:]}
             if route == '/day/growth/config':

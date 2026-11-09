@@ -161,7 +161,7 @@ CHANNEL_WHO_ID = "3425635473"          # 身份：裸数字号，不加任何前
 CONTRACT_KEYS = {"ok", "reply_kind", "reply", "chunks", "scene", "recalled", "memory_recall", "heart", "gate", "audit", "turn_id",
                  # 核·识别这一轮的读数（本轮加的）：五键冻结，/chat 原样透出、不重组。
                  "event",
-                 "assembly", "continuity", "banned", "action", "llm", "anchors",
+                 "assembly", "continuity", "banned", "action", "llm", "anchors", "lookup",
                  "guard", "memory", "addressed", "borrow", "refusal", "audience_held",
                  # 这一轮是谁起的头 + 由头原样（本轮加的）：被动两格也在，形状不随状态变。
                  "mode", "seed",
@@ -1873,10 +1873,10 @@ class ChatApiTest(unittest.TestCase):
                 self.assertEqual(200, status)
                 understanding = json.loads(seen['理解这一段话'][-1]['content'])
                 self.assertEqual(directed, understanding['directed'])
-                self.assertIn('主人（你叫老大）', understanding['caller'])
+                self.assertIn('主人；你对对方的称呼：老大', understanding['caller'])
                 prompt = seen['生成回复'][0]['content']
                 self.assertIn('[本轮接话]', prompt)
-                self.assertIn('主人（你叫老大）', prompt)
+                self.assertIn('主人；你对对方的称呼：老大', prompt)
                 identity = json.loads(prompt.split('[当前身份核对结果]\n')[1].split('\n')[0])
                 self.assertEqual({'who': CHANNEL_WHO_ID, 'relationship': '主人', 'address': '老大'}, identity)
                 self.assertIn('称呼与关系描述的是同一个人', prompt)
@@ -2156,6 +2156,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(CONTRACT_KEYS, set(payload),
                          "成功体的键不是契约那一份：%s" % sorted(payload))
         self.assertTrue(payload["ok"])
+        self.assertEqual('not_requested', payload['lookup']['state'])
         self.assertEqual(LONG_REPLY, payload["reply"])
         chunks = payload["chunks"]
         mouth_policy = json.loads((MOUTH_DATA / "policy.json").read_text(encoding="utf-8"))

@@ -8,7 +8,7 @@ from organs.hand import comfy
 from . import llm
 
 PROMPT = """理解当前发言者这一整段互动，同时判断情绪事件与功能委托，只输出 JSON 对象：
-{"kind":null,"evidence":"","reason":"简短依据","painting":null,"reminder":null,"image_request":null,"learning":null,"voice_request":null,"memory_note":null}。
+{"kind":null,"evidence":"","reason":"简短依据","painting":null,"reminder":null,"image_request":null,"learning":null,"lookup":null,"voice_request":null,"memory_note":null}。
 kind 只能为 null、praise、care、cold、insult、rejected。没有明确的对应互动就用 null。
 praise 是对 bot 的赞赏或感谢；care 是关心 bot；insult 是确实针对 bot 的贬低/辱骂；
 rejected 是拒绝 bot 刚提出的具体邀约或帮助，不是任何“不用/不要”；
@@ -67,6 +67,14 @@ learning 是视频字幕资料工具，只在 learning_enabled=true 且当前发
 start 的 reference 必须逐字来自当前本人发言或 history 中本人的原话；不能编造链接。没给具体视频就 clarify，问一句需要的链接。
 status/continue 只指本人当前会话的学习任务，不输出任务编号、接收人或文件路径。当前不能停止已经开始的学习，不声称已停止。
 无学习意图时 learning=null。evidence为1至6段当前eligible原文，每段最多240字；question最多160字。
+lookup 只在**当前发言者**明确提出一个可核的公共事实需求时非 null，形状：
+{"question":"要查的那句话","evidence":["当前逐字请求"],"freshness":"volatile|stable|unknown"}。
+只认本人本轮明确提出的公共问题：引用或转发别人的话、群友插话、假设句、讨论检索功能、感慨吐槽与自问自答都不算。
+关于某个具体的人的私事、约定、关系或这段过去的经历（我的生日、你答应过的事、我们聊过的）**不进这个字段**，它们只归记忆，网上查到也不推翻。
+question 是仅从当前eligible提取、能独立成立的公共查询，≤128字；不得带入history、人设、关系、记忆里的私人材料，不以改写掩盖私人信息。
+混合请求只取独立的公共部分；本轮的今天/昨天按当前日期展开。缺赛事、年份、版本、地区这类关键限定又无法从本轮话里确定时留空串表示需要先澄清，不猜“半决赛”是哪一场。
+evidence 为1至6段当前eligible原文，各≤240字，必须来自当前发言者；同一段后来的更正优先，明确撤销后 lookup=null。
+freshness：会随时间和地点变的（赛程、价格、版本、在售、排行、在任、在世）为 volatile；定义、常识等稳定事实为 stable；判断不了用 unknown。
 voice_request 只在 voice_available=true 且本人明确希望本轮回复用语音时给出 {"evidence":["当前逐字请求"]}，否则 null。
 先合并本人整段话，后面的文字回复要求或撤销优先；/语音 也按整段最终意思理解。语音要求不必在句首，后续补充内容不撤销要求。
 用户要发来录音、询问功能、转述/引用、假设、仅讨论音色，不是本轮语音委托。历史只用于理解，不延续之前的语音要求。
@@ -133,7 +141,7 @@ def assess(*, text, who, bot, scene, segment, history, config=None, env=None, tr
     painting_images = qq_painting.available_images(session_id, who, query='\n'.join(eligible))
     result = {"kind": None, "who": who, "note": "", "evidence": "", "status": "unavailable",
               "source": "semantic", "session_id": session_id, "delivery_id": delivery_id, "painting": None, "reminder": None,
-              "image_request": None, "learning": None, "voice_request": None, "memory_note": None}
+              "image_request": None, "learning": None, "lookup": None, "voice_request": None, "memory_note": None}
     from organs.home import expressions
     candidates = expressions.candidates(query='\n'.join(eligible))
     prompt = PROMPT
@@ -192,7 +200,7 @@ def assess(*, text, who, bot, scene, segment, history, config=None, env=None, tr
             raise ValueError("证据格式不正确")
         if (kind is not None or evidence) and (not evidence.strip() or not any(evidence in line for line in eligible)):
             raise ValueError("证据不属于当前发言者的新话")
-        for name in ("painting", "reminder", "image_request", "learning", "voice_request"):
+        for name in ("painting", "reminder", "image_request", "learning", "lookup", "voice_request"):
             intent = data.get(name)
             if intent is None:
                 continue
@@ -251,6 +259,15 @@ def assess(*, text, who, bot, scene, segment, history, config=None, env=None, tr
                 raise ValueError("学习链接必须有本人原话依据，缺链接时需询问")
             learning = {"action": learning["action"], "evidence": learning["evidence"],
                         "reference": reference, "question": question} if context["learning_enabled"] else None
+        lookup = data.get("lookup")
+        if lookup is not None:
+            question, freshness = lookup.get("question"), lookup.get("freshness")
+            # 空 question 是合法的「缺限定，先澄清」：缺赛事/年份时不许猜，也不许改写成别的问题。
+            if (not isinstance(question, str) or len(question) > 160
+                    or freshness not in ("volatile", "stable", "unknown")):
+                raise ValueError("检索意图格式不正确")
+            lookup = {"question": question.strip(), "evidence": lookup["evidence"],
+                      "freshness": freshness}
         voice_request = data.get("voice_request")
         voice_request = ({"evidence": voice_request["evidence"]} if voice_request is not None
                          and context["voice_available"] else None)
@@ -285,7 +302,8 @@ def assess(*, text, who, bot, scene, segment, history, config=None, env=None, tr
                 memory_note = None
                 result["memory_note_error"] = "理解缺少本人当前/前文的逐字依据，本轮只存原话"
         result.update(kind=kind, evidence=evidence, note=reason, status="ok", painting=painting,
-                      reminder=reminder, image_request=image_request, learning=learning, voice_request=voice_request,
+                      reminder=reminder, image_request=image_request, learning=learning, lookup=lookup,
+                      voice_request=voice_request,
                       memory_note=memory_note)
         if image_candidates:
             request = data.get('revisit_images')

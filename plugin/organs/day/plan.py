@@ -165,6 +165,8 @@ def listing(root: Any = None) -> Dict[str, Any]:
     never_ran 是该跑却没跑成的，consumed 是真跑过的——四种没落地的原因不能叠成一个桶。
     """
     data = load(root)
+    for column in ("pending", "consumed", "blocked", "expired", "never_ran"):
+        data[column] = [row for row in data[column] if row.get('accounting_only') is not True]
     rows = [row for column in ("pending", "consumed", "blocked", "expired", "never_ran")
             for row in data[column]]
     for row in rows:

@@ -114,7 +114,7 @@ class NoteDisplayTest(unittest.TestCase):
                         transport=_transport('周六下午。',captured),config=CONFIG,env=ENV)
                 self.assertEqual(body,got['_retrieval_query'])
                 self.assertEqual(body,got['memory_recall']['query'])
-                search.assert_called_once_with(body)
+                search.assert_called_once_with(body, include_web=False)
                 self.assertEqual([topic['id']],[r['id'] for r in got['recalled']])
                 self.assertIn(topic['quote'],self._memory_section(captured))
                 stored=recent.load(root=root)['turns'][-1]
@@ -132,7 +132,7 @@ class NoteDisplayTest(unittest.TestCase):
             got=conversation.answer(formatted,WHO,store=self.store,brain=self.brain,segment=segment,
                 session_id='',transport=_transport('嗯。'),config=CONFIG,env=ENV)
         self.assertEqual(expected,got['_retrieval_query'])
-        search.assert_called_once_with(expected)
+        search.assert_called_once_with(expected, include_web=False)
         self.assertIn('林同学',got['_retrieval_query'])
         self.assertIn('100002',got['_retrieval_query'])
 
@@ -246,7 +246,7 @@ class NoteDisplayTest(unittest.TestCase):
                 query = got['memory_recall']['query']
                 self.assertEqual('饮料照旧\n继续买无糖茶' if valid else '饮料照旧', query)
                 self.assertEqual(1, recall.call_count)
-                search.assert_called_once_with(query)
+                search.assert_called_once_with(query, include_web=False)
                 self.assertEqual(query, got['_retrieval_query'])
                 self.assertEqual(valid, old['id'] in [r['id'] for r in got['recalled']])
                 self.assertEqual(2, len(captured), 'only existing interpretation and reply calls')

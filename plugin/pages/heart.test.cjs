@@ -12,16 +12,16 @@ class Element {
   appendChild(child){this.children.push(child);return child;}
   insertBefore(child,before){this.children.splice(before?this.children.indexOf(before):0,0,child);}
   get firstChild(){return this.children[0];}
-  getContext(){return new Proxy({}, {get:()=>()=>{}});}
+  getContext(){this.drawing??=[];return new Proxy({}, {get:(_,name)=>(...args)=>this.drawing.push([name,...args])});}
 }
-function setup({base='',phase='awake',thoughts=[],fail=[]}={}){
+function setup({base='',phase='awake',thoughts=[],fail=[],trajectory=[]}={}){
   const nodes=new Map([...html.matchAll(/<([a-z]+)[^>]*\bid="([^"]+)"/g)].map(m=>[m[2],new Element(m[1])]));
   nodes.get('changes-group').value='all';
   const requests=[];
   const fixtures={
     '/heart/overview':{ok:true,pending:[],refusals:{items:[]}},
     '/heart/effective':{ok:true,axes:{},voice:{tone:'平常',direction:'稳',bans:[]}},
-    '/heart/mood':{now:60,tier:'平常',baseline:55,direction:'稳',as_of:'2026-11-07T12:00:00+09:00',trajectory:[]},
+    '/heart/mood':{now:60,tier:'平常',baseline:55,direction:'稳',as_of:'2026-11-07T12:00:00+09:00',trajectory},
     '/heart/energy':{value:48,tier:'够用',hours:0,sleep_window:[23,8]},
     '/heart/sleep':{ok:true,rest:phase?{phase}:undefined,effective_window:[23,8]},
     '/heart/engage':{state:'说',hits:[],window:{weight:0,consecutive_ignored:0,rows:0,window_min:60}},
@@ -30,7 +30,7 @@ function setup({base='',phase='awake',thoughts=[],fail=[]}={}){
     '/heart/changes':{ok:true,date:'2026-11-07',timezone:'Asia/Tokyo',total:21,offset:0,has_older:true,available:true,rows:[
       {at:'2026-11-07T12:00:00+09:00',reason:'<img src=x> 他受到夸奖',source:'praise',source_line:1,changes:{mood:{before:55,after:60}}}]},
   };
-  const context={URL,location:new URL('http://local'+base+'/heart'),window:{},
+  const context={URL,location:new URL('http://local'+base+'/heart'),window:{addEventListener:()=>{}},
     document:{querySelector:selector=>nodes.get(selector.slice(1)),createElement:tag=>new Element(tag),currentScript:{getAttribute:()=> 'heart'}},
     fetch:async(path,init)=>{requests.push({path,init});const route=path.replace(base,'').split('?')[0];
       if(fail.includes(route))throw Error('offline');return {json:async()=>fixtures[route]};}};
@@ -40,6 +40,40 @@ function setup({base='',phase='awake',thoughts=[],fail=[]}={}){
   return {get:id=>nodes.get(id),requests,fixtures};
 }
 const text=node=>[node?.textContent||'',...(node?.children||[]).map(text)].join('\n');
+
+test('mood curve uses elapsed time instead of equal sample spacing, including unordered rows',async()=>{
+  const app=setup({trajectory:[
+    {at:'2026-11-07T13:00:00+09:00',now:60,baseline:50},
+    {at:'2026-11-07T12:00:00+09:00',now:40,baseline:50},
+    {at:'2026-11-07T12:01:00+09:00',now:80,baseline:50},
+  ]});await settle();
+  const calls=app.get('curve').drawing;
+  const first=calls.findIndex(c=>c[0]==='save');
+  const line=calls.slice(first).filter(c=>c[0]==='moveTo'||c[0]==='lineTo').slice(0,3);
+  assert.equal(line.length,3);
+  assert.ok(Math.abs((line[1][1]-line[0][1])/(line[2][1]-line[0][1])-1/60)<1e-8);
+  const labels=calls.filter(c=>c[0]==='fillText').map(c=>c[1]).join(' ');
+  assert.match(labels,/11\/07/);
+  assert.match(text(app.get('traj-info')),/实际时间间隔/);
+});
+
+test('one timestamp or invalid samples never become a fabricated trend',async()=>{
+  for(const trajectory of [[],[{at:'bad',now:80,baseline:50}],
+    [{at:'2026-11-07T12:00:00+09:00',now:80,baseline:50}],
+    [{at:'2026-11-07T12:00:00+09:00',now:80,baseline:50},{at:'2026-11-07T12:00:00+09:00',now:60,baseline:50}]]){
+    const app=setup({trajectory});await settle();
+    assert.match(text(app.get('traj-info')),/不足两个不同时间/);
+    assert.equal(app.get('curve').drawing.filter(c=>c[0]==='save').length,0);
+  }
+});
+
+test('newest selected change is expanded with its evidence; older pages remain compact',async()=>{
+ const app=setup();await settle();
+ assert.equal(app.get('changes-list').children[0].children[0].open,true);
+ app.fixtures['/heart/changes'].offset=20;
+ app.get('changes-older').onclick();await settle();
+ assert.equal(app.get('changes-list').children[0].children[0].open,false);
+});
 
 test('overview uses actual rest, not the permissive dry run or scheduled window',async()=>{
   for(const [phase,label] of [['awake','醒着'],['asleep','睡着'],['holding','被叫醒后硬撑'],['deep','彻底睡着'],[null,'尚未开始记录']]){
@@ -76,6 +110,7 @@ test('pending history distinguishes settled, faded, expired but unsettled, and u
 
 for(const base of ['', '/qqagent/panel'])test('changes keep filtering, pagination and literal source text at '+base,async()=>{
   const app=setup({base});await settle();
+  assert.equal(app.get('model-input-link').href,base+'/observe?source=model');
   assert.match(text(app.get('changes-list')),/<img src=x> 他受到夸奖/);
   app.get('changes-older').onclick();await settle();
   assert.match(app.requests.at(-1).path,/offset=20/);

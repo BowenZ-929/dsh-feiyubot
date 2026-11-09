@@ -18,6 +18,14 @@ FIVE = ("玄关", "名片盒", "工作台", "仓库", "信箱")
 
 
 class WhitelistTest(unittest.TestCase):
+    def test_warehouse_rules_are_read_only_for_bot_roles(self):
+        helpers.write_access(self.root, FIVE)
+        for role in ("agent", "organ"):
+            with self.subTest(role=role), self.assertRaises(AccessDenied) as caught:
+                check_write(role=role, room="仓库", name="判据/search_rules.json", chars=10, root=self.root)
+            self.assertEqual("RULES_READ_ONLY", caught.exception.code)
+        check_write(role="human", room="仓库", name="判据/search_rules.json", chars=10, root=self.root)
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

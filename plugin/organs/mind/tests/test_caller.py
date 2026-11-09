@@ -121,20 +121,26 @@ class CallerTextTest(unittest.TestCase):
     def _text(self, who, cards=None, boom=False):
         return conversation._caller_text(self.conf, _CardBox(cards, boom), who)
 
+    def test_contact_without_agreed_address_is_explicitly_unset(self):
+        text, meta = conversation._caller_read(self.conf, _CardBox({WHO: {'id': WHO}}), WHO)
+        self.assertIn('尚未约定', text)
+        self.assertNotIn('你叫他', text)
+        self.assertEqual('尚未约定', meta['address'])
+
     def test_known_line_carries_no_number_and_no_nickname(self):
         """号 + 名片在：那句里是关系词与称呼，**一个数字都没有**，昵称也不许挤进这一句。"""
         got = self._text(WHO, {WHO: _card()})
         first = got.split("\n")[0]
         self.assertIsNone(DIGITS.search(got), "这一节里念了号：%r" % got)
         self.assertIn(self.fallback, first)
-        self.assertIn("你叫%s" % CALLING, first)
+        self.assertIn("你对对方的称呼：%s" % CALLING, first)
         self.assertNotIn(NICKNAME, first, "昵称挤进了 known 那一句：这正是上一版的实盘 bug")
         self.assertNotIn("{", got, "模板占位符没替换干净")
 
     def test_relation_word_comes_from_the_card_not_the_display(self):
         """名片上有关系词（主人）：就用它；display 仍是昵称，一个字都不许顶。"""
         first = self._text(WHO, {WHO: _card(relation="主人")}).split("\n")[0]
-        self.assertEqual("这一轮来的是主人（你叫%s）。" % CALLING, first)
+        self.assertEqual("这一轮来的是主人；你对对方的称呼：%s。" % CALLING, first)
 
     def test_relation_falls_back_when_the_card_has_no_relation_word(self):
         """名片上只有昵称、没有关系词：走 relation_fallback，昵称绝不顶进那句。"""
@@ -217,7 +223,7 @@ class CallerTextTest(unittest.TestCase):
         self.assertIn(self.conf["caller"]["address_fallback"], got)
         other = dict(self.conf["caller"])
         other["address_fallback"] = "喂"
-        self.assertIn("你叫喂", conversation._caller_text(
+        self.assertIn("你对对方的称呼：喂", conversation._caller_text(
             {"caller": other}, _CardBox(bare), WHO))
         self.assertNotIn("喂", got, "兜底词改了，输出却没跟着改")
 
@@ -322,7 +328,7 @@ class CallerAssemblyTest(unittest.TestCase):
         prompt = capture[0]["messages"][0]["content"]
         line = _section(prompt, "这一轮是谁")
         self.assertIsNone(DIGITS.search(line), "提示词里念了号：%r" % line)
-        self.assertIn("你叫%s" % CALLING, line)
+        self.assertIn("你对对方的称呼：%s" % CALLING, line)
         self.assertIn(conversation.load_assembly()["caller"]["relation_fallback"], line)
         self.assertNotIn(NICKNAME, line.split("\n")[0])
         self.assertIn(NICKNAME, line.split("\n")[1])

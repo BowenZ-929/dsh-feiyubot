@@ -10,6 +10,16 @@ from api import api
 
 
 class ChangesTest(unittest.TestCase):
+    def test_personality_baseline_change_has_its_own_readable_history(self):
+        from organs.heart import changes
+        changes.record(self.root, at=self.now, group='baseline', reason='重养采用中性起点',
+                       before={'服气·心里':92,'服气·面上':18}, after={'服气·心里':50,'服气·面上':50})
+        code,data=api.handle('GET','/heart/changes?date=2026-11-07&group=baseline',None,None)
+        self.assertEqual(200,code)
+        self.assertEqual(1,data['total'])
+        self.assertEqual('性格基线',data['groups']['baseline'])
+        self.assertEqual({'before':18,'after':50},data['rows'][0]['changes']['服气·面上'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

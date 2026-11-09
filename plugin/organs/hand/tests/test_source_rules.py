@@ -1,5 +1,5 @@
-"""源码断言：白名单恰五个动作、「怎么说话」恰两个旋钮且没有魂的路径、没有命令执行与动态加载、
-直接碰盘只在两个文件里、网络只在登记的三个文件里、**房名与格子名只能从家来**。
+"""源码断言：白名单恰六个动作、「怎么说话」恰两个旋钮且没有魂的路径、没有命令执行与动态加载、
+直接碰盘只在两个文件里、网络只在登记的四个文件里、**房名与格子名只能从家来**。
 
 这些是**读源码**的断言，不是评审时眼睛看：改坏了就红。
 """
@@ -19,8 +19,8 @@ from organs.hand import stylelang, whitelist
 HAND_DIR = Path(organs.hand.__file__).resolve().parent
 #: 只有这两个文件可以直接碰盘（open 写模式 / write_text / write_bytes / append_line）。
 DISK_FILES = ("ledger.py", "store.py")
-#: 通道、旧生图服务与新增的固定本机 ComfyUI；其他模块不能自行联网。
-NETWORK_FILES = ("channel.py", "draw.py", "comfy.py")
+#: 通道、旧生图服务、固定本机 ComfyUI，以及只读检索（lookup）；其他模块不能自行联网。
+NETWORK_FILES = ("channel.py", "draw.py", "comfy.py", "lookup.py")
 #: 通用能力一个都不许长出来。
 FORBIDDEN = ("subprocess", "os.system", "os.popen", "eval(", "exec(", "__import__",
              "importlib", "shutil")
@@ -98,13 +98,14 @@ def open_mode(node: ast.Call) -> str:
 
 
 class WhitelistLiteralTest(unittest.TestCase):
-    def test_actions_literal_holds_exactly_five_names_in_the_frozen_order(self):
+    def test_actions_literal_holds_exactly_six_names_in_the_frozen_order(self):
         text = (HAND_DIR / "whitelist.py").read_text(encoding="utf-8")
         found = re.search(r"^ACTIONS: Tuple\[str, \.\.\.\] = \(([^)]*)\)", text, re.M)
         self.assertIsNotNone(found, "whitelist.py 里找不到 ACTIONS 那一行")
         names = tuple(part.strip().strip('"') for part in found.group(1).split(",") if part.strip())
         self.assertEqual(names,
-                         ("add_task", "complete_task", "send_image", "draw", "set_style"))
+                         ("add_task", "complete_task", "send_image", "draw", "set_style",
+                          "lookup"))
         self.assertEqual(whitelist.ACTIONS, names)
 
     def test_whitelist_has_no_dynamic_registration(self):
@@ -141,7 +142,7 @@ class NetworkTest(unittest.TestCase):
 
     def test_only_registered_modules_can_reach_the_network(self):
         """ComfyUI 已接入；仍不允许未登记模块另开网络入口。"""
-        self.assertEqual(("channel.py", "draw.py", "comfy.py"), NETWORK_FILES)
+        self.assertEqual(("channel.py", "draw.py", "comfy.py", "lookup.py"), NETWORK_FILES)
         for path in sources():
             if path.name in NETWORK_FILES:
                 continue
@@ -251,6 +252,43 @@ class HomeNameLiteralsTest(unittest.TestCase):
         self.assertEqual(home_cards.SHELF_ROOM, home_residents.DRAWER_ROOM)
         self.assertIn(home_residents.ARTWORK_KIND, home_cards.SHELF_KINDS,
                       "自画像得真的是抽屉的一格（否则「给我看自画像」没有落点）")
+
+
+class LookupSurfaceTest(unittest.TestCase):
+    """lookup 是只读动作，不是「上网」这个能力的门：端点只有一个，地址与凭据只许由调用方注入。
+
+    这几条与 test_gates 的三层闸互补——闸管「能不能做」，这里管「做的范围有多大」。
+    """
+
+    def test_the_endpoint_is_a_suffix_so_v1_never_doubles(self):
+        from organs.hand import lookup as lookup_client
+        self.assertEqual("/tools/search", lookup_client.ENDPOINT)
+        self.assertNotIn("/v1", lookup_client.ENDPOINT,
+                         "实盘 base_url 已含 /v1：后缀里再带一次就是 /v1/v1/tools/search")
+        built = lookup_client.endpoint_of("https://api.deepseek.com/v1")
+        self.assertEqual("https://api.deepseek.com/v1/tools/search", built)
+        self.assertNotIn("/v1/v1", built)
+
+    def test_hand_has_no_rules_directory_write_target(self):
+        for path in sources():
+            values = {value for _, value in string_literals(path)}
+            self.assertFalse(any("search_rules.json" in value or "判据/" in value or value == "判据"
+                                 for value in values), path.name)
+
+    def test_the_client_reads_no_configuration_of_its_own(self):
+        """地址与 key 只能由调用方注入：手不许依赖脑（散文里提到这些词不算，看的是字面量）。"""
+        text = (HAND_DIR / "lookup.py").read_text(encoding="utf-8")
+        for bad in ("os.environ", "getenv", "dotenv"):
+            self.assertNotIn(bad, text, "lookup.py 里读配置了：%r" % bad)
+        values = {value for _line, value in string_literals(HAND_DIR / "lookup.py")}
+        for bad in ("llm.json", ".env"):
+            self.assertNotIn(bad, values, "lookup.py 里读配置文件了：%r" % bad)
+
+    def test_no_field_carrying_the_original_question_is_ever_sent(self):
+        """门0 还没实现，但请求体里先不许有 ori_question／定位这类「顺手带上原话」的字段。"""
+        values = {value for _line, value in string_literals(HAND_DIR / "lookup.py")}
+        for bad in ("ori_question", "localization", "location"):
+            self.assertNotIn(bad, values, "lookup.py 里出现了外发字段 %r" % bad)
 
 
 class AssetsReadOnlyTest(unittest.TestCase):

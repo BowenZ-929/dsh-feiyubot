@@ -56,7 +56,7 @@ def used_today(who: str, *, now: Any = None, root=None) -> int:
     day = store.local_day(store.now_iso(now))
     total = 0
     for row in ledger.read_all(root=root):
-        if row.get("state") != "done":
+        if row.get("state") != "done" or row.get("action") == "lookup":
             continue
         if str(row.get("who")) != str(who):
             continue

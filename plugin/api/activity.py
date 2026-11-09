@@ -131,6 +131,8 @@ def dispatch(query):
                             except ValueError:
                                 invalid += 1
                                 continue
+                            if record.get('accounting_only') is True:
+                                continue  # 重养时保留的额度/去重记录不是新经历。
                             records.append(dict(record, source_line=number, source_date=path.stem))
                 if kind == 'autonomy':
                     records = [r for r in records if r.get('event') in

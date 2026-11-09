@@ -324,6 +324,8 @@ def check_write(*, role: str, room: str, name: str, chars: int, files: int = 1,
     """
     found = _doors(role=role, room=room, root=root, whitelist=whitelist, kind=kind)
     check_path_shape(found.name, name)
+    if role != "human" and found.name == "仓库" and name.split("/")[0] == "判据":
+        raise _deny("RULES_READ_ONLY", "判据目录由人维护，程序只读", 0, 0, 1, room=found.name)
 
     if chars > MAX_CHARS_PER_WRITE:
         raise _deny("CHARS_OVER", "一次写 %d 字，超过 %d 字，得拆" % (chars, MAX_CHARS_PER_WRITE),
@@ -392,6 +394,8 @@ def check_consume(*, role: str, room: str, name: str, root=None,
     """
     found = _doors(role=role, room=room, root=root, whitelist=whitelist)
     check_path_shape(found.name, name)
+    if role != "human" and found.name == "仓库" and name.split("/")[0] == "判据":
+        raise _deny("RULES_READ_ONLY", "判据目录由人维护，程序不能移走", 0, 0, 1, room=found.name)
     limits = load_limits(root)
     _day_quota(root=root, room=found.name, consume=True,
                limit=limits.consumes_per_room_per_day)

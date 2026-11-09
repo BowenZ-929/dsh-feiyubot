@@ -8,12 +8,17 @@ from organs.brain import model
 from organs.day import phone_browse
 
 LEARNING_ROUTES = {"/learning/status": "GET", "/learning/read": "GET",
+                   "/learning/web": "GET",
                    "/learning/search": "GET", "/learning/start": "POST",
                    "/learning/expressions": "GET", "/learning/expressions/set": "POST"}
 
 
 def dispatch(route, params, body):
     try:
+        if route == "/learning/web":
+            from organs.mind import search
+            return 200, {"enabled": search.enabled(), "jobs": [row for row in knowledge.jobs()
+                         if row["kind"] == knowledge.KIND_WEB][:50]}
         if route == "/learning/expressions":
             browsing = {}
             for job in phone_browse.view(limit=None)['jobs']:
@@ -67,15 +72,22 @@ def dispatch(route, params, body):
                 return 404, {"ok": False, "message": "找不到这组表达记录"}
             return 200, {"id": row["id"], "enabled": row["enabled"]}
         if route == "/learning/status":
+            # 这一页的每一列（片段数、下一段、投递）都只对字幕有意义：网页卡混进来只会显示
+            # 成一片空字段，还会把「继续字幕」的入口指向一份根本没有字幕的记录。
+            # 先过滤再截 50 条——先截后滤会让网页卡把字幕的名额占掉。
+            subtitle = [row for row in knowledge.jobs()
+                        if row["kind"] == knowledge.KIND_SUBTITLE][:50]
             return 200, {"credential_ready": bool(bilibili.read_cookie()), "jobs": [
                 {"id": row["id"], "status": learning.state(row)["status"], "created_at": row["created_at"],
                  "title": row.get("source", {}).get("meta", {}).get("title", row["reference"]),
                  "cards": len(row["cards"]), "next_segment": row["next_segment"],
                  "delivery": {"status": learning.state(row).get("delivery", {}).get("status", "not_requested")},
-                 "total_segments": row.get("total_segments", 0)} for row in knowledge.jobs()[:50]]}
+                 "total_segments": row.get("total_segments", 0)} for row in subtitle]}
         if route == "/learning/read":
-            job = learning.state(knowledge.read(params.get("id")))
-            return 200, {k: v for k, v in job.items() if k != "outputs"}
+            job = knowledge.read(params.get("id"))
+            if job["kind"] == knowledge.KIND_WEB:
+                raise ValueError("网页知识不是字幕任务，不能在这里打开")
+            return 200, {k: v for k, v in learning.state(job).items() if k != "outputs"}
         if route == "/learning/search":
             q = params.get("q", "").strip()
             if not q or len(q) > 500:
@@ -83,9 +95,16 @@ def dispatch(route, params, body):
             return 200, {"items": knowledge.search(q)}
         if not isinstance(body, dict):
             raise ValueError("需要视频链接或学习记录编号")
-        if body.get("id") and knowledge.read(body["id"]).get("destination"):
-            from organs.mind import qq_learning
-            return 202, learning.start(ident=body["id"], on_done=qq_learning.deliver)
-        return 202, learning.start(body.get("reference"), ident=body.get("id"))
+        ident = body.get("id")
+        if ident:
+            # 只认字幕：网页卡没有 bvid/page 那套字幕来源，接进「继续字幕」等于拿视频字段
+            # 去解析一张网页卡，读不出来还会把进度写成 0。网页卡的去处不是这条流程。
+            job = knowledge.read(ident)
+            if job["kind"] == knowledge.KIND_WEB:
+                raise ValueError("网页知识不是字幕任务，不能继续")
+            if job.get("destination"):
+                from organs.mind import qq_learning
+                return 202, learning.start(ident=ident, on_done=qq_learning.deliver)
+        return 202, learning.start(body.get("reference"), ident=ident)
     except ValueError as exc:
         return 400, {"ok": False, "message": str(exc)}

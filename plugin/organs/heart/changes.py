@@ -6,7 +6,7 @@ from pathlib import Path
 from organs.day import model as day_model
 from . import store
 
-GROUPS = {'mood': '心情与基线', 'energy': '精力', 'offset': '六轴偏移', 'sleep': '睡眠', 'proactive': '主动交流反馈'}
+GROUPS = {'mood': '心情与基线', 'energy': '精力', 'baseline': '性格基线', 'offset': '六轴偏移', 'sleep': '睡眠', 'proactive': '主动交流反馈'}
 
 
 def record(root, *, at, group, reason, before, after, source=None, from_at=None, origin=None):

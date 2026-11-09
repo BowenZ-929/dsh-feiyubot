@@ -11,7 +11,7 @@
 随时能再改回来），所以都免授权；但闸得在——第一个不可逆动作来时不用现加。表里没有的动作
 按**最坏档**算（不可逆），fail closed：漏一条就等于没有。
 
-三个新动作为什么是「可撤销」（判据，不是措辞）：`send_image` 的消息可撤回、且通道那边
+第 1 条白名单只看名字。六个动作为什么都是「可撤销」（判据，不是措辞）：`send_image` 的消息可撤回、且通道那边
 有自己的门与配额，本器官不为它再立一道一次性授权；`draw` 只在本地生成一张图、落点在自己的
 盘上，删掉就没了；`set_style` 写的是家·名片盒里的偏好卡（只增不改），改回去就是再追加一行。
 「可撤销」不等于「随便做」：额度那一层照旧，账照旧只增。
@@ -30,10 +30,13 @@ IRREVERSIBLE = "不可逆"
 #: 表里没有的动作按最坏档算。
 DEFAULT_RISK = IRREVERSIBLE
 
-#: 本轮五个动作，且都可撤销（新增的三个不另立一次性授权：本轮没有 grant 存储）。
+#: 本轮六个动作，且都可撤销（新增的三个不另立一次性授权：本轮没有 grant 存储）。
+#: lookup 为什么也标「可撤销」而不是「无害」：它读写不了本地任何东西，但它一次外发加一笔费用
+#: 买不回来——三档里没有「只读但有代价」这一档，而标成不可逆就等于永远要一份不存在的 grant
+#: （即永远拒）。代价由额度与只增的手账看住，所以归这一档，边界写在这里，不留给人猜。
 ACTION_RISK: Dict[str, str] = {"add_task": REVERSIBLE, "complete_task": REVERSIBLE,
                                "send_image": REVERSIBLE, "draw": REVERSIBLE,
-                               "set_style": REVERSIBLE}
+                               "set_style": REVERSIBLE, "lookup": REVERSIBLE}
 
 #: 三层，顺序就是判定顺序。
 GATES = ("whitelist", "grant", "quota")
@@ -75,6 +78,10 @@ def check(action: Any, *, who: str, now: Any = None, root=None) -> Dict[str, Any
                      "（这一次没有 grant）" % (action, risk_of(action)),
                      dict(detail, gate="grant", need="grant_id", risk=risk_of(action)))
     detail["passed"] = ["whitelist", "grant"]
+
+    # 搜索只有每轮上限，不占用写任务、发图等动作的日额度。
+    if action == "lookup":
+        return {"allowed": True, "code": None, "say": "可以查询公开资料", "detail": detail}
 
     # 第 3 条：每人每天额度。数值来自数据文件，用量来自手账。
     left = quota.remaining(who, now=now, root=root)

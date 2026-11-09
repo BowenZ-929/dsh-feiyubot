@@ -37,7 +37,7 @@ class CardTest(unittest.TestCase):
         self.assertEqual('主人', card['relationship'])
         self.assertEqual('老大', card['address'])
         text = conversation._caller_text(conversation.load_assembly(), reloaded, '3425635473')
-        self.assertIn('主人（你叫老大）', text)
+        self.assertIn('主人；你对对方的称呼：老大', text)
         reloaded.interact('10000421', display='主人')
         stranger = conversation._caller_text(conversation.load_assembly(), reloaded, '10000421')
         self.assertIn('关系尚未确认', stranger)

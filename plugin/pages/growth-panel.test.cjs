@@ -3,6 +3,12 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const settle=()=>new Promise(r=>setImmediate(r));
+test('explains carried usage without inventing current activities',async()=>{
+  const {elements:e}=setup(false,{usage:{day:'2026-11-09',used:11,remaining:13,accounting_only:11},log:[]});
+  await settle();
+  assert.match(e.get('growth-state').textContent,/其中 11 次为重养前已用额度/);
+  assert.match(e.get('growth-log').textContent,/还没有新模式的活动记录/);
+});
 function setup(fail=false, overrides={}, base="", withLimits=true){
   const elements=new Map(), requests=[];
   const ids=['growth-state','growth-current','growth-plans','growth-log','growth-toggle','growth-refresh',

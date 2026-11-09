@@ -233,11 +233,10 @@ class HeartHasNoWriteEntry(unittest.TestCase):
                 self.assertNotIn(verb, text, "%s 出现了写请求：%s" % (page, verb))
             self.assertNotIn("contenteditable", text, "%s 有可编辑区域" % page)
 
-            # 导航链接仍只有回魂面板；新控件仅查询历史
+            # 导航只去观察页或回魂面板；筛选控件仍只查询历史。
             anchors = ANCHOR_RE.findall(_text(page))
-            self.assertEqual(len(anchors), 1, "%s 的可点元素不止一条回跳：%r" % (page, anchors))
-            target = urljoin(mount, anchors[0]).partition("?")[0]
-            self.assertEqual(target, "/", "%s 的回跳该回魂面板，实际指向 %s" % (page, target))
+            self.assertEqual(anchors, ["observe?source=model", "../"])
+            self.assertEqual([urljoin(mount, anchor).partition("?")[0] for anchor in anchors], ["/observe", "/"])
             self.assertEqual(PAGE_FILES["/"], "soul.html")
 
 

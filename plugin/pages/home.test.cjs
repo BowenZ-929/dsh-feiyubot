@@ -17,7 +17,7 @@ class Element {
   removeAttribute(name){delete this[name];}
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
-function setup(health){
+function setup(health, web){
   const elements=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element()]));
   const get=id=>elements.get(id);
   const rows=Array.from({length:247},(_,i)=>({card_id:'id-'+i,name:'同名日记',display:'篇目'+i,
@@ -30,6 +30,7 @@ function setup(health){
     panelFetch:async(path,init)=>{
       const url=new URL(path,'http://local');requests.push({url,method:init.method});
       let status=503,data={message:'离线'};
+      if(url.pathname==='/learning/web'&&web){status=200;data=web;}
       if(url.pathname==='/healthz'&&health){status=200;data=health;}
       if(url.pathname==='/home/list'&&url.searchParams.get('room')==='抽屉'&&!control.failList){
         status=200;
@@ -42,7 +43,7 @@ function setup(health){
         const card=rows.find(r=>r.card_id===url.searchParams.get('name')&&r.shelf===url.searchParams.get('shelf'));
         if(card){status=200;data={body:'全文-'+card.card_id+'<img src=x>',truncated:false,card};}
       }
-      return {status,json:async()=>data};
+      return {ok:status===200,status,json:async()=>data};
     }});
   return {get,requests,control,cards:()=>get('drawer-body').children.filter(n=>n.className==='drawer-card')};
 }
@@ -115,4 +116,14 @@ test('drawer links original writing trace without inventing one for legacy cards
   }
   assert.match(links[0].textContent,/写作.*模型记录/);
   assert.ok(app.requests.every(r=>r.method==='GET'));
+});
+
+test('public web cards show date and source as text, without treating HTML as content',async()=>{
+  const {get}=setup(null,{enabled:true,jobs:[{cards:[{title:'<img src=x>',claim:'公开摘要'}],
+    source:{query:'公共问题',url:'https://example.test/a',published_at:'2026-11-09'},fetched_at:'2026-11-09T12:00:00Z'}]});
+  await settle();
+  assert.match(get('web-state').textContent,/已开启/);
+  assert.match(get('web-cards').textContent,/<img src=x>/);
+  assert.match(get('web-cards').textContent,/页面时间：2026-11-09/);
+  assert.equal(get('web-cards').children[0].children.at(-1).href,'https://example.test/a');
 });
