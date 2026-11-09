@@ -77,3 +77,7 @@ plugin/organs/mind/bench/data/legacy.jsonl
 guild1.db
 guild1.db-shm
 guild1.db-wal
+
+# ── 设计文档与实测记录：不入公开仓库 ──
+# 里面有真实 QQ 号、真人聊天原话、内网地址。要公开必须先脱敏。
+/docs/

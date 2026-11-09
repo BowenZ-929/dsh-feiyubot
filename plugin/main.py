@@ -96,7 +96,7 @@ def _report(issue: model.Issue) -> None:
 
 
 class QQAgent(Star):
-    """七器官合体；本轮只把魂接起来。"""
+    """七器官合体：载入魂与脑、起自检；面板挂载在钩子上，核的其余能力走 HTTP。"""
 
     def __init__(self, context: Any, config: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(context)
