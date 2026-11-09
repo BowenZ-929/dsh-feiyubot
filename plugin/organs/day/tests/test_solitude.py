@@ -73,7 +73,7 @@ class SolitudeCase(unittest.TestCase):
         self.assertTrue(out["ok"], out)
 
     def diary(self, date: str, head: str = "那天") -> str:
-        """往抽屉/日记里放一篇（她自己的日记：一天一张、80–150 字）。"""
+        """往抽屉/日记里放一篇（她自己的日记：一天一张、非空且最多150字）。"""
         from organs.home import cards
         out = cards.append_cards(root=self.home, role="agent", by="她", cards=[
             {"kind": "日记", "room": "抽屉", "name": "日记-%s" % date,
@@ -176,6 +176,23 @@ class IdleTest(SolitudeCase):
 
 
 class ConsiderTest(SolitudeCase):
+    def test_consecutive_ticks_wait_between_decisions_and_survive_restart(self):
+        self.heard()
+        first = self.consider(request={'action':'b'})
+        self.assertTrue(first['fired'])
+        self.brain = BrainStore(self.brain.root)
+        waiting = self.consider('2026-11-05T14:01:00', request={'action':'c'})
+        self.assertFalse(waiting['fired'])
+        self.assertEqual('activity-interval', waiting['skipped'])
+        self.assertEqual(at('2026-11-05T14:40:00'), waiting['readings']['next_opportunity_at'])
+        self.assertEqual(1, len(self.rows()))
+        self.assertTrue(self.consider('2026-11-05T14:40:00', request={'action':'c'})['fired'])
+
+    def test_nothing_to_do_does_not_append_every_minute(self):
+        with mock.patch.dict(solitude._DOERS, {k:lambda *args,**kw:None for k in solitude.ACTION_ORDER}):
+            self.assertEqual('nothing-to-do', self.consider()['skipped'])
+            self.assertEqual('activity-interval', self.consider('2026-11-05T14:01:00')['skipped'])
+            self.assertEqual(1, len(self.rows()))
     """45 分钟 + 心情中高 → 触发一次；双低 45 分钟不触发、3 小时触发。"""
 
     def test_forty_minutes_threshold_fires_at_forty_five(self):
@@ -234,8 +251,8 @@ class DiaryTest(SolitudeCase):
         names = [self.diary("2026-10-0%d" % day) for day in (1, 2, 3)]
         self.heard()
         read = []
-        for _ in range(3):
-            out = self.consider()
+        for hour in (14, 15, 16):
+            out = self.consider("2026-11-05T%d:00:00" % hour)
             self.assertEqual("a", out["action"], out)
             read.append(self.last()["read"]["name"])
         self.assertEqual(names, read, "从最旧的一篇起，一篇只读一次")
@@ -247,9 +264,9 @@ class DiaryTest(SolitudeCase):
         for day in (1, 2, 3):
             self.diary("2026-10-0%d" % day)
         self.heard()
-        for _ in range(3):
-            self.consider()
-        out = self.consider()           # 三篇都读过了：换成 b（记一句今天的事）
+        for hour in (14, 15, 16):
+            self.consider("2026-11-05T%d:00:00" % hour)
+        out = self.consider("2026-11-05T17:00:00")  # 三篇都读过了，间隔后换成 b
         self.assertEqual("b", out["action"], out)
         names = [row["read"]["name"] for row in self.rows() if row.get("read")]
         self.assertEqual(3, len(set(names)))
@@ -287,6 +304,27 @@ class DiaryTest(SolitudeCase):
 
 
 class NoteTodayTest(SolitudeCase):
+    def test_duplicate_source_check_reads_all_pages_including_consumed_cards(self):
+        from organs.home import cards, access
+        room = solitude.load_config()['draft']['room']
+        cards.append_cards(root=self.home, role='organ', by='test', cards=[{
+            'room':room, 'kind':'素材', 'name':'其他来源', 'note':'普通素材'}])
+        self.heard()
+        first = solitude._note_today(at(NOW), root=self.root, brain=self.brain, home_root=self.home)
+        cards.consume(root=self.home, role='organ', by='test', room=room,
+                      card_id=first['card_id'], reason='测试已使用')
+        with mock.patch.object(access, 'READ_MAX_LINES', 1):
+            self.assertIsNone(solitude._note_today(at(NOW), root=self.root, brain=self.brain, home_root=self.home))
+
+    def test_already_saved_source_is_not_repeated_and_new_material_can_be_saved(self):
+        self.heard('第一条真实素材')
+        first = solitude._note_today(at(NOW), root=self.root, brain=self.brain, home_root=self.home)
+        self.assertIsNotNone(first)
+        self.assertIsNone(solitude._note_today(at(NOW), root=self.root, brain=self.brain, home_root=self.home))
+        self.heard('第二条真实素材', now='2026-11-05T13:20:00')
+        second = solitude._note_today(at(NOW), root=self.root, brain=self.brain, home_root=self.home)
+        self.assertNotEqual(first['from_entry'], second['from_entry'])
+        self.assertEqual(2, len(self.repo_cards()))
     """b 记一句今天的事：草稿落仓库（kind=素材），这句话只能由今天的真条目拼出来。"""
 
     def test_a_real_material_becomes_a_draft_card(self):
@@ -450,8 +488,8 @@ class OwnDoingTest(SolitudeCase):
         self.diary("2026-10-01")
         self.diary("2026-10-02")
         self.heard()
-        self.consider()
-        self.consider()
+        self.assertTrue(self.consider()['fired'])
+        self.assertTrue(self.consider('2026-11-05T15:00:00')['fired'])
         self.assertEqual(1, len(proactive.own_doing_lines(self.root)),
                          "池里挂着一条没被用掉的就不再写第二条")
 

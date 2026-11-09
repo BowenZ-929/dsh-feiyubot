@@ -170,7 +170,7 @@ def _never_ran_reason(failed: List[str], attempt: int, steps: Dict[str, Any]) ->
 def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
                   brain: Any = None, heart_root: Any = None,
                   config: Optional[Dict[str, Any]] = None,
-                  break_step: Optional[int] = None) -> Dict[str, Any]:
+                  break_step: Optional[int] = None, persona: str = "") -> Dict[str, Any]:
     """到点的夜里：过期的那条标 expired（**不跑**），当天的那条跑并按下场决定去留。
 
     一次尝试之后只有三种去向（都不许静默）：
@@ -218,7 +218,7 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
             result = night.run(at, root=root, brain=brain, heart_root=heart_root,
                                break_step=break_step, only=only, carry=carry,
                                attempt=attempt, backoff_minutes=backoff,
-                               max_retries=limit)
+                               max_retries=limit, persona=persona)
             failed = list(result.get("failed") or [])
             if not failed:
                 summary = _night_summary(result)
@@ -258,7 +258,7 @@ def _settle_night(due_rows: List[Dict[str, Any]], at: str, *, root: Any = None,
 def tick(now_ts: Any = None, *, root: Any = None,
          config: Optional[Dict[str, Any]] = None, brain: Any = None,
          heart_root: Any = None, home_root: Any = None,
-         break_step: Optional[int] = None) -> Dict[str, Any]:
+         break_step: Optional[int] = None, persona: str = "", proactive_runner=None, store=None) -> Dict[str, Any]:
     """一次 tick：排当天（幂等）→ 数到点 → 夜与主动开口各自结账 → 再动念一次 → 算下一次 → 换日记账。
 
     "到夜按固定顺序调四步"就是这一条路：tick 自己排、自己执行、自己下账。
@@ -291,12 +291,16 @@ def tick(now_ts: Any = None, *, root: Any = None,
     ledger = plan.load(root)
     due_rows = plan.due(at, root=root, data=ledger)
     nightly = _settle_night(due_rows, at, root=root, brain=brain, heart_root=heart_root,
-                            config=cfg, break_step=break_step)
+                            config=cfg, break_step=break_step, persona=persona)
+    # 夜间成长可能已提交新版本；后续决策不沿用夜间开始前的快照。
+    if store is not None:
+        from organs.mind import persona as persona_mod
+        persona = persona_mod.render(store, brain, root=root)
     # 到点的主动开口：夜跑完再轮它（夜是固定的那几件事，她想说话不是议程的一部分）。
     # 这里**不**把 limits.json 那份额配置传下去：主动开口的参数在 data/proactive.json，
     # 两份配置混着传就是两处真源。
     proactive_out = proactive.settle_due(due_rows, at, root=root, brain=brain,
-                                        heart_root=heart_root)
+                                        heart_root=heart_root, persona=persona, runner=proactive_runner)
     # 到点的跑完，再问一次"她想不想开口"。**硬灌的是时钟，驱动它的是由头**：consider 里
     # 没有由头就不动念、有 pending 计划就不叠（idle_only=True）、超每人每日上限就不排，
     # 而且它一次都不调核、一条都不发——每 tick 问一次不等于每 tick 说一次。
@@ -316,8 +320,10 @@ def tick(now_ts: Any = None, *, root: Any = None,
     # 已经排过了，这一条只管"没人的时候她做点什么"。同样整段兜错：独处坏了不许让节律停摆。
     idle_out: Dict[str, Any] = {}
     try:
-        idle_out = solitude.consider(at, root=root, brain=brain, heart_root=heart_root,
-                                     home_root=home_root, limits=cfg)
+        from . import growth
+        idle_out = ({"status": "unified_selector"} if growth.enabled(root) else
+                    solitude.consider(at, root=root, brain=brain, heart_root=heart_root,
+                                     home_root=home_root, limits=cfg))
     except Exception as exc:  # noqa: BLE001 - 独处是旁支，坏了要报出来而不是静默吞掉
         message = "solitude: %s: %s" % (type(exc).__name__, exc)
         idle_out = {"ok": False, "error": message}
@@ -341,7 +347,7 @@ def tick(now_ts: Any = None, *, root: Any = None,
         # 到点的夜怎么处置了：executed（跑成了并 consume）/ retried（失败了，留 pending 等重试）/
         # never_ran（试满次数仍失败，进第五栏 + 一条审计）/ expired（过期不补）/ skipped（有人在跑）
         "night": nightly,
-        # 到点的主动开口怎么处置了：rows 逐条（action 是 held/declined/empty/error/sent），
+        # 到点的主动开口怎么处置了：rows 逐条（action 是 held/declined/empty/error/queued），
         # actions 是这一次的计数。它不调核就什么也不发——判 SILENT 的那条只记账
         "proactive": proactive_out,
         # 这一 tick 的动念：fired=False 就是没有由头（skipped=no-source / pending-plan），

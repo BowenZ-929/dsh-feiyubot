@@ -1,7 +1,12 @@
 // OneBot v11 消息事件的最小解析：谁、在哪、说了什么、有没有图。
 // 纯函数，不抛异常：任何输入都返回可判定的结果（ParsedEvent 或 ParseFailure），调用方不需要 try/catch。
 
+import faceNames from "./qq-faces.json" with { type: "json" };
+
+const FACE_NAMES = new Map(Object.entries(faceNames));
 type Rec = Record<string, unknown>;
+
+export type Attachment = { kind: "image" | "audio"; file?: string; url?: string; transcription?: Record<string, unknown> };
 
 export type ImageSummary = {
   file?: string;
@@ -32,6 +37,7 @@ export type ParsedEvent = {
   text: string;
   hasImage: boolean;
   images: ImageSummary[];
+  attachments: Attachment[];
   // 下面几个字段是给合批用的结论，不在合批里重读消息：同一件事只判一次。
   // atTargets 留着原始 qq（"all" 也在里面），排障时要能一眼看出这条 @ 的是谁。
   atTargets: string[];
@@ -75,7 +81,7 @@ const describe = (value: unknown): string => {
 };
 
 // 非文本段也要留一句人看得懂的话，不能让它们变成空字符串。
-const segmentToText = (segment: unknown): string => {
+export const segmentToText = (segment: unknown): string => {
   if (!isRecord(segment)) return "[未知段]";
   const data = isRecord(segment.data) ? segment.data : {};
   switch (segment.type) {
@@ -86,11 +92,16 @@ const segmentToText = (segment: unknown): string => {
       return qq === "all" ? "@全体成员" : `@${qq}`;
     }
     case "reply":
-      return `[回复:${asText(data.id) ?? "?"}]`;
+      // 消息编号留在结构化quote；正文保留占位，不把被引用人的话混入当前原话。
+      return "（引用）";
     case "image":
       return "[图片]";
-    case "face":
-      return `[表情:${asText(data.id) ?? "?"}]`;
+    case "face": {
+      const id = asText(data.id) ?? "?";
+      const raw = isRecord(data.raw) ? data.raw : {};
+      const label = typeof raw.faceText === "string" ? raw.faceText.trim().replace(/^\//, "").trim() : "";
+      return `[表情:${label || FACE_NAMES.get(id) || id}]`;
+    }
     case "mface":
       return asText(data.summary) ?? "[动画表情]";
     case "record":
@@ -178,6 +189,7 @@ export const parseEvent = (raw: unknown): ParseResult => {
 
   const texts: string[] = [];
   const images: ImageSummary[] = [];
+  const attachments: Attachment[] = [];
   const atTargets: string[] = [];
   let replyToId: number | null = null;
   let hasTextSegment = false;
@@ -187,6 +199,13 @@ export const parseEvent = (raw: unknown): ParseResult => {
     if (!isRecord(segment)) continue;
     const data = isRecord(segment.data) ? segment.data : {};
     if (segment.type === "image") images.push(imageSummary(segment));
+    if (segment.type === "image" || segment.type === "record") {
+      const attachment: Attachment = { kind: segment.type === "image" ? "image" : "audio" };
+      const file = asText(data.file), url = asText(data.url);
+      if (file !== undefined) attachment.file = file;
+      if (url !== undefined) attachment.url = url;
+      attachments.push(attachment);
+    }
     // 空白文本段不算"有话说"：她收到一个只有空格的消息，那仍然是一张裸图。
     if (segment.type === "text" && (asText(data.text) ?? "").trim() !== "") hasTextSegment = true;
     if (segment.type === "at") {
@@ -222,6 +241,7 @@ export const parseEvent = (raw: unknown): ParseResult => {
     text: texts.join(""),
     hasImage: images.length > 0,
     images,
+    attachments,
     atTargets,
     replyToId,
     mentionedSelf,

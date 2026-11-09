@@ -1,7 +1,7 @@
 """「给我看你的自画像」那条线的验收：认出来就把家里的图发出去、认不出就反问、闲聊一个字都不动。
 
 判据（每条都对应交付里的一句话）：
-1. **给我看你的自画像** → 真手（send_image）+ 临时 home：手账里有一行 done 的 send_image，
+1. **给我看你的自画像** → 真手（send_image）+ 临时 home：手账先 reserved，收到图片回执才 done，
    回包 look.ok 为真、chunk 带 image（file://）、名字是「自画像」；
 2. **给我看张三的照片** → look.ok 为假、why 表示没找着、回话就是数据里「没找着」那一句
    （手账里那一行是 IMAGE_NOT_FOUND）；
@@ -24,7 +24,7 @@ from unittest import mock
 from organs.brain import BrainStore
 from organs.hand import store as hand_store
 from organs.hand.tests import helpers
-from organs.mind import conversation, look
+from organs.mind import conversation, look, recent
 from organs.soul import load as load_soul
 
 PLUGIN = Path(__file__).resolve().parents[3]
@@ -185,18 +185,21 @@ class LookHandTest(unittest.TestCase):
         self.assertEqual("", got["why"])
         self.assertEqual("file://" + str(image), got["image"], "图指向家里的那一张，不复制本体")
         self.assertEqual(look.PACKET_KEYS, tuple(look.packet(got)), "回包那一格的键是冻结的")
-        # 通道真收到的那一泡：image.file 就是家里那张（手给的 file://）
-        chunk = records[0]["body"]["chunks"][0]["image"]
-        self.assertTrue(chunk["file"].endswith(str(image)), chunk["file"])
-        # 手账：reserved + done 两行，动作是 send_image
+        self.assertEqual([], records, "准备阶段不能提前发送")
         rows = helpers.ledger_lines(self.root)
-        self.assertEqual(["reserved", "done"], [row["state"] for row in rows], rows)
-        self.assertEqual("send_image", rows[1]["action"])
-        self.assertEqual("OK", rows[1]["code"])
-        self.assertEqual(1, rows[1]["params"]["sent"], "只有通道说 sent>0 才算成")
-        # 手账是索引：长串会被截断（ledger.SUMMARY_CHARS + 省略号），这里只核对「指着哪一间格」
-        self.assertIn(PORTRAIT, str(rows[1]["params"]["path"]), rows[1]["params"]["path"])
-        self.assertTrue(rows[1]["params"]["sha256"], "账上要记指纹：不发同一张也认得出是哪张")
+        self.assertEqual(["reserved"], [row["state"] for row in rows])
+        self.assertEqual("send_image", rows[0]["action"])
+        self.assertTrue(got["receipt"]["params"]["sha256"])
+
+    def test_group_requires_group_target_instead_of_speaker(self):
+        helpers.register_portrait(self.root, "江迟-人设卡.jpg")
+        for target, expected in (("123456", True), (None, False)):
+            got = look.handle("给我看你的" + PORTRAIT, who=WHO, scene="group",
+                              target=target, now=NOW, root=self.root)
+            self.assertEqual(expected, got["ok"], got)
+            if expected:
+                self.assertEqual("123456", got["target"])
+                self.assertEqual(123456, got["receipt"]["params"]["target"])
 
     def test_a_picture_that_is_not_at_home_is_missing(self):
         data = look.load_config()
@@ -214,13 +217,11 @@ class LookHandTest(unittest.TestCase):
         self.assertEqual("failed", rows[-1]["state"])
         self.assertEqual("IMAGE_NOT_FOUND", rows[-1]["code"])
 
-    def test_a_channel_that_is_not_there_says_it_did_not_go_out(self):
+    def test_preparation_does_not_require_a_channel(self):
         helpers.register_portrait(self.root, "江迟-人设卡.jpg")
-        data = look.load_config()
-        got = self._look("给我看你的" + PORTRAIT)      # setUp 把通道指向关着的端口
-        self.assertFalse(got["ok"], "连不上就不许说发过了")
-        self.assertEqual("CHANNEL_UNREACHABLE", got["why"], "why 原样带手那边的码")
-        self.assertEqual(data["say"]["fail"], got["say"], "「没发出去」那句来自数据")
+        got = self._look("给我看你的" + PORTRAIT)
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(["reserved"], [row["state"] for row in helpers.ledger_lines(self.root)])
 
 
 class LookInAssemblyTest(unittest.TestCase):
@@ -281,11 +282,42 @@ class LookInAssemblyTest(unittest.TestCase):
         self.assertEqual(1, len(images), "图只挂一泡：%r" % (got["chunks"],))
         self.assertEqual(cell["image"], images[0]["file"])
         self.assertIn("image", got["chunks"][-1], "图挂在最后一泡上")
-        self.assertTrue(records[0]["body"]["chunks"][0]["image"]["file"].endswith(
-            str(self.portrait)), "通道收到的那一泡里就是家里那张")
+        self.assertEqual([], records, "图片只能跟最终回复发送一次")
         rows = helpers.ledger_lines(self.hand_root)
         self.assertEqual("send_image", rows[-1]["action"])
-        self.assertEqual("done", rows[-1]["state"])
+        self.assertEqual("reserved", rows[-1]["state"])
+
+    def test_image_receipt_is_required_and_only_counts_once(self):
+        from organs.mind import delivery
+        prepared = look.handle("给我看你的" + PORTRAIT, who=WHO, scene="private",
+                               now=NOW, root=self.hand_root)
+        root = self.tmp / "mind-delivery"
+        recent.append({"ts": NOW, "who": WHO, "said": "看看", "reply": ""}, root=root)
+        record = {"ts": NOW, "msg_id": "test-image", "who": WHO,
+                  "speaker": "她", "scene": "private", "image": prepared["image"],
+                  "image_receipt": prepared["receipt"]}
+        delivery.stage("image-test", record, root=root)
+        self.assertFalse(delivery.confirm("image-test", "", self.brain, root=root,
+                                         images=["file:///wrong.jpg"]))
+        self.assertEqual("reserved", helpers.ledger_lines(self.hand_root)[-1]["state"])
+        for _ in range(2):
+            self.assertTrue(delivery.confirm("image-test", "", self.brain, root=root,
+                                            images=[prepared["image"]]))
+        rows = helpers.ledger_lines(self.hand_root)
+        self.assertEqual(["reserved", "done"], [row["state"] for row in rows])
+        self.assertEqual(1, rows[-1]["params"]["sent"])
+
+    def test_text_receipt_does_not_confirm_unsent_image(self):
+        from organs.mind import delivery
+        prepared = look.handle("给我看你的" + PORTRAIT, who=WHO, scene="private",
+                               now=NOW, root=self.hand_root)
+        root = self.tmp / "mind-delivery"
+        recent.append({"ts": NOW, "who": WHO, "said": "看看", "reply": ""}, root=root)
+        delivery.stage("text-only", {"ts": NOW, "msg_id": "test-text", "who": WHO,
+                       "speaker": "她", "scene": "private", "image": prepared["image"],
+                       "image_receipt": prepared["receipt"]}, root=root)
+        self.assertTrue(delivery.confirm("text-only", "", self.brain, root=root))
+        self.assertEqual("reserved", helpers.ledger_lines(self.hand_root)[-1]["state"])
 
     def test_she_never_claims_she_drew_it(self):
         data = look.load_config()

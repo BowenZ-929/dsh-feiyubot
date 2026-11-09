@@ -15,7 +15,7 @@
      往由头池 proactive_own_doing.jsonl 写一条，本文件读它）。**只在"真做了"之后才有**：
      没读到正文的日记、今天没有真素材的草稿都不许由头；一次独处最多一条，池里挂着
      没被用掉的那条就不再写第二条。用掉之后（动念账上落了这个 id）就不再出现。
-   - `unscheduled`：今天还没定下要做什么（日程日志里没有当天的条目），
+   - `unscheduled`：没有启用的当天生活安排，也没有当天抽签活动条目，
      **并且此刻在 unscheduled_window 里**（proactive.json，默认 9–12 点）：
      那是个常驻条件，窗外它不算由头——否则等于每天固定时间硬灌。
    几个同时成立时按 REASON_ORDER 取第一个：**一次动念只排一条计划**，理由要能说清是哪个。
@@ -31,12 +31,13 @@
    就 consume 并记账，不重试。
 5. **交给核之后只有四路**，都如实落账、都 consume：`declined`（她说这轮不想说）/
    `empty`（空产出，不重试）/ `error`（核打挂或解析不出，带 error_kind；主动开口
-   **不做退避重试**——下一 tick 可以由动念重新产生，受每人每日上限约束）/ `sent`
-   （**先** delivery.intake 落盘，**再** heart.proactive.sent 记一条 pending）。
+   **不做退避重试**——下一 tick 可以由动念重新产生，受每人每日上限约束）/ `queued`
+   （delivery.intake 落盘待发）。成功 ack 后才记 sent 并让心开始等待回复。
 6. **连 mute_after 次没人接** → 静音；**刚刚进入静音那一次**调一次
    heart.mood.apply_event("cold") 并落一行 `cold`，同一次静音只落一次（幂等看 muted_until）。
-7. **谁**：脑的人名录里最近 lately_talked_hours 内说过话的人中熟稔最高者；没有就退回
-   配置里的 owner。对方最近这么近还主动找过她 → 计划 priority 减
+7. **谁**：未完话题固定原作者；其余无指定对象的由头，找脑的人名录里最近
+   lately_talked_hours 内说过话的人中熟稔最高者，没有就退回配置里的 owner。
+   对方最近这么近还主动找过她 → 计划 priority 减
    lately_talked_downgrade（账上记降权前 / 后两个数）。
 8. **本文件不改心、不改脑、不改核**：心的账只走它的公开口子（is_muted / sent / outcome /
    apply_event），脑只读（people_list / today_entries），核只调 organs.mind.complete。
@@ -79,6 +80,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from organs.brain import store as brain_store
 from organs.heart import energy as heart_energy
+from organs.heart import sleep as heart_sleep
+from organs.heart import rest as heart_rest
 from organs.heart import engage as heart_engage
 from organs.heart import model as heart_model
 from organs.heart import mood as heart_mood
@@ -121,11 +124,13 @@ ACT_DECLINED = "declined"
 ACT_EMPTY = "empty"
 ACT_ERROR = "error"
 ACT_SENT = "sent"
+ACT_QUEUED = "queued"
 ACT_COLD = "cold"
 #: task 账上的"这一轮没提醒"（没到期 / 已提醒 / 已完成 / 没有任务标记）：只这本账有这个动作。
 ACT_SKIPPED = "skipped"
 ACTIONS = (ACT_PLANNED, ACT_HELD, ACT_QUOTA, ACT_MUTED, ACT_BLOCKED,
-           ACT_DECLINED, ACT_EMPTY, ACT_ERROR, ACT_SENT, ACT_COLD)
+           ACT_DECLINED, ACT_EMPTY, ACT_ERROR, ACT_QUEUED, ACT_SENT, ACT_COLD,
+           'started', 'sending', 'partial', 'replaced', 'unconfirmed', 'disabled')
 
 #: 核回来的东西与卡上的事对不上（既没提标题、也没提那个时刻）：自己长出来的一类错，
 #: 与"核打挂了"（error_kind 是 LLMError.kind）和"回执解析不出"（parse）分开记。
@@ -134,6 +139,7 @@ ERR_OFFTASK = "offtask"
 STAGE_CONSIDER = "consider"
 STAGE_DUE = "due"
 STAGE_OUTCOME = "outcome"
+STAGE_ACK = "ack"
 
 #: engage 的理由码 → 动念账上的短码。只改一个名字（双低在账上叫 double-low，
 #: 人读账时一眼看得出是"心与精力都低"），其余照抄 engage 的码，不另造一套语汇。
@@ -142,6 +148,7 @@ HOLD_CODES = {heart_model.REASON_DOUBLE_LOW: "double-low"}
 #: owner 与提示词这两块的真源在 data/proactive.json；这里是兜底（文件读不到时还能跑）。
 DEFAULTS: Dict[str, Any] = {
     "version": VERSION,
+    "delivery": {"enabled": False, "routes": []},
     "owner": "主人",
     "because_chars": 40,
     "plan_delay_minutes": 5,
@@ -601,6 +608,9 @@ def pick_who(now_ts: Any = None, *, root: Any = None, brain: Any = None,
     at = _now(now_ts)
     hours = _num(cfg.get("lately_talked_hours"), 24.0)
     best: Optional[Dict[str, Any]] = None
+    delivery = cfg.get('delivery') or {}
+    allowed = ({r['who'] for r in delivery.get('routes', [])}
+               if delivery.get('enabled') is True else None)
     for view in _people(brain, at):
         if not isinstance(view, dict):
             continue
@@ -609,7 +619,7 @@ def pick_who(now_ts: Any = None, *, root: Any = None, brain: Any = None,
         if age is None or age < 0 or age > hours:
             continue
         who = str(view.get("id") or view.get("display") or "").strip()
-        if not who:
+        if not who or (allowed is not None and who not in allowed):
             continue
         familiar = _num(view.get("familiarity"), 0.0)
         if best is None or familiar > best["familiarity"]:
@@ -633,7 +643,7 @@ def _today(brain: Any, at: str) -> List[Dict[str, Any]]:
 
 def _lately_talked(who: str, at: str, *, brain: Any = None,
                    config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """对方最近有没有主动找过她：从脑的 today 里现算（不落任何"冷度"状态）。
+    """对方最近有没有主动找过她：用名录的最后互动时间，不受今日记忆换日影响。
 
     返回 {"lately_talked": bool, "downgrade": int, "hours": float, "last_at": str}。
     """
@@ -641,12 +651,11 @@ def _lately_talked(who: str, at: str, *, brain: Any = None,
     hours = _num(cfg.get("lately_talked_hours"), 24.0)
     downgrade = int(_num(cfg.get("lately_talked_downgrade"), 0.0))
     last_at = ""
-    for entry in _today(brain, at):
-        if str(entry.get("who") or "") != who:
+    for person in _people(brain, at):
+        if str(person.get("id") or "") != who:
             continue
-        if str(entry.get("side") or brain_store.SIDE_OTHER) == brain_store.SIDE_SELF:
-            continue
-        stamp = str(entry.get("last_ts") or entry.get("ts") or "")
+        # 名录仅由对方的互动更新；她自己说话不会续长这个窗口。
+        stamp = str(person.get("last_interaction") or "")
         age = _hours_between(stamp, at) if stamp else None
         if age is None or age < 0 or age > hours:
             continue
@@ -706,14 +715,16 @@ def _task_cards(home_root: Any, room: str) -> Tuple[Optional[List[Dict[str, Any]
     读不出来（房名不在十间里、家未载入、盘坏了）就回一句原因：这条由头这一轮不成立，
     既不抛崩 tick，也不许凭空编一张卡出来。
     """
-    if home_root is None:
-        return None, "家未载入（没有 home_root）：这一轮不判任务卡"
     from organs.home import cards as home_cards
+    items = []
     try:
-        listing = home_cards.list_room(root=home_root, room=room)
+        while True:
+            listing = home_cards.list_room(root=home_root, room=room, offset=len(items))
+            items.extend(listing['items'])
+            if not listing['truncated']:
+                return items, ""
     except Exception as exc:  # noqa: BLE001 - 卡片读不出来不该让动念整条断掉
         return None, "读不了「%s」：%s: %s" % (room, type(exc).__name__, exc)
-    return list(listing.get("items") or []), ""
 
 
 def _card_progress(card: Mapping[str, Any]) -> Optional[int]:
@@ -788,6 +799,9 @@ def pending_task(now_ts: Any = None, *, root: Any = None, home_root: Any = None,
     room = task_room_of(cfg)
     soon, grace = task_window(cfg)
     cap = task_remind_cap(root, limits)
+    # 显式日子根只读自己的家；未指定时由家的既有解析器读取环境配置。
+    if home_root is None and root is not None:
+        home_root = Path(root) / "home"
     items, error = _task_cards(home_root, room)
     out: Dict[str, Any] = {"ok": not error, "at": at, "room": room, "error": error,
                            "window": {"due_soon_minutes": soon,
@@ -896,29 +910,46 @@ def _flush_task_log(root: Any, at: str, task: Mapping[str, Any], action: str = "
 # ---- 三个驱动源 -----------------------------------------------------------
 
 
-def _unfinished(brain: Any, at: str) -> Optional[Dict[str, Any]]:
-    """未了的事：today 里最后一手是别人说的（她当天没接上）的那条。"""
+def _unfinished(brain: Any, at: str, *, session_id: Optional[str] = None,
+                include_archived: bool = False) -> Optional[Dict[str, Any]]:
+    """末条原话还未接上；执行旧计划时连同在役归档核对，不因换日丢话题。"""
     entries = _today(brain, at)
+    if include_archived and brain is not None:
+        entries = list(brain.longterm_active_entries()) + entries
+    if session_id is not None:
+        entries = [entry for entry in entries if entry.get("session_id") == session_id]
     if not entries:
         return None
     last = entries[-1]
+    if last.get("local_only") is True or last.get("scope") == "local":
+        return None
     if str(last.get("side") or brain_store.SIDE_OTHER) == brain_store.SIDE_SELF:
         return None
     text = str(last.get("text") or last.get("quote") or "").strip()
     if not text:
         return None
     return {"who": str(last.get("who") or ""), "text": text,
-            "at": str(last.get("last_ts") or last.get("ts") or "")}
+            "at": str(last.get("last_ts") or last.get("ts") or ""),
+            "source": {"entry_id": str(last.get("id") or ""),
+                       "turn_id": str(last.get("turn_id") or ""),
+                       "who": str(last.get("who") or ""),
+                       "scene": str(last.get("scene") or "unknown"),
+                       **({"session_id": last["session_id"]} if last.get("session_id") else {}),
+                       "at": str(last.get("last_ts") or last.get("ts") or "")}}
 
 
 def _scheduled_today(root: Any, at: str) -> bool:
-    """今天定下要做什么了没有：日程日志里有当天的条目就算定了。
+    """今天是否已有安排：启用的连续生活计划或旧抽签活动条目。
 
     读不出来（日程配置坏了）就**当作已定**：宁可这一轮不开口，也不许凭空编一个
     "今天还没定"的由头。
     """
-    from . import schedule      # 延迟导入：日程那边还在长，别让日子线的导入顺序被它绑住
+    from . import life, schedule
     try:
+        if life.config(root)["enabled"]:
+            current = life.view(at, root=root)["plan"]
+            if current and current["status"] == "ready" and current["items"]:
+                return True
         return bool(schedule.log_lines(root, day=model.day_key(at)))
     except Exception:  # noqa: BLE001
         return True
@@ -969,11 +1000,20 @@ def sources(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                                  "because": _clip(because, chars),
                                  "thought_id": str(top.get("id") or ""), "who": ""}
 
-    talk = _unfinished(brain, at)
+    delivery = cfg.get('delivery') or {}
+    if delivery.get('enabled') is True:
+        talks = [_unfinished(brain, at, session_id='qq:%s:%s' % (r['scene'], r['target']))
+                 for r in delivery.get('routes', [])]
+        allowed = {r['who'] for r in delivery.get('routes', [])}
+        talk = max((t for t in talks if t and t['who'] in allowed),
+                   key=lambda t: t['at'], default=None)
+    else:
+        talk = _unfinished(brain, at)
     if talk is not None:
         found[REASON_UNFINISHED] = {"reason_code": REASON_UNFINISHED,
                                     "because": _clip(talk["text"], chars),
-                                    "thought_id": "", "who": talk["who"]}
+                                    "thought_id": "", "who": talk["who"],
+                                    "source": talk["source"]}
 
     # 第五类：她独处时做的那件事（solitude 写进由头池、这里读）。句子只由那一步
     # 真做的动作拼出来，所以不走 because_chars 的截断——它是这一步的原文，不是别人的长话。
@@ -987,7 +1027,7 @@ def sources(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
     if not _scheduled_today(root, at) and in_unscheduled_window(at, cfg):
         found[REASON_UNSCHEDULED] = {
             "reason_code": REASON_UNSCHEDULED,
-            "because": _clip("今天还没定下要做什么（日程日志里没有 %s 的条目）"
+            "because": _clip("%s 还没有启用的生活安排，也没有抽签活动条目；这不代表今天没做过事"
                              % model.day_key(at), chars),
             "thought_id": "", "who": ""}
 
@@ -1023,7 +1063,9 @@ def readings(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
     """
     at = _now(now_ts)
     mood_read = heart_mood.read(heart_root, at)
-    energy_read = heart_energy.read(heart_root, at)
+    sleeping = heart_sleep.overview(heart_root, at)
+    energy_read = heart_energy.read(heart_root, at, sleep_window=sleeping['effective_window'],
+                                    wake_cap=sleeping['wake_cap'])
     try:
         energy_value = float(energy_read.get("value"))
     except (TypeError, ValueError):
@@ -1037,6 +1079,8 @@ def readings(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
     muted = heart_proactive.is_muted(heart_root, at)
     window = heart_engage.window_signal(heart_root, at)
     inp = heart_engage.EngageInput(
+        sleep_window=sleeping['effective_window'],
+        resting=heart_rest.is_resting(heart_root),
         mood_now=float(mood_read.get("now") or 0.0),
         energy=energy_value,
         familiarity=familiarity,
@@ -1205,7 +1249,9 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                 "plan": None, "pending_task": task}
 
     top = fired[0]
-    picked = pick_who(at, root=root, brain=brain, config=cfg)
+    # 接谁没说完的话，就找谁；无指定作者的由头才按熟稔选择。
+    picked = ({"who": top["who"], "source": "source-author"}
+              if top.get("who") else pick_who(at, root=root, brain=brain, config=cfg))
     who = picked["who"]
     talks = _lately_talked(who, at, brain=brain, config=cfg)
     before = _priority(cfg, top["reason_code"])
@@ -1256,6 +1302,8 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
         if card:
             # 到点执行时要能判"回执里说的事还是不是卡上那件"：标题与时刻随计划落账。
             candidate["task"] = dict(card)
+        if top.get("source"):
+            candidate["source"] = dict(top["source"])
         out = plan.add([candidate],
                        root=root, now_ts=at, config=limits or model.load_limits(root))
         if out["added"]:
@@ -1276,7 +1324,7 @@ def consider(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                task_due=str(card.get("due") or ""),
                # own_doing 那一次由头：把这个 id 落账，由头池才知道这条已经被用掉了
                own_doing_id=str(top.get("own_doing_id") or ""),
-               quota=quota)
+               quota=quota, source=top.get("source"))
     append_log(root, row)
     _flush_task_log(root, at, task, *_task_verdict(action, quota, muted, code, blocked),
                     config=cfg)
@@ -1312,16 +1360,33 @@ def _consume(row: Dict[str, Any], at: str, root: Any, summary: Dict[str, Any]) -
                  results={str(row.get("id")): summary})
 
 
+def _obsolete_reason(row, at, *, root=None, heart_root=None, brain=None):
+    """生成前与入队前共用同一由头判据，读取各器官当前记录。"""
+    reason_code = row.get("reason_code")
+    if reason_code == REASON_UNSCHEDULED and _scheduled_today(root, at):
+        return "source-resolved"
+    if reason_code == REASON_THOUGHT and not any(
+            thought["id"] == row.get("thought_id")
+            for thought in heart_pending.open_thoughts(root=heart_root, now=at)):
+        return "source-resolved"
+    source = row.get("source") or {}
+    if reason_code == REASON_UNFINISHED and source.get("entry_id"):
+        current = _unfinished(brain, at, session_id=source.get("session_id") or None, include_archived=True)
+        if current is None or current["source"]["entry_id"] != source["entry_id"]:
+            return "source-changed"
+    return ""
+
+
 def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
             heart_root: Any = None, brain: Any = None,
             config: Optional[Dict[str, Any]] = None, complete: Any = None,
-            env: Optional[Mapping[str, str]] = None, transport: Any = None
+            env: Optional[Mapping[str, str]] = None, transport: Any = None, persona: str = "", runner=None
             ) -> Dict[str, Any]:
     """到点的 proactive 计划：**再判一次** engage，然后要么交给核、要么只记账。
 
     只有四条出口：still-SILENT → consume + held；她这轮不想说 → consume + declined；
     空产出 → consume + empty（不重试）；核打挂/解析不出 → consume + error（不重试）；
-    成功 → intake 先落盘，再 heart.proactive.sent 记一条 pending，最后 consume + sent。
+    成功 → intake 落盘，consume + queued；成功回执后才记 sent 与心的 pending。
     """
     at = _now(now_ts)
     cfg = config or load_config(root)
@@ -1338,6 +1403,16 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
     engage_read = read["engage"]
     code = hold_code(engage_read)
 
+    obsolete_reason = _obsolete_reason(row, at, root=root, heart_root=heart_root, brain=brain)
+    if obsolete_reason:
+        # 原会话已往下聊、安排已定或念头失效，就不再用旧理由生成。
+        _consume(row, at, root, {"action": ACT_DECLINED, "reason": obsolete_reason, "sent": False})
+        ledger = _row(at, STAGE_DUE, reason_code, who, because, priority, engage_read,
+                      ACT_DECLINED, plan_id=pid, reason=obsolete_reason)
+        append_log(root, ledger)
+        return {"ok": True, "id": pid, "at": at, "action": ACT_DECLINED,
+                "reason": obsolete_reason, "sent": False, "row": ledger}
+
     if str(engage_read.get("state")) == heart_model.STATE_SILENT:
         _consume(row, at, root, {"action": ACT_HELD, "reason": code, "sent": False})
         ledger = _row(at, STAGE_DUE, reason_code, who, because, priority, engage_read,
@@ -1346,9 +1421,14 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
         return {"ok": True, "id": pid, "at": at, "action": ACT_HELD, "reason": code,
                 "sent": False, "row": ledger}
 
+    if runner is not None:
+        return runner(dict(row, who=who), at, engage_read)
+
     task = row.get("task") if isinstance(row.get("task"), dict) else {}
     ctx: Dict[str, Any] = {"who": who, "because": because,
-                           "tone": str(row.get("tone") or ""), "now": at, "root": root}
+                           "tone": str(row.get("tone") or ""), "now": at, "root": root,
+                           "persona": persona, "reason_code": reason_code, "source": row.get("source"),
+                           "state": {"mood": read["mood"].get("tier"), "energy": read["energy"].get("tier")}}
     if task:
         # 交这一段的是任务卡：提示词里要写明只能用卡上那两样，不许添加卡上没有的事。
         ctx["rule"] = _render(task_template(cfg, "task_rule"),
@@ -1399,8 +1479,17 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
             return {"ok": False, "id": pid, "at": at, "action": ACT_ERROR,
                     "error_kind": ERR_OFFTASK, "error": offtask, "sent": False, "row": ledger}
 
+    obsolete_reason = _obsolete_reason(row, at, root=root, heart_root=heart_root, brain=brain)
+    if obsolete_reason:
+        _consume(row, at, root, {"action": ACT_DECLINED, "reason": obsolete_reason, "sent": False})
+        ledger = _row(at, STAGE_DUE, reason_code, who, because, priority, engage_read,
+                      ACT_DECLINED, plan_id=pid, reason=obsolete_reason, after_generation=True)
+        append_log(root, ledger)
+        return {"ok": True, "id": pid, "at": at, "action": ACT_DECLINED,
+                "reason": obsolete_reason, "sent": False, "row": ledger}
+
     from .delivery import intake as delivery_intake
-    queued = delivery_intake(text, to=who, now_ts=at, root=root)
+    queued = delivery_intake(text, to=who, now_ts=at, root=root, source=row.get("source"))
     if not queued.get("ok"):
         error = str(queued.get("message") or "")
         _consume(row, at, root, {"action": ACT_ERROR, "error_kind": "delivery",
@@ -1411,19 +1500,32 @@ def run_due(row: Dict[str, Any], now_ts: Any = None, *, root: Any = None,
         return {"ok": False, "id": pid, "at": at, "action": ACT_ERROR,
                 "error_kind": "delivery", "error": error, "sent": False, "row": ledger}
 
-    # 先落盘（上面那一步），再记一条"她主动开口了"的 pending：顺序颠倒是谎报。
-    sent = heart_proactive.sent(heart_root, at)
-    if thought_id:
-        heart_pending.attempt(thought_id, root=heart_root, now=at)
+    # 入队还没有通道确认，不能让心开始等待回复，也不能把念头记为已尝试表达。
     item = (queued.get("item") or {}).get("id", "")
-    _consume(row, at, root, {"action": ACT_SENT, "sent": True, "delivery_id": item,
+    _consume(row, at, root, {"action": ACT_QUEUED, "sent": False, "delivery_id": item,
                              "chunks": len(outcome.get("chunks") or []),
                              "chars": len(text)})
     ledger = _row(at, STAGE_DUE, reason_code, who, because, priority, engage_read,
-                  ACT_SENT, plan_id=pid, delivery_id=item)
+                  ACT_QUEUED, plan_id=pid, delivery_id=item, thought_id=thought_id)
     append_log(root, ledger)
-    return {"ok": True, "id": pid, "at": at, "action": ACT_SENT, "sent": True,
-            "delivery_id": item, "pending": sent, "row": ledger}
+    return {"ok": True, "id": pid, "at": at, "action": ACT_QUEUED, "sent": False,
+            "delivery_id": item, "row": ledger}
+
+
+def confirm_delivery(item, at, *, root=None, heart_root=None):
+    """由 delivery.ack 首次确认送达调用；普通入队消息不影响主动反馈。"""
+    queued = next((row for row in reversed(log_lines(root))
+                   if row.get("delivery_id") == item["id"] and row.get("action") == ACT_QUEUED), None)
+    if queued is None:
+        return None
+    # 临时日子根沿用 API 的派生规则，不能让验收回执污染真实心情。
+    target = heart_root if heart_root is not None else (Path(root) / "heart" if root is not None else None)
+    feedback = heart_proactive.sent(target, at)
+    if queued.get("thought_id"):
+        heart_pending.attempt(queued["thought_id"], root=target, now=at)
+    append_log(root, dict(queued, at=at, stage=STAGE_ACK, action=ACT_SENT,
+                          feedback=feedback, receipt=item["ack"]))
+    return feedback
 
 
 def _offtask(row: Mapping[str, Any], outcome: Mapping[str, Any]) -> str:
@@ -1446,7 +1548,7 @@ def _offtask(row: Mapping[str, Any], outcome: Mapping[str, Any]) -> str:
 def settle_due(due_rows: List[Dict[str, Any]], now_ts: Any = None, *, root: Any = None,
                heart_root: Any = None, brain: Any = None,
                config: Optional[Dict[str, Any]] = None, complete: Any = None,
-               env: Optional[Mapping[str, str]] = None, transport: Any = None
+               env: Optional[Mapping[str, str]] = None, transport: Any = None, persona: str = "", runner=None
                ) -> Dict[str, Any]:
     """tick 的到点那一半：只挑 proactive 那几条，逐条 run_due，按 action 计数。"""
     out: Dict[str, Any] = {"rows": [], "actions": {}}
@@ -1454,7 +1556,7 @@ def settle_due(due_rows: List[Dict[str, Any]], now_ts: Any = None, *, root: Any 
         if str(row.get("kind")) != KIND:
             continue
         result = run_due(row, now_ts, root=root, heart_root=heart_root, brain=brain,
-                         config=config, complete=complete, env=env, transport=transport)
+                         config=config, complete=complete, env=env, transport=transport, persona=persona, runner=runner)
         out["rows"].append(result)
         action = str(result.get("action") or "")
         out["actions"][action] = out["actions"].get(action, 0) + 1
@@ -1586,5 +1688,45 @@ def overview(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
                                                            config=cfg, limits=limits)),
             "muted": muted, "streak": muted.get("streak"),
             "muted_until": muted.get("muted_until"),
-            "pending_plan": pending, "counts": tally, "log": rows}
+            "pending_plan": pending, "counts": tally, "log": rows,
+            "delivery": cfg["delivery"]}
+
+
+def enable_delivery(private_qq, root=None):
+    """设置唯一私聊接收人并开启；保存不发送，启用前的计划不补发。"""
+    from organs.heart.store import write_json
+    if (not isinstance(private_qq, str) or not private_qq.isascii()
+            or not private_qq.isdigit() or not 3 <= len(private_qq) <= 15
+            or private_qq.startswith('0')):
+        raise ValueError('请输入 3–15 位数字 QQ 号，不含空格或前导零')
+    config = json.loads(config_path(root).read_text(encoding='utf-8'))
+    settings = config.get('delivery') or {}
+    routes = [{'who':private_qq, 'scene':'private', 'target':int(private_qq)}]
+    if (settings.get('enabled') is True and settings.get('routes') == routes
+            and settings.get('enabled_at') and config.get('owner') == private_qq):
+        return {'ok':True, 'delivery':settings}
+    at = model.now_iso()
+    before = {'enabled':settings.get('enabled') is True, 'routes':settings.get('routes', []),
+              'owner':config.get('owner'), 'enabled_at':settings.get('enabled_at')}
+    config['owner'] = private_qq
+    config['delivery'] = dict(settings, enabled=True, routes=routes, enabled_at=at)
+    after = dict(config['delivery'], owner=private_qq)
+    changes = {key:{'before':value,'after':after[key]} for key,value in before.items() if value != after[key]}
+    write_json(model.day_root(root)/CONFIG_FILE, config)
+    append_log(root, _row(at, 'config', '', private_qq, '开启主动分享，仅私聊 ' + private_qq,
+                         0, {}, 'enabled', reason='manual-enable', changes=changes))
+    return {'ok':True, 'delivery':config['delivery']}
+
+
+def disable_delivery(root=None):
+    """只停止新的日子主动发送；保留路由与全部原参数，不清历史或补发队列。"""
+    from organs.heart.store import write_json
+    config = json.loads(config_path(root).read_text(encoding='utf-8'))
+    settings = config.get('delivery')
+    config['delivery'] = dict(settings if isinstance(settings, dict) else {}, enabled=False)
+    write_json(model.day_root(root)/CONFIG_FILE, config)
+    if isinstance(settings, dict) and settings.get('enabled') is True:
+        append_log(root, _row(model.now_iso(), 'config', '', '', '关闭日子的主动发送', 0, {},
+                              'disabled', reason='manual-stop', changes={'enabled':{'before':True,'after':False}}))
+    return {'ok':True, 'delivery':config['delivery']}
 

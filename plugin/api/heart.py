@@ -44,6 +44,7 @@ from organs.heart import ports as ports_module
 from organs.heart import proactive as proactive_module
 from organs.heart import refuse as refuse_module
 from organs.heart import sleep as sleep_module
+from organs.heart import rest as rest_module
 
 from .core import Result
 
@@ -62,6 +63,7 @@ HEART_ROUTES = {
     "/heart/proactive": "GET",
     # 出站闸的只读判读：人级（三态）→ 群级（滑窗），回答「现在真发，门会不会拦」。
     "/heart/gate": "GET",
+    "/heart/changes": "GET",
 }
 
 # /heart/offset 每轴对外只承诺这四个键；offset 模块以后多出来的键原样透传。
@@ -434,6 +436,7 @@ def _sleep_route(params: Mapping[str, str]) -> Result:
     """
     root, now = _root(params), _now(params)
     payload = sleep_module.overview(root, now)
+    payload['rest'] = rest_module.state(root)
     payload["effective_window"] = list(payload["effective_window"])
     payload.update({"ok": True, "readonly": True, "agent": "heart",
                     "status": STATUS_CONNECTED})
@@ -510,6 +513,8 @@ def _judgement(params: Mapping[str, str], brain: Any, intent: str) -> Any:
     muted = proactive_module.is_muted(root, now)
     judgement = engage_module.EngageInput.from_effective(
         eff,
+        sleep_window=sleep_module.effective_window(root, now),
+        resting=rest_module.is_resting(root),
         window=window,
         intents=intents,
         muted=muted,
@@ -578,6 +583,14 @@ def dispatch(route: str, params: Mapping[str, str],
 
 def _dispatch(route: str, params: Mapping[str, str], brain: Any = None) -> Result:
     """各端点的实际分派；干跑与只读都在这里，一个字节都不写。"""
+    if route == "/heart/changes":
+        from organs.heart import changes
+        try:
+            return 200, changes.view(params)
+        except ValueError:
+            raise QueryError("请检查日期、参数类别和分页参数")
+        except OSError:
+            return 500, {"ok": False, "message": "参数变化记录读取失败"}
     if route in ("/heart", "/heart/overview"):
         return _overview(params, brain)
     if route == "/heart/baseline":

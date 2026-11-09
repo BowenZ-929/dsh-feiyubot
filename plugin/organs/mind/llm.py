@@ -28,6 +28,11 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from itertools import count
+from uuid import uuid4
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -209,6 +214,54 @@ def _trigger_matches(trigger: Mapping[str, Any], *, recalled_nonempty: bool,
     return True
 
 
+
+# ── 追踪：把这一轮真正发给模型的原文与它的原始回包落盘 ────────────────────
+# 开关：QQAGENT_TRACE=1 才写；落点 <实盘>/mind/trace/YYYY-MM-DD.jsonl（一天一本）
+# 判据：追踪只写、不改任何行为；关掉就等于不存在。
+_ROUND_TRACE = ContextVar('model_round_trace', default=None)
+
+
+@contextmanager
+def trace_round(turn_id, session_id):
+    token = _ROUND_TRACE.set({'turn_id': turn_id, 'session_id': session_id, 'calls': count(1)})
+    try:
+        yield
+    finally:
+        _ROUND_TRACE.reset(token)
+
+
+def _trace_dir() -> Optional[Path]:
+    import os
+    if os.environ.get("QQAGENT_TRACE") != "1":
+        return None
+    root = os.environ.get("QQAGENT_HOME_ROOT") or paths.home_root()
+    return Path(root) / "mind" / "trace"
+
+
+def _trace(messages, status, body, text, payload, metadata) -> None:
+    try:
+        d = _trace_dir()
+        if d is None:
+            return
+        import datetime, json
+        d.mkdir(parents=True, exist_ok=True)
+        raw = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body)
+        rec = {
+            **metadata,
+            "at": datetime.datetime.now().astimezone().isoformat(),
+            "status": status,
+            "messages": messages,
+            "reply": text,
+            "request": {name: value for name, value in payload.items() if name != "messages"},
+            "raw": raw,
+        }
+        p = d / (datetime.date.today().isoformat() + ".jsonl")
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+    except Exception:
+        pass
+
+
 def complete(
     messages: List[Dict[str, Any]],
     *,
@@ -216,6 +269,7 @@ def complete(
     env: Optional[Mapping[str, str]] = None,
     transport: Optional[Transport] = None,
     temperature: Optional[float] = None,
+    purpose: str = "",
 ) -> str:
     """把 messages 送出去，把她的那句话拿回来（OpenAI 兼容协议，urllib 投递）。
 
@@ -240,9 +294,18 @@ def complete(
         "temperature": conf["temperature"] if temperature is None else _temperature(temperature),
         "max_tokens": conf["max_tokens"],
     }
+    for name in ("thinking", "reasoning_effort"):
+        if name in conf:
+            payload[name] = conf[name]
     timeout = conf["timeout_ms"] / 1000.0
     error: Optional[LLMError] = None
-    for _ in range(conf["retries"] + 1):
+    context = _ROUND_TRACE.get()
+    metadata = {'call_id': uuid4().hex, 'purpose': purpose}
+    if context is not None:
+        metadata.update(turn_id=context['turn_id'], session_id=context['session_id'], call_index=next(context['calls']))
+    for attempt in range(1, conf["retries"] + 2):
+        started = time.monotonic()
+        status, body = None, b''
         try:
             status, body = send(url, headers, payload, timeout)
         except LLMError as exc:
@@ -252,10 +315,26 @@ def complete(
         except Exception as exc:  # 注入的 transport 抛别的，也要变成能分岔的 LLMError
             error = LLMError("http", "请求模型时出错：%s" % exc)
         else:
+            if status == 200 and conf['base_url'].rstrip('/') in ('https://api.deepseek.com', 'https://api.deepseek.com/v1'):
+                from . import rice
+                try:
+                    receipt = json.loads(body)
+                    if isinstance(receipt, dict):
+                        rice.record(receipt)
+                except (ValueError, OSError):
+                    # 记账失败不能让已经付费的模型请求重发。
+                    import logging
+                    logging.getLogger(__name__).warning('饭账未写入，请检查用量记录')
             try:
-                return _unwrap(status, body)
+                text = _unwrap(status, body)
             except LLMError as exc:
                 error = exc
+            else:
+                _trace(prepared, status, body, text, payload,
+                       dict(metadata, attempt=attempt, duration_ms=round((time.monotonic()-started)*1000, 2)))
+                return text
+        _trace(prepared, status, body, '', payload,
+               dict(metadata, attempt=attempt, error=error.kind, duration_ms=round((time.monotonic()-started)*1000, 2)))
         if not _retryable(error):
             raise error
     raise error
@@ -326,6 +405,16 @@ def _check_config(data: Any, where: str) -> Dict[str, Any]:
     conf["temperature"] = float(temperature)
     tiers = data.get("temperature_tiers")
     conf["temperature_tiers"] = None if tiers is None else _check_tiers(tiers, where)
+    if "thinking" in data:
+        thinking = data["thinking"]
+        if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "disabled"):
+            raise LLMConfigError("thinking.type 要 enabled 或 disabled：%s" % where)
+        conf["thinking"] = {"type": thinking["type"]}
+    if "reasoning_effort" in data:
+        effort = data["reasoning_effort"]
+        if effort not in ("none", "low", "high", "max"):
+            raise LLMConfigError("reasoning_effort 要 none / low / high / max：%s" % where)
+        conf["reasoning_effort"] = effort
     return conf
 
 

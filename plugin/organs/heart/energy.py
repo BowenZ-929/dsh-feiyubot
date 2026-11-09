@@ -17,8 +17,9 @@
 结果与逐片积分相同（写测试钉住）。
 
 作息窗口（几点算睡、几点算醒）从外面注入，不在本文件里写死：DEFAULT_SLEEP_WINDOW
-只是默认值；注入进来的是「她此刻该算醒着还是睡着」的档，心不自己判断日程。默认值
-写在这里；日子线接管后由它提供，心不自己去读日程。
+只是尚未启动实际休息生命周期时的回退。已有心的rest账时，按实际阶段及已保存的
+硬撑/醒来截止分段结算；转换时先结清旧阶段，不能把硬撑按钟点算成回血。
+本模块不读取虚构日程，也不自行生成睡眠事件。
 
 去重按 event_id 的容量上限 FIFO，不设过期时间：本模块只持有一把时间尺（settle 那把），
 不养第二个时钟。
@@ -303,6 +304,7 @@ def _settle(
     at: str,
     window: Tuple[int, int],
     wake_cap: Any = None,
+    *, root: Any = None, force: bool = False,
 ) -> Dict[str, Any]:
     """把 updated_at → at 的 Δt 按 ENERGY_SLICE_MIN 切片积分，就地改 state。
 
@@ -325,7 +327,7 @@ def _settle(
     if state["day"] != today:
         state["deducted"] = 0.0
         state["day"] = today
-    if gap_min < float(model.ENERGY_MIN_GAP_MIN):
+    if gap_min <= 0 or (not force and gap_min < float(model.ENERGY_MIN_GAP_MIN)):
         return {
             "from": start_iso,
             "to": start_iso,
@@ -335,10 +337,38 @@ def _settle(
             "folded_days": 0,
         }
 
+    from . import rest
+    resting = rest.state(root)
+    phase = resting['phase']
+    if phase != 'untracked':
+        asleep = phase in ('asleep', 'deep')
+        boundaries = []
+        if phase == 'holding' and resting['hold_until'] < resting['wake_at']:
+            boundaries.append((model.parse_ts(resting['hold_until']), True))
+        if phase != 'awake':
+            boundaries.append((model.parse_ts(resting['wake_at']), False))
+        # 精力可能先于日子tick被页面读取，仍须按已经保存的截止时间分段结算。
+        cursor, value = start_ts, float(state['value'])
+        for boundary, next_asleep in boundaries + [(end_ts, False)]:
+            until = min(boundary, end_ts)
+            minutes = max(0, (until-cursor).total_seconds()/60)
+            if minutes:
+                delta = float(model.ENERGY_SLEEP_PER_MIN)*minutes if asleep else float(model.ENERGY_AWAKE_PER_H)*minutes/60
+                value = _clamp(value + delta, cap if asleep else None)
+                cursor = until
+            if boundary >= end_ts:
+                break
+            asleep = next_asleep
+        state['value'] = value
+        state['updated_at'] = at
+        return {'from': start_iso, 'to': at, 'hours': round(gap_min/60, 2),
+                'capped': False, 'steps': 1, 'folded_days': 0}
+
     slice_min = float(model.ENERGY_SLICE_MIN)
     day_min = ENERGY_STEP_CAP * slice_min  # 一整天 = ENERGY_STEP_CAP 片
     value = float(state["value"])
-    cursor = start_ts
+    # 旧状态可能写成 UTC；睡眠窗口按本次结算的钟面时间，不能沿用旧偏移。
+    cursor = start_ts.astimezone(end_ts.tzinfo)
     remaining = gap_min
     steps = 0
 
@@ -398,11 +428,18 @@ def _snapshot(state: Dict[str, Any], info: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _save(root: Any, state: Dict[str, Any]) -> None:
+def _save(root: Any, state: Dict[str, Any], reason="时间结算", source=None, at=None) -> None:
+    from . import changes
+    previous = store.read_json(_path(root), {})
     store.write_json(_path(root), state)
+    names = {"value": "精力", "tier": "精力档位", "deducted": "当日额外消耗"}
+    changes.record(root, at=at or state['updated_at'], group='energy', reason=reason, source=source,
+                   from_at=previous.get('updated_at'),
+                   before={label: previous.get(key) for key, label in names.items()},
+                   after={label: state[key] for key, label in names.items()})
 
 
-def _save_tier(root: Any, tier: str) -> None:
+def _save_tier(root: Any, tier: str, at: str) -> None:
     """只把 tier 这一栏落盘：value / updated_at / deducted 一个字节都不动。
 
     短间隔（Δ < ENERGY_MIN_GAP_MIN）不该结算、也不该重写值，但档位是状态：换了档就得
@@ -411,8 +448,12 @@ def _save_tier(root: Any, tier: str) -> None:
     data = store.read_json(_path(root), {})
     if not data or data.get("tier") == tier:
         return
+    from . import changes
+    before = data.get('tier')
     data["tier"] = tier
     store.write_json(_path(root), data)
+    changes.record(root, at=at, group='energy', reason='精力档位结算',
+                   before={'精力档位': before}, after={'精力档位': tier})
 
 
 def _dedupe_burst(at: str, event_id: Optional[str]) -> bool:
@@ -467,6 +508,7 @@ def read(
     now: Optional[str] = None,
     sleep_window: Optional[Tuple[int, int]] = None,
     wake_cap: Optional[float] = None,
+    *, force: bool = False,
 ) -> Dict[str, Any]:
     """读此刻的精力：从 updated_at 到 now 现算积分，然后写回（value + updated_at）。
 
@@ -484,15 +526,15 @@ def read(
     window = _window(sleep_window)
     state, existed = _load(root, at)
     was = state["tier"]
-    info = _settle(state, at, window, wake_cap)
+    info = _settle(state, at, window, wake_cap, root=root, force=force)
     _retier(state)
-    if info["hours"] > 0 or not existed:
+    if info["hours"] > 0 or not existed or (force and info['to'] != info['from']):
         _save(root, state)
     elif was is not None and state["tier"] != was:
         # 换了档，但这段间隔不足 ENERGY_MIN_GAP_MIN：值不动，档位照样落下。
         # was 为 None 是"旧文件补写"而不是换档——那一次仍等第一次真结算才落，
         # 短间隔"一个字节都不碰"的老规矩不为它破。
-        _save_tier(root, str(state["tier"]))
+        _save_tier(root, str(state["tier"]), at)
     return _snapshot(state, info)
 
 
@@ -509,7 +551,7 @@ def apply_burst(
     at = now if isinstance(now, str) and now else model.now_iso()
     window = _window(sleep_window)
     state, existed = _load(root, at)
-    info = _settle(state, at, window)
+    info = _settle(state, at, window, root=root)
     _retier(state)
 
     if _dedupe_burst(at, event_id) or _same_minute(state["last_burst_at"], at):
@@ -528,7 +570,7 @@ def apply_burst(
     state["deducted"] = float(state["deducted"]) + cost
     state["last_burst_at"] = at
     _retier(state)  # 扣减改了值，档位再定一次（迟滞一次只走一格）
-    _save(root, state)
+    _save(root, state, '时间结算与连续消息消耗', event_id, at=at)
     return _result(state, info, cost, None)
 
 
@@ -545,7 +587,7 @@ def apply_long_reply(
     at = now if isinstance(now, str) and now else model.now_iso()
     window = _window(sleep_window)
     state, existed = _load(root, at)
-    info = _settle(state, at, window)
+    info = _settle(state, at, window, root=root)
     _retier(state)
     try:
         length = int(chars)
@@ -567,7 +609,7 @@ def apply_long_reply(
     state["value"] = _clamp(float(state["value"]) - cost)
     state["deducted"] = float(state["deducted"]) + cost
     _retier(state)  # 扣减改了值，档位再定一次
-    _save(root, state)
+    _save(root, state, '时间结算与长回复消耗', str(length) + '字', at=at)
     return _result(state, info, cost, None)
 
 
@@ -585,13 +627,13 @@ def overview(
     window = _window(sleep_window)
     state, existed = _load(root, at)
     was = state["tier"]
-    info = _settle(state, at, window, wake_cap)
+    info = _settle(state, at, window, wake_cap, root=root)
     _retier(state)
     if info["hours"] > 0 or not existed:
         _save(root, state)
     elif was is not None and state["tier"] != was:
         # 同 read：间隔不够结算，但换了档；旧文件补写（was 为 None）仍等真结算才落。
-        _save_tier(root, str(state["tier"]))
+        _save_tier(root, str(state["tier"]), at)
     out = _snapshot(state, info)
     out["deducted"] = round(float(state["deducted"]), 2)
     return out

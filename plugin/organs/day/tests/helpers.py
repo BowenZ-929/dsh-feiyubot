@@ -80,6 +80,9 @@ def fake_mind(text: str = "", retries: int = 0) -> Dict[str, Any]:
                       ensure_ascii=False).encode("utf-8")
 
     def transport(url, headers, payload, timeout):
+        if payload['messages'][0]['content'].startswith(night.load_writing()['entries']['home_diary']['review_prompt']):
+            return 200, json.dumps({'choices': [{'message': {'content': json.dumps({
+                'text': content, 'changes': []}, ensure_ascii=False)}}]}).encode()
         return 200, body
 
     config = {"provider": "test", "model": "test-model",
@@ -112,7 +115,9 @@ def offline_night(case: Any, text: str = "") -> Path:
 
     case.addCleanup(restore)
     content = text or article()
-    for name, replacement in (("complete", lambda messages, **kwargs: content),
+    for name, replacement in (("complete", lambda messages, **kwargs:
+                              json.dumps({'text': content, 'changes': []}, ensure_ascii=False)
+                              if kwargs.get('purpose') == '日记事实复核' else content),
                               ("load_config", lambda *a, **k: {"temperature_tiers":
                                                                {"factual": 0.5}})):
         patcher = mock.patch.object(night, name, replacement)

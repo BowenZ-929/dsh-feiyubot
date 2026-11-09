@@ -86,6 +86,18 @@ class EnergyTest(unittest.TestCase):
 
     # ---- 验收 1：时间前推一天 --------------------------------------------
 
+    def test_old_utc_state_uses_current_clock_for_sleep_window(self) -> None:
+        # 同一小时，旧存档可能来自脑的 UTC 钟，也可能来自心的本地钟。
+        end = "2026-11-07T09:00:00+09:00"
+        for start in ("2026-11-06T23:00:00+00:00", "2026-11-07T08:00:00+09:00"):
+            with self.subTest(start=start):
+                self._seed(50.0, start)
+                got = energy.read(self.root, now=end)
+                self.assertAlmostEqual(46.0, got["value"], places=6)
+                self.assertEqual(1.0, got["hours"])
+                again = energy.read(self.root, now=end)
+                self.assertEqual(got["value"], again["value"])
+
     def test_day_gap_stays_in_range_and_explains_itself(self) -> None:
         """验收 1：updated_at 前推 24 小时、value=80。
 

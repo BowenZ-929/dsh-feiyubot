@@ -105,7 +105,7 @@ class CardLoadTest(unittest.TestCase):
             self.assertIn(row["inner_word"], card.TIER_WORDS[axis_id])
             self.assertIn(row["shown_word"], card.TIER_WORDS[axis_id])
         self.assertEqual(view["tiers"]["服气"]["inner_word"], "特别服")
-        self.assertEqual(view["tiers"]["服气"]["shown_word"], "顶得凶")
+        self.assertEqual(view["tiers"]["服气"]["shown_word"], "有自己的判断")
         self.assertEqual(view["tiers"]["想黏人"]["shown_word"], "淡着")
 
     def test_tier_words_five_each_for_all_six_axes(self):
@@ -152,7 +152,7 @@ class CardLoadTest(unittest.TestCase):
         text = card.render_text(loaded)
         self.assertFalse(any(ch.isdigit() for ch in text), "渲染文本里不许出现 0-9：%r" % text)
         self.assertIn("特别服", text)
-        self.assertIn("顶得凶", text)
+        self.assertIn("有自己的判断", text)
         hits = [word for words in card.TIER_WORDS.values() for word in words if word in text]
         self.assertGreaterEqual(len(set(hits)), 2, "至少两个档位词")
 

@@ -7,7 +7,7 @@
 <style>
   /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --radius: 8px;
@@ -57,28 +57,134 @@
     main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
     main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
   }
+  #growth-card, #life-card, #activity-card { grid-column: 1 / -1; }
+  #activity-list > li { padding: 14px 0; }
+  #activity-list summary { cursor: pointer; overflow-wrap: anywhere; }
+  #activity-list details { border-left: 2px solid var(--brand); padding-left: 14px; }
+  #activity-list .body { margin: 8px 0; }
+  #activity-list .meta { overflow-wrap: anywhere; }
+  #activity-list a { color: var(--brand); }
+  .badge { display: inline-block; font-size: .8rem; padding: 1px 7px; margin: 0 7px; border: 1px solid var(--line); border-radius: 6px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button, input, textarea, select { font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; }
+  button { cursor: pointer; } button:disabled { opacity: .5; cursor: wait; }
+  button.primary { background: var(--brand); color: white; border-color: var(--brand); }
+  .life-row { display: grid; grid-template-columns: 8rem minmax(0, 1fr) auto; gap: 12px; }
+  .life-row.current { border-left: 3px solid var(--brand); padding-left: 12px; }
+  .life-row time { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .life-row button { align-self: start; }
+  #life-edit { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
+  #life-edit label { display: block; margin: 10px 0; }
+  #life-edit input, #life-edit textarea { display: block; width: 100%; }
+  #life-edit textarea { min-height: 80px; }
+  @media (max-width: 480px) { .life-row { grid-template-columns: 1fr auto; }
+    .life-row time { grid-column: 1 / -1; } }
+html[data-theme="light"]{color-scheme:light}
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
      壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
 <script src="panel-base.js" data-page="day"></script>
 </head>
 <body>
-<p class="banner">今天。这一页全是读数：现在落在哪一段、今天抽到过什么、排着要说什么、计划跑没跑，都是程序记的，人在这里什么都改不了。</p>
+<p class="banner">今天 · 调整她的生活安排，查看活动和执行记录。</p>
 <main>
+  <section class="card" id="growth-card">
+    <div class="head"><h2>她自己的生活</h2><span class="who">成长与个人打算</span></div>
+    <p class="hint">开启后，她可以形成新的喜好和看法、保留自己的打算，自主写作、读作品或画画，也可以闲着。会使用现有模型账号并产生用量；不新增消息接收者，不自动开放新平台。每个生活日夜间整理一次；失败后按 1、5、15 分钟最多补试三次，成功步骤不重复。</p>
+    <p class="msg" id="growth-state" role="status">读取中…</p>
+    <button type="button" id="growth-toggle" disabled>读取开关</button>
+    <button type="button" id="growth-refresh">刷新成长状态</button>
+    <details><summary>调整活动机会</summary>
+      <form id="growth-limits" class="toolbar">
+        <label>机会间隔（分钟） <input id="growth-interval" type="number" min="1" max="1440" step="1" required style="width:100px"></label>
+        <label>每生活日最多（次） <input id="growth-cap" type="number" min="1" max="24" step="1" required style="width:90px"></label>
+        <button id="growth-limits-save" type="submit" disabled>保存活动机会</button>
+      </form>
+      <p class="hint">间隔 1–1440 分钟，每生活日 1–24 次。机会越多，可能产生的模型用量越多。更改从下一次检查生效，今天已用的次数继续保留；她仍可选择闲着。</p>
+    </details>
+    <h3>当前自我认识</h3><pre id="growth-current" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    <h3>她的打算</h3><pre id="growth-plans" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    <details><summary>最近活动选择</summary><pre id="growth-log" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
+    <p class="hint">在 <a href="./">魂页</a> 查看成长版本、纠正或回退；在 <a href="day?source=autonomy#activity-card">活动记录</a> 查看实际结果和模型调用。</p>
+  </section>
+
+  <section class="card" id="activity-card">
+    <div class="head"><h1>发生过的事</h1><span class="who">只读执行记录</span></div>
+    <p class="hint">汇总聊天、手机浏览、绘画、提醒、字幕资料任务、模型调用和状态变化等已有记录。计划、底稿、发言判断、发送尝试与确认发送分别显示，不计作不同次聊天；展开记录可看实际结果。</p>
+    <div class="toolbar">
+      <label>记录日期 <input type="date" id="activity-date"></label>
+      <label>来源 <select id="activity-source"><option value="all">全部来源</option><option value="autonomy">自主活动</option><option value="growth">认识变化</option><option value="soul">初始设定变化</option><option value="growth_settings">自主活动设置</option><option value="phone">手机浏览汇总</option><option value="phone_event">手机过程</option><option value="phone_settings">手机开关变化</option><option value="painting">绘画汇总</option><option value="painting_event">绘画过程</option><option value="chat">聊天底稿</option><option value="delivery">QQ 通道</option><option value="decision">QQ 发言判断</option><option value="reminder">提醒评估</option><option value="proactive">主动开口</option><option value="learning">字幕资料任务</option><option value="expression">评论表达学习</option><option value="meme">表情图库变化</option><option value="night">夜间整理</option><option value="heart">状态变化</option><option value="eye">看图</option><option value="ear">听语音</option><option value="voice">合成语音</option><option value="model">模型调用</option><option value="model_settings">模型设置变化</option><option value="life">生活背景设置与调整</option><option value="art_assets">画室素材变化</option><option value="people">人物名片变化</option><option value="memory_edit">记忆理解修改</option><option value="preference">相处偏好变化</option></select></label>
+      <label><input type="checkbox" id="activity-tests"> 包含已标记的验收</label>
+      <button type="button" id="activity-refresh">刷新记录</button>
+    </div>
+    <p class="msg" id="activity-msg" role="status" aria-live="polite">读取中…</p>
+    <ul class="rows" id="activity-list"></ul>
+    <div class="toolbar"><button type="button" id="activity-newer" disabled>较新记录</button><button type="button" id="activity-older" disabled>较早记录</button></div>
+    <p class="msg">按本机自然日查看。验收记录默认隐藏；旧记录未标记来源时保留为“来源未标记”。状态变化列出实际保存的前后值，时间相邻不代表互为原因。识图和转写可能有误，不等于亲历；合成语音不等于已发送。模型调用及各来源原始详情在 <a href="observe">观察记录</a>。</p>
+  </section>
+  <section class="card" id="life-card">
+    <div class="head"><h2>生活背景安排</h2><span class="who" id="life-state">读取中…</span></div>
+    <p class="hint">模型生成的角色生活背景，不是现实执行记录。开启时进入聊天背景；每天自动补齐，晚上 22 点准备明天。</p>
+    <div class="toolbar">
+      <label>日期 <input type="date" id="life-date"></label>
+      <button id="life-refresh" type="button">刷新</button>
+      <button id="life-enabled" type="button" disabled>读取中…</button>
+      <button id="life-generate" class="primary" type="button" disabled>生成这一天</button>
+    </div>
+    <p class="msg" id="life-msg" role="status" aria-live="polite"></p>
+    <h3 id="life-title"></h3>
+    <details><summary>生成这份安排时的模型记录</summary><ul class="rows" id="life-models"></ul>
+      <p class="msg">查看提示词、原稿和服务端返回的思考；记录未开启或请求尚未发出时可能没有内容。查看不会重新生成。</p></details>
+    <ul class="rows" id="life-list"></ul>
+    <form id="life-edit" hidden>
+      <h3 id="life-edit-title">调整这一段</h3>
+      <label>活动<input id="life-activity" required maxlength="80"></label>
+      <label>地点<input id="life-location" maxlength="80"></label>
+      <label>衣着<input id="life-outfit" maxlength="120"></label>
+      <label>状态<textarea id="life-detail" maxlength="300"></textarea></label>
+      <p class="hint">正在进行的时段从保存时起改变，已经过去的部分保留。</p>
+      <div class="toolbar"><button class="primary" type="submit">保存调整</button>
+        <button id="life-cancel" type="button">取消</button></div>
+    </form>
+    <details><summary>修改记录</summary><ul class="rows" id="life-changes"></ul></details>
+  </section>
   <div class="col">
+    <section class="card">
+      <div class="head"><h2>日子的主动消息</h2><span class="who" id="proactive-state">读取中…</span></div>
+      <p class="msg" id="proactive-routes"></p>
+      <p class="hint" id="proactive-quota"></p>
+      <p class="hint">由念头或真实经历触发，休息时不发。关闭后仍可能保留草稿；已经交给 QQ 的消息可能继续完成。</p>
+      <button type="button" id="proactive-stop">停止主动发送</button>
+      <button type="button" id="proactive-refresh">刷新状态</button>
+      <details><summary>设置接收人并开启</summary>
+        <form id="proactive-form">
+          <label>私聊接收人的 QQ 号 <input id="proactive-qq" inputmode="numeric" pattern="[1-9][0-9]{2,14}" maxlength="15" required autocomplete="off"></label>
+          <p class="hint">保存后仅向这个 QQ 私聊，替换现有发送范围。她自行决定是否分享，休息时不发；开启前的计划不补发，保存本身不发消息。</p>
+          <button id="proactive-enable" type="submit" disabled>保存并开启</button>
+          <p class="msg" id="proactive-save-msg" role="status"></p>
+        </form>
+      </details>
+    </section>
+    <section class="card" id="solitude-card" hidden>
+      <div class="head"><h2>自己的时间</h2><span class="who" id="solitude-state">读取中…</span></div>
+      <p class="msg" id="solitude-info"></p>
+      <p class="msg">目前会翻日记、摘录真实素材或给自己开卡。两次活动之间留间隔，同一来源不重复摘录；到点也要看是否休息、有没有可做的事。这些动作尚未使用模型自主反思。</p>
+      <button type="button" id="solitude-refresh">刷新独处状态</button>
+    </section>
     <section class="card">
       <div class="head"><h2>现在这一段</h2><span class="who">由程序写：按钟点换段，人改不了</span></div>
       <dl class="kv">
         <dt>日子</dt><dd id="now-day">读取中…</dd>
         <dt>这一段</dt><dd id="now-slot">读取中…</dd>
         <dt>几点到几点</dt><dd id="now-window">读取中…</dd>
-        <dt>有没有人</dt><dd id="now-company">读取中…</dd>
+        <dt>陪伴预设</dt><dd id="now-company">读取中…</dd>
       </dl>
       <p class="msg" id="now-msg"></p>
     </section>
 
     <section class="card">
-      <div class="head"><h2>排着要说的</h2><span class="who">由程序写：她排着要说的话，进出都由程序管，人改不了</span></div>
+      <div class="head"><h2>保留的草稿</h2><span class="who">旧待说队列，只读留存</span></div>
       <p class="hint" id="pending-count">读取中…</p>
       <ul class="rows" id="pending-list"><li class="msg">读取中…</li></ul>
       <p class="msg" id="pending-msg"></p>
@@ -111,12 +217,12 @@
   "use strict";
 
   // 谁陪：这两个词只用来解释那一个真假值。
-  var COMPANY_TEXT = { yes: "这段一般有人陪", no: "这段一般一个人" };
+  var COMPANY_TEXT = { yes: "陪伴档", no: "独处档" };
   // 计划那一行的类型：认不出就照实写「别的安排」，不编。
   var KIND_TEXT = { night: "夜里那一轮" };
   var SOURCE_TEXT = { plan: "按计划抽的", fallback: "没计划时兜底抽的" };
   var ENERGY_TEXT = { low: "偏累", mid: "一般", high: "充沛" };
-  var STATE_TEXT = { expect: "排着", delivered: "说过了" };
+  var STATE_TEXT = { expect: "留存草稿，不自动补发", delivered: "旧账标记已发送" };
 
   function el(id) { return document.getElementById(id); }
   function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
@@ -131,10 +237,10 @@
     box.className = "msg" + (tone ? " " + tone : "");
     box.textContent = text;
   }
-  // 只读页：出口只有一个，而且只收 GET。
-  function call(method, path) {
-    if (method !== "GET") { throw new Error("这一页只读：只许 GET"); }
-    return panelFetch(path, { method: method }).then(function (res) {
+  function call(method, path, body) {
+    var options = { method: method };
+    if (body !== undefined) { options.headers = {"Content-Type": "application/json"}; options.body = JSON.stringify(body); }
+    return panelFetch(path, options).then(function (res) {
       return res.json().then(function (data) {
         return { status: res.status, data: data };
       }, function () {
@@ -150,6 +256,398 @@
     return text ? text.slice(0, 16).replace("T", " ") : "时间没记";
   }
 
+  var activityOffset = 0;
+  var activityStatus = {
+    autonomy: {started:"发起活动选择", queued:"已排队，等待实际结果", done:"本次动作已完成", idle:"这次不执行活动", failed:"本次失败", interrupted:"已中断", cancelled:"已取消", stopped:"已停止", partial:"只完成一部分", rested:"选择休息", unavailable:"设备不可用", missing:"结果记录缺失"},
+    growth: {changed:"认识版本已保存"},
+    soul: {edit:"已修改",manual:"人工调整",migrate:"已迁移",proposal:"已采纳",probe:"验收测试",rollback:"已回滚",recorded:"旧记录"},
+    growth_settings: {setting:"设置已保存"},
+    model_settings: {setting:"参数已保存"},
+    life: {setting:"设置已保存",edited:"背景安排已调整"},
+    art_assets: {created:"素材已添加",edited:"素材已修改"},
+    people: {edited:"名片已修改"}, memory_edit: {edited:"理解已修改"},
+    preference: {learned:"已记住", updated:"已调整", withdrawn:"已撤回"},
+    meme: {settings:"设置已保存",edit:"资料已修改",import:"图库已导入"},
+    phone: {queued: "等待浏览", running: "正在浏览", done: "浏览流程完成", partial: "部分完成", failed: "浏览失败", stopped: "已停止", interrupted: "运行中断", rested: "这次休息"},
+    phone_event: {recorded: "原始过程记录"},
+    phone_settings: {setting: "设置已保存"},
+    painting_event: {running: "进行中", ok: "本阶段完成", done: "绘画完成", failed: "本阶段失败", cancelled: "已取消", sending: "正在发送，尚未确认", sent: "通道确认发送", unconfirmed: "发送未确认", uncertain: "发送结果不确定", unknown: "结果未知"},
+    painting: {running: "正在画", done: "画作已生成", failed: "绘画失败", cancelled: "已取消", interrupted: "运行中断"},
+    chat: {recorded: "保存了对话底稿"},
+    reminder: {planned: "已排提醒计划", held: "暂缓提醒", quota: "达到次数限制", skipped: "本次未提醒"},
+    proactive: {settings: "设置已保存", enabled: "已开启主动发送", disabled: "已关闭主动发送", planned: "已排开口计划", started: "正在组织话语", sending: "正在尝试发送", partial: "部分文字已确认", replaced: "原稿被替换，已确认替换文字", unconfirmed: "发送结果尚未确认", held: "暂缓开口", quota: "达到次数限制", muted: "暂时不打扰", blocked: "已拦截", declined: "本次不执行", empty: "没有生成话语", error: "执行出错", queued: "已入队，待确认发送", sent: "协议端确认发送", legacy_sent: "旧账标记已发，无回执依据", cold: "未获回应后的状态结算"},
+    learning: {running: "正在处理字幕", done: "字幕分段已处理", partial: "部分分段已处理", no_subtitles: "未找到字幕", failed: "任务失败", interrupted: "任务中断"},
+    expression: {created: "候选已保存，尚非采用", reviewed: "已完成逐卡复核", selection: "人工选择已保存", offered_to_model: "交给回复模型参考，未必说出口"},
+    night: {recorded: "执行记录", never_ran: "仍有步骤未完成", started:"正在整理认识", changed:"已形成新版本", unchanged:"保持当前认识", failed:"本次整理失败", interrupted:"本次整理已中断"},
+    heart: {recorded: "状态已保存"},
+    model: {completed: "模型返回正文", failed: "本次尝试失败", unknown: "结果未确认"},
+    eye: {ok: "已获得图片观察", sensitive: "敏感图不转述", failed: "看图失败", skipped: "本次跳过", unavailable: "看图不可用", setting: "看图设置变化"},
+    ear: {ok: "已获得转写", partial: "仅部分转写", unclear: "转写不可靠", empty: "未识别出文字", short: "语音过短", failed: "转写失败", skipped: "本次跳过", unavailable: "转写不可用", setting: "听语音设置变化"},
+    voice: {attempt: "发起合成尝试", generated: "语音已生成，送达另查", failed: "合成失败", skipped: "本次跳过", unavailable: "合成不可用", setting: "语音设置变化"},
+    decision: {recorded:"已记录判断"},
+    delivery: {sent: "协议端确认发送", uncertain: "发送结果不确定", failed: "发送失败", blocked: "已拦截", batched: "已收进消息批次", dup: "重复消息", empty: "没有发言", silent: "保持安静", error: "通道异常", unsent: "未发送"}
+  };
+  var activityRequested = new URLSearchParams(location.search);
+  var requestedOffset = Number(activityRequested.get("offset"));
+  activityOffset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0 ? requestedOffset : 0;
+  var requestedSource = activityRequested.get("source");
+  if (requestedSource === "all" || Object.prototype.hasOwnProperty.call(activityStatus, requestedSource)) el("activity-source").value = requestedSource;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(activityRequested.get("date") || "")) el("activity-date").value = activityRequested.get("date");
+  el("activity-tests").checked = activityRequested.get("include_tests") === "1";
+  var origins = {conversation:"本人聊天", automatic: "自主机会", manual: "手动发起", acceptance: "验收", validation_run: "验收", unknown: "来源未标记"};
+  var nightSteps = {growth: "自我认识整理", brain_compact: "记忆整理", brain_decay: "记忆衰减", home_diary: "日记", home_dream: "梦", heart_settle: "心情与精力结算"};
+  var nightStatus = {ok: "完成", failed: "失败", skipped: "跳过", carried: "本次未执行", stubbed: "未接独立动作"};
+  async function loadActivity() {
+    var controls = ["activity-date", "activity-source", "activity-tests", "activity-refresh", "activity-newer", "activity-older"];
+    controls.forEach(function (id) { el(id).disabled = true; });
+    var query = new URLSearchParams({source: el("activity-source").value, offset: String(activityOffset), limit: "20", include_tests: el("activity-tests").checked ? "1" : "0"});
+    if (el("activity-date").value) query.set("date", el("activity-date").value);
+    say("activity-msg", "正在读取…"); clear(el("activity-list"));
+    try {
+      var res = await call("GET", "/observe/activity?" + query);
+      if (res.status !== 200 || !res.data.ok) throw new Error(reasonOf(res));
+      var data = res.data;
+      el("activity-date").value = data.date;
+      var saved = new URLSearchParams({source: el("activity-source").value, date: data.date});
+      if (activityOffset) saved.set("offset", String(activityOffset));
+      if (el("activity-tests").checked) saved.set("include_tests", "1");
+      history.replaceState(null, "", "?" + saved + location.hash);
+      window.dispatchEvent(new Event("panel-routechange"));
+      var errors = Object.keys(data.errors).map(function (source) { return data.sources[source] + "：" + data.errors[source]; });
+      var missing = Object.keys(data.available).filter(function (source) { return !data.available[source]; }).map(function (source) { return data.sources[source]; });
+      say("activity-msg", data.total + " 条记录 · 当前 " + (data.rows.length ? data.offset + 1 : 0) + "–" + Math.min(data.offset + data.limit, data.total) + " 条 · " + data.timezone + " · 已隐藏验收 " + data.hidden_tests + " 条"
+        + (data.invalid_records ? " · " + data.invalid_records + " 条记录无法解析或缺少有效时间" : "")
+        + (missing.length ? " · 尚未留存记录：" + missing.join("、") : "")
+        + (errors.length ? " · " + errors.join("；") : ""), errors.length || data.invalid_records ? "bad" : "");
+      data.rows.forEach(function (row) {
+        var li = node("li"), detail = node("details"), summary = node("summary");
+        summary.appendChild(node("span", "meta", shortTime(row.at) + " · " + data.sources[row.source] + " · " + (row.source === "heart" ? row.group_label : (origins[row.origin] || row.origin))));
+        summary.appendChild(node("span", "badge", (activityStatus[row.source] || {})[row.status] || row.status));
+        summary.appendChild(node("span", "", row.title + (row.source === "art_assets" && row.detail ? " · " + row.detail : ""))); detail.appendChild(summary);
+        if (row.finished_at) detail.appendChild(node("div", "meta", "结束时间：" + shortTime(row.finished_at)));
+        if (row.source === "decision") {
+          if (row.target) detail.appendChild(node("div", "meta", "回应对象：" + row.target));
+          if (row.batch) detail.appendChild(node("div", "meta", "消息段：" + (row.batch.id || "未记录")
+            + (typeof row.batch.msgs === "number" ? " · 合并 " + row.batch.msgs + " 条原消息" : "")));
+          if (row.reason_code) detail.appendChild(node("div", "meta", "判断原因编号：" + row.reason_code));
+          detail.appendChild(node("div", "meta", "这是发言判断；是否实际送达，以QQ通道回执为准。"));
+        }
+        if (row.mode) detail.appendChild(node("div", "meta", "通道模式：" + row.mode));
+        if (row.delivery_status) detail.appendChild(node("div", "meta", (row.source === "learning" ? "结果通知：" : "发图结果：") + (activityStatus.delivery[row.delivery_status] || ({pending:"等待通知", sending:"正在发送，尚未确认", unconfirmed:"发送结果未确认", not_requested:"未请求通知", not_recorded:"未记录"})[row.delivery_status] || row.delivery_status)));
+        if (row.model_turn_id && ["phone", "phone_event"].includes(row.source)) {
+          var phoneModelLink = node("a", "", "查看本次浏览的模型调用");
+          phoneModelLink.href = "observe?source=model&turn_id=" + encodeURIComponent(row.model_turn_id);
+          detail.appendChild(phoneModelLink);
+        }
+        if (row.model_turn_id && ["painting", "painting_event"].includes(row.source)) {
+          var paintingModelLink = node("a", "", "查看这幅画的规划与检查记录");
+          paintingModelLink.href = "observe?source=model&turn_id=" + encodeURIComponent(row.model_turn_id);
+          detail.appendChild(paintingModelLink);
+        }
+        if (row.model_turn_id && ["autonomy", "night"].includes(row.source)) {
+          var growthModelLink = node("a", "", row.source === "autonomy" ? "查看本次活动选择的模型记录" : "查看本次成长判断的模型记录");
+          growthModelLink.href = "observe?source=model&turn_id=" + encodeURIComponent(row.model_turn_id);
+          detail.appendChild(growthModelLink);
+        }
+        if (row.source === "autonomy") {
+          detail.appendChild(node("div", "meta", ({autonomy_attempt:"选择尝试",autonomy_result:"选择及启动结果",autonomy_finished:"执行器最终回执"})[row.event] || "自主活动记录"));
+          if (row.event === "autonomy_result") detail.appendChild(node("div", "meta", row.recorded_at
+            ? "按结果记录时间展示；选择开始于 " + shortTime(row.started_at)
+            : "这条旧结果只保留选择开始时间，结果记录时间未保存。"));
+          if (row.reaction_error) detail.appendChild(node("div", "meta", "附带感想未采用，未影响心情：" + row.reaction_error));
+          if (row.reaction) {
+            var reaction = row.reaction;
+            detail.appendChild(node("div", "meta", "感受依据：" + reaction.id));
+            detail.appendChild(node("div", "body", reaction.impression || "没有特别感受"));
+            if (reaction.evidence) detail.appendChild(node("div", "body", "当时依据的原文：" + reaction.evidence));
+            if (reaction.mood && reaction.mood.ok) {
+              detail.appendChild(node("div", "meta", "心情：" + reaction.mood.before + " → " + reaction.mood.after));
+            }
+          }
+          var receipt = row.receipt;
+          var intention = row.intention_id || (receipt && receipt.intention_id);
+          if (intention) detail.appendChild(node("div", "meta", "对应打算：" + intention));
+          if (receipt) {
+            if (["write", "read"].includes(row.action) && typeof receipt.text === "string") {
+              detail.appendChild(node("div", "meta", receipt.kind === "painting" ? "本次重新看图得到的观察"
+                : row.action === "write" ? "当时写下的作品" : "当时读到的作品"));
+              if (receipt.kind === "painting" && receipt.observation) {
+                var observationFields = {subject:"主体",scene:"场景",visible_text:"可见文字",meaning:"画面含义",uncertainty:"未看清或未确认"};
+                Object.keys(observationFields).forEach(function (key) {
+                  if (receipt.observation[key]) detail.appendChild(node("div", "body", observationFields[key] + "：" + receipt.observation[key]));
+                });
+              } else detail.appendChild(node("div", "body", receipt.text));
+              detail.appendChild(node("div", "meta", receipt.kind === "painting"
+                ? "视觉观察可能有误，原画未修改。画作编号：" + receipt.job_id : "作品内容不代表实际经历。"));
+            }
+            if (receipt.card_id || (row.action === "read" && receipt.id)) {
+              detail.appendChild(node("div", "meta", "家中卡片：" + (receipt.card_id || receipt.id)));
+            }
+            if (receipt.based_on) detail.appendChild(node("div", "meta", (receipt.kind === "painting" ? "原画活动：" : "接续原稿：") + receipt.based_on));
+            if (row.action === "plan") {
+              var planStates = {active:"进行中", paused:"暂停", abandoned:"已放下", done:"完成"};
+              detail.appendChild(node("div", "body", "当时的打算：" + (receipt.name || "未保存名字")
+                + " · " + (planStates[receipt.status] || receipt.status || "未保存状态")));
+              if (receipt.next_step) detail.appendChild(node("div", "body", "下一步：" + receipt.next_step));
+            }
+            if (["paint", "browse"].includes(row.action) && (receipt.job_id || receipt.id)) {
+              detail.appendChild(node("div", "meta", "执行任务：" + (receipt.job_id || receipt.id)));
+              var execution = row.execution;
+              if (execution) {
+                detail.appendChild(node("div", "meta", "执行任务当前状态：" + (execution.status === "missing"
+                  ? "执行任务记录已缺失" : (activityStatus[row.action === "paint" ? "painting" : "phone"][execution.status] || execution.status))));
+                if (execution.model_turn_id) {
+                  var executionLink = node("a", "", "查看实际执行的模型记录");
+                  executionLink.href = "observe?source=model&turn_id=" + encodeURIComponent(execution.model_turn_id);
+                  detail.appendChild(executionLink);
+                } else if (execution.status !== "missing") {
+                  detail.appendChild(node("div", "meta", execution.mode === "image"
+                    ? "本地模型直接生图，没有语言模型规划与检查记录。" : "此任务未保存执行模型记录编号。"));
+                }
+              }
+            }
+          } else if (row.status === "done" && ["write", "read", "plan"].includes(row.action)) {
+            detail.appendChild(node("div", "meta", "这条记录未保存结果回执，无法在这里还原当时的内容。"));
+          }
+        }
+        if (row.source === "preference") {
+          detail.appendChild(node("div", "meta", "人物：" + row.person_id + " · 会话：" + row.session_id
+            + " · " + (row.actor === "panel" ? "面板撤回" : "本人聊天")));
+          (row.evidence || []).forEach(function (quote) { detail.appendChild(node("div", "", "原话依据：" + quote)); });
+          if ((row.missing_previous || []).length) detail.appendChild(node("div", "msg bad", "找不到 " + row.missing_previous.length + " 条被替换记录，改前内容未补猜。"));
+          (row.memory_links || []).forEach(function (memory, index) {
+            var memoryLink = node("a", "meta", "查看原话记忆 " + (index + 1)); memoryLink.href = memory.link;
+            detail.appendChild(memoryLink);
+          });
+          if (row.model_turn_id) {
+            var preferenceModelLink = node("a", "meta", "查看当轮理解与回复的模型记录");
+            preferenceModelLink.href = "observe?source=model&turn_id=" + encodeURIComponent(row.model_turn_id);
+            detail.appendChild(preferenceModelLink);
+          }
+        }
+        if (row.source === "people" || row.source === "memory_edit") {
+          detail.appendChild(node("div", "meta", (row.source === "people" ? "人物：" + row.person_id : "记忆：" + row.entry_id)
+            + " · 操作者：" + (row.actor || "未记录")));
+          if (row.summary_only) {
+            detail.appendChild(node("div", "meta", "旧记录只保存摘要，可能截断，无法还原完整前后值。"));
+            detail.appendChild(node("div", "body", "改前摘要：" + (row.before_summary == null ? "未记录" : row.before_summary || "空值")));
+            detail.appendChild(node("div", "body", "改后摘要：" + (row.after_summary == null ? "未记录" : row.after_summary || "空值")));
+          }
+          if (row.source === "memory_edit" && !Object.prototype.hasOwnProperty.call(row.changes || {}, "unclear")) {
+            detail.appendChild(node("div", "meta", "旧记录未保存当时的不确定标记。"));
+          }
+        }
+        if (row.source === "soul") {
+          detail.appendChild(node("div", "meta", "初始设定的历史，不是她自主形成的认识；下方为原账摘要，可能截断。"));
+          detail.appendChild(node("div", "meta", "操作者：" + (row.actor || "未记录") + " · 字段：" + (row.field || "未记录或整档操作")));
+          detail.appendChild(node("div", "body", "改前摘要：" + (row.before_summary == null ? "未记录" : row.before_summary === "" ? "空值" : row.before_summary)));
+          detail.appendChild(node("div", "body", "改后摘要：" + (row.after_summary == null ? "未记录" : row.after_summary === "" ? "空值" : row.after_summary)));
+          if (row.revision != null) detail.appendChild(node("div", "meta", "保存为第 " + row.revision + " 版"));
+          if (row.target_revision != null) detail.appendChild(node("div", "meta", "回滚目标：第 " + row.target_revision + " 版"));
+        }
+        if (row.source === "growth") {
+          var growthFields = {likes:"喜欢",dislikes:"不喜欢",views:"当前看法",self_description:"怎样看自己",stance:"待人倾向",sleep_notice:"睡眠提示"};
+          Object.keys(row.changes || {}).forEach(function (key) {
+            var change = row.changes[key];
+            var before = change.before == null ? "沿用初始设定" : change.before === "" ? "已清空" : change.before;
+            var after = change.after == null ? "沿用初始设定" : change.after === "" ? "已清空" : change.after;
+            detail.appendChild(node("div", "body", (growthFields[key] || key) + "：" + before + " → " + after));
+          });
+          detail.appendChild(node("div", "meta", "出处：" + ((row.sources || []).join("、") || "自主选择或人工纠正")));
+        }
+        if (row.source === "phone") {
+          detail.appendChild(node("div", "meta", "这是本次浏览当前保存的汇总，时间为创建时刻；逐步经历请筛选“手机过程”，两者不是两次浏览。"));
+        }
+        if (row.source === "painting") {
+          detail.appendChild(node("div", "meta", "这是画作当前保存的汇总，时间为任务创建时刻；已记录的阶段请筛选“绘画过程”，旧任务不会补造过程。"));
+        }
+        if (row.source === "painting_event") {
+          detail.appendChild(node("div", "meta", "画作编号：" + row.job_id + " · 第 " + row.source_line + " 步"));
+          detail.appendChild(node("div", "meta", "记录时刻：" + row.at));
+          if (row.stroke_count != null) detail.appendChild(node("div", "body", "笔触数量：" + row.stroke_count));
+          if (row.action) detail.appendChild(node("div", "body", "检查决定：" + ({keep:"保留初稿",revise:"修改一次"}[row.action] || row.action)));
+          if (row.delivery_kind) detail.appendChild(node("div", "body", "发送内容：" + ({image:"画作图片",failure_notice:"绘画失败通知"}[row.delivery_kind] || row.delivery_kind)));
+          detail.appendChild(node("div", "meta", "渲染完成不等于送达；改稿只渲染一次，没有再次看图。这里记录后台阶段，不是动画回放帧。"));
+        }
+        if (row.source === "phone_event") {
+          detail.appendChild(node("div", "meta", "浏览编号：" + row.session_id + " · 第 " + row.source_line + " 步"));
+          detail.appendChild(node("div", "meta", "记录时刻：" + row.at));
+          if (row.event_status) detail.appendChild(node("div", "body", "这一步结果：" + ({ok:"已取得结果",failed:"失败",partial:"部分完成",unavailable:"不可用"}[row.event_status] || row.event_status)));
+          if (row.selected_title != null) detail.appendChild(node("div", "body", "选中标题：" + row.selected_title));
+          if (row.event_kind === "selection" && row.selected_title == null) detail.appendChild(node("div", "body", "这次没有选中视频。"));
+          if (row.action) detail.appendChild(node("div", "body", "操作：" + ({wake:"唤醒屏幕",bilibili:"打开B站",tap:"点按",swipe:"滑动",pause:"请求暂停",home:"回到桌面",back:"返回"}[row.action] || row.action)));
+          if (row.index != null) detail.appendChild(node("div", "body", "画面序号：" + (row.index + 1)));
+          if (row.cards != null) detail.appendChild(node("div", "body", "表达候选：" + row.cards + " 张（保存不等于采用）"));
+          detail.appendChild(node("div", "meta", "按这一步的实际记录时间展示；操作返回不代表画面效果已确认，选片理由不等于看后感想。"));
+        }
+        if (row.source === "reminder") {
+          detail.appendChild(node("div", "meta", "这是提醒评估记录，不能据此认定已发消息或已完成任务。"));
+          if (row.due) detail.appendChild(node("div", "body", "任务到期：" + shortTime(row.due)));
+          detail.appendChild(node("div", "meta", "该记录累计评估 " + row.evaluation_count + " 次；合并记录的时间为最近一次评估。"));
+          if (row.card_id) detail.appendChild(node("div", "meta", "任务卡：" + row.card_id));
+        }
+        if (row.source === "proactive") {
+          if (row.correction_reason === "model-declined") detail.appendChild(node("div", "body", "她选择这次不主动开口，没有发送，也不会重试这条计划。"));
+          else if (row.after_generation) detail.appendChild(node("div", "body", row.turn_id ? "生成后已取消，草稿没有发送。" : "生成后由头变化，草稿未入队。"));
+          detail.appendChild(node("div", "meta", "阶段：" + (({config:"调整设置", consider:"考虑是否开口", due:"计划到期执行", ack:"通道确认", outcome:"后续结果"})[row.stage] || row.stage || "未记录")));
+          if (row.who) detail.appendChild(node("div", "body", "对象：" + row.who));
+          if (row.engage && row.engage.reason) detail.appendChild(node("div", "body", "当时的接话判断：" + row.engage.reason));
+          if (row.error) detail.appendChild(node("div", "body", "错误：" + row.error));
+          if (row.correction_of) detail.appendChild(node("div", "body", "历史修正：" + (row.correction_reason === "withdrawn-unsent-legacy" ? "撤回旧版未实际发送的草稿" : row.correction_reason || "原因未记录") + " · 对应记录时间：" + shortTime(row.correction_of)));
+          if (row.plan_id) detail.appendChild(node("div", "meta", "计划编号：" + row.plan_id));
+          if (row.delivery_id) detail.appendChild(node("div", "meta", "投递编号：" + row.delivery_id));
+          if (row.confirmed_text) detail.appendChild(node("div", "body", "实际确认的文字：" + row.confirmed_text));
+          if (row.turn_id) { var proactiveLink = node("a", "", "查看本次生成与思考记录");
+            proactiveLink.href = "observe?source=model&turn_id=" + encodeURIComponent(row.turn_id); detail.appendChild(proactiveLink); }
+          detail.appendChild(node("div", "meta", "安排计划或进入队列不等于送达；协议端确认发送也不代表对方已读。"));
+        }
+        if (row.source === "learning") {
+          detail.appendChild(node("div", "meta", "此条是任务最近保存的状态，按更新时间展示；没有保存的中间过程不补造。"));
+          if (row.created_at) detail.appendChild(node("div", "meta", "创建时间：" + shortTime(row.created_at)));
+          detail.appendChild(node("div", "body", "已处理分段：" + row.completed_segments + " / " + (row.total_segments == null ? "总数未记录" : row.total_segments) + " · 资料卡 " + row.card_count + " 张 · 未通过检查 " + row.rejected_count + " 条"));
+          detail.appendChild(node("div", "meta", "处理字幕资料，不代表手机观看视频或学习评论区；生成资料卡也不等于内容已核实。"));
+        }
+        if (row.source === "expression") {
+          (row.cards || []).forEach(function(card) {
+            detail.appendChild(node("div", "body", "表达：" + card.phrase));
+            if (card.review) {
+              var review = card.review;
+              detail.appendChild(node("div", "body", "模型建议：" + (review.adopt ? "采用" : "不采用") + " · " + (review.reason || "理由未记录")));
+              detail.appendChild(node("div", "meta", typeof review.applied === "boolean" ?
+                (review.applied ? "复核决定已应用" : "保留你的决定，未应用模型建议") + " · 当时采用状态：" + (review.enabled_before ? "采用" : "未采用") + " → " + (review.enabled_after ? "采用" : "未采用") :
+                "旧复核未记录实际状态变化，不能用当前开关倒推。"));
+            }
+          });
+          (row.changes || []).forEach(function(change) {
+            var from = {user:"你的决定",model:"模型决定"}[change.source_before] || "此前来源未记录";
+            detail.appendChild(node("div", "body", change.id + "：" + (change.enabled_before ? "采用" : "未采用") + " → " + (change.enabled_after ? "采用" : "未采用") + " · " + from + " → 你的决定"));
+          });
+          if (row.card_ids && row.card_ids.length) detail.appendChild(node("div", "body", "参考卡片：" + row.card_ids.join("、")));
+          if (row.session_id) detail.appendChild(node("div", "meta", "会话：" + row.session_id));
+          if (row.delivery_id) detail.appendChild(node("div", "meta", "对应投递编号：" + row.delivery_id));
+          if (row.source_rejected_now) detail.appendChild(node("div", "meta", "这组来源目前已被判定有误，不能采用；不据此改写当时的记录。"));
+          detail.appendChild(node("div", "meta", "候选、复核、采用和聊天参考分别记录；参考不等于照说，实际发言以QQ回执为准。旧的人工变化没有时间记录时不补造。"));
+        }
+        if (row.source === "night") {
+          detail.appendChild(node("div", "meta", "整理的生活日：" + (row.day || "未记录")
+            + (row.attempt == null ? "" : row.attempt === 0 ? " · 首次执行" : " · 第 " + row.attempt + " 次重试")));
+          Object.keys(row.steps).forEach(function (key) {
+            var step = row.steps[key];
+            var execution = row.retried_steps == null ? "本次是否执行未记录" : row.retried_steps.indexOf(key) >= 0 ? "本次执行" : "沿用之前结果";
+            var state = step.rerun ? "已有记录，未重写" : (nightStatus[step.status] || step.status);
+            var entry = node("details");
+            entry.appendChild(node("summary", "body", (nightSteps[key] || key) + " · " + state + "（" + execution + "）"));
+            entry.appendChild(node("div", "meta", step.detail || "没有附加说明。"));
+            if (step.model_turn_id) {
+              var modelLink = node("a", "", "查看这次整理的模型记录");
+              modelLink.href = "observe?source=model&turn_id=" + encodeURIComponent(step.model_turn_id);
+              entry.appendChild(modelLink);
+            }
+            detail.appendChild(entry);
+          });
+          if (row.failed_steps.length) detail.appendChild(node("div", "body", "未完成：" + row.failed_steps.map(function (key) { return nightSteps[key] || key; }).join("、")));
+          if (row.next_retry_at) detail.appendChild(node("div", "meta", "当时安排的下次重试：" + shortTime(row.next_retry_at)));
+        }
+        if (row.source === "heart") {
+          detail.appendChild(node("div", "meta", row.group_label + " · 前后值可能包含期间的自然恢复或回落，不全由单次事件造成。"));
+          Object.keys(row.changes).forEach(function (name) {
+            var c = row.changes[name];
+            var values = [c.before, c.after].map(function (value, index) {
+              if (row.group === "proactive") {
+                if (name === "暂停主动开口至" && value === null) return "未设置暂停";
+                if (name === "最近主动开口" && value === null) return "尚无记录";
+                if (typeof value === "boolean") return value ? "是" : "否";
+              }
+              return index === 0 && value == null ? "无此前记录" : value;
+            });
+            detail.appendChild(node("div", "body", name + "：" + values[0] + " → " + values[1]));
+          });
+          var feedbackSources = {proactive_sent:"主动开口登记",proactive_ignored:"未获回应",proactive_replied:"收到回应",proactive_incoming:"对方主动开口"};
+          if (row.trigger_source) detail.appendChild(node("div", "meta", "来源标记：" + (feedbackSources[row.trigger_source] || row.trigger_source)));
+          if (row.emotion_origin) {
+            var emotion = row.emotion_origin, sceneNames = {group:"群聊",private:"私聊",unknown:"场景未知"};
+            detail.appendChild(node("div", "meta", "说话人：" + emotion.who + " · " + (sceneNames[emotion.scene] || emotion.scene)));
+            detail.appendChild(node("div", "body", "判断所据摘录：" + (emotion.evidence || "未保存")));
+            detail.appendChild(node("div", "meta", "当时判断：" + (emotion.note || "未保存")));
+            var emotionLink = node("a", "", "查看这一轮模型调用");
+            emotionLink.href = "observe?source=model&turn_id=" + encodeURIComponent(emotion.turn_id);
+            detail.appendChild(emotionLink);
+          } else if (["praise","care","cold","insult","rejected"].indexOf(row.trigger_source) >= 0) {
+            detail.appendChild(node("div", "meta", "未保存回合关联，不能按时间猜测原话或说话人。"));
+          }
+          if (row.from_at) detail.appendChild(node("div", "meta", "上次保存：" + shortTime(row.from_at)));
+        }
+        if (row.source === "meme" && row.status === "import") detail.appendChild(node("div", "body", "导入 " + row.imported + " 张表情"));
+        if (row.source === "life" || row.source === "art_assets") {
+          if (row.day) detail.appendChild(node("div", "meta", "安排日期：" + row.day));
+          if (row.revision != null) detail.appendChild(node("div", "meta", "保存为第 " + row.revision + " 版"));
+        }
+        if ((row.status === "setting" || row.source === "life" || row.source === "art_assets" || row.source === "people" || row.source === "memory_edit" || row.source === "preference" || row.source === "meme" || row.source === "proactive" && row.stage === "config") && row.changes) {
+          var settingNames = {interaction_preference:"相处偏好",note:"记忆理解",unclear:"不确定标记",name:"名称",category:"素材类别",images:"参考图片",start:"开始时间",end:"结束时间",activity:"背景活动",location:"地点",outfit:"衣着",detail:"背景状态",model:"模型请求名",thinking:"思考开关",reasoning_effort:"思考档位",max_tokens:"输出 token 上限",timeout_ms:"等待时间（毫秒）",retries:"失败重试次数",temperature:"温度",enabled:"功能开关",interval_minutes:"机会间隔（分钟）",daily_cap:"每生活日最多（次）",per_who_daily_cap:"每生活日主动开口上限（次）",own_doing_daily_cap:"其中自身经历分享上限（次）",routes:"接收会话",owner:"默认接收人",enabled_at:"本次启用时间",sound_model:"声音分类模型",chat_enabled:"聊天选图开关",description:"图片描述",visible_text:"图中文字",keywords:"检索词",reviewed:"复核标记"};
+          Object.keys(row.changes).forEach(function (name) {
+            var c = row.changes[name];
+            var values = [c.before,c.after].map(function (value) {
+              if (value == null) return "未设置";
+              if (value === "") return "空值";
+              if (name === "interaction_preference") return value.length ? value.join("；") : "无";
+              if (name === "unclear") return value ? "有" : "无";
+              if (name === "thinking") return value.type === "enabled" ? "开启" : "关闭";
+              if (name === "category") return ({characters:"人物",outfits:"服饰",scenes:"场景",props:"道具"})[value] || value;
+              if (value === true) return "开启";
+              if (value === false) return "关闭";
+              if (name === "routes") return value.length ? value.map(function (route) {
+                return (route.scene === "private" ? "私聊 QQ " : "群聊 ") + route.target;
+              }).join("、") : "未设置";
+              return typeof value === "object" ? JSON.stringify(value) : value;
+            });
+            detail.appendChild(node("div", "body", (settingNames[name] || name) + "："
+              + values[0] + " → " + values[1]));
+          });
+          if (row.trigger_source) detail.appendChild(node("div", "meta", "操作来源：" + (row.trigger_source === "panel" ? "设置面板" : row.trigger_source)));
+        }
+        if (row.source === "eye") {
+          if (row.cached) detail.appendChild(node("div", "meta", "复用这张图的已有观察，本次没有重新识图。"));
+          var labels = {subject:"画面主体", scene:"场景", visible_text:"可见文字", meaning:"可能含义", uncertainty:"仍不确定"};
+          Object.keys(labels).forEach(function (key) {
+            if (row.observation && row.observation[key]) detail.appendChild(node("div", "body", labels[key] + "：" + row.observation[key]));
+          });
+        }
+        if (row.transcript) detail.appendChild(node("div", "body", "机器转写（可能有错字）：" + row.transcript));
+        if (row.sound_events) {
+          var sounds = row.sound_events;
+          var labels = (sounds.events || []).map(function (event) { return event.label; }).join("、");
+          var soundText = sounds.status === "ok" ? (labels ? "可能有" + labels : "没有明确类别，不等于没有声音")
+            : ({failed:"本次声音分类失败",unavailable:"本次声音分类不可用",short:"片段过短，未分类"}[sounds.status] || "声音分类结果未确认");
+          detail.appendChild(node("div", "body", "声音线索：" + soundText));
+          if (sounds.status === "ok") detail.appendChild(node("div", "meta", "仅前 " + sounds.processed_seconds + " 秒；类别可能识错，模型分数不是正确率。"));
+        }
+        if (row.duration != null) detail.appendChild(node("div", "meta", "音频时长：" + row.duration + " 秒"));
+        if (row.characters != null) detail.appendChild(node("div", "meta", "合成文字：" + row.characters + " 字符"));
+        if (row.source === "model") {
+          detail.appendChild(node("div", "meta", "记录时间是本次尝试结束时间，不代表消息已发送。"));
+          detail.appendChild(node("div", "body", "请求模型：" + (row.requested_model || "未记录") + " · 返回模型：" + (row.actual_model || "未记录")));
+          if (row.duration_ms != null) detail.appendChild(node("div", "meta", "耗时：" + row.duration_ms + " 毫秒"));
+          if (row.call_index != null || row.attempt != null) detail.appendChild(node("div", "meta", "回合内调用：" + (row.call_index == null ? "未关联" : row.call_index) + " · 本次尝试：" + (row.attempt == null ? "未记录" : row.attempt)));
+          if (row.http_status != null) detail.appendChild(node("div", "meta", "HTTP：" + row.http_status));
+          if (row.turn_id) detail.appendChild(node("div", "body", "回合：" + row.turn_id));
+          detail.appendChild(node("div", "meta", "原账日期：" + row.source_date));
+        }
+        if (row.detail || ["night", "heart", "eye", "ear", "voice"].indexOf(row.source) < 0) detail.appendChild(node("div", "body", row.detail || "这条记录没有附加说明。"));
+        detail.appendChild(node("div", "meta", "记录编号：" + row.id + (row.source_line && ["phone_event", "painting_event"].indexOf(row.source) < 0 ? " · 原账第 " + row.source_line + " 行" : "")));
+        if (["night", "reminder", "proactive"].indexOf(row.source) < 0) { var link = node("a", "", "查看该来源详情"); link.href = row.link; detail.appendChild(link); }
+        li.appendChild(detail); el("activity-list").appendChild(li);
+      });
+      if (!data.rows.length) el("activity-list").appendChild(node("li", "msg", "当前日期和筛选条件下没有可展示的记录。"));
+      el("activity-newer").disabled = activityOffset === 0;
+      el("activity-older").disabled = !data.has_older;
+    } catch (err) { say("activity-msg", "读取失败：" + err.message, "bad"); }
+    finally { controls.slice(0, 4).forEach(function (id) { el(id).disabled = false; }); }
+  }
+  ["activity-date", "activity-source", "activity-tests"].forEach(function (id) { el(id).onchange = function () { activityOffset = 0; loadActivity(); }; });
+  el("activity-refresh").onclick = function () { loadActivity(); };
+  el("activity-newer").onclick = function () { activityOffset = Math.max(0, activityOffset - 20); loadActivity(); };
+  el("activity-older").onclick = function () { activityOffset += 20; loadActivity(); };
+
   // —— 现在这一段（只读） ————————————————————————
   function showNow(data) {
     el("now-day").textContent = String(data.day || "日期没给");
@@ -157,9 +655,10 @@
     var span = data.slot_window || {};
     el("now-window").textContent = (span.from === undefined || span.to === undefined)
       ? "时段范围没给" : span.from + " 点到 " + span.to + " 点";
-    var company = COMPANY_TEXT[data.company_key] || "按钟点算的";
-    el("now-company").textContent = (data.company === true ? "有人陪" : "一个人") + "（" + company + "）";
-    say("now-msg", "这一段现在就是这么定的；要不要有人陪，也是程序按钟点算的。");
+    var company = COMPANY_TEXT[data.company_key] || "预设未记录";
+    var source = ({slot:"按时段预设", explicit:"调用时指定"})[data.company_source] || "来源未记录";
+    el("now-company").textContent = company + "（" + source + "）";
+    say("now-msg", "这是抽签模块的陪伴预设，不表示实际有人在线、正在聊天或在场。实际活动请看上方记录。");
   }
 
   // —— 今天抽到过什么（只读） ————————————————————
@@ -185,27 +684,44 @@
     say("draw-msg", "这是最近抽到的那一次。");
   }
 
-  // —— 排着要说的（只读） ————————————————————————
+  // —— 保留的草稿（只读） ————————————————————————
+  function appendTalkSource(li, row) {
+    if (row.to || row.who) li.appendChild(node("div", "meta", "拟回应对象：" + (row.to || row.who)));
+    var source = row.source;
+    if (!source) {
+      li.appendChild(node("div", "meta", "未保存原话来源；不能据此确定发送会话。"));
+      return;
+    }
+    var scene = source.scene === "group" ? (source.session_id ? "群聊" : "群聊（具体群未保存）")
+      : source.scene === "private" ? "私聊" : "会话未知";
+    li.appendChild(node("div", "meta", "原话来自：" + scene
+      + (source.session_id ? " · 来源会话 " + source.session_id : "")
+      + (source.at ? " · " + shortTime(source.at) : "")
+      + (source.entry_id ? " · 原话编号 " + source.entry_id : "")));
+  }
+
   function showPending(data) {
     var list = el("pending-list");
     clear(list);
     var counts = data.counts || {};
-    el("pending-count").textContent = "排着 " + Number(counts.expect || 0)
-      + " 条 · 说过了 " + Number(counts.delivered || 0) + " 条";
+    el("pending-count").textContent = "留存草稿 " + Number(counts.expect || 0)
+      + " 条 · 旧账标记已发送 " + Number(counts.delivered || 0) + " 条";
     var rows = data.items || [];
     if (!rows.length) {
-      list.appendChild(node("li", "msg", "队列空着：没有排着要说的话。"));
-      say("pending-msg", "她要说什么，由她那边的程序排；这一页只是给你看它排了什么。");
+      list.appendChild(node("li", "msg", "目前没有留存草稿。"));
+      say("pending-msg", "这里只展示旧队列；新的主动分享和实际发送结果请看上方活动记录。");
       return;
     }
     rows.forEach(function (row) {
       var li = node("li");
       li.appendChild(node("div", "body", row.text || "（这条没有正文）"));
+      appendTalkSource(li, row);
       li.appendChild(node("div", "meta", (STATE_TEXT[row.state] || "状态没记")
         + (row.created_at ? " · " + shortTime(row.created_at) + " 排上的" : "")));
+      if (row.reason) li.appendChild(node("div", "meta", row.reason));
       list.appendChild(li);
     });
-    say("pending-msg", "这条队列不由人改：它跟着她那边的发送走。");
+    say("pending-msg", "这些旧草稿不会因开启主动消息而补发。新的主动分享和实际送达结果请看上方活动记录。");
   }
 
   // —— 计划的下场（只读） ————————————————————————
@@ -213,6 +729,7 @@
     var li = node("li");
     var name = KIND_TEXT[row.kind] || String(row.kind || "别的安排");
     li.appendChild(node("div", "body", name + (row.note ? "：" + row.note : "")));
+    if (row.kind === "proactive") appendTalkSource(li, row);
     var meta = [];
     if (row.at) { meta.push(shortTime(row.at)); }
     if (row.reason) { meta.push("为什么：" + row.reason); }
@@ -265,8 +782,166 @@
     });
   }
 
-  load();
+  var lifeState = null, editing = null, busy = false;
+  function lifeTime(text) {
+    return (text.slice(0, 10) !== lifeState.day ? "次日 " : "") + text.slice(11, 16);
+  }
+  function showLife(data) {
+    lifeState = data;
+    el("life-date").value = data.day;
+    el("life-state").textContent = (data.enabled ? "聊天背景已开启" : "聊天背景已关闭") + " · " + data.cutover_hour + " 点换日 · UTC" + data.now.slice(-6);
+    var phase = data.rest && data.rest.phase;
+    var restNames = {awake:"醒着", asleep:"睡着", holding:"被叫醒后硬撑", deep:"彻底睡着", untracked:"尚未记录"};
+    el("life-state").textContent += " · 实际状态：" + (restNames[phase] || "未知");
+    if (["asleep", "holding", "deep"].includes(phase)) {
+      el("life-state").textContent += "，聊天以休息状态为准；下方保留原安排。";
+    }
+    el("life-enabled").textContent = data.enabled ? "关闭生活背景" : "开启生活背景";
+    el("life-enabled").disabled = false;
+    var plan = data.plan;
+    el("life-generate").disabled = Boolean(plan && plan.status === "ready");
+    el("life-generate").textContent = plan && plan.status !== "ready" ? "重试生成" : "生成这一天";
+    el("life-title").textContent = plan && plan.title || "";
+    clear(el("life-list")); clear(el("life-changes")); clear(el("life-models"));
+    (data.settings_changes || []).slice(-5).reverse().forEach(function (change) {
+      el("life-changes").appendChild(node("li", "", shortTime(change.at) + (change.after ? " · 开启生活背景" : " · 关闭生活背景")));
+    });
+    if (!plan) { say("life-msg", "这一天还没有安排。开启后自动生成，也可以手动生成今天或明天。"); return; }
+    (plan.model_runs || []).forEach(function (run) {
+      var row = node("li"), link = node("a", "", "第 " + run.attempt + " 次生成 · " + shortTime(run.at) + " · 查看模型记录");
+      link.href = "observe?source=model&turn_id=" + encodeURIComponent(run.turn_id);
+      row.appendChild(link); el("life-models").appendChild(row);
+    });
+    if (!(plan.model_runs || []).length) {
+      el("life-models").appendChild(node("li", "msg", "这份旧安排未保存模型调用关联，不能根据时间推定。"));
+    }
+    if (plan.status !== "ready") {
+      say("life-msg", plan.status === "pending" ? "生成请求已发出。如果上次运行中断，可手动重试；不会自动重复调用。" : plan.error + "，可手动重试。", "bad");
+      return;
+    }
+    say("life-msg", "第 " + plan.revision + " 版 · 模型安排；手动调整会单独标记。" + (data.enabled ? "" : " 当前未用于聊天。"));
+    plan.items.forEach(function (item) {
+      var current = data.current && item.start === data.current.start;
+      var row = node("li", "life-row" + (current ? " current" : ""));
+      row.appendChild(node("time", "", lifeTime(item.start) + "–" + lifeTime(item.end)));
+      var body = node("div");
+      body.appendChild(node("strong", "", (current ? "此时原安排 · " : "") + item.activity));
+      body.appendChild(node("div", "meta", [item.location, item.outfit, item.source === "manual" ? "手动调整" : ""].filter(Boolean).join(" · ")));
+      body.appendChild(node("div", "body", item.detail)); row.appendChild(body);
+      if (new Date(item.end) > new Date(data.now)) {
+        var edit = node("button", "", "调整"); edit.type = "button";
+        edit.addEventListener("click", function () {
+          editing = {day: data.day, revision: plan.revision, start: item.start};
+          ["activity", "location", "outfit", "detail"].forEach(function (key) { el("life-" + key).value = item[key]; });
+          el("life-edit-title").textContent = "调整 " + lifeTime(item.start) + "–" + lifeTime(item.end);
+          el("life-edit").hidden = false; el("life-activity").focus();
+        }); row.appendChild(edit);
+      }
+      el("life-list").appendChild(row);
+    });
+    (plan.changes || []).slice(-10).reverse().forEach(function (change) {
+      el("life-changes").appendChild(node("li", "", shortTime(change.at) + " · " + change.before.activity + " → " + change.after.activity + "（第 " + change.revision + " 版）"));
+    });
+    if (!plan.changes.length && !(data.settings_changes || []).length) { el("life-changes").appendChild(node("li", "msg", "尚未调整。")); }
+  }
+  function loadLife() {
+    return call("GET", "/day/life" + (el("life-date").value ? "?day=" + encodeURIComponent(el("life-date").value) : "")).then(function (res) {
+      if (res.status !== 200) { throw new Error(reasonOf(res)); }
+      showLife(res.data);
+    }).catch(function (err) { say("life-msg", String(err), "bad"); });
+  }
+  function changeLife(request) {
+    if (busy) { return; } busy = true;
+    el("life-card").querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+    say("life-msg", "正在处理…生成日程通常需要几十秒。");
+    request().then(function (res) {
+      if (res.status !== 200) { throw new Error(reasonOf(res)); }
+      el("life-edit").hidden = true; editing = null;
+      return loadLife();
+    }).catch(function (err) { say("life-msg", String(err), "bad"); }).finally(function () {
+      busy = false;
+      el("life-card").querySelectorAll("button").forEach(function (b) { b.disabled = false; });
+      el("life-generate").disabled = Boolean(lifeState && lifeState.plan && lifeState.plan.status === "ready");
+    });
+  }
+  el("life-refresh").onclick = loadLife;
+  el("life-date").onchange = function () { el("life-edit").hidden = true; editing = null; loadLife(); };
+  el("life-enabled").onclick = function () { changeLife(function () { return call("POST", "/day/life/config", {enabled: !lifeState.enabled}); }); };
+  el("life-generate").onclick = function () { changeLife(function () { return call("POST", "/day/life/generate", {day: el("life-date").value}); }); };
+  el("life-cancel").onclick = function () { el("life-edit").hidden = true; editing = null; };
+  el("life-edit").onsubmit = function (event) {
+    event.preventDefault(); if (!editing || busy) { return; }
+    var body = Object.assign({}, editing);
+    ["activity", "location", "outfit", "detail"].forEach(function (key) { body[key] = el("life-" + key).value; });
+    changeLife(function () { return call("POST", "/day/life/adjust", body); });
+  };
+  function loadSolitude() {
+    return call("GET", "/day/solitude").then(function (res) {
+      if (res.status !== 200) throw new Error(reasonOf(res));
+      var data = res.data;
+      var waiting = data.next_opportunity_at && Date.parse(data.at) < Date.parse(data.next_opportunity_at);
+      el("solitude-state").textContent = data.night ? "正在休息，不做独处活动" : waiting ? "还在活动间隔内" : "已到可考虑活动的时间";
+      el("solitude-info").textContent = "心情 " + data.mood_tier + " · 精力 " + data.energy_tier
+        + " · 距离上次聊天 " + data.idle_minutes + " 分钟 · 当前活动间隔 " + data.threshold_minutes + " 分钟。"
+        + " 最近一次决定：" + (data.last_decision_at ? shortTime(data.last_decision_at) : "尚无记录")
+        + "；最早下次机会：" + (data.next_opportunity_at ? shortTime(data.next_opportunity_at) : "未记录") + "。";
+    }).catch(function (err) { el("solitude-state").textContent = "读取失败"; say("solitude-info", String(err), "bad"); });
+  }
+  el("solitude-refresh").onclick = loadSolitude;
+  function showProactive(data) {
+    var settings = data.delivery || {}, enabled = settings.enabled === true;
+    var quota = data.quota;
+    el("proactive-quota").textContent = quota ? "每生活日最多 " + quota.cap
+      + " 次主动开口机会 · 已使用 " + quota.used + " 次 · 剩余 " + quota.remaining + " 次。"
+      + (quota.reasons && quota.reasons.own_doing ? "其中自身经历分享最多 " + quota.reasons.own_doing.cap + " 次。" : "")
+      + "按已排出的计划计数，不等于已送达次数。" : "刷新可查看当前额度。";
+    el("proactive-state").textContent = enabled ? "已开启" : "已关闭";
+    el("proactive-stop").disabled = !enabled;
+    var routes = Array.isArray(settings.routes) ? settings.routes : [];
+    el("proactive-enable").disabled = false;
+    el("proactive-qq").value = routes.length === 1 && routes[0].scene === "private" ? String(routes[0].target) : "";
+    el("proactive-routes").textContent = routes.length ? "允许的范围：" + routes.map(function (route) {
+      return (route.scene === "private" ? "私聊 " : "群聊 ") + route.target + "（对象 " + route.who + "）";
+    }).join("；") : "尚未设置发送范围。";
+  }
+  function loadProactive() {
+    return call("GET", "/day/proactive").then(function (res) {
+      if (res.status !== 200) throw new Error(reasonOf(res));
+      showProactive(res.data);
+    }).catch(function (err) { el("proactive-state").textContent = "读取失败";
+      el("proactive-quota").textContent = "本次未能读取额度。";
+      el("proactive-enable").disabled = true;
+      el("proactive-stop").disabled = false; say("proactive-routes", String(err), "bad"); });
+  }
+  el("proactive-form").onsubmit = function (event) {
+    event.preventDefault();
+    if (el("proactive-enable").disabled) return;
+    el("proactive-enable").disabled = true;
+    return call("POST", "/day/proactive/enable", {private_qq:el("proactive-qq").value}).then(function (res) {
+      if (res.status !== 200 || res.data.ok !== true) throw new Error(reasonOf(res));
+      showProactive(res.data);
+      say("proactive-save-msg", "已保存并开启，仅向指定 QQ 私聊。", "good");
+    }).catch(function (err) {
+      el("proactive-enable").disabled = false;
+      el("proactive-stop").disabled = false;
+      el("proactive-state").textContent = "待确认";
+      say("proactive-save-msg", "未能确认开启：" + String(err), "bad");
+    });
+  };
+  el("proactive-stop").onclick = function () {
+    el("proactive-stop").disabled = true;
+    return call("POST", "/day/proactive/disable", {}).then(function (res) {
+      if (res.status !== 200 || res.data.ok !== true) throw new Error(reasonOf(res));
+      showProactive(res.data);
+    }).catch(function (err) { el("proactive-stop").disabled = false;
+      say("proactive-routes", "未能确认关闭：" + String(err), "bad"); });
+  };
+  el("proactive-refresh").onclick = loadProactive;
+  el("proactive-stop").disabled = false;
+  el("proactive-enable").disabled = true;
+  load(); loadLife(); loadActivity(); loadSolitude(); loadProactive();
 }());
 </script>
+<script src="growth-panel.js"></script>
 </body>
 </html>

@@ -78,7 +78,7 @@ class EveryClickableHasARoute(unittest.TestCase):
         """没绑事件的按钮 = 点了没反应的死按钮。"""
         text = _text("home.html")
         ids = BUTTON_ID_RE.findall(text)
-        self.assertEqual(sorted(ids), ["audit-verify", "refresh-all", "write-submit"],
+        self.assertEqual(sorted(ids), ["audit-verify", "drawer-next", "drawer-prev", "refresh-all", "write-submit"],
                          "家这一页静态按钮数变了，核对表要同步：%r" % (ids,))
         for button_id in ids:
             self.assertIn('el("%s").addEventListener' % button_id, text,
@@ -174,9 +174,10 @@ class TenRoomsAreFixed(unittest.TestCase):
         self.assertIn('el("write-room")', chunk)
 
     def test_readonly_rooms_are_not_greyed_out(self):
-        """只读不灰化：五间只读房各有一句「谁写的」，而且页面不许 disable 任何控件。"""
+        """只读房仍可打开；翻页到边界的禁用不属于房间权限。"""
         text = _text("home.html")
-        self.assertNotIn("disabled", text.lower(), "只读不许灰化：页面出现了 disabled")
+        rooms = text[text.index("function showRooms"):text.index("// —— 一间房里有什么")]
+        self.assertNotIn("disabled", rooms.lower(), "只读房间不许灰化")
         for room in READONLY_ROOMS:
             self.assertIn('"%s":' % room, text, "只读房 %s 没有「由谁写」那句话" % room)
         self.assertIn("WRITTEN_BY_PROGRAM", text)

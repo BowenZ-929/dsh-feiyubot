@@ -91,6 +91,20 @@ class ToneLedgerTest(unittest.TestCase):
             encoding="utf-8")
         return root
 
+    def test_tone_shares_actual_conversation_identity(self):
+        from organs.mind import recent
+        for index in (1, 2):
+            result = conversation.answer('今天到家了。', str(10000 + index),
+                store=self.store, brain=self.brain, now=_at(index),
+                transport=_transport('嗯。'), config=CONFIG, env=ENV,
+                scene='group', session_id='group:test', turn_id=str(index) * 32)
+            row = conversation.read_tone_log()[-1]
+            self.assertEqual(row['turn_id'], result['turn_id'])
+            self.assertEqual(row['turn_id'], recent.load()['turns'][-1]['turn_id'])
+            self.assertEqual(row['who'], str(10000 + index))
+            self.assertEqual(row['session_id'], 'group:test')
+            self.assertEqual(row['scene'], 'group')
+
     def test_the_ledger_is_append_only(self):
         """两轮两行，第一轮那行一个字节都不动。"""
         self._answer(now=_at(5))

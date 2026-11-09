@@ -341,20 +341,19 @@ class MoodTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             mood.apply_event("bribe", self.root, now=_at())
 
-    def test_same_who_same_hour_is_windowed(self) -> None:
-        """同一人同一小时只算一次；被挡时状态一个字节都不改。"""
+    def test_same_person_repetition_uses_heat_instead_of_hour_lock(self) -> None:
+        """底层重复事件递减，入口同类冷却另由report负责。"""
         start = _at()
         self._seed(60, 60, start)
         first = mood.apply_event("praise", self.root, now=start, who="主人")
         self.assertTrue(first["ok"])
-        before = self._raw()
         second = mood.apply_event("praise", self.root, now=start, who="主人")
-        self.assertFalse(second["ok"])
-        self.assertEqual("windowed", second["skipped"])
-        self.assertEqual(before, self._raw(), "被窗口挡掉还动了状态")
+        self.assertTrue(second["ok"])
+        self.assertGreater(second['delta'], 0)
+        self.assertLess(second['delta'], first['delta'])
 
         next_hour = mood.apply_event("praise", self.root, now=_at(1), who="主人")
-        self.assertTrue(next_hour["ok"], "换了一小时还挡着")
+        self.assertTrue(next_hour["ok"])
 
     def test_daily_cap_resets_with_a_new_day(self) -> None:
         """昨天用满的配额不带进今天。"""
@@ -405,16 +404,16 @@ class MoodTest(unittest.TestCase):
     # ---- 事件账本落账 ----------------------------------------------------
 
     def test_every_landed_event_leaves_one_ledger_row(self) -> None:
-        """落一次账就写一行：at / kind / who / delta / after 都在；被挡的不写。"""
+        """落一次账就写一行：重复事件也有各自的实际增量。"""
         start = _local()
         self._seed(60, 60, model.iso(start))
         first = mood.apply_event("praise", self.root, now=model.iso(start), who="甲")
         self.assertTrue(first["ok"])
-        self.assertFalse(
+        self.assertTrue(
             mood.apply_event("praise", self.root, now=model.iso(start), who="甲")["ok"]
         )
         rows = events.recent(self.root, now=_at_min(1, start), window_min=60.0)
-        self.assertEqual(1, len(rows), "被窗口挡掉的那次也落了账")
+        self.assertEqual(2, len(rows))
         self.assertEqual("praise", rows[0]["kind"])
         self.assertEqual("甲", rows[0]["who"])
         self.assertAlmostEqual(4.0, rows[0]["delta"], places=2)

@@ -58,7 +58,7 @@ test("带图群消息：图片段汇总 + 非文本段有可读占位", () => {
     role: "admin",
   });
   assert.deepEqual(event.where, { scene: "group", groupId: 700000001 });
-  assert.equal(event.text, "[回复:2000000001]@1000000001 帮我看下这段[图片][表情:14][动画表情][卡片]");
+  assert.equal(event.text, "（引用）@1000000001 帮我看下这段[图片][表情:微笑][动画表情][卡片]");
   assert.equal(event.hasImage, true);
   assert.deepEqual(event.images, [
     { file: "ab12cd34.image", url: "https://example.invalid/img.png", summary: "[图片]" },
@@ -113,4 +113,35 @@ test("畸形输入的补充边界：字符串输入被当成 JSON，null 与数�
   const notice = parseEvent({ post_type: "notice", notice_type: "group_upload", group_id: 700000001 });
   assert.equal(notice.ok, false);
   if (!notice.ok) assert.match(notice.reason, /暂不解析 post_type=notice/);
+});
+
+test("QQ原生表情：私聊和群聊保留名称、连发顺序与表情属性", () => {
+  for (const scene of ["private", "group"]) {
+    const fixture = loadFixture(`event.${scene}.text.json`) as Record<string, unknown>;
+    const event = expectParsed({ ...fixture, message: [
+      { type: "text", data: { text: "就是这个" } },
+      ...Array.from({ length: 3 }, () => ({ type: "face", data: { id: "76", raw: { faceIndex: 76, faceText: null, faceType: 1 } } })),
+    ] });
+    assert.equal(event.text, "就是这个[表情:赞][表情:赞][表情:赞]");
+    assert.equal(event.isSticker, false);
+    const pure = expectParsed({ ...fixture, message: [{ type: "face", data: { id: "76" } }] });
+    assert.equal(pure.isSticker, true);
+    assert.equal(pure.text, "[表情:赞]");
+    assert.equal(event.hasImage, false);
+  }
+});
+
+test("QQ表情使用平台名称，未知或畸形名称不猜", () => {
+  for (const [data, expected] of [
+    [{ id: "9998", raw: { faceText: "/新表情" } }, "[表情:新表情]"],
+    [{ id: "76", raw: { faceText: "/超级赞" } }, "[表情:超级赞]"],
+    [{ id: 76, raw: { faceText: 123 } }, "[表情:赞]"],
+    [{ id: "9999" }, "[表情:9999]"],
+    [{ id: "9999", raw: { faceText: " / " } }, "[表情:9999]"],
+    [{}, "[表情:?]"],
+    [{ id: "319" }, "[表情:319]"], // 参考仓库把比心误记成生气，未核对数据不沿用。
+  ] as Array<[Record<string, unknown>, string]>) {
+    const event = expectParsed({ ...(loadFixture("event.private.text.json") as object), message: [{ type: "face", data }] });
+    assert.equal(event.text, expected);
+  }
 });

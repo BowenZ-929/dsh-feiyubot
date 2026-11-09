@@ -65,6 +65,13 @@ class NotCheckedIsNotTheSameAsJudged(unittest.TestCase):
 class HittingWordsAreEvidence(unittest.TestCase):
     """命中返回的是一条证据（哪个动词、哪一段、哪一句、为什么），不是布尔。"""
 
+    def test_accepting_praise_is_not_an_unperformed_external_action(self):
+        for text in ('这句“牛逼”我收了，虽然我觉得自己就说了句实话。',
+                     '你的夸奖我收了。', '好意我收了，事情还是我自己决定。'):
+            with self.subTest(text=text):
+                self.assertIsNone(check(text, []))
+        self.assertEqual('画', check('你的夸奖我收了。我这就去画。', []).verb)
+
     def test_the_verb_and_the_sentence_come_back(self):
         hit = check(CLAIM_LINE, [])
         self.assertEqual(BOOK["action_verbs"][0], hit.verb)
@@ -110,6 +117,15 @@ class TheLedgerDecides(unittest.TestCase):
     def test_a_matching_verb_passes(self):
         hit = check(CLAIM_LINE, [])
         self.assertIsNone(check(CLAIM_LINE, [{"verb": hit.verb}]))
+
+    def test_historical_work_supports_past_work_but_not_new_action_promises(self):
+        actions=[{'verb':'写','historical':True,'source':'completed-story'}]
+        self.assertIsNone(check('我刚写了个小故事。',actions))
+        self.assertIsNotNone(check('我这就写。',actions))
+        self.assertIsNotNone(check('我马上去写。',actions))
+        self.assertIsNotNone(check('我刚画了。',actions))
+        self.assertIsNotNone(check('我刚写了个小故事。',[]))
+        self.assertIsNone(check('我这就写。',actions+[{'verb':'写'}]))
 
     def test_another_action_on_the_ledger_is_not_this_one(self):
         hit = check(CLAIM_LINE, [])

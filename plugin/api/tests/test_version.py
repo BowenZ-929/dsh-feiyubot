@@ -5,13 +5,15 @@
 
 被看住的三件事：
 1. `GET /healthz` 回一份可读的身份：git HEAD、启动时间、进程号、启动时的源码指纹；
-2. `stale` 只在源码真被改过时为真——现算指纹与启动指纹不一致；
+2. `stale` 比较提交，`source_changed` 比较启动时与当前Python源码；
 3. 家页与脑页的页脚真的去读这一行，并且有「进程旧了」的红字分支。
 """
 from __future__ import annotations
 
 import re
 import unittest
+import tempfile
+from unittest import mock
 from pathlib import Path
 
 from api import api, devserver, version
@@ -21,6 +23,37 @@ BUILD_RE = re.compile(r'<footer[^>]*\bid="build"', re.S)
 
 
 class HealthzTest(unittest.TestCase):
+    def test_source_change_is_independent_of_commit_and_dirty_flags(self):
+        for changed, dirty, head_changed in ((True, True, False), (False, True, False),
+                                             (False, False, True), (True, False, True)):
+            with self.subTest(changed=changed, dirty=dirty, head_changed=head_changed), \
+                    mock.patch.object(version, 'BOOT_DIGEST', 'a'*64), \
+                    mock.patch.object(version, 'source_digest', return_value='a'*63+('b' if changed else 'a')), \
+                    mock.patch.object(version, 'GIT_HEAD', 'abc1234'), \
+                    mock.patch.object(version, '_git_head', return_value='def5678' if head_changed else 'abc1234'), \
+                    mock.patch.object(version, '_git_dirty', return_value=(dirty, 0)):
+                result = version.report()
+                self.assertEqual(changed, result['source_changed'])
+                self.assertEqual(head_changed, result['stale'])
+                self.assertEqual(dirty, result['dirty'])
+                if not changed:
+                    self.assertNotIn('跑的是旧字节', result['advice'])
+                    self.assertNotIn('必须重启', result['advice'])
+
+    def test_digest_tracks_runtime_python_but_not_pages_data_or_tests(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(version, 'PLUGIN_DIR', Path(root)):
+            source = Path(root)/'organs'/'example.py'
+            source.parent.mkdir()
+            source.write_text('value = 1')
+            before = version.source_digest()
+            for relative in ('pages/example.html', 'organs/data/example.json', 'organs/tests/test_example.py'):
+                path = Path(root)/relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('changed')
+            self.assertEqual(before, version.source_digest())
+            source.write_text('value = 2')
+            self.assertNotEqual(before, version.source_digest())
+
     def test_healthz_is_a_registered_get(self):
         self.assertEqual(api.ROUTES.get("/healthz"), "GET")
 

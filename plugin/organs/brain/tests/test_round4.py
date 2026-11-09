@@ -25,6 +25,44 @@ class CardTest(unittest.TestCase):
         self.assertEqual(["别提工作"], after["prefs"])
         self.assertEqual(2, len(store.card_history("3425635473")))
 
+    def test_relationship_and_address_survive_real_card_storage(self):
+        from organs.mind import conversation
+        store, tmp = fresh_store()
+        self.addCleanup(tmp.cleanup)
+        store.interact('3425635473', display='普通群昵称')
+        result = store.patch_card('3425635473', 'owner-confirmed', {'关系':'主人', '叫法':'老大'})
+        self.assertTrue(result['ok'], result)
+        reloaded = type(store)(store._root)
+        card = reloaded.card_view('3425635473')
+        self.assertEqual('主人', card['relationship'])
+        self.assertEqual('老大', card['address'])
+        text = conversation._caller_text(conversation.load_assembly(), reloaded, '3425635473')
+        self.assertIn('主人（你叫老大）', text)
+        reloaded.interact('10000421', display='主人')
+        stranger = conversation._caller_text(conversation.load_assembly(), reloaded, '10000421')
+        self.assertIn('关系尚未确认', stranger)
+        self.assertNotIn('一个熟人', stranger)
+        self.assertNotIn('来的是主人', stranger)
+        self.assertEqual(2, len(reloaded.card_history('3425635473')))
+        for value in (None, {}, 3, 'x'*81):
+            self.assertFalse(reloaded.patch_card('3425635473','panel',{'关系':value})['ok'])
+        self.assertEqual('主人', reloaded.card_view('3425635473')['relationship'])
+
+    def test_caller_uses_exact_number_not_another_persons_numeric_alias(self):
+        from organs.mind import conversation
+        store, tmp = fresh_store()
+        self.addCleanup(tmp.cleanup)
+        store.interact('10000011', display='旧主人')
+        store.patch_card('10000011', 'fixture', {'关系':'主人', '叫法':'老大'})
+        store.add_alias('10000011', '10000022')
+        store.interact('10000022', display='另一个人')
+        text = conversation._caller_text(conversation.load_assembly(), store, '10000022')
+        self.assertNotIn('来的是主人', text)
+        self.assertIn('另一个人', text)
+        store.add_alias('10000011', '10000033')
+        missing = conversation._caller_text(conversation.load_assembly(), store, '10000033')
+        self.assertIn('不认识的号', missing)
+
     def test_patch_card_rejects_familiarity_and_unknown_fields(self):
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)

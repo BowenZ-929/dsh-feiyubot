@@ -9,6 +9,7 @@
 //   ⑤ 切完拼回去必须逐字节等于原文。
 // 每个 piece 带 sep（piece 之前被移除的那段原文）：换行切来的 sep="\n"，标点切来的 sep=""（标点留在左段末尾）。
 // reconstruct = pieces.map(p => p.sep + p.text).join("") —— 合并回最后一泡时也按各自的 sep 还原，绝不统一用 "\n"。
+import { createHash } from "node:crypto";
 import type { Chunk } from "./outbox.ts";
 
 export type BubblePolicy = {
@@ -21,10 +22,19 @@ export type BubblePolicy = {
   sentenceMarks: string[];
   clauseMarks: string[];
   tailParticles: string[];
+  // 逗号粘连的长句按概率拆：命中率百分比 + 逗号字符表。
+  commaSplitRatePct: number;
+  commaSplitMarks: string[];
 };
 
 export type BubbleSplit = { reason: "bubble_len"; len: number; into: number[] };
-export type SplitResult = { chunks: Chunk[]; merged: boolean; splits: BubbleSplit[] };
+export type CommaSplitRecord = { comma: string; len: number; into: [number, number] };
+export type SplitResult = {
+  chunks: Chunk[];
+  merged: boolean;
+  splits: BubbleSplit[];
+  commaSplits: CommaSplitRecord[];
+};
 
 type Piece = { text: string; sep: string };
 
@@ -52,6 +62,30 @@ const lastCut = (text: string, marks: string[], particles: string[], maxChars: n
   return cut;
 };
 
+// 确定性抽样：拿泡文本做 sha256，取前 8 位 hex 转 int，% 100 < 命中率 才拆。
+// 同一句话永远同一个结论（可复现、账上可解释），绝不用 Math.random。
+export const commaSplitHit = (text: string, ratePct: number): boolean => {
+  if (!Number.isFinite(ratePct) || ratePct <= 0) return false;
+  const hex = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 8);
+  return parseInt(hex, 16) % 100 < ratePct;
+};
+
+// 拆点：该泡里**最后一个**逗号；左段或右段为空/纯空白就往前找上一个。
+// 返回切点（逗号的位置）与那个逗号本身；找不到返回 null。
+const lastCommaCut = (text: string, marks: string[], particles: string[]): { at: number; comma: string } | null => {
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    const char = text[index];
+    if (!marks.includes(char)) continue;
+    const left = text.slice(0, index);
+    const right = text.slice(index + 1);
+    if (isBlankLike(left) || isBlankLike(right)) continue;
+    // 语气词保护（与超长切分层同一条）：右段以语气词开头就不在这一刀切，往前找上一个逗号。
+    if (particles.some((particle) => particle.length > 0 && right.startsWith(particle))) continue;
+    return { at: index, comma: char };
+  }
+  return null;
+};
+
 const splitLong = (text: string, marks: string[], particles: string[], maxChars: number): string[] => {
   const pieces: string[] = [];
   let rest = text;
@@ -70,6 +104,7 @@ export const splitBubbles = (chunks: Chunk[], policy: BubblePolicy): SplitResult
   const gapSec = Number.isFinite(policy.gapSec) && policy.gapSec > 0 ? policy.gapSec : 0;
   const maxChars = Number.isFinite(policy.maxChars) && policy.maxChars >= 1 ? Math.floor(policy.maxChars) : 1;
   const splits: BubbleSplit[] = [];
+  const commaSplits: CommaSplitRecord[] = [];
   const out: Chunk[] = [];
   let merged = false;
 
@@ -77,10 +112,11 @@ export const splitBubbles = (chunks: Chunk[], policy: BubblePolicy): SplitResult
     // 带图的一泡是原子的：不按换行/标点再切——切碎等于让图落在半句话旁边。
     // text 为空的只有图的泡也必须留下：这里直接产出，绕开下面「全空的不占泡」那一步。
     // image 原样透传（file/summary 一个字节都不改），顺序、gap_before、send_at 的算法与纯文字泡一致。
-    if (chunk.image !== undefined) {
+    if (chunk.image !== undefined || chunk.audio !== undefined) {
       out.push({
         text: chunk.text,
-        image: chunk.image,
+        ...(chunk.image === undefined ? {} : { image: chunk.image }),
+        ...(chunk.audio === undefined ? {} : { audio: chunk.audio }),
         gap_before: chunk.gap_before,
         send_at: chunk.send_at,
       });
@@ -121,6 +157,31 @@ export const splitBubbles = (chunks: Chunk[], policy: BubblePolicy): SplitResult
       });
     }
 
+    // ④ 逗号粘连的长句：按概率拆两泡（丢弃那个逗号——这是「拼回逐字节相等」的唯一例外）
+    const commaStage: Array<{ text: string; sep: string }> = [];
+    for (const piece of expanded) {
+      if (!commaSplitHit(piece.text, policy.commaSplitRatePct)) {
+        commaStage.push(piece);
+        continue;
+      }
+      const cut = lastCommaCut(piece.text, policy.commaSplitMarks, policy.tailParticles);
+      if (cut === null) {
+        commaStage.push(piece);
+        continue;
+      }
+      const left = piece.text.slice(0, cut.at);
+      const right = piece.text.slice(cut.at + 1);
+      commaSplits.push({
+        comma: cut.comma,
+        len: charLen(piece.text),
+        into: [charLen(left), charLen(right)],
+      });
+      commaStage.push({ text: left, sep: piece.sep });
+      commaStage.push({ text: right, sep: "" });
+    }
+    expanded.length = 0;
+    for (const piece of commaStage) expanded.push(piece);
+
     // 上限合并：超了就把后面的合回最后一泡（按各自 sep 还原，禁截断）
     if (expanded.length > cap) {
       merged = true;
@@ -149,5 +210,23 @@ export const splitBubbles = (chunks: Chunk[], policy: BubblePolicy): SplitResult
     }
   }
 
-  return { chunks: out, merged, splits };
+  // 独立表情不合回文字；给它留一条位置。单条文字偏好仍允许另发一张表情。
+  const separateImage = out.length > 1 && out.at(-1)!.image !== undefined && out.at(-1)!.text.trim() === ""
+      && out.slice(0, -1).every(item => item.image === undefined && item.audio === undefined)
+    ? out.pop() : undefined;
+  const textCap = separateImage ? Math.max(1, cap - 1) : cap;
+  // 核心可能已分成多泡；上限按整轮合并，不跨中途图片或语音。
+  if (out.length > textCap && out.at(-1)!.audio === undefined
+      && out.slice(0, -1).every(item => item.image === undefined && item.audio === undefined)) {
+    const image = out.at(-1)!.image;
+    out[textCap - 1].text = out.slice(textCap - 1).map(item => item.text).join("\n");
+    if (image !== undefined) out[textCap - 1].image = image;
+    out.splice(textCap);
+    merged = true;
+  }
+  if (separateImage) {
+    separateImage.send_at = Math.max(separateImage.send_at, out.at(-1)!.send_at + gapSec);
+    out.push(separateImage);
+  }
+  return { chunks: out, merged, splits, commaSplits };
 };

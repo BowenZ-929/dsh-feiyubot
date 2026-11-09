@@ -1,61 +1,13 @@
-"""嘴的复述审计：这段输出是不是把注入的那段原文照搬过来了。
+"""嘴的复述审计：区分照搬设定与正常使用对话原话。
 
-条款闸（gate.py）管「怎么说」——客服腔、话术、排比这些形状；本文件管另一件事：**说的是不是
-抄来的**。她这一轮的输出本该跟三样东西对得上：她的魂（她是谁）、她的家与脑（锚句、记忆原文、
-心档位词、规矩句）、以及对方说过的话。前两样只能化成她自己的话，照搬就是复述；第三样允许原样
-引用，但必须带引述标记，否则听的人分不清她是在转述还是在冒充对方。
+按归一化后的最长公共子串比较注入文本。魂、锚句、心档位词和规矩句
+达到数据中的阈值时仍产生违规；对方原话和记忆原文只报告字面重合，
+不凭缺少引述标记判断冒充经历。正常确认地点、订单和转述都可能重合。
+来源归属、私密话题、重复自身回复由各自检查负责，本项不替它们判语义。
 
-**判据是最长公共子串（连续，不是子序列）**：拿这段输出与注入的每一段比，比之前先归一化——
-去掉空白与标点（两张表都在 organs/mouth/data/audit.json）。用子序列会把「撞了两个字就跳过去」
-的句子判成复述；用子串只认连着的一截，正好对上「照搬」这件事。连着 6 个字及以上才算复述
-（阈值写在数据里，默认 6）。**阈值为什么是 6**：中文 4 个字太短——「我知道了」「好的呀」这类
-常用串一撞就上，阈值 4 等于把客气话判成复述；6 个字既能抓住一整截原文，又不会误杀日常口语。
-
-**边界这一格（连着 5 个字）为什么不走重写**：判据是「连着 6 个字及以上才算复述」，阈值写在数据里
-（threshold，默认 6）。5 个字最长只连着 5 个，length < threshold 就跳过这一段，读数仍是 status="ok"、
-hit 是 None——**没有命中，就没有「命中」这一件事交给闸的重写器**，所以闸那一边一次 rewrite 都不会调，
-不是「调了但改不动」。这一格与「改不动」长得像，处置却是相反的：改不动才删那一句、只剩一句才弃；
-没命中就一个字不改照发（老规矩，见 gate.enforce）。核那边若看到「5 个字也走了重写」，只能出自别处：
-那边传进来的 policy 里 threshold 不是 6，或者根本没走这条判据——**这一条是推断，没有在本仓库复现**：
-本仓库的数据里 threshold 就是 6（data/audit.json 的 threshold 与 threshold_note），audit() 里就一句
-`if length < rules.threshold: continue`，5 个字必然被它跳过，没有任何一条路能把它送到重写器上。要坐实
-核那边的原因，得看那边调用 enforce 时传的 policy 是哪一份。
-
-**两类分开，不许一锅端**（两个清单都在数据里）：
-
-- 注入段的 kind 属于「设定类」（魂 / 锚句 / 记忆原文 / 心档位词 / 规矩句）→ 撞上阈值就拦，
-  带了引述标记也拦：这些东西本来就是她自己的，没有「引用自己」这一说。
-- kind 是「对方原话」→ 允许，但**必须带引述标记**，而且标记要落在命中片段**前面**的窗口内
-  （窗口默认 12 字，写在数据里）。没标记、或标记离得太远，一样拦：拦的是「把对方的话当成
-  自己的话说出去」这件事，不是拦「记得对方说过什么」。
-
-inject 的形状是 [{"kind": <六类之一>, "text": str}]；**未知 kind 当场抛 AuditBroken 并指名
-那一个**——未知不等于设定类，静默从严会把别人的分类错误变成她的沉默。为了照顾只传一段话的
-调用方，inject 传纯字符串也接受，一律按设定类从严（哪一类算「纯字符串的类别」也写在数据里）。
-
-**拿不到注入文本（inject 为 None 或空）时 status 是 "audit-unavailable"，不是 "ok"。** 取舍：
-缺料时**不弃这句**——弃了等于她一缺料就闭嘴，而缺料是调用侧的问题，不该拿她的沉默来兜；但必须
-显式带状态与一句人话（reason），由 api 层照实透出。两种状态调用方一眼就能分开：
-status 为 "ok" 才算真的比过，status 为 "ok" 且 hit 为 None 才算「没在复述」。
-
-**对方明确要求重复／引用时，这一关也只记账、不判废（这一轮加的）。** 他要她「再说一遍」「重复
-刚才那句」时，把她说过的那段设定原样再说一遍正是他要的，这时候还判废等于把她照办的那一下
-也吞掉。豁免的开关由闸传进来（requested），判法只有一处：repeat.requested(asked, 表)——**请求
-标记的词表不在这里**，在这里另抄一份就是第二处真源。此时交出去的是**一样算命中**的读数：
-status 仍旧 "ok"、hit 照旧带着（面板上看得见她引了设定），另加 skipped=True 与一句取自数据的
-skip_reason（里面带着 audit-skipped-by-request）。**为什么只记账不判废、又为什么要标记**：我们
-不想让她养成引用设定的习惯，只是不在这句上拦——标记留着，账才记得下来。
-
-**返回的是一句人话 + 片段 + 来源段 kind，不是布尔。** AuditHit 里带 kind（违规类别：设定段
-照搬 / 原话没带标记，取值在数据里）、matched（撞上的那几个字，归一化之后的）、seg_kind
-（来源段是哪一类）、reason（可以直接贴进日志与面板的一句话）；布尔说不出「为什么拦」。
-
-数据全在 organs/mouth/data/audit.json（经 warehouse.load("audit") 读入）：阈值、窗口、标点表、
-空白表、引述标记词表、六类 kind、全部人话说法都在那里，本文件不写死任何一个数、不写死一句
-说法。缺节缺键抛 AuditBroken（不抛 model.PolicyMiss：那份报错会把人指向 policy.json，指错了
-地方比不报错更费时间）。
-
-纯：不 import time / datetime / random，不取时钟、不写盘、不碰宿主；文件 IO 只经 warehouse。
+返回状态、违规片段、重合长度与可读原因。缺少材料时如实返回
+ audit-unavailable；未知类别抛 AuditBroken。明确请求重复设定时沿用
+ requested 豁免并留痕。数据经 warehouse 读取，本模块不写盘或调用模型。
 """
 from __future__ import annotations
 
@@ -164,8 +116,8 @@ def audit(text: str, inject: Any = None,
     逐段比最长公共子串，取第一段「撞够阈值又违规」的当结果：
 
     - 设定类段撞够阈值 → 拦（带了引述标记也拦）。
-    - 对方原话段撞够阈值、但窗口内没有引述标记 → 也拦。
-    - 对方原话段撞够阈值、标记就在前面 → 放行，并在 reason 里点名是哪个标记。
+    - 对方原话或记忆原文撞够阈值 → 只记重合，不判违规。
+    - 标记就在前面 → 在 reason 里点名标记；仍检查后续设定段。
 
     撞上了、而 requested 为真时→ **读数一样算命中**（status 仍是 "ok"、hit 原样带着、面板看得见
     她引了设定），只是另加 skipped=True 与一句取自数据的 skip_reason（带 audit-skipped-by-request）：
@@ -184,6 +136,7 @@ def audit(text: str, inject: Any = None,
     body = _normalize(_text_of(text), rules.strip, rules.blank)
     longest = 0
     marked: Optional[Tuple[str, str, str]] = None      # （引述标记, 撞上的那截, 来源段类别）
+    overlap = None
     for segment in segments:
         length, end = _lcs(body, _normalize(segment.text, rules.strip, rules.blank))
         longest = max(longest, length)
@@ -196,14 +149,19 @@ def audit(text: str, inject: Any = None,
                 if marked is None:
                     marked = (marker, matched, segment.kind)
                 continue
-            return _blocked(rules, rules.verdict_quote, segment.kind, matched, length,
-                            rules.reasons["quote_unmarked"].format(
-                                seg_kind=segment.kind, matched=matched,
-                                lcs_len=length, window=rules.window), requested)
+            # 原话重合只能证明用了相同字词，不能判定确认地点/订单是在冒充经历。
+            # 继续检查后面的设定段，不能因遇到可用原话而提前放过照搬人设。
+            if overlap is None:
+                overlap = (segment.kind, matched, length)
+            continue
         return _blocked(rules, rules.verdict_setting, segment.kind, matched, length,
                         rules.reasons["setting"].format(
                             seg_kind=segment.kind, matched=matched, lcs_len=length), requested)
-    if marked is not None:
+    if overlap is not None:
+        seg_kind, matched, length = overlap
+        reason = rules.reasons["quote_unmarked"].format(
+            seg_kind=seg_kind, matched=matched, lcs_len=length, window=rules.window)
+    elif marked is not None:
         marker, matched, seg_kind = marked
         reason = rules.reasons["quote_marked"].format(seg_kind=seg_kind, matched=matched,
                                                       marker=marker)

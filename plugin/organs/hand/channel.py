@@ -129,6 +129,19 @@ def say_image(*, scene: Any, target: Any, path: Any, name: Any,
     endpoint = base_url(url) + SAY_ROUTE
     body = {"scene": scene, "target": target,
             "chunks": [{"image": {"file": file_uri(path), "summary": str(name or "")}}]}
+    return _say(body, endpoint, timeout)
+
+
+def say_text(*, scene: Any, target: Any, text: str, url: Any = None, timeout: Any = None,
+             reply_kind: Any = None) -> Dict[str, Any]:
+    """后台任务的结果通知，仍由现有通道判门与送达，不自动重试。"""
+    body = {"scene": scene, "target": target, "chunks": [{"text": text}]}
+    if reply_kind is not None:
+        body['reply_kind'] = reply_kind
+    return _say(body, base_url(url) + SAY_ROUTE, timeout)
+
+
+def _say(body, endpoint, timeout):
     problem = guard(body)
     if problem is not None:
         # 本地就不放行：不发请求，也不假装这是通道的回答（local=True）。
@@ -159,6 +172,8 @@ def say_image(*, scene: Any, target: Any, path: Any, name: Any,
 
     carried = {"sent": int(sent), "reason_code": "" if payload.get("reason_code") is None
                else str(payload.get("reason_code")),
+               "stopped": payload.get("stopped"),
+               "confirmed_text": payload.get("confirmed_text") if isinstance(payload.get("confirmed_text"), str) else None,
                "channel_id": None if payload.get("id") is None else str(payload.get("id")),
                "http": status}
     if sent == 0:

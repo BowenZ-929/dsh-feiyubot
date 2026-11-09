@@ -1,36 +1,7 @@
-"""「给我看你的自画像」这一类话：装配前认一次，认出来就交给手把家里的图发出去。
+"""认出索图请求后交给手准备图片，挂到本轮回复，由通道统一发送。
 
-她回一句「给你看」本身是空的——真正的动作是**手把家里那张图交给通道**（organs/hand/actions.py
-的 send_image）。这个模块只做那一段：**认一句话 → 抽一个名字 → 交出手去发**。它不是通用工具
-框架，只认「看图」这一件事，形状照 remind.py：数据驱动、认不出回 None、绝不猜。
-
-三段，次序钉死：
-
-1. **意图**（intent.words）：句子里出现意图词表任一词，这一轮就算「要看图」。有没有指名另说
-   ——**没指名就反问**（「给我看」），手一次都不调，也就一分额度都不烧。
-2. **抽名字**（frame）：把意图词与请求词从这句话里削掉，再剥一次指示词（「你的」「那张」…），
-   剩下就是「要看的那张」叫什么。**只剥一次**，削光了就是没指名。这里只判「有没有名字」，
-   **不拼路径**：图在哪、叫什么，全由手从她原话里认（整句当 utterance 原样交出去）。
-3. **交出手**（handle）：send_image(who=这一轮的号, scene=场合, target=同一个号, utterance=整句)。
-   按手的回答分四支：
-   · 认不出她说的是哪张（IMAGE_NOT_UNDERSTOOD）→ 说 say.unknown（「不认识」）；
-   · 认得出、家里没有（IMAGE_NOT_FOUND）→ 说 say.missing（「没找着」），**不假装**；
-   · 成（state=done）→ 把手的产物（detail.path → file://）落进回包那一格，由装配把图挂到
-     最后一泡上（chunk.image）；她被允许补一句跟图有关的话（见 say）；
-   · 其余失败（额度、通道没连上、场景／号不合规…）→ 说 say.fail，why **原样带手那边的码**。
-
-**红线**：成功那一轮她的措辞里**不许出现「我画了／我拍的／我照的」这一类话**——图是家里的，
-不是她现做的。禁止清单在 data/look.json 的 say.forbid：模型那句命中清单、或者干脆空着，就换成
-数据里 say.ok 那一句口径。改数据即改判据（测试对着回包 reply 的文本 grep）。
-
-**词表、指示词、五句人话、禁止清单全在 data/look.json**：代码里一个中文词都没有。读法同
-assembly.json／remind.json：实盘 <仓库>/home/organs/mind/look.json 优先（存在才读），否则读出厂
-organs/mind/data/look.json；数据缺键当场 ValueError 并点名缺的是哪一格（不在代码里补默认值）。
-
-回包那一格（packet，六键冻结）：{intent, target, ok, why, name, image}——认出的是哪个意图词、
-发给谁、成没成、为什么没成、要看的那张叫什么、图在哪儿（file://）。name 是**核削出来的那个名字**
-（给人核对用），不保证与手从整句里认出的名字逐字相同：两边各读各的表，谁都不替谁改口。
-**普通闲聊这一格根本不出现**（handle 回 None，调用方一个字都不改）。
+ok 表示图片已准备，不表示已发送。手先检查权限、额度和素材；实际发送回执才记 done。
+群聊目标由调用方传入群号；缺失时不能拿发言人的 QQ 号代替。
 """
 from __future__ import annotations
 
@@ -193,25 +164,22 @@ def _name(text: str, cfg: Mapping[str, Any]) -> str:
     return piece.strip(cfg["frame"]["trim"])
 
 
-# —— 看图（会动手：手的 send_image）————————————————————
+# —— 准备图片（不发送）————————————————————
 
 
 def handle(text: Any, *, who: str = "", scene: Any = None, now: Any = None,
-           root: Optional[Any] = None,
-           config: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """认出来就交给手发图。**普通闲聊回 None**（调用方据此一个字节都不动）。
-
-    root 是**手自己的实盘根**（家按兄弟目录换算，与手那边同一条口径）。who 是这一轮的号：
-    图发给**他**（target=who），不发给别人——场合另算，由 scene 带下去。
-
-    没指名的那一轮**一次都不调手**：反问的成本是一句话，调手的成本是一份额度。
-    """
+           root: Optional[Any] = None, target: Any = None,
+           config: Optional[Mapping[str, Any]] = None, intent: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """只准备图片。root 是手的根；群聊必须由调用方给出 target。"""
+    target = who if target is None and scene == "private" else target
     cfg = config or load_config()
-    found = plan(text, config=cfg)
+    # 在线意图已在 appraisal 校验；旧离线调用继续使用原词表。
+    found = ({"word": "、".join(intent["evidence"]), "name": intent["name"]}
+             if intent is not None else plan(text, config=cfg))
     if found is None:
         return None
     name = found["name"]
-    read: Dict[str, Any] = {"intent": found["word"], "target": str(who), "ok": False,
+    read: Dict[str, Any] = {"intent": found["word"], "target": str(target or ""), "ok": False,
                             "why": "", "name": name, "image": None, "say": "", "fixed": True}
     if not name:
         # 有意图没指名：反问，**手一次都不调**（不烧额度、也不落账）
@@ -219,17 +187,22 @@ def handle(text: Any, *, who: str = "", scene: Any = None, now: Any = None,
         read["say"] = cfg["say"]["ask"]
         return read
 
-    outcome = hand_actions.send_image(who=who, scene=scene, target=who,
-                                      utterance=str(text if text is not None else "").strip(),
-                                      now=now, root=root)
+    source = ({"name": name} if intent is not None else
+              {"utterance": str(text if text is not None else "").strip()})
+    if intent is not None and intent.get('_painting_path'):
+        source = {'path': intent['_painting_path']}
+        read['source'] = '已有完成画作，并非本轮新画；画面细节只依据实际观察'
+    outcome = hand_actions.send_image(who=who, scene=scene, target=target, **source,
+                                      now=now, root=root, defer=True)
     state = str(outcome.get("state") or "")
     code = str(outcome.get("code") or "")
     detail = outcome.get("detail") or {}
-    if state == "done":
+    if state == "reserved" and code == "IMAGE_PREPARED":
         image = _image_uri(detail.get("path"))
         if image:
-            # 只有手给了路径才算成：图没落到回包里，「发出去了」就是一句空话
-            read.update({"ok": True, "why": "", "image": image, "say": ""})
+            # 准备成功才挂到回包；这里不声明已发出。
+            read.update({"ok": True, "why": "", "image": image, "say": "",
+                         "receipt": outcome["receipt"]})
             return read
         read["why"] = "IMAGE_PATH_MISSING"
         read["say"] = cfg["say"]["fail"]

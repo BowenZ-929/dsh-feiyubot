@@ -94,6 +94,9 @@ class EngageInput:
     # 主动开口的反馈读数（proactive.is_muted() 的返回，调用方传进来）。
     # 仍然只是入参：decide 不读盘、不改 streak，只看这一份里的 muted 是不是 True。
     muted: Optional[Dict[str, Any]] = None
+    # 由调用方从睡眠账取得；纯判决器不读盘。未接入睡眠账的旧调用保留基准作息。
+    sleep_window: Optional[tuple] = None
+    resting: Optional[bool] = None
 
     @classmethod
     def from_effective(cls, eff: Dict[str, Any], energy: float, familiarity: float,
@@ -121,11 +124,10 @@ class EngageInput:
 # —— 门：硬门固定次序，软门三条全算不短路 ——
 
 
-def _is_night(now: str) -> bool:
-    """now 的小时是否落在夜间窗口里；窗口按 model 的起点/终点算，跨午夜也对。"""
+def _is_night(now: str, sleep_window=None) -> bool:
+    """当前小时是否落在调用方提供的生效作息内；旧调用使用基准作息。"""
     hour = model.parse_ts(now).hour
-    start = model.NIGHT_START_H
-    end = model.NIGHT_END_H
+    start, end = sleep_window if sleep_window is not None else (model.NIGHT_START_H, model.NIGHT_END_H)
     if start <= end:  # 不跨午夜
         return start <= hour < end
     return hour >= start or hour < end
@@ -134,7 +136,7 @@ def _is_night(now: str) -> bool:
 def _hard_hits(inp: EngageInput, now: str) -> List[str]:
     """按固定次序把三道硬门各算一遍，命中的理由码按次序全列。"""
     hits: List[str] = []
-    if _is_night(now):
+    if inp.resting if inp.resting is not None else _is_night(now, inp.sleep_window):
         hits.append(model.REASON_NIGHT)
     if inp.insulted_today:
         hits.append(model.REASON_INSULTED)

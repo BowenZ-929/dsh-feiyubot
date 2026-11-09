@@ -9,7 +9,7 @@
      宿主给变量就跟宿主；宿主没给，color-scheme 会让系统色自己跟着明暗走。
      深色跟随宿主的 [data-theme="dark"]，不自造色板。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --radius: 8px;
@@ -19,7 +19,7 @@
     --fg: var(--dsw-alias-text-l1, CanvasText);
     --dim: var(--dsw-alias-text-l2, GrayText);
     --brand: var(--dsw-alias-brand, #4d6bfe);
-    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --on-brand: var(--dsw-alias-text-on-brand, #fff);
     --warn: var(--dsw-alias-warn, #d98a3d);
   }
   html[data-theme="dark"] { color-scheme: dark; }
@@ -89,34 +89,79 @@
               border-top: 1px solid var(--line); }
   .rollback .who { margin: 0; }
 
-  /* 网格不许出现「某一行只填一列」的空洞：跨列的整块明确 span 满宽，末尾落单的那张也铺满 */
+  /* 整块内容明确跨栏，左右两列不会因新增首页状态区而错位。 */
   @media (min-width: 60rem) {
     main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
-    main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
   }
+.growth-version-record { margin: 12px 0; padding: 10px 0; border-top: 1px solid var(--border, #8885); overflow-wrap: anywhere; }
+.growth-version-record p { white-space: pre-wrap; }
+  #growth-card { min-width: 0; }
+  #growth-card select { max-width: 100%; }
+html[data-theme="light"]{color-scheme:light}
+  #daily-overview { grid-column: 1 / -1; border-top: 3px solid var(--brand); }
+  .overview-readings { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 20px; margin: 18px 0; }
+  .overview-readings h2 { font-size: .9rem; color: var(--dim); font-weight: 400; }
+  .overview-value { font-size: 1.35rem; margin: 6px 0; }
+  .overview-links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .overview-links a { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; color: var(--fg); }
+  .overview-links a:hover, .overview-links a:focus-visible { border-color: var(--brand); color: var(--brand); }
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
      壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
 <script src="panel-base.js" data-page="soul"></script>
 </head>
 <body>
-<p class="banner">她的魂。每块标题右边那行小字写着「这块谁写的」：人写的能改，程序写的只能看。改一句、加一条红线都要写原因——原因会进改动记录。</p>
+<p class="banner">她的魂与当前认识。身份和红线保留人工边界，日常成长另存版本；人工纠正也会留下理由。</p>
 <main>
+  <section class="card" id="daily-overview" aria-labelledby="overview-title">
+    <div class="head"><h1 id="overview-title">她现在</h1><button class="slim" id="overview-refresh" type="button">刷新状态</button></div>
+    <div class="overview-readings">
+      <div><h2>睡眠与清醒</h2><p class="overview-value" id="overview-rest" role="status">正在读取…</p><p class="hint" id="overview-wake"></p></div>
+      <div><h2>QQ 连接</h2><p class="overview-value" id="overview-channel" role="status">正在读取…</p><p class="hint">连接正常不等于每条消息都会回复；发言判断和送达结果在经历里查看。</p></div>
+    </div>
+    <nav class="overview-links" aria-label="常用入口">
+      <a href="day#activity-card">全部经历</a><a href="heart#changes-list">心情与参数变化</a>
+      <a href="observe?source=model">模型与思考记录</a><a href="galaxy">记忆星图</a>
+      <a href="studio">画室与作品</a><a href="settings">功能设置</a>
+    </nav>
+    <p class="hint" id="overview-checked" style="margin-top:12px">读取已有状态，不唤醒她。</p>
+  </section>
   <div class="col">
+  <section class="card" id="growth-card">
+    <div class="head"><h2>她自己的生活</h2><span class="who">成长与个人打算</span></div>
+    <p class="hint">开启后，她可以形成新的喜好和看法、保留自己的打算，自主写作、读作品或画画，也可以闲着。会使用现有模型账号并产生用量；不新增消息接收者，不自动开放新平台。每个生活日夜间整理一次；失败后按 1、5、15 分钟最多补试三次，成功步骤不重复。</p>
+    <p class="msg" id="growth-state" role="status">读取中…</p>
+    <button type="button" id="growth-toggle" disabled>读取开关</button>
+    <button type="button" id="growth-refresh">刷新成长状态</button>
+    <p class="hint"><a href="day#growth-card">调整活动机会与每日次数</a></p>
+    <h3>当前自我认识</h3><pre id="growth-current" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    <h3>她的打算</h3><pre id="growth-plans" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    <details><summary>最近活动选择</summary><pre id="growth-log" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
+    <details><summary>查看成长版本与人工纠正</summary>
+      <div id="growth-versions"></div>
+      <label>修改哪一项 <select id="growth-field"><option value="likes">成长兴趣</option><option value="dislikes">不喜欢</option><option value="views">当前看法</option><option value="self_description">怎样看自己</option><option value="stance">待人倾向</option><option value="sleep_notice">睡眠提示</option></select></label>
+      <label for="growth-value">新内容（留空表示清除，不恢复初始设定）</label><textarea id="growth-value" maxlength="600" rows="3"></textarea>
+      <label for="growth-note">纠正或回退的理由</label><input id="growth-note" maxlength="600" type="text">
+      <button type="button" id="growth-save">保存这一项</button>
+      <label>回到已有成长版本 <select id="growth-version"></select></label><button type="button" id="growth-restore">追加一个回退版本</button>
+      <p class="hint">日常成长不逐条审批。纠正和回退会保留历史；总开关关闭时，这些成长内容暂不进入聊天。</p>
+    </details>
+  </section>
+
     <section class="card">
       <div class="head"><h2>她是谁</h2><span class="who">人写的；这一页只显示，改不了</span></div>
       <dl class="kv">
         <dt>名字</dt><dd id="ro-name">读取中…</dd>
         <dt>形象</dt><dd id="ro-appearance">读取中…</dd>
-        <dt>三句自述</dt><dd id="ro-statements">读取中…</dd>
+        <dt>初始性格</dt><dd id="ro-statements">读取中…</dd>
         <dt>怕什么</dt><dd id="ro-fears">读取中…</dd>
       </dl>
       <p class="msg" id="identity-msg"></p>
     </section>
 
     <section class="card">
-      <div class="head"><h2>喜欢什么</h2><span class="who">人写的</span></div>
-      <p class="hint">她喜欢什么，一句话，逐字进注入。只有人写的那一句：她自己不会往这里长（她要长新的喜欢，写进自述与家·抽屉），也不许写成讨好人的话。改完下一回合就生效，不用重启。</p>
+      <div class="head"><h2>标志性喜好</h2><span class="who">人写的</span></div>
+      <p class="hint">标志性喜好由你设定，成长不会覆盖这一项；她新增或改变的兴趣单独保存在成长记录里。</p>
       <label for="like-value">这一句话</label>
       <textarea id="like-value" rows="3" spellcheck="false" placeholder="读取中…"></textarea>
       <label for="like-reason">为什么改（必填，进改动记录）</label>
@@ -127,7 +172,7 @@
 
     <section class="card">
       <div class="head"><h2>待人姿态</h2><span class="who">人写</span></div>
-      <p class="hint">她跟人打交道时的那股劲儿，一句话。改完下一回合就生效，不用重启。</p>
+      <p class="hint">尚未形成成长记录时的待人起点；成长后使用她从实际相处中形成的待人方式。</p>
       <label for="say-value">这一句话</label>
       <textarea id="say-value" rows="3" spellcheck="false" placeholder="读取中…"></textarea>
       <label for="say-reason">为什么改（必填，进改动记录）</label>
@@ -158,15 +203,15 @@
     </section>
 
     <section class="card">
-      <div class="head"><h2>她提的改动</h2><span class="who">由程序写：她自己只能提，点头的是人</span></div>
-      <p class="hint">她夜里攒下的想法放在这儿，每条都带着依据的记忆。点头才落进她的魂，她自己是改不动自己的；摇头就只记下这次拒绝，她的魂一个字不动。</p>
+      <div class="head"><h2>她提的改动</h2><span class="who">她可以自行采纳、拒绝或暂缓，你也可以介入</span></div>
+      <p class="hint">这些建议由旧程序从关键词生成，不等于她已经认同。自主生活开启时，她会在夜间整理中自己判断；采纳进入上方成长版本，下一轮聊天使用。外貌、身份、红线与标志性喜好保持。</p>
       <ul class="rows" id="proposal-list"><li><span class="body">读取中…</span></li></ul>
       <p class="msg" id="proposal-msg"></p>
     </section>
 
     <section class="card">
-      <div class="head"><h2>已经处理过的提案</h2><span class="who">由程序写：谁在什么时候点了头或摇了头，程序自己记</span></div>
-      <p class="hint">点头进魂的那几条、被人拒掉的几条都留在这一块，带着谁处理的、什么时候、为什么拒。刷新可见，重启仍在。</p>
+      <div class="head"><h2>已经处理过的提案</h2><span class="who">谁决定、为什么决定，都会留下记录</span></div>
+      <p class="hint">她自己或你做出的决定都会保留，显示理由、时间和采用的成长版本。刷新和换日后仍可查看。</p>
       <ul class="rows" id="proposal-done-list"><li><span class="body">读取中…</span></li></ul>
       <p class="msg" id="proposal-done-msg"></p>
     </section>
@@ -403,7 +448,7 @@
     say("history-msg", "共 " + rows.length + " 次改动，最新的一行在上面。");
   }
 
-  // —— 她提的改动（她只能提，点头的是人） ————————————————
+  // —— 程序建议与自主决定 ————————————————
   // 页面不给自己造提案：一条一条原样来自程序。接受写魂并回写终态，拒绝只落终态。
   var PROPOSAL_STATUS_TEXT = { accepted: "已接受", rejected: "已拒绝" };
 
@@ -418,7 +463,8 @@
     var cell = node("div");
     cell.appendChild(node("div", "body",
       "想把「" + targetText(proposal.target) + "」改成「" + String(proposal.value || "") + "」"));
-    if (proposal.reason) { cell.appendChild(node("div", "meta", "为什么：" + proposal.reason)); }
+    if (proposal.reason) { cell.appendChild(node("div", "meta", "程序提出的理由：" + proposal.reason)); }
+    if (proposal.decision_reason) { cell.appendChild(node("div", "meta", "她暂缓的理由：" + proposal.decision_reason)); }
     var evidence = proposal.evidence || [];
     cell.appendChild(node("div", "meta", evidence.length
       ? "依据的三条记忆：" : "这条没带依据（不该出现，报告它）"));
@@ -454,14 +500,14 @@
     var proposals = (batch || {}).proposals || [];
     STATE.proposals = proposals;
     if (!proposals.length) {
-      list.appendChild(node("li", "msg", "这一夜她没提改动"));
-      say("proposal-msg", "她提了会摆在这儿：改成什么、为什么、依据哪三条记忆。");
+      list.appendChild(node("li", "msg", "目前没有待决定的建议"));
+      say("proposal-msg", "自主生活开启后，她会在夜间整理中自行判断；你也可以手动处理。");
       return;
     }
     proposals.forEach(function (proposal, index) {
       proposalRow(list, proposal, index);
     });
-    say("proposal-msg", "共 " + proposals.length + " 条等她被人点头。");
+    say("proposal-msg", "共 " + proposals.length + " 条待她在夜间自行决定，也可由你处理。");
   }
 
   function acceptProposal(proposal) {
@@ -479,7 +525,8 @@
               return;
             }
             say("proposal-msg", "接受了。她的「" + targetText(proposal.target)
-              + "」换成这一句，改动记录里多了一行；这条挪进了「已经处理过的提案」。", "good");
+              + "」已更新，" + (data.applied_to === "profile" ? "成长版本" : "改动记录")
+              + "里留下了记录；这条挪进了「已经处理过的提案」。", "good");
           });
         }
         // 重复点头：拒因（多半是 GATE_COOLDOWN）照旧显示，但要看得出「这条已经处理过」。
@@ -544,9 +591,11 @@
       if (row.reason) {
         cell.appendChild(node("div", "meta", "她提的理由：" + row.reason));
       }
-      if (row.status === "rejected") {
-        cell.appendChild(node("div", "meta",
-          "拒绝理由：" + (row.decision_reason || "没记")));
+      if (row.decision_reason) {
+        cell.appendChild(node("div", "meta", "决定理由：" + row.decision_reason));
+      }
+      if (row.profile_version) {
+        cell.appendChild(node("div", "meta", "采用的成长版本：v" + row.profile_version));
       }
       li.appendChild(cell);
       list.appendChild(li);
@@ -624,6 +673,32 @@
   }
 
   // —— 取数与三态 ————————————————————————————————
+  async function refreshOverview() {
+    el('overview-refresh').disabled = true;
+    el('overview-rest').textContent = '正在读取…';
+    el('overview-channel').textContent = '正在读取…';
+    el('overview-wake').textContent = '';
+    await Promise.all([
+      call('GET', '/heart/sleep').then(function (res) {
+        if (res.status !== 200 || res.data.ok === false) throw new Error('读取失败');
+        var rest = res.data.rest || {};
+        el('overview-rest').textContent = ({awake:'醒着',asleep:'睡着了',holding:'被叫醒后硬撑着',deep:'彻底睡着了',untracked:'尚无睡眠记录'})[rest.phase] || '睡眠状态未知';
+        var hints = [];
+        if (rest.hold_until) hints.push('硬撑到 ' + new Date(rest.hold_until).toLocaleString('zh-CN'));
+        if (rest.wake_at) hints.push('计划醒来：' + new Date(rest.wake_at).toLocaleString('zh-CN'));
+        if (rest.phase === 'deep') hints.push('私聊提示一次，普通群聊不打扰。');
+        el('overview-wake').textContent = hints.join(' · ');
+      }).catch(function () { el('overview-rest').textContent = '睡眠状态暂时读不到'; }),
+      call('GET', '/observe/channel').then(function (res) {
+        if (res.status !== 200 || res.data.ok === false) throw new Error('读取失败');
+        var bots = res.data.bots || [];
+        el('overview-channel').textContent = !bots.length ? '尚无 QQ 连接' :
+          bots.every(function (b) { return b.business_connected && b.running; }) ? 'QQ 已连接' : 'QQ 连接不完整';
+      }).catch(function () { el('overview-channel').textContent = 'QQ 状态暂时读不到'; })
+    ]);
+    el('overview-checked').textContent = '本次读取：' + new Date().toLocaleString('zh-CN') + ' · 只查看，不唤醒她。';
+    el('overview-refresh').disabled = false;
+  }
   function refresh() {
     return Promise.all([
       call("GET", "/soul"),
@@ -633,31 +708,31 @@
       call("GET", "/soul/revisions"),
       call("GET", "/soul/proposals?status=pending"),
       call("GET", "/soul/proposals?status=all")
-    ]).then(function (out) {
-      if (out[0].status === 200) { showSoul(out[0].data || {}); }
+    ]).then(function ([soul, rendered, history, checks, revisions, pending, handled]) {
+      if (soul.status === 200) { showSoul(soul.data || {}); }
       else {
-        say("identity-msg", "她是谁读不出来，先确认核在跑：" + reasonOf(out[0]), "bad");
-        say("redline-msg", "红线也读不出来：" + reasonOf(out[0]), "bad");
+        say("identity-msg", "她是谁读不出来，先确认核在跑：" + reasonOf(soul), "bad");
+        say("redline-msg", "红线也读不出来：" + reasonOf(soul), "bad");
       }
-      if (out[1].status === 200) { showRender(out[1].data || {}); }
+      if (rendered.status === 200) { showRender(rendered.data || {}); }
       else {
         el("render-text").textContent = "读不出来。";
-        say("render-msg", "注入面读不到，先确认核在跑：" + reasonOf(out[1]), "bad");
+        say("render-msg", "注入面读不到，先确认核在跑：" + reasonOf(rendered), "bad");
       }
-      if (out[2].status === 200) { showHistory((out[2].data || {}).history || []); }
-      else { say("history-msg", "改动记录读不到：" + reasonOf(out[2]), "bad"); }
-      if (out[3].status === 200) { showIssues((out[3].data || {}).issues || []); }
-      else { say("issues-msg", "自检跑不起来：" + reasonOf(out[3]), "bad"); }
-      if (out[5].status === 200) { showRevisions(out[5].data || {}); }
+      if (history.status === 200) { showHistory((history.data || {}).history || []); }
+      else { say("history-msg", "改动记录读不到：" + reasonOf(history), "bad"); }
+      if (checks.status === 200) { showIssues((checks.data || {}).issues || []); }
+      else { say("issues-msg", "自检跑不起来：" + reasonOf(checks), "bad"); }
+      if (revisions.status === 200) { showRevisions(revisions.data || {}); }
       else {
         STATE.previous = null;
         renderRevision();
-        say("rollback-msg", "版本清单读不到，退回上一版先别点：" + reasonOf(out[5]), "bad");
+        say("rollback-msg", "版本清单读不到，退回上一版先别点：" + reasonOf(revisions), "bad");
       }
-      if (out[6].status === 200) { showProposals(out[6].data || {}); }
-      else { say("proposal-msg", "她提的改动读不到：" + reasonOf(out[6]), "bad"); }
-      if (out[7].status === 200) { showDone(out[7].data || {}); }
-      else { say("proposal-done-msg", "处理过的提案读不到：" + reasonOf(out[7]), "bad"); }
+      if (pending.status === 200) { showProposals(pending.data || {}); }
+      else { say("proposal-msg", "她提的改动读不到：" + reasonOf(pending), "bad"); }
+      if (handled.status === 200) { showDone(handled.data || {}); }
+      else { say("proposal-done-msg", "处理过的提案读不到：" + reasonOf(handled), "bad"); }
     }).catch(function (err) {
       say("identity-msg", "连不上核：" + err + "。先把它起起来，这一页会自动再读一次。", "bad");
     });
@@ -742,8 +817,11 @@
     });
   });
 
+  el('overview-refresh').addEventListener('click', refreshOverview);
+  refreshOverview();
   refresh();
 }());
 </script>
+<script src="growth-panel.js"></script>
 </body>
 </html>

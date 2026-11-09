@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from organs.heart import energy, events, model, mood, offset, store
+from organs.heart import energy, events, model, mood, offset, sleep, store
 
 PENDING_FILE = "pending.json"
 VERSION = 1
@@ -261,12 +261,17 @@ def _expire(data: Dict[str, Any], at: str, root: Any) -> List[Dict[str, Any]]:
 # ---- 派生 ---------------------------------------------------------------
 
 
-def _candidates(root: Any, at: str, cfg: Dict[str, Any]) -> List[Tuple[str, Optional[str], str]]:
+def _candidates(root: Any, at: str, cfg: Dict[str, Any], thoughts: List[Dict[str, Any]]) -> List[Tuple[str, Optional[str], str]]:
     """现算此刻能长出的念头（只读别人的状态，不看本文件）。"""
     found: List[Tuple[str, Optional[str], str]] = []
 
     run = 0
+    # 已被满足的那批冷落不再次触发；新事件仍按原连续次数判断。
+    satisfied = max((_stamp(row.get('settled_at')) or _FALLBACK_TS for row in thoughts
+                     if row['kind'] == KIND_PRAISE and row['state'] == STATE_SETTLED), default=_FALLBACK_TS)
     for row in reversed(events.recent(root=root, now=at, window_min=cfg["ignore_window_min"])):
+        if model.parse_ts(row['at']) <= satisfied:
+            break
         if row.get("kind") == events.KIND_IGNORED:
             run += 1
             continue
@@ -275,7 +280,9 @@ def _candidates(root: Any, at: str, cfg: Dict[str, Any]) -> List[Tuple[str, Opti
         found.append((KIND_PRAISE, None, SOURCE_IGNORED))
 
     try:
-        tired = float(energy.read(root=root, now=at).get("value"))
+        terms = sleep.overview(root=root, now=at)
+        tired = float(energy.read(root=root, now=at, sleep_window=terms['effective_window'],
+                                  wake_cap=terms['wake_cap']).get("value"))
     except (TypeError, ValueError):
         tired = float(model.ENERGY_MAX)
     if tired <= float(model.ENERGY_LOW):
@@ -343,7 +350,7 @@ def derive(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
     open_rows = _open_rows(data)
     created: List[str] = []
     dropped: List[Dict[str, Any]] = []
-    for kind, axis, source in _candidates(root, at, cfg):
+    for kind, axis, source in _candidates(root, at, cfg, data['thoughts']):
         if _already_open(open_rows, kind, axis):
             continue
         if len(open_rows) >= _int(cfg["max_open"], 3):
@@ -400,12 +407,13 @@ def _match(key: str, open_rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]
 
 
 def settle(
-    kind_or_id: str, root: Any = None, now: Optional[str] = None, who: str = "主人"
+    kind_or_id: str, root: Any = None, now: Optional[str] = None, who: str = "主人", *, reward: bool = True
 ) -> Dict[str, Any]:
     """结算一条念头：只由事件触发（嘴 / 脑投递 praise / rest / 轴名）。
 
     praise → 标 settled 后调用 mood.apply_event("praise")；rest → 只标 settled，
     不投事件。本模块永远不碰心情的落盘文件。
+    report_event 已负责情绪计分时传 reward=False，只结算念头，不重复投递夸奖。
     没有对应的 open 念头 → {"ok": False, "skipped": "no-open"}，状态一个字节不改
     （除非顺带标了已过期的念头）。
     """
@@ -422,7 +430,7 @@ def settle(
     target["settled_at"] = at
     _save(root, data)
     event = None
-    if target["kind"] == KIND_PRAISE:
+    if reward and target["kind"] == KIND_PRAISE:
         event = mood.apply_event(model.EVENT_PRAISE, root=root, now=at, who=who)
     return {
         "ok": True,

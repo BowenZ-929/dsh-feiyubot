@@ -339,13 +339,15 @@ class ConfigFileTest(LLMTest):
         with mock.patch.dict(llm.os.environ, {}, clear=True):
             factory = load_config()
         self.assertEqual(factory["provider"], "deepseek")
-        self.assertEqual(factory["model"], "deepseek-chat")
+        self.assertEqual(factory["model"], "deepseek-flash")
+        self.assertEqual(factory["thinking"], {"type": "enabled"})
+        self.assertEqual(factory["reasoning_effort"], "high")
         self.assertEqual(factory["base_url"], "https://api.deepseek.com/v1")
-        self.assertEqual(factory["timeout_ms"], 30000)
-        self.assertEqual(factory["retries"], 2)
+        self.assertEqual(factory["timeout_ms"], 45000)
+        self.assertEqual(factory["retries"], 0)
         self.assertEqual(factory["key_env"], "QQAGENT_LLM_KEY")
         self.assertEqual(factory["temperature"], 0.7)
-        self.assertEqual(factory["max_tokens"], 400)
+        self.assertEqual(factory["max_tokens"], 8192)
 
     def test_factory_file_carries_the_two_temperature_tiers(self):
         """两个温度（0.7 / 0.5）与触发条件都只在数据里：这一条钉的是数据，不是代码常量。"""

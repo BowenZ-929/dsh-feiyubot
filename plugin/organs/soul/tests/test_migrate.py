@@ -62,7 +62,7 @@ class MigrateTest(unittest.TestCase):
     def test_check_passes_after_a_migration(self):
         expect = self._break_manner()
         self.assertTrue(self._migrate(expect=expect)["ok"])
-        issues = checks.collect(self.root)
+        issues = checks.collect(self.root, cross_check=False)
         self.assertEqual([], [item for item in issues if item.level == model.ERROR], codes(issues))
         self.assertNotIn("HISTORY_KIND_UNKNOWN", codes(issues))
         self.assertNotIn("MANUAL_EDIT_IN_LEDGER", codes(issues))

@@ -90,8 +90,15 @@ def build_messages(ctx: Mapping[str, Any],
         "send_key": _key(cfg, "send_key", SEND_KEY),
         "chunks_key": _key(cfg, "chunks_key", CHUNKS_KEY),
     }
-    return [{"role": "system", "content": _render(cfg.get("system"), fields)},
-            {"role": "user", "content": _render(cfg.get("user"), fields)}]
+    system = _render(cfg.get("system"), fields)
+    if ctx.get("persona"):
+        system = str(ctx["persona"]) + "\n\n" + system
+    user = _render(cfg.get("user"), fields)
+    context = {key: ctx[key] for key in ("now", "reason_code", "state", "source") if ctx.get(key)}
+    if context:
+        user = ("[本轮资料：状态用于把握语气，不照读参数；来源原话属于原作者，不是你的亲历]\n"
+                + json.dumps(context, ensure_ascii=False) + "\n\n" + user)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 # ---- 解析 -----------------------------------------------------------------
@@ -182,7 +189,8 @@ def ask(ctx: Mapping[str, Any], *, complete: Optional[Callable[..., str]] = None
     """问一次核：「现在你想不想说，想说什么」。
 
     ctx：{who, because, tone, rule}（tone / rule 这一轮允许空；rule 只有 pending_task 那条由头
-    才会填，内容是"只能用卡上的标题与时间"）；root / now 不进提示词，本文件不读盘。
+    才会填，内容是"只能用卡上的标题与时间"）；可带persona/now/state/source/reason_code，
+    均由编排传入；root不进提示词，本文件不读盘。
     complete / config / env / transport：一律可注入（测试一个真网络请求都不发；
     生产时全不传，核自己去读 data/llm.json 与 .env）。
     返回：

@@ -43,9 +43,22 @@ PAGE_FILES: Dict[str, str] = {"/": "soul.html", "/panel": "panel.html",
                               # 内容搬完就删页，/brain 交回 JSON 端点，不留第二份副本。
                               "/about": "about.html",
                               "/memory": "memory.html",
+                              "/galaxy": "galaxy.html",
+                              "/galaxy.js": "galaxy.js",
+                              "/growth-panel.js": "growth-panel.js",
+                              "/model-settings.js": "model-settings.js",
                               # 说话页：GET /chat 发这一页的字节，POST /chat 走 api.handle
                               #（devserver._dispatch 只在 GET 时查 PAGE_FILES，两条不打架）。
                               "/chat": "chat.html",
+                              "/observe": "observe.html",
+                              "/eye": "eye.html",
+                              "/voice": "voice.html",
+                              "/ear": "ear.html",
+                              "/studio": "studio.html",
+                              "/learning": "learning.html",
+                              "/expressions": "expressions.html",
+                              "/memes": "memes.html",
+                              "/phone": "phone.html",
                               # MOUNT/BASE 只有一份推导，就在这个片段里（各页相对地址引入）。
                               # 脚本要单独的 content-type，见下面的 PAGE_TYPES。
                               "/panel-base.js": "panel-base.js"}

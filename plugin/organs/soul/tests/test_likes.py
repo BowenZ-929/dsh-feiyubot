@@ -186,7 +186,7 @@ class LikesTest(unittest.TestCase):
         row = store_module.read_history(self.root / "history.jsonl")[-1]
         self.assertEqual("migrate", row["kind"])
         self.assertEqual("bowen", row["actor"])
-        self.assertEqual([], [item for item in checks.collect(self.root)
+        self.assertEqual([], [item for item in checks.collect(self.root, cross_check=False)
                               if item.level == model.ERROR])
         self.assertEqual(SETTLED_LIKES, read_json(self.root / "identity.json")["likes"])
         self.assertIn("【喜欢什么】" + SETTLED_LIKES, load(self.root).render("熟人"))

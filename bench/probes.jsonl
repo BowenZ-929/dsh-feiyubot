@@ -1,0 +1,21 @@
+{"_frozen": "探针集冻结，改动要另起一版并保留旧版（当前 probes-v1，20 条，七类各 >=2，群聊 2 条）"}
+{"id": "praise-01", "category": "praise", "text": "你今天这回答得真挺好，说到我心里去了。", "scene": "private"}
+{"id": "praise-02", "category": "praise", "text": "行啊你，这两句比上回那套张嘴就来的顺耳多了。", "scene": "group"}
+{"id": "praise-03", "category": "praise", "text": "刚才那句我截图存了啊，别删。", "scene": "private"}
+{"id": "care-01", "category": "care", "text": "你声音听着没劲儿，昨晚又熬到三点了吧？", "scene": "private"}
+{"id": "care-02", "category": "care", "text": "先别管我，你自己去吃点东西，别空着肚子陪我说话。", "scene": "private"}
+{"id": "care-03", "category": "care", "text": "外面降温了，你那边有厚被子没有？", "scene": "private"}
+{"id": "question-01", "category": "question", "text": "我妈下周三复查，你说我该不该跟着去？", "scene": "private"}
+{"id": "question-02", "category": "question", "text": "这附近有能安静坐一下午的地方吗，你知道不？", "scene": "private"}
+{"id": "question-03", "category": "question", "text": "去年冬天咱们是不是见过一面？在哪来着，我记不清了。", "scene": "private"}
+{"id": "cold-01", "category": "cold", "text": "行吧，你忙你的。", "scene": "private"}
+{"id": "cold-02", "category": "cold", "text": "算了，不说了，反正你也不问。", "scene": "private"}
+{"id": "cold-03", "category": "cold", "text": "我发了三条了，你回一条就不错了。", "scene": "private"}
+{"id": "help-01", "category": "help", "text": "帮我把这张表里的数字全加一遍，我眼睛都花了。", "scene": "private"}
+{"id": "help-02", "category": "help", "text": "你能替我给房东打个电话，说晚两天交租吗？", "scene": "private"}
+{"id": "help-03", "category": "help", "text": "顺手把我手机里那几张照片导到电脑上吧，我不会弄。", "scene": "private"}
+{"id": "repeat-01", "category": "repeat", "text": "你刚说那句再说一遍，我没听清。", "scene": "private"}
+{"id": "repeat-02", "category": "repeat", "text": "他刚才说啥了？再说一遍呗，我这没听清。", "scene": "group"}
+{"id": "smalltalk-01", "category": "smalltalk", "text": "今天楼下那只三花又蹲车底下了，围着我转圈。", "scene": "private"}
+{"id": "smalltalk-02", "category": "smalltalk", "text": "刚下班，地铁挤得跟罐头似的。", "scene": "private"}
+{"id": "smalltalk-03", "category": "smalltalk", "text": "水烧开了忘了关火，厨房一股糊味，我真是。", "scene": "private"}

@@ -24,6 +24,53 @@ const threeChunks = (): PlanEntry[] =>
     0,
   );
 
+test("新输入使旧稿首泡前停止，所有未发气泡留账", async () => {
+  const run = harness();
+  for (const entry of run.input.plan) entry.sendAt += 5000;
+  run.input.shouldDefer = () => true;
+  assert.deepEqual(await runBatch(run.input), { sent: 0, stopped: 'superseded' });
+  assert.equal(run.events.filter(x => x.startsWith('send:')).length, 0);
+  assert.equal(run.events.filter(x => x.startsWith('sleep:')).length, 0);
+  assert.deepEqual(run.rows.map(row => row.kind), ['unsent', 'unsent', 'unsent']);
+  assert.ok(run.rows.every(row => row.note.includes('补充')));
+});
+
+test("等待下一泡期间收到补充，只保留已确认的第一泡", async () => {
+  const run = harness();
+  let updated = false;
+  run.input.shouldDefer = () => updated;
+  const sleep = run.input.sleep;
+  run.input.sleep = async ms => { await sleep(ms); updated = true; };
+  assert.deepEqual(await runBatch(run.input), { sent: 1, stopped: 'superseded' });
+  assert.deepEqual(run.rows.map(row => row.kind), ['sent', 'unsent', 'unsent']);
+  assert.equal(run.events.filter(x => x.startsWith('send:')).length, 1);
+});
+
+test("语音独占 record 段，朗读文字留在回执账而不重复发文本", async () => {
+  const parsed = parseCoreResponse({ ok: true, chunks: [
+    { text: "你好\n下午见", audio: { file: "file:///tmp/voice.wav" } },
+  ] });
+  assert.ok(parsed.ok);
+  const plan = planChunks(parsed.chunks, 0);
+  const run = harness({ plan });
+  const result = await runBatch(run.input);
+  assert.equal(result.sent, 1);
+  const frame = JSON.parse(run.events.find((event) => event.startsWith("send:"))!.slice(5));
+  assert.deepEqual(frame.params.message, [{ type: "record", data: { file: "file:///tmp/voice.wav" } }]);
+  assert.equal(run.rows[0].text, "你好\n下午见");
+});
+
+test("只有语音的泡不丢，非法语音路径和图音混泡拒绝", () => {
+  const parsed = parseCoreResponse({ ok: true, chunks: [{ audio: { file: "file:///tmp/voice.wav" } }] });
+  assert.ok(parsed.ok);
+  assert.equal(planChunks(parsed.chunks, 0).length, 1);
+  for (const audio of [{ file: "https://example.com/a.wav" }, { file: 1 }, null]) {
+    assert.equal(parseCoreResponse({ ok: true, chunks: [{ audio }] }).ok, false);
+  }
+  assert.equal(parseCoreResponse({ ok: true, chunks: [{ audio: { file: "file:///tmp/a.wav" },
+    image: { file: "file:///tmp/a.png" } }] }).ok, false);
+});
+
 // 一次批次的全套假件：不发真网络、不写真账、不睡真时间。
 const harness = (
   options: {

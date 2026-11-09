@@ -1,51 +1,12 @@
-"""嘴的去重：同一动作行、或同一开场，在最近几轮里出现过第二次，就算她在反复念那一条。
+"""输出文字的字面重合观察，不据此认定语义复读。
 
-**这一关治的是「复读」。** 口癖护栏（organs/mind/usage.py）只统计「开场有没有命中锚句」——
-它看的是她开口的那一下有没有落在给定的锚句上，不看整行是不是又抄了一遍自己上一句。于是有这么一类
-病它照不到：同一个动作行、同一句开场，隔一轮又原样回来一次；从锚句那一关看是「没命中」，从听的人
-这边看是「这句我听过」。本文件只认这一件事。
-
-**两条判据都只看字面，谁也不许用相似度、更不许用模型**（同一个输入必须离线复算出一模一样的结论）：
-
-- **同一动作行**：去空白与标点之后**逐字相等**。动作行短，逐字比才对——「尾巴尖蜷了一下」与
-  「尾巴尖蜷了两下」是两回事，按相似度比会把它们并成一条，把她的分寸感一起抹掉。
-- **同一开场**：去空白之后**前 opening_chars 个字相等**（默认 6，写在数据里）。开场是她开口的
-  那几个字，标点也算数；去空白是因为换行与空格不该改变「这话是怎么开的」。
-- **只看最近 rounds 条**（默认 8，写在数据里）：隔了十几轮又想起同一句话，那叫回到旧话题，不叫
-  复读；窗口太短又抓不住「隔一轮又念一遍」。
-- **太短的不算开场**：字数不够 opening_chars 的那条不参与开场比较——否则一句「好」就能把两句
-  毫不相干的话判成同一个开场。
-- 两路都撞时先报**动作行**：那是逐字相等，比「前几个字一样」更确定。
-
-**最近若干条输出（recent）由调用方给，旧的在前，越靠后越新。** 本文件不记账、不写盘、不取时钟：
-谁记着她说过什么，是调用方的事（organs/mind/recent.py 与 api 层）。**recent 为 None 表示这一轮
-拿不到历史——那不是「没重复」**，两件事必须分得开：状态由模块级常量 STATUS_OK / STATUS_NOT_CHECKED
-表示，与 action_note 的 action_status 同一个写法，由闸带进 Verdict.repeat_status 照实透出。
-check 的返回类型（Optional[RepeatHit]）装不下第三种状态，所以 recent 为 None 时它返回 None
-（没有证据），判没判看状态，**不许拿 None 冒充通过**，也不许塞一条假命中进去。
-
-**返回的不是布尔。** 命中给一条 RepeatHit：哪一路（开场那一路 / 动作行那一路）、撞上的那几个字、
-上一次是 recent 里的第几条（0 起）、一句人话。布尔说不出「为什么拦」，日志与面板就没法复盘。
-
-**有一条豁免，而且只有这一条：对方明说要她重复。** 他说「再说一遍」「重复」「刚才那句」
-「你刚才说」这类话时，原样把那句再说一遍正是他要的——这时候还把重复判废，等于把她照办的那一下
-也吞掉。判法分两步，缺一步都不算：**先真的撞上了重复**（同一动作行或同一开场），**再**看对方
-这一句是不是在要她重复（request_markers 里的正则表，逐条 re.search）。两步都成立才返回一条
-RepeatSkip（**不是** RepeatHit）：这一关只记账、不判废，状态是 STATUS_SKIPPED，话照发。
-为什么两步都要：只认「说了再说一遍」就跳过，等于每次他一开口说这话这一关就白设；而且没撞上重复
-的时候根本没有「判废」需要放掉，记那一笔账只是噪音。asked 为空一律不算请求——**不许默认豁免**。
-
-**请求标记只有一份真源，就是这里的 request_markers。** 同一句请求还要豁免复述审计（那边判的是
-「她照搬了设定段」），所以判定公开成 requested(asked, table)：闸算一次，把那个布尔同时交给
-repeat.check 与 audit.audit——审计那份数据里不许另抄一张标记表，抄了就是第二处真源。
-
-判据全在 organs/mouth/data/repeat.json（经 warehouse.load("repeat") 只读借入）：两个数、两张字符
-表、两条判据的名字、闸用的三个名字（clause_id 与 kind，外加跳过记账用的 skip_clause_id）、
-请求标记表、弃言账里认这一条用的记号、全部人话模板；
-本文件不写死一个数、不写死一句说法。缺键、坏形状当场抛 RepeatBroken，**不补默认值**——补一个
-默认数，代码里就又多了一处真源。
-
-纯：不 import time / datetime / random，不取时钟、不联网、不写盘，不碰宿主；文件 IO 只经 warehouse。
+比较去标点的完整文字行和去空白的前 opening_chars 个字，窗口为最近 rounds 条。
+保留 action_line 数据键以兼容旧记录，实际比较所有文字行。
+RepeatHit 只描述重合；gate 记录 observed，保留原话，不触发模型改写。
+明确请求复述且确有重合时返回 RepeatSkip，保留原有请求审计。
+请求标记由 requested 统一供本模块与复述审计使用。
+recent=None 表示未获得历史，与比过但无重合分开记录。
+判据来自 warehouse.load("repeat")；本模块不联网、不记账、不取时钟。
 """
 from __future__ import annotations
 
@@ -55,12 +16,13 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .warehouse import load
 
+STATUS_OBSERVED = "observed"          # 字面重合只作观察，不据此改写或丢弃
 STATUS_OK = "ok"                     # 真的比过了：这一轮拿到了最近几条输出
 STATUS_NOT_CHECKED = "not-checked"   # 没拿到历史，这一关没跑；不是通过
 STATUS_SKIPPED = "skipped-by-request"  # 撞上了重复，但对方要她再说一遍：只记账，不判废
 
 __all__ = ["RepeatBroken", "RepeatHit", "RepeatSkip", "STATUS_OK", "STATUS_NOT_CHECKED",
-           "STATUS_SKIPPED", "check", "clear_reason", "names", "requested"]
+           "STATUS_SKIPPED", "STATUS_OBSERVED", "check", "clear_reason", "names", "requested"]
 
 
 class RepeatBroken(ValueError):

@@ -20,6 +20,11 @@ case "$ans" in
 esac
 
 echo
+echo "• 停止 NoneBot…"
+if lsof -ti:6290 -sTCP:LISTEN >/dev/null 2>&1; then
+  lsof -ti:6290 -sTCP:LISTEN | xargs kill 2>/dev/null
+fi
+
 echo "• 停止通道…"
 if lsof -ti:6200 -sTCP:LISTEN >/dev/null 2>&1; then
   lsof -ti:6200 -sTCP:LISTEN | xargs kill 2>/dev/null

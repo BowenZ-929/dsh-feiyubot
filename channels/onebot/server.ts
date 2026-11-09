@@ -29,7 +29,8 @@ import {
 import { loadPolicy, type Policy } from "./policy.ts";
 import { BatchHub, type BatchSnapshot } from "./batch.ts";
 import { renderSegment } from "./segment.ts";
-import { enforceLimits } from "./compose.ts";
+import { hearAttachments } from "./hearing.ts";
+import { countChars, enforceLimits } from "./compose.ts";
 import {
   DECISIONS_RELATIVE_PATH,
   DecisionLog,
@@ -40,6 +41,8 @@ import {
 import { QUOTA_RELATIVE_PATH, Quota } from "./quota.ts";
 import { burstBlocked, chitchatSampled, firstLayer, loadGateWords, type DirectRule, type GateWords } from "./direct.ts";
 import { OWN_IDS_RELATIVE_PATH, OwnIds } from "./own-ids.ts";
+import { INBOUND_RELATIVE_PATH, InboundRing } from "./inbound-ids.ts";
+import { quoteFromMsgData, resolveQuote, type QuoteContent, type QuoteResult } from "./quotes.ts";
 import { SEGMENTS_RELATIVE_PATH, SegmentCounter } from "./segments.ts";
 import { splitBubbles } from "./bubbles.ts";
 import { capFor, openPrefsStore, type PrefsStore } from "./prefs.ts";
@@ -49,6 +52,7 @@ const WS_PATH = "/ws";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const now = (): string => new Date().toISOString();
+const STARTED_AT = now();
 const log = (tag: string, message: string): void => {
   console.log(`${now()} ${tag.padEnd(6)} ${message}`);
 };
@@ -111,6 +115,7 @@ const QUOTA_PATH = join(STATE_DIR, "quota.json");
 const OWN_PATH = join(STATE_DIR, "own.json");
 // 段序号也得跟着 --state 走：演练在 /tmp/ch-drill 下，生产在 .state 下。
 const SEGMENTS_PATH = join(STATE_DIR, "segments.json");
+const INBOUND_PATH = join(STATE_DIR, "inbound.json");
 
 const describeWho = (event: ParsedEvent): string => {
   const parts = [String(event.who.id)];
@@ -155,6 +160,7 @@ let quota: Quota | null = null;
 let gateWords: GateWords | null = null;
 let ownIds: OwnIds | null = null;
 let segments: SegmentCounter | null = null;
+let inboundRing: InboundRing | null = null;
 let prefs: PrefsStore | null = null;
 let prefsWarned: string | null = null;
 if (CORE_URL) {
@@ -180,6 +186,7 @@ if (CORE_URL) {
     quota = new Quota({ path: QUOTA_PATH, policy, onWarn: (message) => log("warn", message) });
     ownIds = new OwnIds({ path: OWN_PATH, onWarn: (message) => log("warn", message) });
     segments = new SegmentCounter({ path: SEGMENTS_PATH, onWarn: (message) => log("warn", message) });
+    inboundRing = new InboundRing({ path: INBOUND_PATH, onWarn: (message) => log("warn", message) });
     prefs = openPrefsStore(PREFS_PATH);
     // 回落必须可见：读不到卡就明说「上限回落 maxChunks」，别静默。
     const startupPrefs = prefs.read();
@@ -202,7 +209,15 @@ let requestSeq = 0;
 // /say 没有「来源 socket」：主动开口只能往当前连着的那个协议端发。没有连接就是发不出去（不是崩溃）。
 let lastSocket: WebSocket | null = null;
 
-type AckFrame = { echo: string; status: string | null; retcode: number | null; messageId: number | null; note: string };
+type AckFrame = {
+  echo: string;
+  status: string | null;
+  retcode: number | null;
+  messageId: number | null;
+  // get_msg 要从 data.message 里取原文，所以原始 data 一并带出来。
+  data: Record<string, unknown>;
+  note: string;
+};
 type AckWaiter = (outcome: AckOutcome) => void;
 const ackWaiters = new Map<string, AckWaiter>();
 
@@ -241,7 +256,7 @@ const isActionAck = (raw: string): AckFrame | null => {
     `收到下发应答 echo=${JSON.stringify(record.echo)} status=${String(record.status)} retcode=${String(record.retcode)}` +
       (extras.length > 0 ? ` ${extras.join(" ")}` : ""),
   );
-  return { echo: String(record.echo), status, retcode, messageId, note: extras.join(" ") };
+  return { echo: String(record.echo), status, retcode, messageId, data, note: extras.join(" ") };
 };
 
 // 等 ack 必须有超时兜底：协议端不回话时不能把整批吊死，更不能自动重发（可能已经发出去了）。
@@ -259,6 +274,69 @@ const waitAck = (echo: string): Promise<AckOutcome> =>
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+// get_msg：走**既有那条 WS**，echo 用 getmsg-<n>；最多等 2000ms，超时/失败一律不重试。
+const GET_MSG_TIMEOUT_MS = 2000;
+const getMsgWaiters = new Map<string, (frame: AckFrame) => void>();
+let getMsgSeq = 0;
+
+// 每一泡实际发出去的文本，按 echo 记一下：ack 回来时要把「她说了什么」一起记进 own entries。
+const sentTexts = new Map<string, string>();
+
+const sendTracked = (socket: WebSocket | null, frame: string): void => {
+  try {
+    const parsed = JSON.parse(frame) as {
+      echo?: unknown;
+      params?: { message?: Array<{ data?: { text?: unknown } }> };
+    };
+    const echo = typeof parsed.echo === "string" ? parsed.echo : null;
+    const text = parsed.params?.message?.[0]?.data?.text;
+    if (echo !== null && typeof text === "string") sentTexts.set(echo, text);
+  } catch {
+    // 记不下就算了：最坏是 own 里这一条没有原文。
+  }
+  if (socket === null) throw new Error("没有协议端连着");
+  socket.send(frame);
+};
+
+const readAction = async (action: "get_msg" | "get_record", params: Record<string, unknown>, timeout: number,
+                          socket: WebSocket | null): Promise<AckFrame | null> => {
+  if (socket === null || socket.readyState !== WebSocket.OPEN) return null;
+  const echo = `getmsg-${(getMsgSeq += 1)}`;
+  const frame = await new Promise<AckFrame | null>((resolve) => {
+    const timer = setTimeout(() => {
+      getMsgWaiters.delete(echo);
+      resolve(null);
+    }, timeout);
+    getMsgWaiters.set(echo, (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+    try {
+      socket.send(JSON.stringify({ action, params, echo }));
+    } catch {
+      clearTimeout(timer);
+      getMsgWaiters.delete(echo);
+      resolve(null);
+    }
+  });
+  return frame;
+};
+
+const getMsgQuote = async (messageId: number, socket: WebSocket | null): Promise<QuoteContent | null> => {
+  const frame = await readAction("get_msg", { message_id: messageId }, GET_MSG_TIMEOUT_MS, socket);
+  if (frame === null) {
+    log("warn", `get_msg(${messageId}) 超时/发不出去（>${GET_MSG_TIMEOUT_MS}ms），不重试`);
+    return null;
+  }
+  if (frame.retcode !== 0 || frame.status === "failed") {
+    log("warn", `get_msg(${messageId}) 失败 status=${String(frame.status)} retcode=${String(frame.retcode)}，不重试`);
+    return null;
+  }
+  const quote = quoteFromMsgData(frame.data);
+  if (quote === null) log("warn", `get_msg(${messageId}) 回包里没有可读内容，不重试`);
+  return quote;
+};
+
 // burst 阀：同一会话「上一次真正发出」的时刻。silent 不更新（没发出去就不算说过）。
 // 进程内状态就够了：重启后她刚说过什么这件事，账里本来也查得到，这里只防连发。
 const lastSentAt = new Map<string, number>();
@@ -266,6 +344,8 @@ const lastSentAt = new Map<string, number>();
 // 一段消息的「账的固定部分」：这一段的每一行都带同样的 key / 场景 / 目标。
 // key 取这一段最后一句话的 key——单条成段时它就是这个群/私聊里唯一能对上的那个键。
 type BatchMeta = {
+  continuationWho?: number;
+  directedWho?: ParsedEvent["who"];
   key: string;
   messageId: number | null;
   socket: WebSocket;
@@ -284,6 +364,12 @@ const batchMeta = new Map<string, BatchMeta>();
 // 每个会话（group:<id> / user:<id>）一个定时器：永远指向 hub.state(key) 报的那个 deadline。
 // 一个群热闹不该把另一个群的取件推迟或提前——定时器也必须按会话来排。
 const batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// 一轮包括生成、逐泡发送和送达记忆回执；完成前，同会话的新话继续留在 hub 合批。
+const activeTurns = new Set<string>();
+// 已通过参与门的当前回应对象；同人补充留给下一轮，未参与的群聊不开启。
+const activeReplies = new Map<string, { who: number; updated: boolean }>();
+// 引用可并行补查，入段必须保持各会话的消息到达顺序。
+const ingestTails = new Map<string, Promise<void>>();
 
 const disarmTimer = (key: string): void => {
   const timer = batchTimers.get(key);
@@ -295,7 +381,7 @@ const disarmTimer = (key: string): void => {
 
 const armTimer = (key: string): void => {
   disarmTimer(key);
-  if (hub === null) return;
+  if (hub === null || activeTurns.has(key)) return;
   const state = hub.state(key);
   // 私聊的排队段（上一条还没取走）不等时间：有排队就立刻取。
   if (!state.open && state.queued === 0) return;
@@ -306,9 +392,9 @@ const armTimer = (key: string): void => {
   batchTimers.set(key, setTimeout(() => onDeadline(key), remaining));
 };
 
-const onDeadline = (key: string): void => {
+const onDeadline = async (key: string): Promise<void> => {
   batchTimers.delete(key);
-  if (hub === null) return;
+  if (hub === null || activeTurns.has(key)) return;
   const snapshot = hub.consume(key, Date.now());
   if (snapshot === null) {
     // 到点但取不到件（deadline 被后到的消息推后了/已经取走）：只把这一个会话的定时器对回新 deadline。
@@ -323,8 +409,14 @@ const onDeadline = (key: string): void => {
     armTimer(key);
     return;
   }
-  void runSegment(snapshot, meta);
-  armTimer(key);
+  activeTurns.add(key);
+  try {
+    await runSegment(snapshot, meta);
+  } finally {
+    activeReplies.delete(key);
+    activeTurns.delete(key);
+    armTimer(key);
+  }
 };
 
 // 每段一次核调用。这一段里所有「为什么没发」的结论都收成恰好一行决策账。
@@ -346,7 +438,7 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
   const batch = { key: meta.key, messageId: meta.messageId, scene, target };
   const logOf = (tag: string, message: string): void => log(tag, message);
   const isSocketOpen = (): boolean => meta.socket.readyState === WebSocket.OPEN;
-  const send = (frame: string): void => meta.socket.send(frame);
+  const send = (frame: string): void => sendTracked(meta.socket, frame);
   const ledgerSink = { appendNew: (row: Parameters<Ledger["appendNew"]>[0]) => ledger.appendNew(row) };
 
   const gates: GateInput[] = [];
@@ -410,6 +502,7 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         scene: scene === "private" ? "private" : "group",
         mentionedSelf: meta.mentionedSelf,
         quotedHer: meta.quotedHer,
+        continuation: meta.continuationWho !== undefined,
         text: judgeText,
         isSticker: meta.allSticker,
         isBareImage: meta.allBareImage,
@@ -452,25 +545,44 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       gates.push({ name: "burst", code: "burst_guard", hit: false });
     }
 
+    const replyWho = meta.directedWho ?? meta.who;
+    const activeReply = { who: replyWho.id, updated: false };
+    activeReplies.set(target, activeReply);
     // ④ 送核（定向与抽到的闲聊都要调，且这一次同时是生成回复的那次）。
     const rendered = renderSegment(snapshot);
+    const background = scene === 'group' && inboundRing ? {
+      session_id: 'qq:' + target,
+      ...inboundRing.contextBefore(target, snapshot.msgs.map(row => row.messageId), policy.context),
+    } : undefined;
+    await hearAttachments(rendered.attachments, HOME_DIR, async (file, timeout) => {
+      const frame = await readAction("get_record", { file, out_format: "wav" }, timeout, meta.socket);
+      return frame?.retcode === 0 && frame.status !== "failed" ? frame.data : null;
+    });
     log(`req#${id}`, `② 交给核 POST ${CORE_URL}${CORE_PATH}（${snapshot.msgs.length} 行，${elapsed()}）`);
 
+    // 最终回复可能按需合成语音（20 秒）；图片观察再留独立的 20 秒预算。
+    const requestTimeout = CORE_TIMEOUT.ms + 25000 + (rendered.attachments.some((item) => item.kind === "image") ? 25000 : 0);
     let attempt: CoreAttempt;
     try {
       const response = await fetch(`${CORE_URL}${CORE_PATH}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          who: meta.who,
+          who: replyWho,
           where: meta.where,
           scene,
+          scope: scene,
+          delivery_ack: true,
+          directed: first.kind === 'directed',
           text: rendered.text,
+          segment: rendered.segment,
+          attachments: rendered.attachments,
           hasImage: meta.hasImage,
           messageId: meta.messageId,
           batch: rendered.batch,
+          ...(background ? { background } : {}),
         }),
-        signal: AbortSignal.timeout(CORE_TIMEOUT.ms),
+        signal: AbortSignal.timeout(requestTimeout),
       });
       const body = await response.text();
       if (!response.ok) {
@@ -486,11 +598,14 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
       const failure = error as Error;
       const timedOut = failure.name === "TimeoutError" || failure.name === "AbortError";
       attempt = timedOut
-        ? { kind: "timeout", timeoutMs: CORE_TIMEOUT.ms, message: failure.message }
+        ? { kind: "timeout", timeoutMs: requestTimeout, message: failure.message }
         : { kind: "unreachable", message: failure.message };
     }
 
     const gateSummary = attempt.kind === "payload" ? readGateSummary(attempt.payload) : null;
+    const response = attempt.kind === "payload" ? attempt.payload as { reply_kind?: string; delivery_id?: string } | null : null;
+    const shouldDefer = response?.reply_kind === "conversation" && response.delivery_id
+      ? () => activeReply.updated : undefined;
 
     // ⑤ 收尾一律走 settleRound：error / empty / silent / blocked 的文案一个字不新写。
     const settle = async (value: CoreAttempt): Promise<Awaited<ReturnType<typeof settleRound>>> =>
@@ -506,6 +621,7 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         ledger: ledgerSink,
         isGateOpen: () => gate.mode === "send",
         isSocketOpen,
+        shouldDefer,
         send,
         waitAck,
         sleep,
@@ -536,7 +652,7 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     const cap =
       prefs === null
         ? policy.outbound.maxChunks
-        : capFor(String(meta.who.id), prefs.read().prefs, policy.outbound.maxChunks);
+        : capFor(String(replyWho.id), prefs.read().prefs, policy.outbound.maxChunks);
     if (prefs !== null) {
       const prefsNow = prefs.read();
       if (prefsNow.warn !== null && prefsNow.warn !== prefsWarned) {
@@ -544,17 +660,23 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
         log("warn", prefsNow.warn);
       }
     }
-    const split = splitBubbles(reply.chunks, {
+    // 睡眠提示是一次状态通知，保留她设定的原文，回执才能准确去重。
+    const split = response?.reply_kind === "sleep_notice"
+      ? { chunks: reply.chunks, splits: [], commaSplits: [], merged: false }
+      : splitBubbles(reply.chunks, {
       gapSec: policy.outbound.newlineGapMs / 1000,
       cap,
       maxChars: policy.outbound.maxCharsPerBubble,
       sentenceMarks: policy.outbound.bubbleSentenceMarks,
       clauseMarks: policy.outbound.bubbleClauseMarks,
       tailParticles: policy.outbound.bubbleTailParticles,
+      commaSplitRatePct: policy.outbound.commaSplitRatePct,
+      commaSplitMarks: policy.outbound.commaSplitMarks,
     });
-    // style 两格都可缺：发生超长切分写 split、因上限合并写 merged；都没有就是 null（不写空对象）。
+    // style 三格都可缺：超长切分写 split、逗号抽样拆写 commaSplit、因上限合并写 merged；都没有就是 null。
     const styleValue: Record<string, unknown> = {};
     if (split.splits.length > 0) styleValue.split = split.splits;
+    if (split.commaSplits.length > 0) styleValue.commaSplit = split.commaSplits;
     if (split.merged) styleValue.merged = [{ reason: "chunk_cap" }];
     const style = Object.keys(styleValue).length > 0 ? styleValue : null;
     const limited = enforceLimits(split.chunks, snapshot.batchId, policy);
@@ -565,10 +687,33 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     }
 
     const result = await settle({ kind: "payload", payload: { ok: true, chunks: limited.chunks } });
+    const deliveryId = (attempt.payload as { delivery_id?: string }).delivery_id;
+    if (deliveryId && result.batch !== null) {
+      const delivered = result.plan.slice(0, result.batch.sent);
+      const sentText = delivered.map((part) => part.text).join("\n");
+      const images = delivered.flatMap((part) => part.image ? [part.image.file] : []);
+      try {
+        const receipt = await fetch(`${CORE_URL}/chat/ack`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ delivery_id: deliveryId, text: sentText, images,
+            ...(result.batch.stopped === "superseded" ? { stop_reason: "superseded" } : {}) }),
+          signal: AbortSignal.timeout(CORE_TIMEOUT.ms),
+        });
+        if (!receipt.ok) log("error", `发送回执记忆未写入：HTTP ${receipt.status}`);
+      } catch (error) {
+        log("error", `发送回执记忆未写入：${(error as Error).message}`);
+      }
+    }
     if (result.kind === "empty") {
       decide([{ name: "limits", code: "core_empty", hit: true }]);
       return;
     }
+    if (result.batch?.stopped === "superseded" && result.batch.sent === 0) {
+      decide([{ name: "outbound", code: "superseded", hit: true }]);
+      return;
+    }
+    const stopNote = result.batch?.stopped === "superseded" ? "收到补充，已发部分保留，其余旧稿停止发送" : null;
     // 只有门开着（send）才谈得上「出站全败」：silent 下 sent=0 是门挡的。
     if (result.batch !== null && result.batch.sent === 0 && gate.mode === "send") {
       gates.push({ name: "outbound", code: "outbound_failed", hit: true });
@@ -576,10 +721,10 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
     if (result.batch !== null && result.batch.sent > 0) lastSentAt.set(target, Date.now());
     const gateForRow = result.batch !== null && result.batch.sent > 0 ? gateSummary : null;
     if (limited.reason === "replaced_too_long") {
-      decide([{ name: "limits", code: "replaced_too_long", hit: true }], null, gateForRow, style);
+      decide([{ name: "limits", code: "replaced_too_long", hit: true }], stopNote, gateForRow, style);
       return;
     }
-    decide([{ name: "limits", code: "core_empty", hit: false }], null, gateForRow, style);
+    decide([{ name: "limits", code: "core_empty", hit: false }], stopNote, gateForRow, style);
   } catch (error) {
     const message = (error as Error).message;
     log("error", `段 ${snapshot.batchId} 处理异常，本轮收尾：${message}`);
@@ -597,8 +742,9 @@ const runSegment = async (snapshot: BatchSnapshot, meta: BatchMeta): Promise<voi
   }
 };
 
-// 入站：判重 → 攒段 → 落一行 batched → 重排定时器。这一段里一次核调用都还没有发生。
-const ingest = (event: ParsedEvent, socket: WebSocket): void => {
+// 入站：判重 → 解析引用（最多问一次协议端，2000ms）→ 攒段 → 落一行 batched → 重排定时器。
+// 这一段里一次核调用都还没有发生。引用解析失败只 warn，绝不让这条消息丢。
+const ingest = async (event: ParsedEvent, socket: WebSocket): Promise<void> => {
   if (hub === null) return;
   const scene = sceneOf(event.where);
   const target = targetOf(event.where);
@@ -623,14 +769,60 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
     return;
   }
 
+  const previous = ingestTails.get(target) ?? Promise.resolve();
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  const tail = previous.then(() => finished);
+  ingestTails.set(target, tail);
+  void tail.then(() => {
+    if (ingestTails.get(target) === tail) ingestTails.delete(target);
+  });
+
   try {
     const mentioned = event.mentionedSelf || event.mentionedAll;
+    // 资格取消息到达时的状态；不能被后续引用补查的等待时间改变。
+    const activeReply = activeReplies.get(target);
+    // 「引用她」只认自己发过的消息；与补充资格一起在入站时确定。
+    const quotedHer = event.replyToId !== null && (ownIds?.has(event.replyToId) ?? false);
+    const incoming = gateWords && firstLayer({ scene: event.where.scene,
+      mentionedSelf: event.mentionedSelf, quotedHer, text: event.text,
+      continuation: activeReply?.who === event.who.id,
+      isSticker: event.isSticker, isBareImage: event.isBareImage }, gateWords);
+    const continuationWho = activeReply?.who === event.who.id &&
+      incoming?.kind === "directed" ? event.who.id : undefined;
+    if (continuationWho !== undefined) activeReply!.updated = true;
+    // 每条解析成功的入站都进环（id/who/原文/时刻）——以后被引用时才拿得到原文。
+    if (event.messageId !== null && inboundRing !== null) {
+      inboundRing.add({ id: event.messageId, who: event.who.id, name: event.who.card ?? event.who.nickname,
+        text: event.text, at: new Date().toISOString(), target });
+    }
+    // 引用解析：own 环 → 入站环 → get_msg（2000ms）→ 占位。号码绝不进她的文本。
+    const text = event.text;
+    let quote: QuoteResult | undefined;
+    if (event.replyToId !== null) {
+      quote = await resolveQuote(event.replyToId, {
+        own: (id) => ownIds?.has(id) ? {text: ownIds.textOf(id),who: event.selfId === null ? "" : String(event.selfId),speaker:"机器人自己"} : null,
+        inbound: (id) => inboundRing?.quoteOf(id) ?? null,
+        getMsg: (id) => getMsgQuote(id, socket),
+      });
+      log(
+        "quote",
+        `引用 ${event.replyToId} → source=${quote.source}，原作者=${quote.who || "未知"}，与当前正文分开`,
+      );
+      if (quote.source === "none") {
+        log("warn", `引用 ${event.replyToId} 读不到原文（已注入占位，照常处理这条消息）`);
+      }
+    }
+    await previous;
     hub.observe(
       {
         senderId: event.who.id,
+        messageId: event.messageId,
+        attachments: event.attachments,
         // 群名片优先：段里每一行都要有个能读的人名。
         senderName: event.who.card ?? event.who.nickname,
-        text: event.text,
+        text,
+        ...(quote ? { quote } : {}),
         mentioned,
         bareImage: event.isBareImage,
         sticker: event.isSticker,
@@ -642,9 +834,9 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
     const state = hub.state(target);
     const batchId = state.batchId ?? "unknown";
     const before = batchMeta.get(batchId);
-    // 「引用她」只认引用的是她自己发过的消息：reply 的 id 必须命中 own-ids 集合。
-    const quotedHer = event.replyToId !== null && (ownIds?.has(event.replyToId) ?? false);
     batchMeta.set(batchId, {
+      continuationWho: before?.continuationWho ?? continuationWho,
+      directedWho: incoming?.kind === "directed" ? event.who : before?.directedWho,
       key,
       messageId: event.messageId,
       socket,
@@ -676,6 +868,7 @@ const ingest = (event: ParsedEvent, socket: WebSocket): void => {
   } finally {
     // 认领只是入段期间的互斥：batched 行已经让这个 key 在去重集合里落地了，这里必须放掉。
     ledger.release(key);
+    finish();
   }
 
   // 只重排这个会话自己的定时器（target 就是会话键：group:<id> / user:<id>）。
@@ -714,12 +907,11 @@ const handleEvent = (socket: WebSocket, raw: string): void => {
       `text=${JSON.stringify(parsed.text)} hasImage=${parsed.hasImage}`,
   );
   if (!CORE_URL) return;
-  try {
-    ingest(parsed, socket);
-  } catch (error) {
+  // 入段现在是 async（可能要问一次协议的 get_msg）：不 await，免得一条引用把整条连接卡住。
+  void ingest(parsed, socket).catch((error: Error) => {
     // 入段本身不许因为一条畸形消息把通道带下去。
-    log("error", `#${id} 入段失败：${(error as Error).message}`);
-  }
+    log("error", `#${id} 入段失败：${error.message}`);
+  });
 };
 
 // ---------- M5：内部入口 POST /say（主动开口） ----------
@@ -727,12 +919,13 @@ const handleEvent = (socket: WebSocket, raw: string): void => {
 // 不复制发送逻辑：分泡、send_at、ack、每泡一行账全在 outbox.ts 里，这里只接线。
 const BODY_LIMIT = 64 * 1024;
 
-type SayInput = { scene: "group" | "private"; target: number; chunks: Chunk[] };
+type SayInput = { scene: "group" | "private"; target: number; chunks: Chunk[]; reply_kind?: "sleep_notice" };
 type SayResult = {
   ok: boolean;
   id: string;
   source: "proactive";
   sent: number;
+  confirmed_text: string;
   stopped: string | null;
   reason_code: string;
 };
@@ -772,7 +965,7 @@ const readBody = (request: IncomingMessage): Promise<{ ok: true; text: string } 
     request.on("error", (error) => resolve({ ok: false, message: `读请求体失败：${error.message}` }));
   });
 
-// 校验只认这三样：scene / target / chunks。请求体里的 source 一律忽略——这条路的来源恒为 proactive。
+// source 一律忽略；可选 reply_kind 仅允许私聊睡眠通知保留单泡原文。
 const parseSayBody = (raw: unknown): { ok: true; value: SayInput } | { ok: false; message: string } => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, message: "请求体应为 JSON 对象" };
@@ -809,11 +1002,18 @@ const parseSayBody = (raw: unknown): { ok: true; value: SayInput } | { ok: false
     chunks.push({
       text: parts.value.text,
       ...(parts.value.image === undefined ? {} : { image: parts.value.image }),
+      ...(parts.value.audio === undefined ? {} : { audio: parts.value.audio }),
       gap_before: 0,
       send_at: sendAt,
     });
   }
-  return { ok: true, value: { scene, target, chunks } };
+  if (body.reply_kind !== undefined && (body.reply_kind !== "sleep_notice" || scene !== "private"
+      || chunks.length !== 1 || !chunks[0].text.trim() || countChars(chunks[0].text) > 60
+      || chunks[0].image !== undefined || chunks[0].audio !== undefined)) {
+    return { ok: false, message: "reply_kind 只接受私聊单泡1–60字纯文字的 sleep_notice" };
+  }
+  return { ok: true, value: { scene, target, chunks,
+    ...(body.reply_kind === "sleep_notice" ? { reply_kind: "sleep_notice" as const } : {}) } };
 };
 
 // 主动开口这一段：与入站共用 decide / quota / enforceLimits / planChunks / runBatch，
@@ -875,23 +1075,28 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
     if (!charge.ok) {
       gates.push({ name: "quota", code: "quota_exceeded", hit: true });
       log("quota", `${id} target=${target} 配额用尽（used=${charge.used}），主动开口被挡`);
-      return { ok: false, id, source: "proactive", sent: 0, stopped: null, reason_code: decide([]) };
+      return { ok: false, id, source: "proactive", sent: 0, confirmed_text: "", stopped: null, reason_code: decide([]) };
     }
     charged = true;
     gates.push({ name: "quota", code: "quota_exceeded", hit: false });
   }
 
   // /say 没有「人」可言：上限只认 outbound.maxChunks（不读家的偏好卡），但换行照样切泡。
-  const split = splitBubbles(input.chunks, {
+  const split = input.reply_kind === "sleep_notice"
+    ? { chunks: input.chunks, splits: [], commaSplits: [], merged: false }
+    : splitBubbles(input.chunks, {
     gapSec: policy.outbound.newlineGapMs / 1000,
     cap: policy.outbound.maxChunks,
     maxChars: policy.outbound.maxCharsPerBubble,
     sentenceMarks: policy.outbound.bubbleSentenceMarks,
     clauseMarks: policy.outbound.bubbleClauseMarks,
     tailParticles: policy.outbound.bubbleTailParticles,
+    commaSplitRatePct: policy.outbound.commaSplitRatePct,
+    commaSplitMarks: policy.outbound.commaSplitMarks,
   });
   const styleValue: Record<string, unknown> = {};
   if (split.splits.length > 0) styleValue.split = split.splits;
+  if (split.commaSplits.length > 0) styleValue.commaSplit = split.commaSplits;
   if (split.merged) styleValue.merged = [{ reason: "chunk_cap" }];
   style = Object.keys(styleValue).length > 0 ? styleValue : null;
   // 三道上限：越界就整批换成一句短的（sha256 按 id 选，同一批永远同一句）。
@@ -908,10 +1113,7 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
     ledger: { appendNew: (row) => ledger.appendNew(row) },
     isGateOpen: () => gate.mode === "send",
     isSocketOpen: () => socket !== null && socket.readyState === WebSocket.OPEN,
-    send: (frame) => {
-      if (socket === null) throw new Error("没有协议端连着");
-      socket.send(frame);
-    },
+    send: (frame) => sendTracked(socket, frame),
     waitAck,
     sleep,
     now: () => Date.now(),
@@ -943,6 +1145,8 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
     id,
     source: "proactive",
     sent: result.sent,
+    // 与普通聊天的 /chat/ack 一样，只取串行发送中已获成功回执的计划前缀。
+    confirmed_text: plan.slice(0, result.sent).map((part) => part.text).join("\n"),
     stopped: result.stopped,
     reason_code: reasonCode,
   };
@@ -950,8 +1154,24 @@ const runSay = async (input: SayInput): Promise<SayResult> => {
 
 const handleHttp = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
   const path = (request.url ?? "").split("?")[0];
+  if (path === "/runtime" && request.method === "GET") {
+    let diskMatches: boolean | null = null;
+    let configError: string | null = null;
+    if (policy !== null && gateWords !== null) {
+      try {
+        diskMatches = JSON.stringify(loadPolicy()) === JSON.stringify(policy)
+          && JSON.stringify(loadGateWords(GATE_PATH)) === JSON.stringify(gateWords);
+      } catch {
+        configError = "磁盘配置读取失败；以下仍为进程已加载的值。";
+      }
+    }
+    sendJson(response, 200, {ok: true, channel: "onebot-business", started_at: STARTED_AT,
+      mode: gate.mode, core_enabled: Boolean(CORE_URL), core_timeout_ms: CORE_TIMEOUT.ms,
+      policy, gate_words: gateWords, disk_matches: diskMatches, config_error: configError});
+    return;
+  }
   if (path !== "/say" || request.method !== "POST") {
-    sendJson(response, 404, { ok: false, message: "只有 POST /say" });
+    sendJson(response, 404, { ok: false, message: "只有 GET /runtime 与 POST /say" });
     return;
   }
   const body = await readBody(request);
@@ -989,7 +1209,7 @@ const handleHttp = async (request: IncomingMessage, response: ServerResponse): P
   }
 };
 
-// HTTP 与 WS 共用同一个端口：WS 挂在 /ws 上，其余交给 handleHttp（只认 POST /say，别的一律 404）。
+// HTTP 与 WS 共用同一个端口：WS 挂在 /ws，HTTP 提供只读运行参数和 POST /say。
 const httpServer = createServer((request, response) => {
   void handleHttp(request, response);
 });
@@ -1022,11 +1242,24 @@ wss.on("connection", (socket, request) => {
     const raw = data.toString();
     const ack = isActionAck(raw);
     if (ack !== null) {
+      // get_msg 的应答走自己的 waiter（同一个 socket、同一条 ack 通道）。
+      if (ack.echo.startsWith("getmsg-")) {
+        const getMsgWaiter = getMsgWaiters.get(ack.echo);
+        if (getMsgWaiter) {
+          getMsgWaiters.delete(ack.echo);
+          getMsgWaiter(ack);
+        }
+        return;
+      }
       const waiter = ackWaiters.get(ack.echo);
       if (waiter) {
         ackWaiters.delete(ack.echo);
         // 发成功了就把这条 message_id 记成「她说过的话」：之后别人引用它才算定向。
-        if (ack.retcode === 0 && ack.messageId !== null) ownIds?.add(ack.messageId);
+        if (ack.retcode === 0 && ack.messageId !== null) {
+          const text = sentTexts.get(ack.echo) ?? null;
+          sentTexts.delete(ack.echo);
+          ownIds?.add(ack.messageId, text, new Date().toISOString());
+        }
         waiter({ kind: "ack", status: ack.status, retcode: ack.retcode, messageId: ack.messageId, note: ack.note });
       }
       return;

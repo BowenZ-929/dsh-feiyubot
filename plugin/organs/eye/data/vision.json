@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "base_url": "https://api.siliconflow.cn/v1",
+  "max_images": 2,
+  "budget_seconds": 20,
+  "max_bytes": 8388608,
+  "max_tokens": 900
+}

@@ -15,7 +15,7 @@ from api import api
 from organs.home import access, cards, rooms, store
 
 # 房名单不抄进测试：这里只盯「格子不开新房间」这条不变量，房表本身有它自己的护栏。
-LONG = "今天" + "把抽屉里的东西一件一件摆回去，" * 6 + "摆完就坐着。"   # 98 字：落在 80–150 里
+LONG = "今天" + "把抽屉里的东西一件一件摆回去，" * 6 + "摆完就坐着。"   # 98字，未超过150字上限
 DREAM_TEXT = ("梦见自己变成一条很小的鱼，在很浅的水里游。水清得能看见底下每颗石子。"
                "有人蹲在岸上看着我，我想问他为什么不走，可是鱼不会说话。" + "醒来还记得水是凉的。" * 2)
 
@@ -50,6 +50,15 @@ class DrawerTest(unittest.TestCase):
     def _write(self, *cards_in, role="agent", by="她"):
         return cards.append_cards(root=self.root, role=role, by=by, cards=list(cards_in))
 
+    def test_short_diary_and_dream_keep_complete_text(self):
+        text='今天看到橘猫坐在纸箱旁。'
+        self._write(diary('2026-11-04',text),dream('2026-11-04','梦里还是那个纸箱。'))
+        listing=cards.list_room(self.root,room='抽屉')['items']
+        for row in listing:
+            read=cards.read_item(self.root,room='抽屉',name=row['card_id'])
+            self.assertEqual(row['params']['text'],read['body'])
+        self.assertEqual(2,len(listing))
+
     def test_diary_and_dream_read_back_verbatim(self) -> None:
         self._write(diary("2026-11-04"), dream("2026-11-04"))
         got = cards.list_room(self.root, room="抽屉")
@@ -70,15 +79,17 @@ class DrawerTest(unittest.TestCase):
         self.assertTrue(by_kind["梦"]["display"].startswith("（梦）"), "梦要带显示前缀")
 
     def test_diary_length_is_enforced_with_the_count(self) -> None:
-        for text, want in (("短", 1), (LONG, None)):
-            with self.subTest(length=len(text)):
-                if want is None:
-                    self.assertTrue(80 <= len(text) <= 150, len(text))
-                    continue
-                with self.assertRaises(cards.CardError) as caught:
-                    self._write(diary("2026-11-04", text))
-                self.assertEqual("KIND_TEXT_LENGTH", caught.exception.code)
-                self.assertIn("字", caught.exception.message)
+        with self.assertRaises(cards.CardError) as caught:
+            self._write(diary("2026-11-04", "长" * 151))
+        self.assertEqual("KIND_TEXT_LENGTH", caught.exception.code)
+        self.assertIn("151", caught.exception.message)
+        self.assertEqual([], cards.list_room(self.root, room="抽屉")["items"])
+
+    def test_empty_or_whitespace_diary_is_rejected(self) -> None:
+        for text in ("", " \n\t"):
+            with self.subTest(text=text), self.assertRaises(cards.CardError) as caught:
+                self._write(diary("2026-11-04", text))
+            self.assertEqual("KIND_FIELD_MISSING", caught.exception.code)
 
     def test_one_entry_per_day_is_idempotent(self) -> None:
         self._write(diary("2026-11-04"))

@@ -39,17 +39,18 @@ def backfill_people(store: Any, records: List[Dict[str, Any]]) -> Dict[str, Any]
                           "aliases": existing.get("aliases"),
                           "count": count})
             continue
-        display = nicknames[-1] if nicknames else sender_id
-        aliases = [n for n in nicknames if n != display]
-        store.interact(sender_id, display=display, is_bot=False)
+        nickname = nicknames[-1] if nicknames else ""
+        store.interact(sender_id, display=nickname, is_bot=False)
         data = store._people_data()
         person = data["people"][sender_id]
-        person["display"] = display
-        person["aliases"] = aliases
+        person["display"] = ""          # display 归人：旧日记里没有"人写的称呼"
+        person["nickname"] = nickname
+        person["aliases"] = [n for n in nicknames if n != nickname]
         person["from_old_home"] = True
         person["familiarity_estimated"] = True
         person["old_doc_count"] = count
         store._write_people(data)
         built.append({"sender_id": sender_id, "action": "built",
-                      "display": display, "aliases": aliases, "count": count})
+                      "display": "", "nickname": nickname,
+                      "aliases": person["aliases"], "count": count})
     return {"ok": True, "built": built, "skipped": skipped}

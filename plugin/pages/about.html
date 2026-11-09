@@ -7,7 +7,7 @@
 <style>
   /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --radius: 8px;
@@ -17,7 +17,7 @@
     --fg: var(--dsw-alias-text-l1, CanvasText);
     --dim: var(--dsw-alias-text-l2, GrayText);
     --brand: var(--dsw-alias-brand, #4d6bfe);
-    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --on-brand: var(--dsw-alias-text-on-brand, #fff);
     --warn: var(--dsw-alias-warn, #d98a3d);
   }
   html[data-theme="dark"] { color-scheme: dark; }
@@ -74,6 +74,7 @@
     main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
     main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
   }
+html[data-theme="light"]{color-scheme:light}
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：直开核 → /panel-base.js，
      壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀后仍是这一份）。 -->
@@ -125,6 +126,14 @@
       <p class="msg" id="memory-msg"></p>
     </section>
 
+    <section class="card" id="preferences-card">
+      <div class="head"><h2>相处偏好</h2><span class="who">从本人明确的长期要求中学习</span></div>
+      <p class="hint">只在标明的会话中参考。可以聊天更正，也可以在这里撤回；不会改成她对所有人的性格。</p>
+      <ul class="rows" id="preference-list"><li class="msg">请选择一个人。</li></ul>
+      <p class="msg" id="preference-msg"></p>
+      <details><summary>查看依据与变化历史</summary><ul class="rows" id="preference-history"></ul></details>
+    </section>
+
     <section class="card">
       <div class="head"><h2>名片改动记录</h2><span class="who">由程序写：每次改名片，程序自己记一行</span></div>
       <ul class="rows" id="card-history"><li class="msg">读取中…</li></ul>
@@ -145,7 +154,7 @@
     ["备注", "notes", "lines"],
     ["照片说明", "photo_note", "input"]
   ];
-  var STATE = { people: [], selected: "", card: null, history: null, historyFor: "" };
+  var STATE = { people: [], selected: new URLSearchParams(window.location.search).get("who") || "", card: null, history: null, historyFor: "" };
 
   function el(id) { return document.getElementById(id); }
   function clear(box) { while (box.firstChild) { box.removeChild(box.firstChild); } }
@@ -314,6 +323,48 @@
     });
   }
 
+  function loadPreferences(person) {
+    var path = "/brain/people/" + encodeURIComponent(person.id) + "/preferences";
+    var list = el("preference-list"), history = el("preference-history");
+    clear(list); clear(history); say("preference-msg", "读取中…");
+    return call("GET", path).then(function (res) {
+      if (STATE.selected !== person.id) return;
+      if (res.status !== 200) { say("preference-msg", reasonOf(res), "bad"); return; }
+      var active = res.data.current, rows = res.data.history;
+      if (!active.length) list.appendChild(node("li", "msg", "还没有现行相处偏好。旧聊天不会自动重新归类。"));
+      active.forEach(function (row) {
+        var li = node("li");
+        li.appendChild(node("div", "body", row.text));
+        li.appendChild(node("div", "meta", row.session_id + " · " + new Date(row.at).toLocaleString("zh-CN", {hour12: false})));
+        li.appendChild(node("div", "body", "原话：" + row.evidence.join(" / ")));
+        var button = node("button", "", "撤回这条"); button.type = "button";
+        button.addEventListener("click", function () {
+          button.disabled = true;
+          return call("POST", path, {id: row.id}).then(function (result) {
+            if (STATE.selected !== person.id) return;
+            if (result.status !== 200) { button.disabled = false; say("preference-msg", reasonOf(result), "bad"); return; }
+            return loadPreferences(person);
+          }).catch(function (err) { button.disabled = false; say("preference-msg", "没能撤回：" + err, "bad"); });
+        });
+        li.appendChild(button); list.appendChild(li);
+      });
+      rows.slice().reverse().forEach(function (row) {
+        var li = node("li");
+        li.appendChild(node("div", "body", row.text ? "记为：" + row.text : "撤回偏好"));
+        li.appendChild(node("div", "meta", new Date(row.at).toLocaleString("zh-CN", {hour12: false}) + " · " + row.session_id + " · " + (row.actor === "panel" ? "面板撤回" : "本人聊天")));
+        if (row.evidence.length) li.appendChild(node("div", "body", "原话：" + row.evidence.join(" / ")));
+        row.replaces.forEach(function (id) {
+          var old = rows.find(function (r) { return r.id === id; });
+          li.appendChild(node("div", "body", "停用旧项：" + (old ? old.text : id)));
+        });
+        history.appendChild(li);
+      });
+      say("preference-msg", active.length + " 条现行偏好 · " + rows.length + " 次记录");
+    }).catch(function (err) {
+      if (STATE.selected === person.id) say("preference-msg", "相处偏好读不到：" + err, "bad");
+    });
+  }
+
   function select(personId) {
     var person = personById(personId);
     if (!person) { return; }
@@ -325,6 +376,7 @@
     fillCard(person);
     showMemories(person);
     loadCardHistory(person);
+    loadPreferences(person);
     say("card-msg", "改完点「保存名片」。四栏和现在一样就不发请求。");
   }
 

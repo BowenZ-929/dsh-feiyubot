@@ -8,7 +8,7 @@
   /* 颜色只取宿主变量，兜底用系统色（Canvas / CanvasText / GrayText）：宿主给了变量就跟宿主，
      没给就让 color-scheme 带着系统色走。深色跟随宿主 [data-theme="dark"]，不自造色板。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --bg: var(--dsw-alias-bg-l1, Canvas);
@@ -24,12 +24,11 @@
   body { margin: 0; padding: var(--gap-2); background: var(--bg); color: var(--fg);
          font: .95rem/1.6 -apple-system, "PingFang SC", "Heiti SC", sans-serif;
          min-height: 100vh; }
-  main { max-width: 46rem; margin: 0 auto; }
-  h1 { font-size: 1.1rem; margin: 0 0 var(--gap-1); }
+  main { max-width: 76rem; margin: 0 auto; }
+  h1 { font-size: 1.7rem; letter-spacing: -.03em; margin: 0 0 var(--gap-1); }
   h2 { font-size: 1.1rem; margin: var(--gap-2) 0 var(--gap-1); }
-  section { border-top: 1px solid var(--line); padding: var(--gap-1) 0; }
-  .note { margin: 0 0 var(--gap-1); color: var(--warn);
-          border-left: 3px solid var(--warn); padding: var(--gap-1); }
+  section { min-width: 0; }
+  .note { margin: 0 0 var(--gap-1); color: var(--dim); }
   .status { margin: 0 0 var(--gap-1); font-weight: 600; }
   .issues { margin: 0 0 var(--gap-1); font: .95rem/1.6 ui-monospace, Menlo, monospace;
             color: var(--warn); white-space: pre-line; }
@@ -43,6 +42,36 @@
   .legend { margin: 0 0 var(--gap-1); color: var(--dim); }
   .back { margin-top: var(--gap-2); }
   a { color: var(--brand); }
+  .overview { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin:24px 0; }
+  .summary-card, .card, .detail-card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; min-width:0; overflow-wrap:anywhere; }
+  .summary-card { border-top:3px solid var(--brand); }
+  .summary-card dt { color:var(--dim); font-size:.85rem; }
+  .summary-card dd { margin:10px 0 0; font-size:1.45rem; font-weight:650; line-height:1.35; }
+  .summary-card p { margin:10px 0 0; color:var(--dim); font-size:.83rem; }
+  .work-grid { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); gap:16px; align-items:start; }
+  .side-cards { display:grid; gap:16px; min-width:0; }
+  .card h2 { margin-top:0; }
+  .card .legend, .detail-card .legend { font-size:.87rem; }
+  .detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; align-items:start; }
+  .detail-card > summary { cursor:pointer; font-weight:600; }
+  .detail-card[open] > summary { margin-bottom:16px; }
+  .thought-history { margin-top:16px; color:var(--dim); }
+  .thought-history summary { cursor:pointer; }
+  .change-list { max-height:30rem; overflow-y:auto; scrollbar-gutter:stable; }
+  button:not(:disabled), select { cursor:pointer; }
+  button:disabled { opacity:.45; }
+  :focus-visible { outline:2px solid var(--brand); outline-offset:3px; }
+  @media(max-width:850px) { .overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .work-grid,.detail-grid { grid-template-columns:1fr; } }
+  @media(max-width:460px) { body { padding:14px; } .summary-card,.card,.detail-card { padding:15px; } .summary-card dd { font-size:1.15rem; } .overview { gap:10px; } .change-tools label { width:100%; } }
+  .change-tools { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:12px 0; }
+  .change-tools input,.change-tools select,.change-tools button { font:inherit; padding:6px 10px; color:var(--fg); background:var(--panel); border:1px solid var(--line); border-radius:7px; }
+  .change-list { list-style:none; padding:0; }
+  .change-list li { border:1px solid var(--line); border-radius:10px; padding:12px; margin:10px 0; overflow-wrap:anywhere; }
+  .change-list summary { cursor:pointer; }
+  .change-list .values { margin-top:8px; font-variant-numeric:tabular-nums; }
+  .change-list .meta { color:var(--dim); font-size:.85rem; margin-top:8px; }
+
+html[data-theme="light"]{color-scheme:light}
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
      直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
@@ -50,85 +79,116 @@
 </head>
 <body>
 <main>
-  <h1>心 · 只读</h1>
-  <p class="note" id="readonly-note" data-readonly="true">只读：人不能改心与脑（architecture.md §9.2：心与脑只能看）。只读：这一页没有任何能改她的控件。</p>
+  <h1>她此刻的心</h1>
+  <!-- architecture.md §9.2：心与脑只能看；筛选和展开不提供状态写入入口。 -->
+  <p class="note" id="readonly-note" data-readonly="true">只读 · 看她现在怎样、发生了哪些变化、还惦记着什么。这里的查看与筛选不会修改她的心。</p>
 
   <p id="status" class="status">正在读……</p>
   <p id="issues" class="issues"></p>
 
-  <section>
-    <h2>① 六轴档位（只讲档位词，不讲数字）</h2>
-    <ul id="axes" class="axes"></ul>
-    <p id="pending" class="legend"></p>
+  <dl class="overview" aria-label="此刻状态">
+    <div class="summary-card"><dt>实际休息</dt><dd id="summary-rest">正在读……</dd><p>按入睡与醒来记录</p></div>
+    <div class="summary-card"><dt>心情</dt><dd id="summary-mood">正在读……</dd><p id="summary-mood-note">此刻与基线</p></div>
+    <div class="summary-card"><dt>精力</dt><dd id="summary-energy">正在读……</dd><p id="summary-energy-note">当前读数</p></div>
+    <div class="summary-card"><dt>说话语气</dt><dd id="summary-voice">正在读……</dd><p id="summary-voice-note">她会带着怎样的语气说话</p></div>
+  </dl>
+  <div class="work-grid">
+  <section class="card changes-card" aria-label="参数变化记录">
+    <h2>最近怎样变了</h2>
+    <p class="legend">记录启用后的实际写入。前后值包含期间的自然回落与事件影响；没有记录的过去不会补猜。只读时计算的回落不记为新事件，心情采样仍在下方曲线。</p>
+    <div class="change-tools">
+      <label>日期 <input id="changes-date" type="date"></label>
+      <label>类别 <select id="changes-group"><option value="all">全部</option><option value="mood">心情与基线</option><option value="energy">精力</option><option value="offset">六轴偏移</option><option value="sleep">睡眠</option><option value="proactive">主动交流反馈</option></select></label>
+      <button id="changes-refresh" type="button">刷新记录</button>
+    </div>
+    <p id="changes-info" class="legend" role="status">正在读变化记录……</p>
+    <ul id="changes-list" class="change-list"></ul>
+    <div class="change-tools"><button id="changes-newer" type="button">较新一页</button><button id="changes-older" type="button">较早一页</button></div>
   </section>
 
-  <section>
-    <h2>② 心情：此刻与基线 + 轨迹</h2>
+  <div class="side-cards">
+  <section class="card">
+    <h2>还惦记着什么</h2>
+    <ul id="thoughts" class="axes"></ul>
+    <p id="pending-info" class="legend"></p>
+    <p class="legend">念头影响说话方式，不代表发生过的事。</p>
+    <details class="thought-history"><summary id="thought-history-title">已结束与到期的念头</summary>
+      <ul id="thought-history" class="axes"></ul>
+      <p class="legend">按原账状态展示；“淡去”不等于知道她为何放下。到期未结算的记录不会在这里被改写。</p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>此刻愿不愿意开口</h2>
+    <p class="legend">只试算倾向，不代表已经回复。实际还要经过休息、会话和发送判断。</p>
+    <p id="engage">……</p>
+    <ul id="hits"></ul>
+  </section>
+  </div>
+  </div>
+  <h2>详细参数与记录</h2>
+  <p class="legend">需要时展开查看，所有读数仍来自同一颗心。</p>
+  <div class="detail-grid">
+  <details class="detail-card">
+    <summary>六轴 · 内部基线</summary>
+    <p class="legend">保留原有“心里／面上”参数供内部计算与查看；聊天已不再把这组反差作为性格要求。当前性格以魂页的底色和自主自述为准。</p>
+    <ul id="axes" class="axes"></ul>
+    <p id="pending" class="legend"></p>
+  </details>
+
+  <details class="detail-card">
+    <summary>心情轨迹 · 此刻与基线</summary>
     <p id="mood">……</p>
     <canvas id="curve" width="720" height="200"></canvas>
     <p class="legend">实线＝此刻，虚线＝基线；横轴是读取时刻，纵轴是心情刻度。</p>
     <p id="traj-info" class="legend"></p>
-  </section>
+  </details>
 
-  <section>
-    <h2>③ 精力</h2>
+  <details class="detail-card">
+    <summary>精力 · 消耗与恢复</summary>
     <p id="energy">……</p>
-  </section>
+  </details>
 
-  <section>
-    <h2>④ 睡眠账</h2>
+  <details class="detail-card">
+    <summary>睡眠账 · 实际休息</summary>
     <p id="sleep">……</p>
-    <p class="legend">这一块看她的睡眠：上次入睡、睡了多久、连着熬了几夜、连着几天没睡够，以及此刻生效的折扣。_cap。三个派生量都是读时现算，账本里不存：连续熬夜把
-      作息窗口整体后移（drift），连续两晚没睡够就把睡眠回血的封顶降到 95。
-      窗口与封顶都接在③精力的结算上——③那一行显示的「生效窗口」就是这一块给的那两个数。</p>
-  </section>
+    <p class="legend">收到入睡、醒来的记录后，这里才会有上一觉时长和连续晚睡情况。日程里安排了睡觉，不代表已经睡过。
+      普通群聊不打断休息；熟人或挚友的私聊可以叫醒一次，最多硬撑 15 分钟，连续消息不延长。之后彻底睡到这夜的早晨醒来时间。
+      硬撑消耗精力，睡眠时长扣除这段清醒；没有睡眠记录时不能推断她已经睡过。</p>
+  </details>
 
-  <section>
-    <h2>⑤ 开口与否（干跑：只算不说）</h2>
-    <p id="engage">……</p>
-    <ul id="hits"></ul>
-  </section>
-
-  <section>
-    <h2>⑥ 意图排序（此刻最值得开口的是哪一件、值不值得开口）</h2>
+  <details class="detail-card">
+    <summary>意图 · 想说什么</summary>
     <ul id="intents" class="axes"></ul>
     <p id="intent-info" class="legend"></p>
-    <p class="legend">来自 /heart 的 intents 一节，与⑤吃的是同一份排序：每条意图的
+    <p class="legend">来自 /heart 的 intents 一节，与开口试算使用同一份排序：每条意图的
       权重 = 表里那一档 × 清醒度系数（精力档 × 夜间窗口）。hit=False 的照样列出，
       并写清是哪一条判据没成立。top 是最重的命中项，pass = top.weight ≥ threshold；
-      pass 只说明「值得开口」，闭不闭嘴仍由⑤的门定——pass=False 时判决会多一道少说。</p>
-  </section>
+      pass 只说明「值得开口」，闭不闭嘴仍由开口判断决定——pass=False 时判决会多一道少说。</p>
+  </details>
 
-  <section>
-    <h2>⑦ 念头（她此刻想要什么：只是说话方式，不是发生过的事）</h2>
-    <ul id="thoughts" class="axes"></ul>
-    <p id="pending-info" class="legend"></p>
-    <p class="legend">等着用的念头：类型、牵动哪一面、还剩多久、试过几次、现在什么状态。
-      念头只影响怎么说、要不要开口，永不被当成发生过的事，也不进证据链。</p>
-  </section>
-
-  <section>
-    <h2>⑧ 近期窗口（她最近遇到的：冷落、被凶、正常回话）</h2>
+  <details class="detail-card">
+    <summary>近期相处 · 冷落与回应</summary>
     <p id="window">……</p>
     <p class="legend">窗内逐条加权（ignored +1.0、harsh +1.5、replied −1.0、normal −0.5，
       越新越接近满权重）。命中时理由码是 ignored-recently：weight ≥ 3 判「少说」、
       ≥ 5 判「不说」，连续被无视 3 条兜底至少「少说」；没到线就不影响判决。</p>
-  </section>
+  </details>
 
-  <section>
-    <h2>⑨ 语气档（嘴读它定冷热）</h2>
+  <details class="detail-card">
+    <summary>语气档 · 冷热与边界</summary>
     <p id="voice">……</p>
-    <p class="legend">这些话的档位、方向与禁令是同一处算出来的：
-      面板说的档与嘴上念的档不会分叉。</p>
-  </section>
+    <p class="legend">聊天使用当前心境、语气与参与状态。这里保留六轴推导的旧规则供查看，已不作为聊天指令；某一轮实际用了哪些材料，请查看观察页的完整模型输入。</p>
+  </details>
 
-  <section>
-    <h2>⑩ 拒绝记录（额度是刹车，不是一直拒的许可；冷却只由时间解除）</h2>
+  <details class="detail-card">
+    <summary>拒绝 · 额度与冷却</summary>
     <p id="refusals">……</p>
     <p class="legend">今天拒绝了几次、上限几次、还剩几次；正在冷却的话题与剩余分钟数。冷却只比 until 与 now 的先后，
       心情升两档、精力回满都不改它一个字节——时间到了才算完，谁也不许提前解除。
       这一块没有输入框：面板只把账摊开给人看，不替人查话题。</p>
-  </section>
+  </details>
+  </div>
 
   <p class="back"><a href="../">← 回魂面板</a></p>
 </main>
@@ -141,6 +201,10 @@
   // /qqagent/panel/heart/mood，壳剥掉前缀后仍是 /heart/mood。
 
   var STATES = ["说", "少说", "不说"];
+  var REASONS = {night:"夜间休息", "insulted-today":"今天受到贬低", "mood-and-energy-low":"心情与精力偏低",
+    "today-volume":"今天已聊得较多", "low-familiarity":"还不太熟悉", "recently-interrupted":"最近被打断",
+    "ignored-recently":"近期回应较少", "intent-below-threshold":"开口意愿不足", "proactive-muted":"主动说话已关闭",
+    unattributed:"未能确定归属"};
   var judged = [];
   var refusalQuota = null;
   var refusalCooling = [];
@@ -175,7 +239,7 @@
       if (item.greyed) {
         grey.push(axis);
         row.className = "greyed";
-        row.textContent = axis + "：待定·跳过注入（标灰，不写数）。";
+        row.textContent = axis + "：待定·暂无读数。";
       } else {
         row.textContent = axis + "：心里 " + item.inner_word + "，面上 " + item.shown_word + "。";
       }
@@ -186,12 +250,15 @@
 
   function renderVoice(voice) {
     var bans = voice.bans || [];
+    say("summary-voice", voice.tone || "暂无读数");
+    say("summary-voice-note", "方向：" + (voice.direction || "暂无读数"));
     say("voice", "语气档 " + voice.tone + " · 方向 " + voice.direction +
-        " · 禁令 " + (bans.length ? bans.join("；") : "无"));
+        " · 六轴旧规则（不作为聊天指令） " + (bans.length ? bans.join("；") : "无"));
   }
 
   function renderEffective(data) {
     if (data.ok !== true) {
+      say("summary-voice", "读取失败");
       el("axes").textContent = "";
       say("pending", "");
       say("voice", "拒载：卡没有载入，语气档一个都不给");
@@ -202,24 +269,24 @@
   }
 
   function renderPending(data) {
-    var rows = (data.thoughts || []).filter(function (row) {
-      return row.state === "open" && typeof row.ttl_left_min === "number" && row.ttl_left_min > 0;
-    });
-    var list = el("thoughts");
-    list.textContent = "";
-    if (!rows.length) {
-      say("pending-info", "此刻没有未了的念头。");
-      return;
-    }
-    rows.forEach(function (row) {
+    var list = el("thoughts"), history = el("thought-history");
+    list.textContent = ""; history.textContent = "";
+    var active = 0, ended = 0;
+    var kinds = {wanted_praise:"想被夸一夸",wanted_rest:"想休息",wanted_axis:"有一面被牵动"};
+    (data.thoughts || []).forEach(function (row) {
+      var current = row.state === "open" && !row.expired;
       var item = document.createElement("li");
-      var axis = row.axis ? "· 轴 " + row.axis + " " : "";
-      var ttl = "还剩 " + row.ttl_left_min + " 分钟";
-      item.textContent = row.kind + " " + axis + "· " + ttl + " · 已试 " +
-        row.attempts + " 次 · 状态 " + row.state;
-      list.appendChild(item);
+      var state = current ? (typeof row.ttl_left_min === "number" ? "还剩 " + row.ttl_left_min + " 分钟" : "时限未知")
+        : row.state === "settled" ? "已满足" : row.state === "faded" ? "已淡去" : "已到期，尚未结算";
+      var at = row.settled_at || row.faded_at;
+      item.textContent = (kinds[row.kind] || row.kind) + (row.axis ? " · " + row.axis : "") +
+        " · " + state + " · 已试 " + row.attempts + " 次" + (at ? " · " + at : "");
+      if (current) { list.appendChild(item); active++; }
+      else { history.appendChild(item); ended++; }
     });
-    say("pending-info", "未了的念头 " + rows.length + " 条（这一块是纯读，不结算、不回吐）。");
+    say("pending-info", active ? "未了的念头 " + active + " 条。" : "此刻没有未了的念头。");
+    say("thought-history-title", "已结束与到期的念头 · " + ended + " 条");
+    if (!ended) history.textContent = "没有已结束或到期的记录。";
   }
 
   function renderWindow(signal) {
@@ -238,10 +305,12 @@
     }
     say("window", "窗口 " + signal.window_min + " 分钟 · 加权 " + weight +
       " · 连续被无视 " + signal.consecutive_ignored + " 条 · 窗内事件 " +
-      signal.rows + " 条\n命中时判决怎么变：" + verdict + "（理由码 ignored-recently，逐条列在⑤的命中门里）");
+      signal.rows + " 条\n命中时判决怎么变：" + verdict + "（理由码 ignored-recently，逐条列在开口判断的命中门里）");
   }
 
   function renderMood(data) {
+    say("summary-mood", data.tier || "暂无读数");
+    say("summary-mood-note", "此刻 " + data.now + " · 基线 " + data.baseline);
     say("mood", "此刻 " + data.now + "（" + data.tier + "）· 基线 " + data.baseline +
         " · 方向 " + data.direction + " · 读数于 " + data.as_of);
     drawCurve(data.trajectory || []);
@@ -297,6 +366,8 @@
   }
 
   function renderEnergy(data) {
+    say("summary-energy", data.tier || "暂无读数");
+    say("summary-energy-note", "当前 " + data.value);
     var tail = data.capped ? "（超过一次补算的上限，更早的部分不追）" : "";
     var window = (data.sleep_window || []).join(" → ");
     var terms = window ? " · 生效窗口 " + window + " 点 · 回血封顶 " + data.wake_cap : "";
@@ -307,6 +378,7 @@
 
   function renderSleep(data) {
     if (data.ok !== true) {
+      say("summary-rest", "读取失败");
       say("sleep", "拒载：睡眠账读不出来，生效窗口与回血封顶一个都不给");
       return;
     }
@@ -314,10 +386,17 @@
     var slept = typeof data.last_duration_min === "number"
       ? Math.round(data.last_duration_min) + " 分钟" : "没有记录";
     var window = (data.effective_window || []).join(" → ");
-    say("sleep", "上次入睡 " + asleep + " · 睡了 " + slept +
+    var rest = data.rest || {phase:"untracked"};
+    var phase = {awake:"醒着",asleep:"睡着",holding:"被叫醒后硬撑",deep:"彻底睡着",untracked:"尚未开始记录"};
+    say("summary-rest", phase[rest.phase] || "未知阶段");
+    say("sleep", "实际阶段：" + (phase[rest.phase] || rest.phase) +
+        (rest.since ? " · 从 " + rest.since : "") +
+        (rest.hold_until ? "\n硬撑截止：" + rest.hold_until + "（连续来信不延长）" : "") +
+        (rest.wake_at ? "\n这夜醒来时间：" + rest.wake_at : "") +
+        "\n上次入睡 " + asleep + " · 睡了 " + slept +
         "\n连续熬夜 " + data.consecutive_late_nights + " 夜 · 连续没睡够 " +
-        data.consecutive_short_nights + " 夜 · drift " + data.drift_hours + " 小时" +
-        "\n生效窗口 " + window + " 点 · wake_cap " + data.wake_cap);
+        data.consecutive_short_nights + " 夜 · 作息推迟 " + data.drift_hours + " 小时" +
+        "\n生效作息 " + window + " 点 · 精力恢复上限 " + data.wake_cap);
   }
 
   function renderIntents(block) {
@@ -378,7 +457,7 @@
       var marks = STATES.map(function (state) {
         return state === item.data.state ? "【" + state + "】" : state;
       }).join(" / ");
-      var reason = item.data.reason ? item.data.reason : "没有命中任何门";
+      var reason = item.data.reason ? (REASONS[item.data.reason] || item.data.reason) : "没有命中任何门";
       return item.label + " → " + marks + "（主因 " + reason + "；干跑，不写日志）";
     });
     say("engage", lines.join("\n"));
@@ -395,7 +474,7 @@
       }
       hits.forEach(function (hit) {
         var row = document.createElement("li");
-        row.textContent = item.label + " · 命中门 " + hit;
+        row.textContent = item.label + " · " + (REASONS[hit] || hit) + "（" + hit + "）";
         list.appendChild(row);
       });
     });
@@ -409,19 +488,71 @@
 
   // 注意："/heart" 是**页面本身**（HTML），JSON 概览在 "/heart/overview"。
   // 打错一处，整页会报"核 /heart 回的不是 JSON"。
+  var changesOffset = 0;
+  function changeNode(tag, text, cls) { var x = document.createElement(tag); x.textContent = text; if (cls) x.className = cls; return x; }
+  function changeValue(v, name) {
+    if (name === "暂停主动开口至" && v === null) return "未设置暂停";
+    if (name === "最近主动开口" && v === null) return "尚无记录";
+    if (typeof v === "boolean") return v ? "是" : "否";
+    return v === null || v === undefined ? "首次记录" : (typeof v === "number" ? String(Math.round(v * 10000) / 10000) : String(v));
+  }
+  function loadChanges() {
+    var query = "?group=" + encodeURIComponent(el("changes-group").value) + "&offset=" + changesOffset;
+    if (el("changes-date").value) query += "&date=" + encodeURIComponent(el("changes-date").value);
+    panelFetch("/heart/changes" + query).then(function(res) { return res.json(); }).then(function(data) {
+      if (!data.ok) throw new Error(data.message || "读取失败");
+      el("changes-date").value = data.date;
+      say("changes-info", data.total + " 条 · " + data.timezone + (data.invalid_records ? " · 有 " + data.invalid_records + " 条损坏记录未展示" : ""));
+      var list = el("changes-list"); list.textContent = "";
+      data.rows.forEach(function(row) {
+        var li = document.createElement("li"), details = document.createElement("details");
+        details.appendChild(changeNode("summary", new Date(row.at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}) + " · " + row.reason));
+        Object.keys(row.changes).forEach(function(name) {
+          var c = row.changes[name], delta = typeof c.before === "number" && typeof c.after === "number" ? c.after - c.before : null;
+          var line = name + "：" + changeValue(c.before, name) + " → " + changeValue(c.after, name);
+          if (delta !== null) line += "（" + (delta > 0 ? "+" : "") + changeValue(delta) + "）";
+          li.appendChild(changeNode("div", line, "values"));
+        });
+        var sources = {praise:"受到夸奖",care:"受到关心",cold:"感到冷落",insult:"受到贬低",rejected:"被拒绝",asleep:"睡眠账：入睡",awake:"睡眠账：醒来",proactive_sent:"主动开口登记",proactive_ignored:"未获回应",proactive_replied:"收到回应",proactive_incoming:"对方主动开口"};
+        if (row.source) details.appendChild(changeNode("div", "来源：" + (sources[row.source] || row.source), "meta"));
+        if (row.origin) {
+          var origin = row.origin, scenes = {group:"群聊",private:"私聊",unknown:"场景未知"};
+          details.appendChild(changeNode("div", "说话人：" + origin.who + " · " + (scenes[origin.scene] || origin.scene), "meta"));
+          details.appendChild(changeNode("div", "判断所据摘录：" + (origin.evidence || "未保存"), "meta"));
+          details.appendChild(changeNode("div", "当时判断：" + (origin.note || "未保存"), "meta"));
+          var link = changeNode("a", "查看这一轮模型调用");
+          link.href = window.PANEL_BASE + "/observe?source=model&turn_id=" + encodeURIComponent(origin.turn_id);
+          details.appendChild(link);
+        } else if (["praise","care","cold","insult","rejected"].indexOf(row.source) >= 0) {
+          details.appendChild(changeNode("div", "未保存回合关联，不能按时间猜测原话或说话人。", "meta"));
+        }
+        if (row.from_at) details.appendChild(changeNode("div", "上次保存：" + new Date(row.from_at).toLocaleString(), "meta"));
+        details.appendChild(changeNode("div", "本次写入：" + new Date(row.at).toLocaleString() + " · 原账第 " + row.source_line + " 行", "meta"));
+        li.insertBefore(details, li.firstChild); list.appendChild(li);
+      });
+      if (!data.rows.length) list.appendChild(changeNode("li", data.available ? "这一天和类别没有变化记录。" : "变化账尚未产生记录，发生实际写入后会出现在这里。"));
+      el("changes-newer").disabled = data.offset === 0; el("changes-older").disabled = !data.has_older;
+    }).catch(function(err) { say("changes-info", "读取失败：" + err.message); });
+  }
+  ["changes-date", "changes-group"].forEach(function(id) { el(id).onchange = function() { changesOffset=0; loadChanges(); }; });
+  el("changes-refresh").onclick = function() { changesOffset=0; loadChanges(); };
+  el("changes-newer").onclick = function() { changesOffset=Math.max(0, changesOffset-20); loadChanges(); };
+  el("changes-older").onclick = function() { changesOffset+=20; loadChanges(); };
+  loadChanges();
+
   panelFetch("/heart/overview").then(function (res) { return res.json(); }).then(function (data) {
     renderStatus(data);
     renderIntents(data.intents);
     renderRefusalCooling(data.refusals);
   }).catch(fail);
 
-  panelFetch("/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(fail);
+  panelFetch("/heart/sleep").then(function (res) { return res.json(); }).then(renderSleep).catch(function (err) { say("summary-rest", "读取失败"); fail(err); });
 
-  panelFetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(fail);
+  panelFetch("/heart/effective").then(function (res) { return res.json(); }).then(renderEffective).catch(function (err) { say("summary-voice", "读取失败"); fail(err); });
 
-  panelFetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(fail);
+  panelFetch("/heart/mood").then(function (res) { return res.json(); }).then(renderMood).catch(function (err) { say("summary-mood", "读取失败"); fail(err); });
 
-  panelFetch("/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(fail);
+  panelFetch("/heart/energy").then(function (res) { return res.json(); }).then(renderEnergy).catch(function (err) { say("summary-energy", "读取失败"); fail(err); });
 
   panelFetch("/heart/engage").then(function (res) { return res.json(); }).then(function (data) {
     renderEngage("被动", data);

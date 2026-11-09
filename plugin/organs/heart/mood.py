@@ -13,7 +13,7 @@
 那把尺在脑，心既不持有也不碰。
 
 落盘两件：
-- mood.json：状态（schema 见下），只由 apply_event / settle_day 写；
+- mood.json：状态（schema 见下），只由 apply_event / apply_experience / settle_day 写；
 - mood_traj.jsonl：轨迹账本，只由 read() 顺手追加一行——"读的时候顺手记一笔"，
   没有定时器、没有线程、没有 cron。
 
@@ -33,8 +33,8 @@ model.MOOD_DIMINISH_FACTOR、model.MOOD_DAILY_SAME_DIRECTION_CAP_TIERS 一起撤
 
 状态 schema（不许悄悄加字段）：
 {"version": 1, "now": float, "baseline": float, "updated_at": iso,
- "day": "YYYY-MM-DD", "conflict_used": int, "window": {who: "YYYY-MM-DDTHH"}}
-day_events / day_delta_tiers 两栏随旧日上限一起退役：不再写；旧文件里读到就
+ "day": "YYYY-MM-DD", "conflict_used": int}
+window（同人整小时封窗）、day_events / day_delta_tiers 已退役：不再写；旧文件里读到就
 静默忽略（不炸，也不搬进新字段）。
 """
 from __future__ import annotations
@@ -113,7 +113,6 @@ def _clamp(value: float) -> float:
 def _load(root: Any, at: str) -> Dict[str, Any]:
     """读状态；缺字段 / 坏字段一律补默认，坏 JSON 交给 store 回默认。"""
     data = store.read_json(_path(root), {})
-    window = data.get("window")
     state = {
         "version": model.VERSION,
         "now": _clamp(_as_float(data.get("now"), model.MOOD_BASELINE_DEFAULT)),
@@ -127,15 +126,9 @@ def _load(root: Any, at: str) -> Dict[str, Any]:
         if isinstance(data.get("day"), str) and data.get("day")
         else day_model.day_key(at, cutover_hour=0),
         "conflict_used": max(0, _as_int(data.get("conflict_used"), 0)),
-        "window": dict(window) if isinstance(window, dict) else {},
     }
-    # day_events / day_delta_tiers 两栏已退役：旧文件里读到就静默丢掉，不搬也不炸。
+    # 退役字段只忽略，不在读时回写或重算历史。
     return state
-
-
-def _hour_key(at: str) -> str:
-    """小时桶 "YYYY-MM-DDTHH"：同一个人同一小时只算一次。"""
-    return model.parse_ts(at).strftime("%Y-%m-%dT%H")
 
 
 def tier_of(value: float) -> str:
@@ -251,6 +244,7 @@ def apply_event(
     now: Optional[str] = None,
     who: str = "主人",
     tiers: Optional[float] = None,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """一个事件：先现算衰减，再按"渐近线 + 热度"折算增量，切掉超出的部分，最后落账。
 
@@ -267,14 +261,14 @@ def apply_event(
     4. 负向（nominal ≤ 0）一个折扣都不给：delta = nominal，
        再 delta = max(delta, −before) 不许穿底——疲惫与压力是代价，不打折；
     5. after = clamp(before + delta)，写回 now / baseline / updated_at / day /
-       conflict_used / window。day_events / day_delta_tiers 两栏随旧日上限退役，不再写；
+       conflict_used。window / day_events / day_delta_tiers 已退役，不再写；
     6. events.append(kind, who, root, now, delta=…, after=…)：本模块只读账本一次（数热度），
        落账时也只投递一次；心不自己编事件。
 
     - kind 不在 model.EVENTS 里 → ValueError，不静默吞掉；
-    - tiers 只换名义档；heat 折扣、渐近线、负向不缩放、windowed、负向日上限照旧；
-    - 两道旧闸照旧保留在前面，被挡时状态一个字节不改、账本也不落行：
-      同一人同一小时最多一次：{"ok": False, "skipped": "windowed"}；
+    - tiers 只换名义档；heat 折扣、渐近线、负向不缩放、负向日上限照旧；
+    - 同类冷却由 report 入口负责，不把同一个人的不同事件按小时一起挡掉。
+      负向日上限被挡时状态不改、账本不落行：
       被拒 / 被骂单日封顶 MOOD_NEGATIVE_DAILY_CAP 次：{"ok": False, "skipped": "capped"}；
     - 成功返回 {"ok": True, "before", "after", "delta", "heat", "headroom", "skipped",
       "kind", "who", "tier"}：delta 是真正落账的分差（被夹到刻度边界时比名义增量小），
@@ -284,12 +278,8 @@ def apply_event(
         raise ValueError("不认识的事件：%r（只认 %s）" % (kind, "、".join(model.EVENTS)))
     at = now if isinstance(now, str) and now else model.now_iso()
     state = _load(root, at)
-    hour = _hour_key(at)
     today = day_model.day_key(at, cutover_hour=0)
     label = who if isinstance(who, str) and who else "主人"
-
-    if state["window"].get(label) == hour:
-        return {"ok": False, "skipped": "windowed"}
 
     capping = kind in (model.EVENT_REJECTED, model.EVENT_INSULT)
     used = state["conflict_used"] if state["day"] == today else 0
@@ -317,8 +307,6 @@ def apply_event(
     # 5) 落账
     after = _clamp(before + delta)
 
-    window = dict((k, v) for k, v in state["window"].items() if v == hour)
-    window[label] = hour
     state.update(
         {
             "now": after,
@@ -326,10 +314,9 @@ def apply_event(
             "updated_at": at,
             "day": today,
             "conflict_used": used + (1 if capping else 0),
-            "window": window,
         }
     )
-    store.write_json(_path(root), state)
+    _save_change(root, state, at, '时间回落后应用聊天情绪', kind, origin=origin)
     # 6) 同一本账落一行
     events.append(
         kind,
@@ -353,6 +340,40 @@ def apply_event(
     }
 
 
+def apply_experience(effect: str, *, source_id: str, note: str, root: Any = None,
+                     now: Optional[str] = None) -> Dict[str, Any]:
+    """实际活动的有界感受；不占人际窗口/冲突次数，同一来源只结算一次。"""
+    nominal={'positive':model.MOOD_EXPERIENCE_STEP,'negative':-model.MOOD_EXPERIENCE_STEP,'neutral':0}[effect]
+    at=now or model.now_iso()
+    base=Path(root) if root is not None else store.default_root()
+    if any(row.get('kind')=='experience' and row.get('source_id')==source_id
+           for row in store.read_jsonl(base/events.EVENTS_FILE)):
+        return {'ok':False,'skipped':'duplicate','source_id':source_id}
+    state=_load(root,at)
+    values=_effective(state,at)
+    before=values['now']
+    delta=nominal*max(0,1-before/model.MOOD_CEILING) if nominal>0 else nominal
+    after=_clamp(before+delta)
+    if nominal:
+        state.update(now=after,baseline=values['baseline'],updated_at=at)
+        _save_change(root, state, at, '时间回落后应用实际经历感受', source_id)
+    result={'ok':True,'before':round(before,1),'after':round(after,1),
+            'delta':round(after-before,1),'effect':effect,'source_id':source_id}
+    events.append('experience',who='self',root=root,now=at,note=note,**result)
+    return result
+
+
+def _save_change(root, state, at, reason, source, origin=None):
+    from . import changes
+    previous = store.read_json(_path(root), {})
+    store.write_json(_path(root), state)
+    names = {"now": "心情", "baseline": "心情基线"}
+    changes.record(root, at=at, group='mood', reason=reason, source=source, origin=origin,
+                   from_at=previous.get('updated_at'),
+                   before={label: previous.get(key) for key, label in names.items()},
+                   after={label: state[key] for key, label in names.items()})
+
+
 def settle_day(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
     """日结：把当日净变化的一半写进 baseline，另一半不给。
 
@@ -368,7 +389,6 @@ def settle_day(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
     absorbed = (values["now"] - values["baseline"]) / 2.0
     after_baseline = _clamp(values["baseline"] + absorbed)
 
-    window = dict((k, v) for k, v in state["window"].items() if v == _hour_key(at))
     state.update(
         {
             "now": values["now"],
@@ -376,10 +396,9 @@ def settle_day(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
             "updated_at": at,
             "day": today,
             "conflict_used": 0,
-            "window": window,
         }
     )
-    store.write_json(_path(root), state)
+    _save_change(root, state, at, '心情日结', today)
     return {
         "ok": True,
         "baseline_before": round(values["baseline"], 1),

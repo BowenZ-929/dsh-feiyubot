@@ -51,6 +51,26 @@ def _write_and_load(tmp: str, book: dict) -> dict:
 class InBookIsNotFamiliar(unittest.TestCase):
     """「在册」不是「熟」：两段都要过，缺一段就照实判；判不了就不判。"""
 
+    def test_confirmed_names_do_not_require_familiarity_or_permit_other_claims(self):
+        known = dict(NEW_FACE, confirmed_terms=['主人', '老大', '亲爱的'])
+        self.assertIsNone(check('老大，这是给你的。主人和亲爱的都是你的叫法。', known))
+        self.assertEqual('老婆', check('老大，老婆。', known).term)
+        self.assertEqual('亲', check('亲爱的。亲。', known).term)
+        self.assertIsNotNone(check('老大，你上次说过这个。', known))
+        self.assertIsNotNone(check('老大。', dict(STRANGER, confirmed_terms=['老大'])))
+
+    def test_confirmed_names_must_be_nonempty_text_list(self):
+        for value in ('老大', [None], ['']):
+            with self.subTest(value=value), self.assertRaises(KinBroken):
+                check('普通聊天', dict(NEW_FACE, confirmed_terms=value))
+
+    def test_neutralize_changes_the_unconfirmed_occurrence_only(self):
+        body = '亲爱的。亲。'
+        hit = check(body, dict(NEW_FACE, confirmed_terms=['亲爱的']))
+        result, changed = neutralize(body, hit)
+        self.assertEqual('亲', changed)
+        self.assertTrue(result.startswith('亲爱的。你。'), result)
+
     def test_a_stranger_is_judged(self):
         self.assertIsInstance(check(CLAIM_LINE, STRANGER), KinHit)
 

@@ -4,7 +4,7 @@
 1. brain_compact：真调脑的公开动作 BrainStore.run_night(now_ts)（脑自己幂等）。
 2. brain_decay：**空实现**——脑没有公开的衰减结算动作（_settle_retention 是私有的，
    结算发生在 recall 读的时候）。所以只报 stubbed + 理由，什么也不写。
-3. home_diary：真写——素材只取今天的真东西（脑 today + 心的心情档 + 日子自己的账），
+3. home_diary：真写——素材只取今天的真东西（带归属的脑 today + 心情档 + 有效手机观察），
    交核（mind.complete）写一篇，落家·抽屉（kind=日记），脑里只留一行索引。
    一天一张：当天已有就跳过并返回既有那张，绝不写第二张。
 4. home_dream：真写——素材与落点同日记，kind=梦，脑里索引的 source_type 是「梦」
@@ -38,9 +38,12 @@ import shutil
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from organs.heart import energy, mood
+from organs.brain.model import SIDE_OTHER, SIDE_SELF
 from organs.mind import LLMError, complete, load_config
+from organs.mind.llm import trace_round
 
 from . import model
 
@@ -172,6 +175,8 @@ def load_writing(path: Any = None) -> Dict[str, Any]:
         if not isinstance(extra, dict) or any(not isinstance(v, str) for v in extra.values()):
             raise WritingError("%s.extra_params 要是 {键: 模板字符串}：%s" % (where, target))
         clean["extra_params"] = dict(extra)
+        if "review_prompt" in entry:
+            clean["review_prompt"] = _need_text(where, entry, "review_prompt")
         if clean["step"] in entries:
             raise WritingError("两个条目抢同一个步骤 %r：%s" % (clean["step"], target))
         entries[clean["step"]] = clean
@@ -249,6 +254,8 @@ def _today_memories(ctx: Dict[str, Any], day: str,
     brain = ctx.get("brain")
     if brain is None:
         raise WritingError("脑未载入（brain=None）：日记要往脑里留一行索引，本步不写半份")
+    from . import growth
+    from organs.brain.visibility import visible
     rows: List[Dict[str, Any]] = []
     for entry in brain.today_entries(ctx["now"]):
         text = str(entry.get("text") or "").strip()
@@ -259,32 +266,13 @@ def _today_memories(ctx: Dict[str, Any], day: str,
                 continue
         except ValueError:
             continue
+        if growth.enabled(ctx.get("root")) and not visible(entry):
+            continue
         rows.append(entry)
-    return rows[-cfg["material"]["limit"]:]
-
-
-def _today_schedule(ctx: Dict[str, Any], day: str) -> List[str]:
-    """日子自己的账：当天 schedule_log.jsonl 里"今天做了什么"（没有就是没有，不补）。"""
-    from . import schedule as schedule_module
-    path = schedule_module.log_path(ctx.get("root"))
-    if not path.is_file():
-        return []
-    items: List[str] = []
-    for text in path.read_text(encoding="utf-8").splitlines():
-        if not text.strip():
-            continue
-        try:
-            row = json.loads(text)
-        except ValueError:
-            continue
-        if not isinstance(row, dict) or row.get("day") != day:
-            continue
-        item = str(row.get("item") or "").strip()
-        if not item:
-            continue
-        slot = str(row.get("slot") or "").strip()
-        items.append(("%s：%s" % (slot, item)) if slot else item)
-    return items
+    selected = rows[-cfg["material"]["limit"]:]
+    selected_ids = {entry['id'] for entry in selected}
+    turn_ids = {entry['turn_id'] for entry in selected if entry.get('turn_id')}
+    return [entry for entry in rows if entry['id'] in selected_ids or entry.get('turn_id') in turn_ids]
 
 
 def _bullets(rows: List[str], empty: str) -> str:
@@ -322,11 +310,11 @@ def _tier_temperature(tier: str, ctx: Dict[str, Any]) -> Optional[float]:
 
 
 def _ask_core(ctx: Dict[str, Any], messages: List[Dict[str, str]],
-              temperature: Optional[float]) -> str:
+              temperature: Optional[float], purpose: str = "夜间写作") -> str:
     """把这一篇交给核：真调 organs.mind.complete。失败原样上抛 LLMError，由 run 记 kind。"""
     mind = ctx.get("mind") or {}
     return complete(messages, config=mind.get("config"), env=mind.get("env"),
-                    transport=mind.get("transport"), temperature=temperature)
+                    transport=mind.get("transport"), temperature=temperature, purpose=purpose)
 
 
 def _append_card(ctx: Dict[str, Any], cfg: Dict[str, Any], card: Dict[str, Any],
@@ -381,33 +369,83 @@ def _write_entry(at: str, ctx: Dict[str, Any], step: str) -> Dict[str, Any]:
     # 落卡时的硬判据仍是 word_range——两件事分开，收窄提示词不等于放松验收
     fields: Dict[str, Any] = {"date": day, "kind": kind, "room": cfg["drawer"]["room"],
                               "name": name, "card_id": "",
+                              "other_side": SIDE_OTHER, "self_side": SIDE_SELF,
                               "min_chars": entry["prompt_range"]["min"],
                               "max_chars": entry["prompt_range"]["max"]}
     existing = _existing_card(ctx, cfg, day, kind)
     if existing is not None:
         return {"status": STATUS_OK, "card_id": existing.get("card_id"), "rerun": True,
+                **({"model_turn_id": existing["params"]["model_turn_id"]}
+                   if (existing.get("params") or {}).get("model_turn_id") else {}),
                 "chars": int(existing.get("chars") or 0),
                 "detail": "幂等：%s %s 今天已有《%s》（%s），不写第二张"
                           % (kind, day, existing.get("name"), existing.get("card_id"))}
 
     memories = _today_memories(ctx, day, cfg)
-    schedule_rows = _today_schedule(ctx, day)
-    if not memories and not schedule_rows:
+    from . import phone_browse
+    from . import growth
+    phone_rows = phone_browse.experiences(at,root=ctx.get('root'),day=day,limit=cfg['material']['limit'])
+    if growth.enabled(ctx.get("root")):
+        phone_rows = [r for r in phone_rows if r.get("scope") == "public"]
+    activities = []
+    if growth.enabled(ctx.get("root")):
+        from . import solitude
+        activities = [{key: row.get(key) for key in
+                       ('at', 'event', 'model_turn_id', 'action', 'status', 'reason', 'receipt')}
+                      for row in solitude.log_lines(ctx.get('root'))
+                      if (row.get('event') == 'autonomy_finished' or
+                          (row.get('event') == 'autonomy_result' and row.get('status') == 'done'))
+                      and row.get('origin') not in ('acceptance', 'validation_run')
+                      and model.day_key(row['at']) == day
+                      and model.parse_ts(row['at']) <= model.parse_ts(at)][-cfg['material']['limit']:]
+    if not memories and not phone_rows and not activities:
         return {"status": STATUS_SKIPPED,
-                "detail": "今天一句真素材都没有（脑 today 0 条 + 日程账 0 行）：不写、不编"}
+                "detail": "今天没有真素材（聊天、实际手机观察、自主活动均为空）：不写、不编"}
 
     read = mood.read(root=ctx.get("heart_root"), now=at)
     tier = str(read.get("tier") or "").strip()
     if not tier:
         raise WritingError("心的心情档读不出档位（mood.read 回了 %r）：素材缺心情这一项" % (read,))
     fields["mood"] = tier
-    fields["memories"] = _bullets([str(row.get("text") or "").strip() for row in memories],
-                                 cfg["material"]["empty"])
-    fields["schedule"] = _bullets(schedule_rows, cfg["material"]["empty"])
-    messages = [{"role": "system", "content": entry["system_prompt"].format(**fields)},
-                {"role": "user", "content": entry["user_template"].format(**fields)}]
+    fields["memories"] = _bullets([json.dumps({key:row.get(key) for key in
+        ('id','turn_id','who','side','ts','source_type','text')},ensure_ascii=False) for row in memories],cfg['material']['empty'])
+    fields['phone'] = json.dumps(phone_rows,ensure_ascii=False) if phone_rows else cfg['material']['empty']
+    fields['schedule'] = cfg['material']['empty']  # 旧模板占位符不再装入模拟活动。
+    # 与聊天/手机活动共用魂的现行文本；性情只影响声音，不是今天的事件素材。
+    voice = ("\n[写作者的现行性情]\n" + ctx["persona"]
+             + "\n沿用自己的第一人称和自然口吻，不逐条复述设定，也不强塞口头禅。"
+               "这些是性情、喜好与边界，不证明今天做过什么；经历仍只依据给出的素材。") if ctx["persona"] else ""
+    if activities:
+        voice += ("\n自主活动只以回执为准：写过或读过作品不等于做过故事里的事，创作内容不代表实际经历；"
+                  "画面要求不证明画作实际内容，失败、取消和部分完成不能写成成功。理由是当时的主观想法；"
+                  "创建打算不等于完成打算，选择闲着不证明后来整天无事。")
+    messages = [{"role": "system", "content": entry["system_prompt"].format(**fields) + voice},
+                {"role": "user", "content": entry["user_template"].format(**fields) +
+                 ("\n今天自主活动的实际回执（作品内容与实际行动分开）：\n" +
+                  json.dumps(activities, ensure_ascii=False) if activities else '')}]
     temperature = _tier_temperature(entry["temperature_tier"], ctx)
-    text = _ask_core(ctx, messages, temperature).strip()
+    ctx["model_turn_id"] = uuid4().hex
+    with trace_round(ctx["model_turn_id"], "day:night:" + day + ":" + step):
+        text = _ask_core(ctx, messages, temperature, purpose="日记写作" if step == "home_diary" else "梦境写作").strip()
+        review = None
+        if entry.get("review_prompt"):
+            draft = text
+            checked = json.loads(_ask_core(ctx, [
+                {"role": "system", "content": entry["review_prompt"] + voice},
+                {"role": "user", "content": json.dumps({"materials": messages[1]["content"], "draft": draft}, ensure_ascii=False)},
+            ], temperature, purpose="日记事实复核"))
+            if (not isinstance(checked, dict) or not isinstance(checked.get("text"), str)
+                    or not isinstance(checked.get("changes"), list) or len(checked["changes"]) > 10
+                    or any(not isinstance(change, dict)
+                           or not isinstance(change.get("quote"), str) or not change["quote"].strip()
+                           or change["quote"] not in draft
+                           or not isinstance(change.get("reason"), str) or not 1 <= len(change["reason"].strip()) <= 300
+                           for change in checked["changes"])
+                    or (not checked["changes"] and checked["text"] != draft)):
+                raise WritingError("日记复核缺少有效正文或原稿修改依据；原稿尚未保存为日记")
+            text = checked["text"].strip()
+            review = {"draft": draft, "changes": [{"quote": row["quote"], "reason": row["reason"]}
+                                                    for row in checked["changes"]]}
 
     low, high = cfg["word_range"]["min"], cfg["word_range"]["max"]
     if not low <= len(text) <= high:
@@ -421,8 +459,15 @@ def _write_entry(at: str, ctx: Dict[str, Any], step: str) -> Dict[str, Any]:
     # params["text"] 留着是因为家那层对日记/梦**要求**它（cards._check_kind_fields 拿它算字数），
     # 它必须与正文逐字相同——两栏一旦不同，账上的字数与卡上的正文就对不上了。
     params: Dict[str, Any] = {"date": day, "text": text, "mood": tier,
+                              "model_turn_id": ctx["model_turn_id"],
+                              "from_phone": [row['id'] for row in phone_rows],
+                              "from_activities": [row['model_turn_id'] for row in activities],
                               "from_memories": [str(row.get("id")) for row in memories
                                                 if row.get("id")]}
+    if growth.enabled(ctx.get("root")):
+        params["scope"] = "public"
+    if review is not None:
+        params["review"] = review
     for key, template in entry["extra_params"].items():
         params[key] = template.format(**fields)
     card = {"room": cfg["drawer"]["room"], "kind": kind, "name": name,
@@ -493,7 +538,7 @@ def run(now_ts: Any = None, *, root: Any = None, brain: Any = None, heart_root: 
         attempt: int = 0,
         backoff_minutes: Optional[List[int]] = None,
         max_retries: Optional[int] = None,
-        writing: Any = None) -> Dict[str, Any]:
+        writing: Any = None, persona: str = "") -> Dict[str, Any]:
     """跑一次夜：五步固定顺序，每步单独兜错，末尾落一行日志。
 
     break_step=N 只给验收用：让第 N 步（1 起数）当场抛错，看后面几步还跑不跑。
@@ -515,7 +560,7 @@ def run(now_ts: Any = None, *, root: Any = None, brain: Any = None, heart_root: 
     wanted = list(STEPS) if only is None else [name for name in STEPS if name in set(only)]
     carried = carry or {}
     ctx: Dict[str, Any] = {"now": at, "root": root, "brain": brain, "heart_root": heart_root,
-                           "home_root": home_root, "mind": mind, "writing": writing}
+                           "home_root": home_root, "mind": mind, "writing": writing, "persona": persona}
     steps: Dict[str, Dict[str, Any]] = {}
     for number, name in enumerate(STEPS, 1):
         if name not in wanted:
@@ -539,14 +584,38 @@ def run(now_ts: Any = None, *, root: Any = None, brain: Any = None, heart_root: 
         except Exception as exc:  # noqa: BLE001 - 一步失败只记一行，继续下一步
             steps[name] = {"status": STATUS_FAILED,
                           "detail": "%s: %s" % (type(exc).__name__, exc)}
-    failed: List[str] = [name for name in STEPS if steps[name]["status"] == STATUS_FAILED]
+        model_turn = ctx.pop("model_turn_id", None)
+        if model_turn:
+            steps[name]["model_turn_id"] = model_turn
+    from . import growth
+    growth_result = None
+    try:
+        if growth.enabled(root):
+            if only is None or 'growth' in only:
+                growth_result = growth.reflect(at, root=root, brain=brain, persona=persona,
+                                               home_root=home_root, retry=attempt > 0)
+                state = growth_result['status']
+                steps['growth'] = {'status': STATUS_FAILED if state in ('failed', 'interrupted') else
+                    STATUS_CARRIED if state in ('already_attempted', 'disabled') else STATUS_OK,
+                    'detail': growth_result.get('record', {}).get('note') or growth_result.get('error_kind') or
+                              growth_result.get('error') or ('保持当前认识' if state == 'ok' else state),
+                    **({'model_turn_id': growth_result['model_turn_id']} if growth_result.get('model_turn_id') else {})}
+            elif 'growth' in carried:
+                steps['growth'] = dict(carried['growth'])
+    except (OSError, ValueError) as exc:
+        growth_result = {'status': 'failed', 'error': type(exc).__name__}
+        steps['growth'] = {'status': STATUS_FAILED, 'detail': type(exc).__name__}
+
+    failed: List[str] = [name for name, step in steps.items() if step["status"] == STATUS_FAILED]
+    if growth.enabled(root) and (only is None or 'growth' in only):
+        wanted.append('growth')
     next_retry_at = _next_retry(at, attempt, bool(failed), backoff_minutes, max_retries)
     line = {"ts": at, "day": day, "attempt": int(attempt), "retried_steps": wanted,
             "next_retry_at": next_retry_at, "written": 1, "steps": steps, "failed": failed}
     target = _append_log(line, root)
     return {"ok": not failed, "now": at, "day": day, "attempt": int(attempt),
             "retried_steps": wanted, "next_retry_at": next_retry_at, "steps": steps,
-            "failed": failed, "written": 1, "log_path": str(target), "log_line": line}
+            "failed": failed, "written": 1, "log_path": str(target), "log_line": line, **({"growth": growth_result} if growth_result else {})}
 
 
 def _next_retry(at: str, attempt: int, failed: bool,

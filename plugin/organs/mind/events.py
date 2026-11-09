@@ -3,6 +3,8 @@
 五类事件的名字与心的枚举是同一份东西（organs/heart/model.py 的 model.EVENTS）：
 praise（夸）/ care（关心）/ cold（冷落）/ insult（被骂）/ rejected（被拒绝）。
 这里只回答"是哪一类"，推多少由心按契约权重与冷却自己拍——数值一个都不许从本模块出去。
+线上 API 由 appraisal.assess 解释整段，再把 interpretation 交给 record；下文的词表
+recognize / is_insult 保留作旧离线基线，语义失败不回退到它们。
 
 输入只有三样（外加两个可选窗口）：
 - text          这一段的原话（可以是发言段拼起来的几行）；
@@ -23,7 +25,7 @@ praise（夸）/ care（关心）/ cold（冷落）/ insult（被骂）/ rejecte
 3. cold 是**窗口判据，不是单词**：最近 N 轮里她的回话都是"极短应答"（长度阈值 + 词表）
    才判 cold。窗口 N、长度阈值、应答词表三样都在数据里。
 
-is_insult(text) 是**全仓唯一的「被骂」判据**：心的 engage 硬门只看调用方传进来的
+旧离线调用的 is_insult(text) 是词表「被骂」判据：心的 engage 硬门只看调用方传进来的
 insulted_today（organs/heart/engage.py:139，理由是 model.REASON_INSULTED），接那一门
 与投 insult 事件用的必须是同一个布尔，否则"她今天被骂了"会出现两份结论。它与
 recognize 里 insult 那一路走的是同一个 _insult_hits（同一份词表、同一票否决），
@@ -39,6 +41,8 @@ recognize 里 insult 那一路走的是同一个 _insult_hits（同一份词表�
   照样落一行。心回 {"applied": false, "reason": ...} 时照实写它的 applied 与 reason；
 - 账本只追加、不改写；读的时候坏行跳过（rows）。
 """
+# 当前 API 对话由 appraisal.assess 提供语义结果给 record；下面的词表识别保留作离线基线。
+# 语义不可用时传入 kind=None，并记录不可用状态，不回退到 recognize。
 from __future__ import annotations
 
 import json
@@ -364,7 +368,7 @@ def _default_report() -> Any:
     return entry
 
 
-def _deliver(kind: str, who: str, at: str, note: str, report: Optional[Any]
+def _deliver(kind: str, who: str, at: str, note: str, report: Optional[Any], origin=None
              ) -> Tuple[bool, str]:
     """把事件名投给心，返回 (applied, reason) —— 三点都照实说，一个都不许编。
 
@@ -382,7 +386,7 @@ def _deliver(kind: str, who: str, at: str, note: str, report: Optional[Any]
         except AttributeError:
             return False, REASON_NO_ENTRY
     try:
-        answer = entry(kind, who, at=at, note=note)
+        answer = entry(kind, who, at=at, note=note, **({'origin': origin} if origin else {}))
     except Exception as exc:  # 投递是旁路，不许把这一轮整死
         warnings.warn(
             "核·events：投递 %r 失败（%s：%s），账上照实记" % (kind, type(exc).__name__, exc),
@@ -425,26 +429,39 @@ def record(
     report: Optional[Any] = None,
     data: Optional[Any] = None,
     data_path: Optional[Any] = None,
+    interpretation: Optional[Dict[str, Any]] = None,
+    turn_id: str = "",
 ) -> Dict[str, Any]:
-    """识别 + 投递 + 落一行账，返回写下去的那一行（形状固定八个字段）。
+    """识别 + 投递 + 落一行账，返回写下去的那一行。
 
     **每轮都落一行**，不识别也落（kind="" / applied=false / reason="没识别出事件"）：
     "这一轮什么都没发生"和"这一轮被心拒了"在账上必须分得开。
     mode：人发消息触发的 = passive，她自己开口 = proactive（调用方传，别的一律按 passive）。
     report：投递口注入口（测试用它假造"心回 applied:false"那一支）；不给就走真入口。
+    turn_id：已有聊天回合编号，同时传给心的变化记录；没有编号不推猜关联。
     """
     cfg = _config(data, data_path)
     moment = _stamp(at)
     mode_value = mode if mode in MODES else MODE_PASSIVE
     where = scene if isinstance(scene, str) and scene else SCENE_UNKNOWN
-    result = recognize(text, last_reply=last_reply, scene=where, who=who,
-                       recent_replies=recent_replies, data=cfg)
+    result = (interpretation if interpretation is not None else
+              recognize(text, last_reply=last_reply, scene=where, who=who,
+                        recent_replies=recent_replies, data=cfg))
     kind = result.get("kind") or ""
+    scene_blocked = bool(kind and where not in cfg["scenes"][kind])
+    if scene_blocked:
+        kind = ""
     note = result.get("note") or ""
     if not kind:
         applied, reason = False, REASON_NO_EVENT
+        if interpretation is not None and interpretation.get("status") == "unavailable":
+            reason = "语义判断不可用，未投递事件"
+        elif scene_blocked:
+            reason = "当前场景未启用该事件，未投递"
     else:
-        applied, reason = _deliver(kind, result["who"], moment, note, report)
+        origin = ({'turn_id': turn_id, 'who': result['who'], 'scene': where,
+                   'evidence': result.get('evidence') or '', 'note': note} if turn_id else None)
+        applied, reason = _deliver(kind, result["who"], moment, note, report, origin)
     row = {
         "at": moment,
         "kind": kind,
@@ -455,6 +472,10 @@ def record(
         "reason": reason,
         "note": note,
     }
+    if interpretation is not None:
+        row["interpretation"] = interpretation
+    if turn_id:
+        row["turn_id"] = turn_id
     _append(row, root)
     return row
 

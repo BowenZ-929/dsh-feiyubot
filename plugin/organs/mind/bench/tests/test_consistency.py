@@ -321,6 +321,16 @@ class DrySmokeTest(unittest.TestCase):
         self.assertEqual(0.0, row["stats"]["b_same_rate"])
         self.assertEqual(0.0, row["stats"]["a_drift_rate"])
 
+    def test_vary_counter_survives_changed_context(self):
+        send = bench.vary_transport(fillers=("我在听",))
+        replies = []
+        for context in ("上一轮回答一", "上一轮回答二"):
+            payload = {"messages": [{"role": "system", "content": context},
+                                    {"role": "user", "content": "同一个问题"}]}
+            _, body = send(None, {}, payload, 1)
+            replies.append(json.loads(body)["choices"][0]["message"]["content"])
+        self.assertNotEqual(*replies)
+
     def test_no_key_prints_the_message_and_exits_nonzero(self):
         """真模型缺 key：把人话原样打出来、退出码非 0——不装成跑通了（这里不联网，直接替掉 preflight）。"""
         from unittest import mock

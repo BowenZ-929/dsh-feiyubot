@@ -176,6 +176,13 @@ def read_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
     return data if isinstance(data, dict) else None
 
+
+def save_phone_config(config: Dict[str, Any]) -> None:
+    root = ensure_dir(hand_root())
+    target = root / "phone.json"
+    target.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(str(target), FILE_MODE)
+
 # ---- 图：读一份已有的字节、把一张画好的图落到自己的盘 ----------------------
 
 

@@ -37,7 +37,7 @@
      "expired": [行], "never_ran": [行]}
     行：{id, kind, at, day, status, required, note, created_at, consumed_at}
         + 候选带上来的附加字段（见 EXTRA_KEYS：priority / who / held / held_reason /
-          reason_code / thought_id）：本文件只搬运，不解释
+          reason_code / thought_id / source）：本文件只搬运，不解释
     blocked 行：{id, kind, at, day, required, reason, message, blocked_at}
     never_ran 行：/ expired 行 = 原行 + {status, reason, expired_at|never_ran_at}
     pending 行里的夜间快照：night = {"attempts": 0..n, "steps": {名字: {status, detail}},
@@ -80,7 +80,7 @@ NIGHT_KEY = "night"
 # held 是"想说但因为夜里/双低没说"），只负责**不丢**——丢了它们，情计划就只剩 id 与时刻。
 # task 是 pending_task 那条由头带上来的一块（card_id / name / due / when / reminded_count）：
 # 到点执行时要靠它判"回执里说的事还是不是卡上那件"，所以它不是给人看的说明，是判据的一部分。
-EXTRA_KEYS = ("priority", "who", "held", "held_reason", "reason_code", "thought_id", "task")
+EXTRA_KEYS = ("priority", "who", "held", "held_reason", "reason_code", "thought_id", "task", "source")
 
 
 class PlanError(ValueError):
@@ -264,7 +264,7 @@ def next_at(now_ts: Any = None, *, root: Any = None,
 def _extras(item: Any) -> Dict[str, Any]:
     """候选带上来要原样落账的附加字段（见 EXTRA_KEYS）；坏值跳过，不猜。
 
-    priority / held 转成本来的类型（整数、布尔），task 那一块按字典原样抄（它是判据），
+    priority / held 转成本来的类型（整数、布尔），task / source 按字典原样抄（任务判据与原话来源），
     其余按字符串抄；没有的键不写——计划行的形状不该因为候选顺手带了几个 None 就长出空字段。
     """
     out: Dict[str, Any] = {}
@@ -279,7 +279,7 @@ def _extras(item: Any) -> Dict[str, Any]:
                 out[key] = int(value)
             elif key == "held":
                 out[key] = value is True
-            elif key == "task":
+            elif key in ("task", "source"):
                 out[key] = dict(value) if isinstance(value, dict) else None
                 if out[key] is None:
                     out.pop(key)

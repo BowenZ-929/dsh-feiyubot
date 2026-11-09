@@ -6,6 +6,7 @@ schedule / delivery 一落地就自动变空，于是"必须 200"自动接管，
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -57,9 +58,59 @@ class DayApiTest(unittest.TestCase):
         json.dumps(payload, ensure_ascii=False)
         return status, payload
 
-    def test_fifteen_routes_registered_with_one_method_each(self):
-        # 口径变更（独处循环）：13 → 15，多了 GET /day/solitude 与 POST /day/solitude/consider
-        self.assertEqual(15, len(DAY_ROUTES))
+    def test_life_routes_read_configure_generate_and_adjust(self):
+        from organs.day import life
+        now = at(NOW)
+        status, empty = self._call("GET", "/day/life", query={"now": now})
+        self.assertEqual(200, status)
+        self.assertIsNone(empty["plan"])
+        self.assertEqual(200, self._call("POST", "/day/life/config", {"enabled": True})[0])
+        self.assertEqual(400, self._call("POST", "/day/life/config", {"enabled": "true"})[0])
+        self.assertEqual(400, self._call("GET", "/day/life", query={"day": "../no"})[0])
+        raw = {"title": "日常", "items": [{"start": 0, "end": 720, "activity": "读书"},
+                                          {"start": 720, "end": 1440, "activity": "休息"}]}
+        soul = mock.Mock()
+        soul.render.return_value = "喜欢看书"
+        with mock.patch.object(life.llm, "complete", return_value=json.dumps(raw)):
+            status, made = api.handle("POST", "/day/life/generate" + self._query(root=str(self.root), now=now),
+                                     {"day": "2026-11-05"}, soul, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertEqual("ready", made["status"])
+        status, edited = self._call("POST", "/day/life/adjust",
+            {"day": "2026-11-05", "revision": 1, "start": made["items"][0]["start"], "activity": "听歌"},
+            query={"now": now})
+        self.assertEqual(200, status)
+        self.assertEqual(2, edited["revision"])
+
+    def test_nightly_writing_uses_current_soul_for_diary_review_and_dream(self):
+        from api.tests.helpers import copy_fixture, read_json, write_json
+        from organs.soul import load
+        from organs.day import night
+        from organs.day.tests.helpers import article
+        soul_root = copy_fixture("valid", str(self.root))
+        soul = load(soul_root)
+        # store 已载入后改卡，确认夜间同样读热更新，不读另一份固定人设。
+        identity = read_json(soul_root / "identity.json")
+        identity["likes"] = "喜欢青色的小纸船，话少，慢慢想。"
+        write_json(soul_root / "identity.json", identity)
+        requests = []
+        def complete(messages, **kwargs):
+            requests.append(messages)
+            return json.dumps({"text": article(), "changes": []}) if kwargs.get("purpose") == "日记事实复核" else article()
+        with mock.patch.object(night, "complete", side_effect=complete):
+            status, payload = api.handle("POST", "/day/tick" + self._query(root=str(self.root), now=at("2026-11-05T03:31:00")),
+                {}, soul, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(payload["night"]["executed"]))
+        self.assertEqual(3, len(requests))
+        for messages in requests:
+            self.assertIn(identity["likes"], messages[0]["content"])
+            self.assertNotIn(identity["likes"], messages[1]["content"], "性情不冒充经历素材")
+
+    def test_day_routes_registered_with_one_method_each(self):
+        self.assertEqual(24, len(DAY_ROUTES))
+        self.assertEqual("POST", DAY_ROUTES["/day/proactive/enable"])
+        self.assertEqual("POST", DAY_ROUTES["/day/proactive/disable"])
         for route, method in DAY_ROUTES.items():
             self.assertIn(route, api.ROUTES, "日子线的表没并进 core.ROUTES")
             self.assertEqual(method, api.ROUTES[route], route)
@@ -258,6 +309,37 @@ class DayApiTest(unittest.TestCase):
         self.assertEqual([False], [row["required"] for row in payload["blocked"]])
 
     # ---- 主动开口：三条新路由（读 / 动念 / 结算回执） ----------------------
+
+    def test_default_proactive_routes_read_home_and_explicit_root_stays_isolated(self):
+        from organs.home import cards
+        from organs.day.tests.test_proactive import home_at
+        ident = cards.append_cards(root=self.home, role='agent', by='agent', cards=[
+            {'kind': '物件', 'room': '工作台', 'name': '五分钟后的约定', 'note': '',
+             'params': {'task': True, 'due': at('2026-11-05T09:35:00')}}])['cards'][0]['card_id']
+        home_at(self.root)  # 显式测试树里的家为空，不能借用环境变量中的家。
+        self.brain.today_entries(at(NOW))
+        env = {'DAY_ROOT': str(self.root), 'HEART_ROOT': str(self.heart), 'HOME_ROOT': str(self.home)}
+        with mock.patch.dict(os.environ, env):
+            before = {p: p.read_bytes() for base in (self.root, self.home)
+                      for p in base.rglob('*') if p.is_file()}
+            status, default = api.handle('GET', '/day/proactive' + self._query(now=at(NOW)),
+                                        None, None, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertTrue(default['pending_task']['ok'], default['pending_task'])
+            self.assertEqual(ident, default['pending_task']['fired'])
+            _, isolated = self._call('GET', '/day/proactive', query={'now': at(NOW)})
+            self.assertTrue(isolated['pending_task']['ok'])
+            self.assertEqual([], isolated['pending_task']['cards'])
+            _, explicit = self._call('GET', '/day/proactive', query={'now': at(NOW), 'home_root': str(self.home)})
+            self.assertEqual(ident, explicit['pending_task']['fired'])
+            self.assertEqual(before, {p: p.read_bytes() for base in (self.root, self.home)
+                                     for p in base.rglob('*') if p.is_file()})
+            status, considered = api.handle('POST', '/day/proactive/consider' + self._query(now=at(NOW)),
+                                           {}, None, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertEqual('pending_task', considered['reason_code'])
+            self.assertEqual(ident, considered['row']['card_id'])
+            self.assertEqual(ident, considered['plan']['task']['card_id'])
 
     def test_proactive_reads_without_writing(self):
         """GET /day/proactive：账尾 + 此刻的读数，一个字节都不落盘（GET 不写）。"""

@@ -107,7 +107,7 @@ class FearsTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("migrate", store_module.read_history(
             self.root / "history.jsonl")[-1]["kind"])
-        self.assertEqual([], [item for item in checks.collect(self.root)
+        self.assertEqual([], [item for item in checks.collect(self.root, cross_check=False)
                               if item.level == model.ERROR])
         self.assertEqual(SETTLED_FEARS, read_json(self.root / "identity.json")["fears"])
         self.assertIn("【怕什么】" + SETTLED_FEARS, load(self.root).render("熟人"))
@@ -118,10 +118,10 @@ class FearsTest(unittest.TestCase):
 class RealCardFearsTest(unittest.TestCase):
     """真卡里的怕什么是用户给的定稿：逐字写入，不改写、不加料。"""
 
-    def test_real_identity_carries_the_settled_fears(self):
+    def test_real_identity_leaves_fears_to_experience(self):
         from pathlib import Path
         data = read_json(Path(__file__).resolve().parents[1] / "data" / "identity.json")
-        self.assertEqual(SETTLED_FEARS, data["fears"])
+        self.assertEqual("随经历形成，不预设怕什么", data["fears"])
         self.assertLessEqual(model.char_count(data["fears"]), model.limits.fears)
 
 

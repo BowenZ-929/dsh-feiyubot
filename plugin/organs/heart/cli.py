@@ -202,8 +202,7 @@ def demo_mood_praise3(root: Path) -> None:
     所以一顿夸顶不满：不是 60 → 70 → 80 → 90 那种加法，而是一路逼近 100。
     末尾 65.1 是 3 小时（MOOD_NOW_HALF_LIFE_H = 3h，一个半衰）后 now 往基线 60 走一半。
 
-    同一人同一小时只算一次（mood 的 window），所以三次夸来自三个不同的人；
-    这是设计里的防连珠炮，不是演示的手脚。
+    演示直接调用底层积分器；线上聊天另经report同类冷却，热度与余量规则相同。
     """
     _root_note(root)
     at = _stamp(5, 9)

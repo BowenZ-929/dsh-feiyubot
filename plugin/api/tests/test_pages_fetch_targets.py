@@ -51,8 +51,8 @@ TARGET_RE = re.compile(
 #: 那两页的 MIN_TARGETS 照旧看住它们；魂页同时从 6 涨到 10（补回提案与回滚两条读写）。
 MIN_TARGETS = {"soul.html": 10, "heart.html": 8,
                "home.html": 9, "chat.html": 1, "panel.html": 0,
-               "day.html": 3, "settings.html": 0,
-               "about.html": 1, "memory.html": 4}
+               "day.html": 8, "settings.html": 1,
+               "about.html": 1, "memory.html": 4, "observe.html": 1, "eye.html": 3, "voice.html": 3, "ear.html": 3, "studio.html": 5, "memes.html": 3, "phone.html": 9, "expressions.html": 2, "learning.html": 3}
 #: 拿它们去探非 GET 端点，只为「证明是 JSON 端点」，不会真写
 PROBE_METHOD = {"POST": "DELETE", "PUT": "DELETE", "PATCH": "DELETE", "DELETE": "PATCH"}
 
@@ -60,7 +60,11 @@ PROBE_METHOD = {"POST": "DELETE", "PUT": "DELETE", "PATCH": "DELETE", "DELETE": 
 def _targets(page: str) -> List[Tuple[str, str]]:
     text = (PAGES / page).read_text(encoding="utf-8")
     found = set()
-    for bare, method, call_path, fetch_path in TARGET_RE.findall(text):
+    for match in TARGET_RE.finditer(text):
+        bare, method, call_path, fetch_path = match.groups()
+        option = re.match(r'\s*,\s*\{\s*method:\s*["\'](POST|PUT|PATCH|DELETE)["\']', text[match.end():])
+        if bare and option:
+            method = option.group(1)
         raw = bare or call_path or fetch_path
         path = raw.partition("?")[0]
         if not path.startswith("/"):

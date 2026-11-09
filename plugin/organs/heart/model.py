@@ -59,6 +59,8 @@ MOOD_HEAT_WINDOW_MIN = 10
 MOOD_HEAT_K = 12.0
 # 同一小时内的事件合并成一次，避免连珠炮式加分。
 MOOD_EVENT_WINDOW_H = 1
+# 实际活动的短暂感受：独立于人际事件，每次最多2分，不改变关系轴。
+MOOD_EXPERIENCE_STEP = 2.0
 # 两次采样至少隔 10 分钟，防止抖动被当成真变化。
 MOOD_SAMPLE_MIN_GAP_MIN = 10
 MOOD_LOW = 30

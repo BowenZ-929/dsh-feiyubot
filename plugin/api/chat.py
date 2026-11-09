@@ -112,10 +112,10 @@ audience=私密 的条目打上 retellable=False，recalled[] 里原样透出）
 scene{value}。**不猜**：缺省也是 unknown——猜成私聊，就是把私事在群里说出去了。
 
 **段往核里传（这一轮加的）：body 多一个可选「segment」**——刚刚这一小段谁说了哪几句，
-两种形状都收（list of {speaker, text}，或 list of [speaker, text]），归一化成 [(谁, 说了什么)]
+两种形状都收（list of {speaker, text, who?}，或 list of [speaker, text]），归一化成对象列表
 后原样交给 conversation.answer(segment=...)，装配里多一段「这一小段」（标题 / 上限在
-assembly.json 的 sections.segment）。它**不写进 recent**：段是刚刚这一小段、recent 是更早的
-12 轮，两份输入不重叠，同一条消息不会既当段又当 recent。没给这个字段就是 None——私聊与老调用
+assembly.json 的 sections.segment）。本轮结束后连同发送者身份存入 recent；当前段与先前
+12 轮不重叠，同一条消息不会同时当当前段与先前轮。没给这个字段就是 None——私聊与老调用
 一字不改。形状坏了（不是 list / 元素既不是对象也不是二元组 / speaker 空）当场 400 并点名，
 不兜底：悄悄当成空段，等于让她以为这一段没人说话。只给段、没给 text 时，这一问取段里最后
 那一条（他刚说的那句）。
@@ -172,6 +172,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -182,6 +183,7 @@ from organs.home import preference_of                # 家·偏好卡：这个�
 from organs.home import residents as home_residents
 from organs.home import store as home_store
 from organs.mind import conversation
+from organs.mind import appraisal
 from organs.mind import events
 from organs.mind import llm
 from organs.mind import recent as mind_recent
@@ -199,7 +201,7 @@ from organs.mouth.gate import ClauseBroken
 
 from .core import Result
 
-CHAT_ROUTES = {"/chat": "POST"}
+CHAT_ROUTES = {"/chat": "POST", "/chat/ack": "POST"}
 
 LOGGER_NAME = "qqagent.chat"
 MISSING_TEXT = "POST /chat 要给 text（一句话）"
@@ -268,6 +270,19 @@ GATE_NOTE = ("闸在 /chat 生效：answer() 返回之后逐泡过一遍闸（�
 
 def dispatch(route: str, body: Optional[Dict[str, Any]],
              store: Any, brain: Any) -> Result:
+    if route == '/chat/ack':
+        return _dispatch(route, body, store, brain)
+    turn_id = uuid.uuid4().hex
+    session_id = _session_of(body) if isinstance(body, Mapping) else ''
+    with llm.trace_round(turn_id, session_id):
+        status, payload = _dispatch(route, body, store, brain, turn_id=turn_id)
+    if status == 200:
+        payload['turn_id'] = turn_id
+    return status, payload
+
+
+def _dispatch(route: str, body: Optional[Dict[str, Any]],
+              store: Any, brain: Any, *, turn_id: str = '') -> Result:
     """POST /chat：一句话进来，一整轮出去；判得出拒绝就在这儿投一次心。
 
     body 非 dict、text 缺失或全空白 → 400；store / brain 未载入 → 503（说不出话的两种原因
@@ -319,9 +334,39 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     """
     # 谁起的头先归一化：proactive 只认那一个字面值，其余（含缺省 / 非法值）一律 passive。
     # 它排在最前面，因为下面「这一轮的输入是什么」两种 mode 各读各的。
+    if route == "/chat/ack":
+        from organs.mind import delivery
+        token = body.get("delivery_id") if isinstance(body, Mapping) else None
+        text = body.get("text") if isinstance(body, Mapping) else None
+        images = body.get("images", []) if isinstance(body, Mapping) else []
+        stop_reason = body.get("stop_reason") if isinstance(body, Mapping) else None
+        if (not isinstance(token, str) or len(token) != 32
+                or any(ch not in "0123456789abcdef" for ch in token)
+                or not isinstance(text, str)
+                or not isinstance(images, list)
+                or stop_reason not in (None, "superseded")
+                or any(not isinstance(image, str) for image in images)):
+            return 400, {"ok": False, "message": "回执需要 delivery_id 和实际发送的 text"}
+        if brain is None:
+            return 503, {"ok": False, "message": BRAIN_MISSING}
+        ok = delivery.confirm(token, text, brain, images=images, stop_reason=stop_reason)
+        return (200 if ok else 404), {"ok": ok}
+    delivery_id = turn_id if isinstance(body, Mapping) and body.get("delivery_ack") is True else ""
+    if isinstance(body, Mapping) and 'directed' in body and not isinstance(body['directed'], bool):
+        return 400, {'ok': False, 'message': 'directed 必须是通道给出的布尔值'}
+    attachments = body.get("attachments", []) if isinstance(body, Mapping) else []
+    from organs.ear import hearing
+    if not isinstance(attachments, list) or any(
+        not isinstance(item, dict) or item.get("kind") not in ("image", "audio")
+        or any(key in item and not isinstance(item[key], str) for key in ("file", "url", "speaker", "speaker_id"))
+        or ('segment_index' in item and (type(item['segment_index']) is not int or item['segment_index'] < 0))
+        or ("transcription" in item and not hearing.validate(item["transcription"]))
+        for item in attachments
+    ):
+        return 400, {"ok": False, "message": "attachments 要给图片或语音列表，file/url/speaker/speaker_id 必须是文本，segment_index为非负整数"}
     mode = _mode_of(body)
     seed = ""
-    segment: Optional[List[Tuple[str, str]]] = None
+    segment: Optional[List[Dict[str, str]]] = None
     if mode == events.MODE_PROACTIVE:
         # 她自己开口：**必填的是由头**，不是 text；段给了也不读（这一轮没有别人说话）。
         seed = _seed_of(body)
@@ -333,9 +378,10 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
         if broken:
             return 400, {"ok": False, "message": broken}
         text = _text(body)
-        # 只给了段、没给 text：这一问就是段里最后那一条（他刚说的那句），不另外编一句。
+        # 没给 text 时取当前对象最后原话；群聊段尾可能是另一位旁听者。
         if text is None and segment:
-            text = segment[-1][1]
+            text = next((row["text"] for row in reversed(segment) if row.get("who") == _who(body)),
+                        segment[-1]["text"])
         if text is None:
             return 400, {"ok": False, "message": MISSING_TEXT}
     # 场景（可选，缺省值是数据里那个）：只决定「私密记忆这一轮能不能被引用」，非法值当场 400 并点名。
@@ -350,11 +396,36 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
         return 503, {"ok": False, "message": BRAIN_MISSING}
     # 闸要的「她最近几条回话」在答题之前读：answer() 最后一步会把这一轮追加进同一份账，
     # 之后再读就把本轮当成了历史——她这句会跟自己比一次，于是每一句都成复读。
-    history = _her_recent()
+    session_id = _session_of(body)
+    try:
+        background = conversation.normalize_background(body.get('background'), session_id)
+    except ValueError as exc:
+        return 400, {'ok': False, 'message': str(exc)}
+    history = _her_recent(session_id=session_id)
+    if mode == events.MODE_PASSIVE and (place == brain_model.SCENE_PRIVATE or
+            (place == brain_model.SCENE_GROUP and body.get('directed') is True)):
+        from organs.heart import proactive
+        proactive.receive_reply(_who(body), session_id, now=brain_model.now_iso())
     # 认亲那一格同样要在答题之前读：answer() 最后一步会把他这句话投进脑，而 ingest 会顺手给他
     # 建一张卡——读晚了这一关永远看到「他在册」，于是对谁都放行，那不是判据，是自己把自己的读数
     # 改了。所以「这一轮他在不在人名录里」问的是**这一轮开口之前**的名录。
     known = _known(brain, _who(body))
+    # QQ 的实际场景先判断能否打断休息；不能先调模型或启动画图/学习后才静默。
+    from organs.heart import rest
+    rest_applies = place in (brain_model.SCENE_GROUP, brain_model.SCENE_PRIVATE) or mode == events.MODE_PROACTIVE
+    if rest_applies:
+        close = bool(known and known.get('relation', 0) >= 3)
+        can_wake = place == brain_model.SCENE_PRIVATE and close and mode != events.MODE_PROACTIVE
+        notice_who = (_who(body) if can_wake and delivery_id and session_id.startswith('qq:private:') else None)
+        resting = rest.advance(now=brain_model.now_iso(), can_wake=can_wake, notice_who=notice_who)
+        if resting['phase'] != 'awake' and not (resting['phase'] == 'holding' and can_wake):
+            if resting['phase'] == 'deep' and place == brain_model.SCENE_PRIVATE and mode == events.MODE_PASSIVE:
+                notice = _sleep_notice(body, brain, store, resting, turn_id, delivery_id, text, session_id)
+                if notice is not None:
+                    return 200, notice
+            return 200, {'ok': True, 'send': False, 'reply': '', 'chunks': [], 'turn_id': turn_id,
+                         'reason': 'rest-' + resting['phase'], 'level': 'engage', 'rest': resting,
+                         'scene': place, 'mode': mode, 'gate': {'outbound': {'send': False, 'reason': 'rest'}}}
     # 冷却先问一次心：在冷却里就整轮短路，模型一次都不调（见 _cooled_payload 的说明）。
     cooled = _cooling_state(text)
     if cooled["cooling"]:
@@ -365,11 +436,14 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
         # 装配按 seed 给不给决定走哪条路（prompt.proactive / INTENT_PROACTIVE / 只有她那句），
         # 这一层只负责认字段与翻状态码。
         payload = conversation.answer(
-            text, who=_who(body), scene=place, segment=segment, mode=mode,
+            text, who=_who(body), scene=place, segment=segment, background=background, mode=mode,
+            directed=body.get('directed'),
             aliases=_aliases_of(body),
             seed=seed if mode == events.MODE_PROACTIVE else None,
             reason=_reason_of(body) if mode == events.MODE_PROACTIVE else None,
-            store=store, brain=brain)
+            store=store, brain=brain, delivery_id=delivery_id, attachments=attachments, assessor=appraisal.assess,
+            session_id=session_id, turn_id=turn_id,
+            reply_target=_group_of(body) if place == "group" else _who(body))
     except LLMError as exc:
         status = STATUS_BY_KIND.get(exc.kind, DEFAULT_STATUS)
         LOG.warning("POST /chat 失败：kind=%s message=%s", exc.kind, exc.message)
@@ -377,25 +451,94 @@ def dispatch(route: str, body: Optional[Dict[str, Any]],
     # 出站闸先判、先问、**先不落手**：拒绝要不要算数取决于她的话到底有没有出去，
     # 所以 sent 必须在判拒绝之前拿到。清正文（send=false 的双保险）留到最后一步。
     _outbound_round(payload, body)
+    if payload.pop('_proactive_declined', False):
+        payload.update(send=False, reason='model-declined')
+        payload['gate']['choice'] = {'source': 'model', 'decision': 'declined'}
+    retrieval_query = payload.pop("_retrieval_query", text)
     sent = _send_flag(payload)                 # 只认 payload["send"]（门说发不发）；缺了或不是布尔当场抛
-    _address_round(payload, text, brain, _who(body))
-    boundary = _audience_round(payload, text, _who(body), scene["scope"], sent=sent)
+    actor_text = ("\n".join(row["text"] for row in segment if
+                  (row.get("who") == _who(body) if row.get("who") else row["speaker"] == segment[-1]["speaker"]))
+                  if segment else text)
+    _address_round(payload, actor_text, brain, _who(body))
+    boundary = _audience_round(payload, retrieval_query, _who(body), scene["scope"], sent=sent)
     _gate_round(payload, text, store, history, scope=scene["scope"], who=_who(body),
                 known=known)
-    # 八股闸排在出站闸之后，它也可能把这一轮的话整句吞掉：门说发、闸吞了，对方还是没听到。
-    # 所以「出没出门」到这一步才定（_went_out 是唯一那处判据），边界话那条的投递也搬到这里。
-    judged = boundary["judged"]
-    if judged is not None:
-        _deliver_judged(judged, payload)
-    else:
-        outcome = _went_out(sent, payload)
-        judged = _judge(text, payload.get("reply"), sent=outcome["sent"],
-                        reason=outcome["reason"], level=outcome["level"], why=outcome["why"])
-    payload["refusal"] = _refusal_section(cooled, judged)
+    reply_for_judgement = payload.get('reply')
     _borrow_round(payload)
     _outbound_apply(payload)
     _core_empty(payload)
+    voice_requested = payload.pop("_voice_requested", False)
+    meme_context = payload.pop('_meme_context', None)
+    if rest_applies:
+        _rest_outbound(payload, may_reply=can_wake)
+    if delivery_id:
+        payload["delivery_id"] = delivery_id
+        if session_id.startswith("qq:") and mode == events.MODE_PASSIVE:
+            from organs.mouth import voice
+            voice.apply(payload, voice_requested, delivery_id)
+            if meme_context is not None and not voice_requested:
+                from organs.mind import meme_reply
+                meme_reply.apply(payload, meme_context, who=_who(body), scene=place,
+                    target=_group_of(body) if place == 'group' else _who(body), delivery_id=delivery_id,
+                    config=CONFIG, env=ENV, transport=TRANSPORT)
+    if rest_applies:
+        _rest_outbound(payload, may_reply=can_wake)
+    # 拒绝冷却最后落账：文字改写、语音/表情与休息截止均可能让原本可发的话变成不发。
+    judged = boundary["judged"]
+    if judged is not None:
+        judged['sent'] = _send_flag(payload)
+        _deliver_judged(judged, payload)
+    else:
+        outcome = _went_out(_send_flag(payload), payload)
+        judged = _judge(text, reply_for_judgement, sent=outcome["sent"],
+                        reason=outcome["reason"], level=outcome["level"], why=outcome["why"])
+    payload["refusal"] = _refusal_section(cooled, judged)
+    # 回复生成到一半睡熟时，原稿仍算未发；用同一轮的回执发送睡眠提示。
+    if (delivery_id and mode == events.MODE_PASSIVE and place == brain_model.SCENE_PRIVATE
+            and payload.get('rest', {}).get('phase') == 'deep'):
+        notice = _sleep_notice(body, brain, store, payload['rest'], turn_id, delivery_id,
+                               text, session_id, reuse_turn=True)
+        if notice is not None:
+            notice['gate'] = dict(payload.get('gate', {}), **notice['gate'])
+            payload.update(notice)
     return 200, payload
+
+
+def _sleep_notice(body, brain, store, resting, turn_id, delivery_id, text, session_id, *, reuse_turn=False,
+                  mode=events.MODE_PASSIVE):
+    from organs.heart import rest
+    from organs.mind import delivery, recent
+    who = _who(body)
+    if rest.notice_sent(who, resting['wake_at']):
+        return None
+    # 入站通知开始发送后，定时器不再抢发；只有真实回执才标记已送达。
+    rest.take_notice_targets(who=who)
+    reply = brain.current_profile().get('sleep_notice') or '睡觉啦，明天说'
+    at = brain_model.now_iso()
+    record = {'ts':at, 'msg_id':turn_id, 'turn_id':turn_id, 'who':who,
+              'session_id':session_id, 'scene':'private', 'mode':mode, 'speaker':store.snapshot().identity.display,
+              'sleep_notice':{'who':who, 'wake_at':resting['wake_at'], 'text':reply}}
+    if not reuse_turn:
+        recent.append(dict(record, said=text, reply='' if delivery_id else reply))
+    if delivery_id:
+        delivery.stage(delivery_id, record, reuse_turn=reuse_turn)
+    else:
+        rest.notice_sent(who, resting['wake_at'], mark=True)
+    return {'ok':True, 'send':True, 'reply':reply,
+            'chunks':[{'text':reply, 'gap_before':0, 'send_at':0}],
+            'turn_id':turn_id, 'delivery_id':delivery_id, 'reply_kind':'sleep_notice', 'reason':'rest-notice', 'level':'engage',
+            'rest':resting, 'scene':'private', 'mode':mode,
+            'gate':{'outbound':{'send':True, 'reason':'rest-notice'}}}
+
+
+def _rest_outbound(payload, *, may_reply):
+    """可选媒体处理前和真正交给通道前共用；复查不会再次叫醒。"""
+    from organs.heart import rest
+    resting = rest.advance(now=brain_model.now_iso())
+    if resting['phase'] != 'awake' and not (resting['phase'] == 'holding' and may_reply):
+        payload.update(send=False, reply='', chunks=[], reason='rest-' + resting['phase'],
+                       level='engage', rest=resting)
+        payload.setdefault('gate', {})['outbound'] = {'send': False, 'reason': 'rest'}
 
 
 # —— 出站闸：这一轮到底发不发 ———————————————————
@@ -486,9 +629,21 @@ def _group_of(body: Any) -> Optional[str]:
     where = body.get("where")
     for raw in ((where.get("groupId") if isinstance(where, Mapping) else None),
                 body.get("group")):
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            return str(raw)
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
     return None
+
+
+def _session_of(body: Mapping[str, Any]) -> str:
+    """参考 NimuQDock 的 group/private 会话键；页面与 QQ 的短期上下文分开。"""
+    prefix = "qq" if isinstance(body.get("where"), Mapping) else "api"
+    scene = _scene_of(body)
+    target = _group_of(body) if scene == brain_model.SCENE_GROUP else _who(body)
+    if not target or scene not in (brain_model.SCENE_GROUP, brain_model.SCENE_PRIVATE):
+        return "api:panel" if prefix == "api" else ""
+    return "%s:%s:%s" % (prefix, scene, target)
 
 
 # —— 出门没有：门说发不发 + 八股闸吞没吞（起不起冷却的唯一判据） ————
@@ -585,6 +740,8 @@ def _address_round(payload: Dict[str, Any], asked: str, brain: Any, who: str) ->
     try:
         table = address.load_table()
         person = brain.lookup(who) if who else None
+        if person and person.get('id') != who:
+            person = brain.card_view(who)
         wanted = address.requested_name(asked, table)
         view = dict(person) if isinstance(person, Mapping) else None
         if wanted:
@@ -649,7 +806,7 @@ def _scene_of(body: Any) -> str:
 def _scope_state(body: Any) -> Dict[str, Any]:
     """读 body 里的场景：合法就交回那一个值，非法就交回一句点名的人话（由 dispatch 翻成 400）。
 
-    只认数据里那两个值（`scopes` 节），缺省也是数据里那个；没给、给了空白都按缺省算。
+    只认数据里那两个值（`scopes` 节）；scope未给或空白时，先用已知scene，否则用数据缺省。
     **判据读不动时不 400**：那是我们的数据坏了，不是他的 body 坏了，所以只记一行 WARNING 并交回
     scope=None——下游看见 None 就一条记忆都不引用（没有判据，就没有哪一条敢说它能往外讲）。
 
@@ -667,7 +824,8 @@ def _scope_state(body: Any) -> Dict[str, Any]:
         return {"scope": None, "error": None}
     raw = body.get("scope") if isinstance(body, Mapping) else None
     if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return {"scope": default, "error": None}
+        scene = _scene_of(body)
+        return {"scope": scene if scene in allowed else default, "error": None}
     value = raw.strip() if isinstance(raw, str) else raw
     if value in allowed:
         return {"scope": value, "error": None}
@@ -922,9 +1080,9 @@ def _word(template: str, where: str, **fields: Any) -> str:
 
 # —— 长度与句末标点（style）：过闸之前先把「形」修一遍 ————————————————
 
-# 两层都在 organs/mouth/style.py 判，判据全在 organs/mouth/data/style_target.json：逐泡的目标长度
-# （按场景 × tone 档）、整段的句末「。」比例。这里只负责接线：哪一段交给谁改、改完的整段怎么
-# 重新切回泡。整段的三件套形状**不在这一层判**（见下面 REPLY_SCOPE 那段说明）。
+# style.py 处理逐泡目标长度（场景 × tone 档）并观察整段句号比例。
+# 目标长度与句号比例仅记账；保持正文、附件与节奏，不为形态追加模型调用。
+# 整段三件套形状不在这一层判（见下面 REPLY_SCOPE）。
 
 #: 数据里标了 scope=reply 的条款是「按整条回复判」的（三件套那种跨得上泡边界的形状）。
 #: **这一层不判它**：装配那一步（organs/mind/conversation.py 的 _through_mouth）已经拿整句过了
@@ -938,8 +1096,8 @@ STYLE_NOT_CHECKED = "not-checked"
 STYLE_NO_TIER_NOTE = ("这一轮没拿到语气档（回包里 tone.tier 缺了，或它不是整数）：长度与句末标点"
                       "这两层都没跑——**档位不许猜**：猜一个顶上，账本上就再也分不清这一句是拿"
                       "哪一套区间判的。")
-STYLE_NOTE = ("过闸之前先修形：逐泡对目标长度（超了改一次、改不动放行并记账）、整段对句末「。」"
-              "比例（少于数据里的最少句数不判）。两层判据都在 "
+STYLE_NOTE = ("逐泡目标长度与整段句末「。」比例仅观察记录，"
+              "不因超过风格目标调用模型或改动正文；主回复预算与通道上限仍有效。两层读数依据都在 "
               "organs/mouth/data/style_target.json，本层不写死一个数。")
 
 
@@ -975,29 +1133,6 @@ def _style_sink(lo: Any = None, hi: Any = None) -> Callable[[str, str], None]:
     return sink
 
 
-def _style_rewriter(kind: str, *, table: Mapping[str, Any], books: Mapping[str, Any],
-                    facts: Mapping[str, Any]) -> Callable[[str], str]:
-    """造这一层的 rewrite（text -> text）：指令按数据里的模板拼、走同一份 transport，改不动就抛。
-
-    两句指令（把这一句说短 / 把那一段的句号收掉）都在 style_target.json 的 prompt 节，这里一个词
-    都不写。拿回来的新稿先过 style.accept（非空、与原文不同、原文里的数字一个都不许丢），
-    过了才交给上一层；长度与句号率是不是真合格，由 apply / stops 拿数据自己重算。
-
-    「改短」那一档还多一条（accept 的 must_shorten）：改回来比原文还长的不算改过——不拦这一条，
-    一次没改好的重写会把一泡撑成三泡，后面的闸跟着一连串误判。
-    """
-    def rewrite(body: str) -> str:
-        said = _ask_model(style_rules.prompt(kind, body, table=table,
-                                             **dict(facts, chars=len(body))),
-                          books["rewrite"])
-        ok, why = style_rules.accept(body, said, table=table, must_shorten=(kind == "length"))
-        if not ok:
-            raise rewrite_rules.Unrewritable(why)
-        return said
-
-    return rewrite
-
-
 def _length_row(counted: Any) -> Dict[str, Any]:
     """一泡的长度读数（进 gate.parts[*].style）。"""
     return {"decision": counted.decision, "scene": counted.scene,
@@ -1015,23 +1150,12 @@ def _stop_row(counted: Any) -> Dict[str, Any]:
             "rewrites": counted.rewrites, "reason": counted.reason}
 
 
-def _resplit(said: str, who: str) -> List[Dict[str, Any]]:
-    """整段被改过之后重新切一次泡：与装配 / 边界话 / 冷却那一轮同一个拼法（split + pace）。"""
-    policy = warehouse.load("policy")
-    batch = pace_fill(split_text(said, _policy_for(who), warehouse.load("action_note")), policy,
-                      "%s%s%s" % (who or "", conversation.SEED_SEP, _stamp()))
-    return [{"text": part.text, "gap_before": part.gap_before, "send_at": part.send_at}
-            for part in batch.parts]
-
-
 def _style_round(chunks: List[Dict[str, Any]], *, payload: Mapping[str, Any],
-                 books: Mapping[str, Any], assembled: bool, scope: Optional[str],
-                 who: str) -> Dict[str, Any]:
-    """这一轮先把「形」修一遍：逐泡长度 → 整段句末句号率。
+                 scope: Optional[str]) -> Dict[str, Any]:
+    """逐泡长度、句末句号率仅作观察。
 
-    返回 {"chunks": 最终那几泡, "rows": 与之一一对应的长度读数, "changed": 有没有动过字,
-    "section": 进回包 gate.style 那一节}。整段被改过就重新切泡（与装配同一个拼法），切完按泡
-    重算一遍长度读数——**同一次回复里不再往外发第二次请求**：改一次就是一次。
+    返回 {"chunks": 最终那几泡, "rows": 对应长度读数, "changed": 有没有动过字,
+    "section": 回包 gate.style}。保持每泡的附件与节奏；不为标点重新生成或分泡。
 
     场景（私聊 / 群聊）从 /chat 的 scope 来，档位从回包的 tone.tier 来，上限从 reply_budget.chars
     来：三个都是这一轮已经有的读数，不在这里另算一遍。拿不到档位就整层不跑并如实记 no-tier。
@@ -1045,42 +1169,20 @@ def _style_round(chunks: List[Dict[str, Any]], *, payload: Mapping[str, Any],
                 "section": {"status": STYLE_NOT_CHECKED, "note": STYLE_NO_TIER_NOTE}}
     info = style_rules.describe(tier, table=table, scene=scope)
     lo, hi = int(info["lo"]), int(info["hi"])
-    facts = {"lo": lo, "hi": hi, "scene": info["label"], "tier": info["tier"]}
     len_sink = _style_sink(lo, hi)
     rows: List[Any] = []
     texts: List[str] = []
     for one in chunks:
         body = str(one.get("text") or "")
-        rewrite = (_style_rewriter("length", table=table, books=books, facts=facts)
-                   if assembled else None)
         counted = style_rules.apply(body, tier, len(body) if cap is None else cap,
-                                    table=table, rewrite=rewrite, sink=len_sink, scene=scope)
+                                    table=table, sink=len_sink, scene=scope)
         texts.append(counted.text)
         rows.append(_length_row(counted))
     reply = "".join(texts)
-    probed = style_rules.stops(reply, table=table)
-    stop_facts = {"mark": probed.mark, "stopped": probed.stopped,
-                  "sentences": probed.sentences, "ratio": round(probed.ratio * 100, 1)}
-    stop_rewrite = (_style_rewriter("stops", table=table, books=books, facts=stop_facts)
-                    if assembled else None)
-    marks = style_rules.stops(reply, table=table, rewrite=stop_rewrite, sink=_style_sink())
-    after = marks.text
-    if after != reply:
-        # 重切只重建文字，图不跟着丢：把原来挂着的 image 按序接回最后那几泡
-        images = [c.get("image") for c in chunks if isinstance(c, Mapping) and c.get("image")]
-        chunks = _resplit(after, who)
-        if images and chunks:
-            for offset, image in enumerate(images):
-                target = chunks[max(0, len(chunks) - len(images) + offset)]
-                target["image"] = image
-        rows = []
-        for one in chunks:
-            body = str(one.get("text") or "")
-            rows.append(_length_row(style_rules.apply(
-                body, tier, len(body) if cap is None else cap, table=table, scene=scope)))
-    else:
-        chunks = [dict(one, text=body) for one, body in zip(chunks, texts)]
-    return {"chunks": chunks, "rows": rows, "changed": after != original,
+    # 标点比例只观察，不能仅为收句号再让模型改变正文、数字或否定。
+    marks = style_rules.stops(reply, table=table, sink=_style_sink())
+    chunks = [dict(one, text=body) for one, body in zip(chunks, texts)]
+    return {"chunks": chunks, "rows": rows, "changed": reply != original,
             "section": {"status": STYLE_OK, "note": STYLE_NOTE, "scene": info["scene"],
                         "scene_label": info["label"], "tier": info["tier"], "cap": cap,
                         "target": "%d-%d" % (lo, hi), "p90": info["p90"],
@@ -1122,9 +1224,8 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
       照旧 dropped（parts[*].fatal 里看得见是哪一类）。
     - **真的落到返回体**：pass 原样留着；rewritten 换 Verdict.text（gap 沿用那一泡的）；dropped 从
       chunks 里删掉。**一处都没被改时不碰 chunks**——不接闸时逐字相同，这条是被测过的。
-    - **改形排在闸之后**：留下来的那几泡再按数据修「形」（逐泡目标长度、整段句末「。」比例，
-      见 _style_round）。顺序不能反：闸要判的是**她说的那句话**，先改形再判，照抄审计比的注入
-      原文、内容重复比的最近几轮就都对不上。改形只动长短与句末标点，不动她说了什么。
+    - **形态观察排在闸之后**：记录留下来的几泡的长度与整段句末「。」比例，
+      见 _style_round。目标长度与句末标点均不触发改写，观察的是其他检查处理后的正文。
     - **重算 send_at**：删掉几泡之后，剩下的按原来的 gap_before 累加重排，不留洞（小数位与
       pace.fill 同一个数，取自 policy 的 pace 段）。
     - **全被弃掉**：chunks=[]、reply=""，gate.decision 记 dropped；每一泡弃言由 sink 记一行账。
@@ -1224,22 +1325,20 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
                       "rewrite": rewritten,
                       "style": None})
         if verdict.decision == "pass":
-            kept.append({"text": chunk["text"], "gap_before": chunk["gap_before"]})
+            kept.append(dict(chunk))
             continue
         changed = True
         if verdict.decision == "dropped":
             blocked.append(verdict.hits[-1].clause_id if verdict.hits else "")
             continue
-        kept.append({"text": verdict.text, "gap_before": chunk["gap_before"]})
+        kept.append(dict(chunk, text=verdict.text))
 
-    # 长度与句末标点排在闸**之后**：闸判的必须是她说的那句话——先改形再判，闸看到的就是另一句
-    # 了（照抄审计比的是注入原文、内容重复比的是最近几轮，字形一改这两关都对不上；词组命中被
-    # 改短之后连命中都没有了）。反过来，改形只动长短与句末标点，落在闸之后才不会被自己改过的
-    # 字骗过。这一层读不动（数据坏 / 缺件）不吞掉这一轮：话照发，回包如实记 not-checked。
+    # 长度与句末标点仅观察闸处理后留下的正文，不再改写。
+    # 观察数据读不动时不吞掉这一轮：话照发，回包如实记 not-checked。
     if kept:
         try:
-            shaped = _style_round(kept, payload=payload, books=books, assembled=assembled,
-                                  scope=scope, who=who)
+            shaped = _style_round(kept, payload=payload,
+                                  scope=scope)
         except (style_rules.StyleBroken, warehouse.WarehouseMiss,
                 warehouse.WarehouseBroken, OSError) as exc:
             LOG.warning("POST /chat 长度/标点这一层没跑成：%s", exc)
@@ -1262,7 +1361,7 @@ def _gate_round(payload: Dict[str, Any], asked: str, store: Any,
         section["style"] = shaped["section"]
     if shaped["changed"]:
         changed = True
-    kept = [{"text": one["text"], "gap_before": one["gap_before"]} for one in shaped["chunks"]]
+    kept = shaped["chunks"]
 
     section.update({"parts": parts, "out_parts": len(kept), "blocked": _unique(blocked),
                     "summary": _gate_summary(parts)})
@@ -1508,7 +1607,7 @@ def _ask_model(prompt_text: str, table: Mapping[str, Any]) -> str:
                     retries=max(0, rewrite_rules.attempts(table) - 1))
         messages = [{"role": "user", "content": prompt_text}]
         return _bounded(lambda: llm.complete(messages, config=conf, env=ENV,
-                                             transport=TRANSPORT),
+                                             transport=TRANSPORT, purpose='出口重写'),
                         budget / 1000.0)
     except concurrent.futures.TimeoutError:
         raise rewrite_rules.Unrewritable(rewrite_rules.timeout_why(table)) from None
@@ -1530,7 +1629,8 @@ def _bounded(call: Callable[[], str], seconds: float) -> str:
     """
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        return pool.submit(call).result(timeout=seconds)
+        from contextvars import copy_context
+        return pool.submit(copy_context().run, call).result(timeout=seconds)
     finally:
         pool.shutdown(wait=False)
 
@@ -1567,17 +1667,10 @@ def _books() -> Dict[str, Any]:
 
 
 def _actions(payload: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
-    """这一轮真发生过的动作账：交给闸里「冒充做过」那一关，**拿不到与给了空是两件事**。
+    """把装配取得的动作凭据交给出口，保留作品来源、时间与 historical 标记。
 
-    取值只有一条路：answer() 回包顶层的 actions（手与家那一侧真做过的事，一项一份带 verb 的
-    键值表）。三种情形三种结论：
-
-    - **没有这一格 → []**：现在还没有手与家的动作账，这一轮确实一件事都没做——那就该判冒充。
-      「账本还不存在」不是「判不了」：把它当成 None，这一关就永远不跑，红线等于没接。
-    - **给了清单 → 原样交下去**（空清单也是清单：账上空着，照样判冒充）——闸只认字，不在这里
-      改形状；形状坏了由闸那边的 claim 当场抛 ClaimBroken，照实变成「整轮弃掉」。
-    - **给了别的形状（读不动）→ None**：**拿不到**，闸记 claim_status=not-checked，不判冒充、
-      也不声称判过。猜一个空清单顶上，等于替她记一笔「什么都没做」——那是编出来的账。
+    缺字段按空账；给了清单就原样交给 claim 校验，其他形状表示拿不到账。
+    历史作品只能支持过去做过，不能证明本轮启动了新动作。
     """
     if "actions" not in payload:
         return []
@@ -1671,7 +1764,7 @@ def _kinds(table: Mapping[str, Any]) -> Dict[str, str]:
 
     两张表在审计那边不是同一档，所以这里也分开认：
       setting_kinds —— 魂 / 锚句 / 心档位词 / 规矩句：照搬一律拦（顺序只决定报出来的来源段叫什么）；
-      quote_kinds   —— 对方原话 / 记忆原文：带引述标记放行、不带标记仍拦。**记忆原文归哪一族由
+      quote_kinds   —— 对方原话 / 记忆原文：重合只记录，不凭引述标记决定拦截。**记忆原文归哪一族由
                        数据说了算**，这里只按数据给的顺序把它认出来——先是他真正说过的话（入站那
                        句），后是从记忆里翻出来的原话（recalled 里的正文），这个顺序写在
                        audit.json 的 quote_kinds_note 里。
@@ -1761,7 +1854,7 @@ def _rule_text() -> str:
     return "\n".join(one for one in rows if one.strip())
 
 
-def _her_recent() -> Optional[List[str]]:
+def _her_recent(session_id: Optional[str] = None) -> Optional[List[str]]:
     """她最近几条自己的回话（旧的在前），只读 mind 的 recent_turns.jsonl；读不动返回 None。
 
     条数（最近几轮）不写死：从 repeat.json 的 rounds 读，与去重那一关看的是同一个窗口。
@@ -1773,7 +1866,7 @@ def _her_recent() -> Optional[List[str]]:
         path = mind_recent.path_of()
         if not path.is_file():
             return []
-        rows = mind_recent.load(turns=rounds).get("turns") or []
+        rows = mind_recent.load(turns=rounds, session_id=session_id).get("turns") or []
     except (warehouse.WarehouseMiss, warehouse.WarehouseBroken, OSError,
             ValueError, KeyError, TypeError) as exc:
         LOG.warning("POST /chat 读不到她最近的回话：%s", exc)
@@ -1790,7 +1883,7 @@ def _resend(payload: Dict[str, Any], kept: List[Dict[str, Any]], digits: int) ->
     rows: List[Dict[str, Any]] = []
     for one in kept:
         clock = round(clock + float(one["gap_before"]), digits)
-        rows.append({"text": one["text"], "gap_before": one["gap_before"], "send_at": clock})
+        rows.append(dict(one, send_at=clock))
     payload["chunks"] = rows
     payload["reply"] = "".join(str(one["text"]) for one in rows)
 
@@ -1852,6 +1945,7 @@ def _audit_row(seen: Any) -> Dict[str, Any]:
     return {
         "status": getattr(seen, "status", None),
         "skipped": bool(getattr(seen, "skipped", False)),
+        "reason": getattr(seen, "reason", ""),
         "hit": None if one is None else {"kind": one.kind, "seg_kind": one.seg_kind,
                                          "matched": one.matched},
         "lcs_len": getattr(seen, "lcs_len", None),
@@ -2059,7 +2153,7 @@ def _text(body: Any) -> Optional[str]:
     return raw.strip()
 
 
-def _segment_state(body: Any) -> Tuple[Optional[List[Tuple[str, str]]], Optional[str]]:
+def _segment_state(body: Any) -> Tuple[Optional[List[Dict[str, str]]], Optional[str]]:
     """读 body 里的段：归一化过就交回去，形状坏了交回一句点名的人话（由 dispatch 翻成 400）。
 
     认的两种形状与判据全在 organs/mind/conversation.py 的 normalize_segment（api 层不另写一份）：
@@ -2069,7 +2163,10 @@ def _segment_state(body: Any) -> Tuple[Optional[List[Tuple[str, str]]], Optional
     if raw is None:
         return None, None
     try:
-        return conversation.normalize_segment(raw), None
+        rows = conversation.normalize_segment(raw)
+        if rows and rows[0].get("who") and not any(row["who"] == _who(body) for row in rows):
+            raise ValueError("本轮 who 必须是段内实际发言者")
+        return rows, None
     except ValueError as exc:
         return None, SEGMENT_BROKEN % exc
 
@@ -2110,7 +2207,8 @@ def _known(brain: Any, who: str) -> Optional[Dict[str, Any]]:
     - {"in_book": True, "relation": n, "tier": …}：在册。**在册不等于熟**：answer() 会把他这句话
       ingest 建档，所以「查得到他」说一句话就成立；够不够熟由闸按 data/kin.json 的 known_by 判
       （现在要 relation ≥ 3，那一档叫什么名字、档界在哪，全在 address_table.json 的 tiers 里）。
-      这里的 relation / tier 就是称呼那一关现算出来的那份读数（address.resolve），**不另造一套判定**；
+      这里的 relation / tier 就是称呼那一关现算出来的那份读数（address.resolve），**不另造一套判定**。
+      confirmed_terms 单独提供精确名片已确认的关系/叫法，不抬高熟悉度，不代表已有共同记忆；
     - None：**判不了**。who 为空（认不出是谁）、脑没接、称呼表读不动、或脑自己坏了都算这一种：
       这一关不跑，闸记 kin_status="not-checked"，不判、也不声称判过。猜成「在册」这一关就永远放行，
       猜成「不在册」就凭一个读错的格子把熟人当生人拦下来——两种猜法都比「如实说没查」难查。
@@ -2119,10 +2217,14 @@ def _known(brain: Any, who: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         person = brain.lookup(who)
+        if person and person.get('id') != who:
+            person = brain.card_view(who)
         if not person:
             return {"in_book": False}
         called = address.resolve(person, address.load_table(), who=who)
-        return {"in_book": True, "relation": called.relation, "tier": called.tier}
+        return {"in_book": True, "relation": called.relation, "tier": called.tier,
+                "confirmed_terms": [person[key].strip() for key in ('relationship', 'address')
+                                    if person.get(key, '').strip()]}
     except (address.PolicyMiss, warehouse.WarehouseMiss, warehouse.WarehouseBroken,
             OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         LOG.warning("POST /chat 查这一轮认不认得这个号没成（who=%s）：%s", who, exc)

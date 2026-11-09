@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from api import api
 from api.pages import PAGE_FILES
@@ -49,7 +49,7 @@ WRITE_VERBS = ('"post"', '"put"', '"delete"', '"patch"')
 # 心页只许拉自己这十条：页面自检用（顺序无所谓，集合相等就够）
 HEART_ROUTES = ("/heart", "/heart/overview", "/heart/baseline", "/heart/mood",
                 "/heart/energy", "/heart/offset", "/heart/engage", "/heart/effective",
-                "/heart/pending", "/heart/sleep", "/heart/refusals")
+                "/heart/pending", "/heart/sleep", "/heart/refusals", "/heart/changes")
 
 
 def _text(name: str) -> str:
@@ -113,10 +113,14 @@ class EveryClickableHasARoute(unittest.TestCase):
         # 再次改动（2026-11-06 二次）：两个 → 三个，「退回上一版」是静态按钮（回滚不靠
         # 现造按钮，页底部那颗一直在）。提案的「接受」「拒绝」仍由 JS 按条生成。
         # 第七件（喜欢什么）：三个 → 四个——它和待人姿态一样是「人改一句」的静态按钮。
-        self.assertEqual(len(ids), 4, "魂页静态按钮数变了，核对表要同步：%r" % (ids,))
+        self.assertCountEqual(ids, ['overview-refresh', 'growth-toggle', 'growth-refresh',
+                                   'growth-save', 'growth-restore', 'like-submit',
+                                   'say-submit', 'redline-submit', 'rollback-btn'],
+                              "魂页静态按钮变了，核对表要同步")
+        text += _text("growth-panel.js")
         for button_id in ids:
-            self.assertIn('el("%s").addEventListener' % button_id, text,
-                          "按钮 %s 没有绑定任何事件" % button_id)
+            self.assertTrue(any(('el(' + quote + button_id + quote + ').addEventListener') in text
+                                for quote in ('"', "'")), "按钮 %s 没有绑定任何事件" % button_id)
 
     def test_dynamic_buttons_are_backed_by_a_route(self):
         """红线列表里「撤这条」是 JS 现造的按钮，它走的路由同样必须存在。"""
@@ -199,7 +203,10 @@ class EveryLinkPointsSomewhere(unittest.TestCase):
         """每页的 <a href> 按它自己的挂载路径解析后，必须落到一张真实页面（或一条 GET 路由）。"""
         for page, mount in PAGE_MOUNT.items():
             for href in ANCHOR_RE.findall(_text(page)):
-                target = urljoin(mount, href).partition("?")[0]
+                if href.startswith("https://"):
+                    self.assertTrue(urlsplit(href).hostname, "外链必须有真实主机名")
+                    continue  # 服务商注册/试听属于站外页面，不在本机路由表中。
+                target = urlsplit(urljoin(mount, href)).path
                 self.assertTrue(target in PAGE_FILES or api.ROUTES.get(target) == "GET",
                                 "%s 里的链接 %r 解析成 %s，既不是页面也不是 GET 路由"
                                 % (page, href, target))
@@ -214,16 +221,19 @@ class HeartHasNoWriteEntry(unittest.TestCase):
     判据也回到这里，见下面的 SoulProposalAndRollbackButtons。
     """
 
-    def test_clickable_elements_are_only_the_back_link(self):
+    def test_controls_only_filter_readonly_history(self):
         for page, mount in (("heart.html", "/heart"),):
             text = _text(page).lower()
-            for forbidden in ("<button", "<form", "<textarea", "<select", "<input"):
+            for forbidden in ("<form", "<textarea"):
                 self.assertNotIn(forbidden, text, "%s 出现了写控件：%s" % (page, forbidden))
+            controls = re.findall(r'<(?:button|select|input)\b[^>]*id="([^"]+)"', text)
+            self.assertEqual({'changes-date', 'changes-group', 'changes-refresh', 'changes-newer', 'changes-older'}, set(controls))
+            self.assertEqual(5, len(controls))
             for verb in WRITE_VERBS:
                 self.assertNotIn(verb, text, "%s 出现了写请求：%s" % (page, verb))
             self.assertNotIn("contenteditable", text, "%s 有可编辑区域" % page)
 
-            # 可点元素只有 <a>：逐条解析，必须都是回魂面板
+            # 导航链接仍只有回魂面板；新控件仅查询历史
             anchors = ANCHOR_RE.findall(_text(page))
             self.assertEqual(len(anchors), 1, "%s 的可点元素不止一条回跳：%r" % (page, anchors))
             target = urljoin(mount, anchors[0]).partition("?")[0]
@@ -352,7 +362,7 @@ class HeartPageOnlySpeaksGet(unittest.TestCase):
 
     def test_heart_page_says_it_is_readonly(self):
         self.assertIn("只读", self.text)
-        for forbidden in ("<button", "<form", "<textarea", "<select", "<input"):
+        for forbidden in ("<form", "<textarea"):
             self.assertNotIn(forbidden, self.text.lower(), "心页出现了写控件：%s" % forbidden)
 
 

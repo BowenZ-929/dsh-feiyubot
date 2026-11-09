@@ -100,18 +100,18 @@ class Pack3000Test(unittest.TestCase):
         """验收③：3000 字量级下装包不超预算，能看到 cap 与 dropped(remaining/need)。"""
         store, tmp = fresh_store()
         self.addCleanup(tmp.cleanup)
-        for index in range(5):
-            text = ("重点内容%d" % index) + ("字" * 590)   # 每条约 600 字，共 3000 字量级
+        for index in range(8):
+            text = ("重点内容%d" % index) + ("字" * 370)   # 每条约375字，共3000字量级
             store.ingest("9900%02d" % index, text,
                          ts="2026-11-03T10:%02d:00+00:00" % index)
-        result = store.recall("重点", now_ts="2026-11-03T10:06:00+00:00")
+        result = store.recall("重点", now_ts="2026-11-03T10:08:00+00:00")
         self.assertTrue(result["has_material"])
         self.assertLessEqual(result["slots_used"], result["budget"]["slots"])
         for item in result["items"]:
             self.assertLessEqual(len(item["text"]), result["budget"]["per_item_cap"],
                                  "每项必须被 cap")
             self.assertTrue(item["capped"])
-        self.assertTrue(result["skipped"], "5 条候选、今日桶配额 3：必须看到 dropped")
+        self.assertTrue(result["skipped"], "候选超过总名额后仍必须记录 dropped")
         for dropped in result["skipped"]:
             self.assertIn("remaining", dropped)
             self.assertIn("need", dropped)

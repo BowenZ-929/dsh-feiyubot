@@ -61,7 +61,7 @@ def dispatch(route: str, params: Mapping[str, str], body: Optional[Dict[str, Any
     if route == "/soul/history":
         return _history(store)
     if route == "/soul/render":
-        return _render(params, store)
+        return _render(params, store, brain)
     if route == "/soul/edit":
         return _edit(body, store)
     if route == "/soul/migrate":
@@ -130,7 +130,7 @@ def _chars(snapshot: Any) -> Dict[str, Any]:
     }
 
 
-def _render(query: Mapping[str, str], store: Any) -> Result:
+def _render(query: Mapping[str, str], store: Any, brain: Any = None) -> Result:
     """她此刻会被注入的样子。
 
     audience 只为旧链接留着（面板不再有对象档）：矩阵归脑，三档文本现在完全一样。
@@ -138,7 +138,8 @@ def _render(query: Mapping[str, str], store: Any) -> Result:
     audience = query.get("audience", "")
     try:
         snapshot = store.snapshot()
-        text = store.render(audience)
+        from organs.mind import persona
+        text = persona.render(store, brain)
     except SoulLoadError as exc:
         return _failed(500, "魂载入失败，先修卡", exc.issues)
     return 200, {"audience": audience, "text": text, "chars": _chars(snapshot)}
@@ -234,6 +235,24 @@ def _proposal(body: Optional[Dict[str, Any]], store: Any, brain: Any = None) -> 
         return 400, {"ok": False, "message": "monthly_limit 必须是整数"}
     proposal = body["proposal"]
     proposal_id = str(proposal.get("id") or "").strip() if isinstance(proposal, dict) else ""
+    from organs.day import growth
+    if growth.enabled() and brain is not None and isinstance(proposal, dict) and proposal.get('target') == 'manner.stance':
+        saved = next((p for p in brain.proposals().get('proposals', []) if p['id'] == proposal_id), None)
+        if saved is None or saved.get('target') != 'manner.stance' or saved.get('status') in ('accepted', 'rejected'):
+            return 400, {'ok':False, 'message':'提案不存在或已处理'}
+        if not isinstance(body['actor'], str) or not body['actor'].strip():
+            return 400, {'ok':False, 'message':'需要记录决定者'}
+        try:
+            result = brain.update_profile({'stance':saved['value']}, note='人工采纳待人倾向建议')
+        except ValueError as exc:
+            return 400, {'ok':False, 'message':str(exc)}
+        versions = brain.selfnarration_versions()
+        version = next((v['version'] for v in reversed(versions) if v.get('profile') == result['profile']), None)
+        brain.record_proposal_decisions([{'id':proposal_id,'decision':'accept','reason':'人工采纳待人倾向建议'}],
+                                       at=now_iso(), actor=body['actor'], version=version)
+        result['mark'] = {'ok':True, 'proposal_id':proposal_id, 'status':'accepted'}
+        result['applied_to'] = 'profile'
+        return 200, result
     try:
         result = store.accept_proposal(actor=body["actor"], proposal=proposal,
                                        monthly_limit=limit)

@@ -21,7 +21,7 @@ address_table.json 那一份，这里只引用它的整数，不另造一套判�
 - **判不了（known=None）→ 不判**：这一轮没拿到人名录读数（who 为空、脑读不出来），返回 None，
   状态由调用方记成 not-checked。**判不了就不诬陷**——把「没查」当成「查过、是生人」，代价是把一句
   公道话拦下来。
-- **不够熟（不在册，或在册但档位没到）→ 照实判**：命中给一条证据，没命中给 None。
+- **不够熟（不在册，或在册但档位没到）→ 照实判**：精确名片已确认的关系/叫法不受熟悉度限制；其他称呼及记忆标记照旧判。
 
 known 只收 None 或一份读数（含 in_book 与数据里 known_by.field 说的那一格）；**布尔、数字、字符串
 一律抛**（布尔守卫）：一个 True 说不出「够不够熟」，把它当放行就是这一关漏的那个洞；1 / "true"
@@ -39,6 +39,7 @@ known 只收 None 或一份读数（含 in_book 与数据里 known_by.field 说�
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from .warehouse import load
@@ -76,6 +77,7 @@ class KinHit:
       reason    一句人话，里面带着命中的那一段，账本与面板直接用这句
       clause_id 闸用的 clause_id，取自数据——闸不自己造名字，弃言账本里看到的就是数据里那个
       kind      闸用的 kind，取自数据，理由同上
+      start     命中在原文中的位置；跳过已确认称呼后，不能再按第一次出现替换
     """
 
     term: str
@@ -84,6 +86,7 @@ class KinHit:
     reason: str
     clause_id: str
     kind: str
+    start: int
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,7 @@ def check(text: str, known: Any, table: Optional[Mapping[str, Any]] = None) -> O
     **必须分得开**。读数里两段，缺一段就是没读完：
       in_book  这个号在不在人名录里（真布尔）；
       relation 关系档的整数（生人 1 / 认识 2 / 熟人 3 / 挚友 4，阶梯在 address_table.json）；
+      confirmed_terms 可选，只由精确名片提供的关系/叫法文本列表，不是昵称或本轮自称；
     **在册还不够，读数要够得着数据里 known_by.min 那一档才放行**——answer() 会 ingest 建档，
     「查得到他」说一句话就成立，拿它当熟人等于这一关没有。不在册、或档位没到，都照实判。
     别的形状（True / False / 1 / "true" / 缺 in_book 的键值表）当场抛 KinBroken：一个布尔说不出
@@ -130,6 +134,11 @@ def check(text: str, known: Any, table: Optional[Mapping[str, Any]] = None) -> O
         return None                       # 判不了 / 够熟：两种都是「这一关不拦」，状态由调用方分
     body = _text_of(text)
     spots = _matches(body, rules)
+    # 只豁免精确名片已确认称呼的实际出现范围；不把确认身份当成旧记忆的凭据。
+    confirmed = [(m.start(), m.end()) for term in reading.get('confirmed_terms', [])
+                 for m in re.finditer(re.escape(term), body)] if reading['in_book'] else []
+    spots = [(start, term) for start, term in spots if term in rules.memory_markers or not any(
+        left <= start and start + len(term) <= right for left, right in confirmed)]
     if not spots:
         return None
     return _hit(rules, body, spots[0])
@@ -189,7 +198,7 @@ def _hit(rules: _Rules, body: str, spot: Tuple[int, str]) -> KinHit:
     matched = body[start:start + len(needle)]
     return KinHit(term=needle, matched=matched, sentence=_sentence_at(body, start, rules),
                   reason=_fill(rules.reason_hit, "reason.hit", matched=matched),
-                  clause_id=rules.clause_id, kind=rules.kind)
+                  clause_id=rules.clause_id, kind=rules.kind, start=start)
 
 
 def _matches(body: str, rules: _Rules) -> List[Tuple[int, str]]:
@@ -207,8 +216,8 @@ def _matches(body: str, rules: _Rules) -> List[Tuple[int, str]]:
 def _swap_term(body: str, hit: KinHit, rules: _Rules) -> Tuple[str, str]:
     """称呼类命中：只把那一次出现换成中性词，别处不论出现几次都不动（换一处报一处，闸会接着判）。"""
     needle = hit.matched or hit.term
-    spot = body.find(needle)
-    if spot < 0:
+    spot = hit.start
+    if body[spot:spot + len(needle)] != needle:
         return body, ""
     rest = body[:spot] + rules.term_word + body[spot + len(needle):]
     return _with_say(rest, rules), needle
@@ -330,6 +339,9 @@ def _reading(known: Any) -> Optional[Mapping[str, Any]]:
     if not isinstance(flag, bool):
         raise KinBroken("known", "读数里的 in_book 必须是真的布尔（不是 1 / \"true\" / 缺着），读到的是"
                                  " %r（%s）。" % (flag, type(flag).__name__))
+    terms = known.get('confirmed_terms', [])
+    if not isinstance(terms, list) or any(not isinstance(term, str) or not term.strip() for term in terms):
+        raise KinBroken('known.confirmed_terms', '必须是非空文本组成的列表。')
     return known
 
 

@@ -49,7 +49,8 @@ class QueueOnDiskTest(unittest.TestCase):
         self.assertEqual(0, result["item"]["attempts"])
         self.assertIsNone(result["item"]["ack"])
         self.assertEqual(result["item"]["id"], result["send_request"]["echo"])
-        self.assertTrue(result["sent"])
+        self.assertFalse(result["sent"])
+        self.assertIn("channel-not-connected", result["item"]["reason"])
 
         on_disk = raw_queue(self.root)
         self.assertEqual(1, len(on_disk["items"]))

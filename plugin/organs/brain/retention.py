@@ -32,6 +32,14 @@ def days_between(now_ts: str, then_ts: Optional[str]) -> Optional[float]:
         return None
 
 
+def should_archive(entry: Dict[str, Any], params: Dict[str, Any], now_ts: str) -> bool:
+    """同一遗忘判据供只读材料筛选与实际归档使用。"""
+    last = entry.get("last_recalled_at") or entry.get("last_accessed_at") or entry.get("ts")
+    idle = days_between(now_ts, last)
+    return (retention(entry, params, now_ts) < params.get("threshold", 0.08)
+            and (idle is None or idle >= params.get("idle_days", 30)))
+
+
 def load_params(root: Path) -> Dict[str, Any]:
     path = Path(root) / "retention.json"
     if not path.is_file():

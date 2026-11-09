@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "python": ".scratch/media-venv/bin/python",
+  "model": ".scratch/models/whisper-small",
+  "language": "zh",
+  "max_audio_bytes": 5000000,
+  "max_audios": 2,
+  "timeout_seconds": 20,
+  "budget_seconds": 45
+}

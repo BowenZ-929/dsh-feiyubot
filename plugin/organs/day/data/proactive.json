@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "delivery": {"enabled": false, "routes": []},
   "owner": "主人",
   "because_chars": 40,
   "plan_delay_minutes": 5,

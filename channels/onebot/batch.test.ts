@@ -45,7 +45,7 @@ const linesOf = (snapshot: BatchSnapshot): string[] => renderSegment(snapshot).t
 // 判据一句话：合批的单位是「这一小段在聊什么」，不是「谁说了几句」。
 // 开批：群聊 quietGapMs 之外 quietOpen(2s) / 之内 activeOpen(5s)；私聊恒 privateOpen(3.5s)。
 // 续发：不分人，恒 continuing，群 3s / 私聊 3.5s。
-// 封顶：firstAt + hardCapMs(8s)；本批被 @ 过再加 atFirst + mentionCapMs(1s)；满 maxMsgs(6) 条立刻出手。
+// 封顶：firstAt + hardCapMs(8s)；@和表情不缩短静默窗口；满maxMsgs(6)条收段。
 
 test("A1 私聊连发 3 条、间隔 3s：1 段 3 行、speaker 同一人、tier=continuing，deadline 3500→6500→8000", () => {
   const h = hub();
@@ -162,30 +162,41 @@ test("A3 群里换人但间隔 1s（不同人交替）：仍是 1 段 4 条 —�
   assert.equal(batch.tier, "continuing");
 });
 
-test("A4 被 @：deadline <= atFirst + 1000，且只认最早那一次（群 / 私聊都一样）", () => {
+test("群聊先@再说明：旧1秒截止不能取走半段", () => {
   const h = hub();
-  h.observe(msg(A, "叫她一声", { mentioned: true }), 1000);
-  assert.equal(h.state(K).atFirst, 1000);
-  assert.equal(h.state(K).deadline, 2000); // min(1000+quietOpen2000, 1000+@1000) = 2000
-  assert.ok((h.state(K).deadline ?? Infinity) <= 1000 + 1000);
+  h.observe(msg(A, "@她", { mentioned: true }), 0);
+  assert.equal(h.consume(K, 1000), null);
+  h.observe(msg(A, "明天的聚餐时间我说错了"), 1500);
+  h.observe(msg(A, "应该是后天下午三点"), 2400);
+  assert.equal(h.consume(K, 5399), null);
+  const batch = h.consume(K, 5400)!;
+  assert.deepEqual(batch.msgs.map(m => m.text), ["@她", "明天的聚餐时间我说错了", "应该是后天下午三点"]);
+  assert.equal(batch.mentioned, true, "收全正文后仍是定向段");
+  assert.equal(h.consume(K, 6000), null, "合并段不能被重复计数");
+});
 
-  // 续发里补 @：3s 续窗被 "@ 那一刻 +1s" 压到 2000；再来一条 @ 不会改写 atFirst
-  const late = hub();
-  late.observe(msg(A, "一"), 0); // quietOpen → 2000
-  late.observe(msg(A, "二", { mentioned: true }), 1000); // continuing 4000 → @ 上限 2000
-  assert.equal(late.state(K).atFirst, 1000);
-  assert.equal(late.state(K).deadline, 2000);
-  late.observe(msg(B, "三", { mentioned: true }), 1500);
-  assert.equal(late.state(K).atFirst, 1000); // atFirst 只 min 不改
-  assert.equal(late.state(K).deadline, 2000);
+test("群聊续句中@与表情：补充和原作者顺序保留", () => {
+  const h = hub();
+  h.observe(msg(A, "说下刚才那张图"), 0);
+  h.observe(msg(B, "@她", { mentioned: true }), 500);
+  assert.equal(h.consume(K, 1500), null);
+  h.observe(msg(A, "[动画表情]", { sticker: true }), 1700);
+  h.observe(msg(A, "我只是转发，不是在生气"), 2600);
+  assert.equal(h.consume(K, 5599), null);
+  const batch = h.consume(K, 5600)!;
+  assert.deepEqual(batch.msgs.map(m => [m.id, m.text]), [
+    [A, "说下刚才那张图"], [B, "@她"], [A, "[动画表情]"], [A, "我只是转发，不是在生气"]]);
+  assert.equal(batch.mentioned, true);
+});
 
-  // 私聊里被 @：3500 窗口同样被 1s 封顶
+test("私聊@保留首次被叫时刻，但按静默窗口；过期批次不再续时", () => {
   const priv = hub();
   priv.observe(msg(PU, "私聊被叫", { where: PRIVATE, mentioned: true }), 0);
-  assert.equal(priv.state(PK).deadline, 1000);
-  assert.ok((priv.state(PK).deadline ?? Infinity) <= 0 + 1000);
-
-  // 已到期的批里补 @：只并入，deadline 一个字节都不动
+  priv.observe(msg(PU, "再次叫", { where: PRIVATE, mentioned: true }), 500);
+  assert.equal(priv.state(PK).atFirst, 0);
+  assert.equal(priv.consume(PK, 999), null);
+  assert.equal(priv.consume(PK, 1000), null);
+  assert.equal(priv.consume(PK, 4000)?.msgs.length, 2);
   const expired = hub();
   expired.observe(msg(A, "一"), 0);
   expired.observe(msg(A, "二", { mentioned: true }), 2001);
@@ -347,16 +358,46 @@ test("裸图：开批至少等 4s，但抬不过硬顶，也不会把更长的 t
   assert.equal(capped.state(K).deadline, 8000);
 });
 
-test("纯表情：只能提前不能延后", () => {
+for (const first of ['文字', '表情', '@']) test(`私聊${first}开段与补充：按正常静默窗口收完整段`, () => {
   const h = hub();
-  h.observe(msg(A, "一"), 0); // 2000
-  h.observe(msg(A, "[表情:14]", { sticker: true }), 500); // 续窗 3500 → 表情压到 1000
-  assert.equal(h.state(K).deadline, 1000);
-  assert.ok(1000 < 3500);
+  h.observe(msg(PU, first, { where: PRIVATE, sticker: first === '表情', mentioned: first === '@' }), 0);
+  assert.equal(h.consume(PK, 1000), null);
+  h.observe(msg(PU, '[表情:14]', { where: PRIVATE, sticker: true }), 1200);
+  assert.equal(h.consume(PK, 1700), null);
+  h.observe(msg(PU, '这是转发的，不是说你', { where: PRIVATE }), 2200);
+  assert.equal(h.consume(PK, 5699), null);
+  assert.deepEqual(h.consume(PK, 5700)?.msgs.map(m => m.text), [first, '[表情:14]', '这是转发的，不是说你']);
+});
 
-  const fresh = hub();
-  fresh.observe(msg(A, "[表情:1]", { sticker: true }), 0);
-  assert.equal(fresh.state(K).deadline, 500); // 开批就是表情：500ms 就出手
+test("群聊文字—表情—补充说明：表情不能截断整段，人物顺序保留", () => {
+  const h = hub();
+  h.observe(msg(A, "他又把日期记错了"), 0);
+  h.observe(msg(B, "[表情:14]", { sticker: true }), 500);
+  // 真实定时器会在旧截止处取件；不在这里消费就可能掩盖提前出段。
+  assert.equal(h.consume(K, 1000), null);
+  h.observe(msg(A, "说的是小明，不是你"), 1800);
+  assert.equal(h.consume(K, 4799), null);
+  const batch = h.consume(K, 4800);
+  assert.ok(batch);
+  assert.deepEqual(renderSegment(batch).segment.map(({ who, text }) => ({ who, text })), [
+    { who: String(A), text: "他又把日期记错了" },
+    { who: String(B), text: "[表情:14]" },
+    { who: String(A), text: "说的是小明，不是你" },
+  ]);
+  assert.equal(h.consume(K, 4800), null);
+});
+
+test("群聊先发表情再解释：沿用普通开段等待，另一群仍独立到期", () => {
+  const h = hub();
+  h.observe(msg(A, "[动画表情]", { sticker: true }), 0);
+  h.observe(msg(B, "另一群的话", { where: { scene: "group", groupId: 700000002 } }), 0);
+  assert.equal(h.consume(K, 500), null);
+  h.observe(msg(A, "这是在笑刚才那段视频"), 1500);
+  assert.equal(h.consume(K, 2000), null);
+  assert.equal(h.consume("group:700000002", 2000)?.msgs.length, 1);
+  const batch = h.consume(K, 4500);
+  assert.ok(batch);
+  assert.deepEqual(batch.msgs.map(m => m.text), ["[动画表情]", "这是在笑刚才那段视频"]);
 });
 
 test("系数活读：openMs / continueMs / hardCapMs / maxMsgs 都由注入的 policy 说话", () => {
@@ -500,7 +541,8 @@ test("parse 的判定直接喂进合批：@我 / 裸图 / 纯表情", () => {
 
   const mentionedHub = hub();
   mentionedHub.observe(fromEvent(atMe), 0);
-  assert.equal(mentionedHub.state(K).deadline, 1000); // @ 上限 1000 < quietOpen 2000
+  assert.equal(mentionedHub.consume(K, 1000), null);
+  assert.equal(mentionedHub.consume(K, 2000)?.mentioned, true);
 
   const imageHub = hub();
   imageHub.observe(fromEvent(bareImage), 0);
@@ -508,7 +550,8 @@ test("parse 的判定直接喂进合批：@我 / 裸图 / 纯表情", () => {
 
   const stickerHub = hub();
   stickerHub.observe(fromEvent(sticker), 0);
-  assert.equal(stickerHub.state(K).deadline, 500);
+  assert.equal(stickerHub.consume(K, 500), null);
+  assert.equal(stickerHub.consume(K, 2000)?.msgs[0].text, "[动画表情]");
 });
 
 // policy.ts 的删键守门：删掉的键不许静默被忽略，哪怕它只是静静地躺在文件里。

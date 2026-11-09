@@ -219,15 +219,17 @@ def _trace(item: Dict[str, Any], action: str) -> Dict[str, Any]:
 
 def _log_sink(request: Dict[str, Any]) -> None:
     """默认 sink：不发网络，只记一行日志（真发由外面注入 send_fn）。"""
-    LOG.info("送达·发出（未接真发）：id=%s to=%s 字数=%d",
+    LOG.info("送达·入队（未接真发）：id=%s to=%s 字数=%d",
              request.get("id"), request.get("to") or "-", len(str(request.get("text") or "")))
 
 
 def _send(request: Dict[str, Any], send_fn: Optional[SendFn] = None) -> "tuple[bool, str]":
     """真的把请求递出去：成功 (True, "")；抛错 (False, reason)。异常不穿给调用方。"""
-    sink = send_fn if send_fn is not None else _log_sink
+    if send_fn is None:
+        _log_sink(request)
+        return False, "channel-not-connected: 已入队，尚未接通发送入口"
     try:
-        sink(dict(request))
+        send_fn(dict(request))
     except Exception as exc:  # noqa: BLE001 - 通道/手 的错一律只记原因，不许炸掉这一轮
         return False, "send_failed: %s: %s" % (type(exc).__name__, exc)
     return True, ""
@@ -246,10 +248,11 @@ def _persist(data: Dict[str, Any], root: Any) -> Optional[str]:
 
 
 def intake(text: Any, *, to: Any = "", now_ts: Any = None, root: Any = None,
-           send_fn: Optional[SendFn] = None) -> Dict[str, Any]:
-    """入队一句待说：先落盘 expect，再递 send_request；返回的是「发出去了」，不是「送达了」。
+           send_fn: Optional[SendFn] = None, source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """入队一句待说：先落盘 expect，再递 send_request；缺省不发送，成功提交也不代表送达。
 
     - to 是收件人标识（空串表示默认对象），今天只落账不解释。
+    - source 为编排线传入的原话来源，只保存，不据此猜测发送会话。
     - send_fn 可注入（日后接嘴/手）；缺省 sink 只记日志，不发网络。
     - 发失败（send_fn 抛错）时账上仍是一条 expect，只把 reason 记下，不谎报送达。
     """
@@ -278,6 +281,8 @@ def intake(text: Any, *, to: Any = "", now_ts: Any = None, root: Any = None,
         "reason": "",
     }
     item["echo"] = item["id"]
+    if source:
+        item["source"] = dict(source)
     # 先落盘再发：这一步之后才允许碰通道
     data["items"].append(item)
     problem = _persist(data, root)
@@ -293,7 +298,8 @@ def intake(text: Any, *, to: Any = "", now_ts: Any = None, root: Any = None,
             "root": str(model.day_root(root))}
 
 
-def ack(item_id: Any, retcode: Any, *, now_ts: Any = None, root: Any = None) -> Dict[str, Any]:
+def ack(item_id: Any, retcode: Any, *, now_ts: Any = None, root: Any = None,
+        heart_root: Any = None) -> Dict[str, Any]:
     """记一条通道 ack：retcode==0 才 delivered；非 0 退回 expect 并记 reason（不算送达）。"""
     key = str(item_id if item_id is not None else "").strip()
     if not key:
@@ -312,6 +318,9 @@ def ack(item_id: Any, retcode: Any, *, now_ts: Any = None, root: Any = None) -> 
     for item in data["items"]:
         if item.get("id") != key:
             continue
+        if item["state"] == STATE_DELIVERED:
+            return {"ok": True, "now": stamp, "delivered": True, "duplicate": True,
+                    "item": dict(item), "counts": counts(data), "root": str(model.day_root(root))}
         item["ack"] = {"retcode": code, "at": stamp}
         if code == 0:
             item["state"] = STATE_DELIVERED
@@ -322,8 +331,12 @@ def ack(item_id: Any, retcode: Any, *, now_ts: Any = None, root: Any = None) -> 
         problem = _persist(data, root)
         if problem:
             return {"ok": False, "message": problem}
+        feedback = None
+        if code == 0:
+            from . import proactive
+            feedback = proactive.confirm_delivery(item, stamp, root=root, heart_root=heart_root)
         return {"ok": True, "now": stamp, "delivered": code == 0, "item": dict(item),
-                "counts": counts(data), "root": str(model.day_root(root))}
+                "feedback": feedback, "counts": counts(data), "root": str(model.day_root(root))}
     return {"ok": False, "message": "队列里没有这一条待说：%s" % key, "item_id": key}
 
 

@@ -10,9 +10,8 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from unittest import mock
 
-from organs.soul import cli, store as store_module
+from organs.soul import cli, checks, store as store_module
 from organs.soul.tests.helpers import (append_row, copy_fixture, edit_card, proposal,
                                        write_json)
 
@@ -22,11 +21,13 @@ class CliTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = copy_fixture("valid", self._tmp.name)
-        patcher = mock.patch.object(cli, "ROOT", self.root)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def _run(self, argv):
+        """--root 显式点名这份样例卡：CLI 的默认根是实盘，不再是出厂，别再靠模块常量。"""
+        argv = [argv[0], "--root", str(self.root)] + list(argv[1:])
+        if argv[0] == "check":
+            # 样例卡只有 2 条线，本就和出厂那 10 条不是同一份：只考这一侧
+            argv.append("--no-cross-check")
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             code = cli.main(argv)

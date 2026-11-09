@@ -1,13 +1,25 @@
-"""醒时自检：三块在不在、账对不对得上、提案有没有绕过、有没有改了没记账。
+"""醒时自检：三块在不在、账对不对得上、提案有没有绕过、有没有改了没记账，两边有没有各改一边。
 
 只读：check 绝不写盘，也绝不给坏卡补默认值。
+
+"两边"是出厂（organs/soul/data，新装起点）与实盘（<仓库>/home/organs/soul，她真正在读的那份）。
+只比集合、不比顺序与措辞：措辞按条各自会变，id 与键是两边的骨架，骨架分叉就是有一边被单独改过。
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from . import model, redline, store
+
+#: 出厂默认（新装起点）：只读参数，不是她的实盘。
+FACTORY_ROOT = Path(__file__).resolve().parent / "data"
+#: 两边骨架分叉：不影响载入，但"只改了一边"必须当场看得见
+CROSS_CHECK_DRIFT = "FACTORY_LIVE_ID_DRIFT"
+#: identity 的键集合按"七件里看得到的那几格"算：self_names 底下两格拆开，其余在顶层
+IDENTITY_KEYS_IN_NAMES = ("display", "synonyms")
+IDENTITY_KEYS_IN_CARD = ("appearance", "fears", "likes", "self_statements")
 
 
 def _history_issues(root: Path, issues: List[model.Issue]) -> List[Dict[str, Any]]:
@@ -134,6 +146,73 @@ def _placeholder_issues(snapshot: store.Snapshot, issues: List[model.Issue]) -> 
                 break
 
 
+def _read_json(path: Path) -> Any:
+    """读一份卡；读不出来或不是 JSON 就是 None（这一侧这次不比，别把读不到当"不一致"）。"""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _bounds_ids(root: Path) -> Optional[Set[str]]:
+    """这一侧的红线 id 集合；卡读不到/形状不对给 None（跳过这一侧）。"""
+    data = _read_json(Path(root) / store.BLOCK_FILES["bounds"])
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
+    return set(str(item.get("id")) for item in items
+               if isinstance(item, dict) and item.get("id") is not None)
+
+
+def _identity_keys(root: Path) -> Optional[Set[str]]:
+    """这一侧 identity 的键集合：display/synonyms 在 self_names 底下，其余在顶层。"""
+    data = _read_json(Path(root) / store.BLOCK_FILES["identity"])
+    if not isinstance(data, dict):
+        return None
+    names = data.get("self_names")
+    names = names if isinstance(names, dict) else {}
+    present = set(key for key in IDENTITY_KEYS_IN_NAMES if key in names)
+    present.update(key for key in IDENTITY_KEYS_IN_CARD if key in data)
+    return present
+
+
+def cross_check_issues(live: Path, factory: Optional[Path] = None) -> List[model.Issue]:
+    """两边不许各改一边：比红线 id 集合与 identity 键集合，**不比顺序、措辞、字数**。
+
+    为什么要有这条：CLI 曾只读出厂，实盘少一条线也一片绿——两边的骨架分叉必须在自检里响，
+    而不是等她在群里多认一个亲才被发现。
+    任一侧目录不存在就跳过该侧比较（单测里常见只有一份卡），不报错。
+    两条都是 error 但 **blocking=False**：这是"只报不拦"的对照（照旧载得进、改得动），
+    真拦下来会让 collect 提前返回，把红线断言、占位符那些更该先看到的 Issue 一起盖掉。
+    """
+    live = Path(live)
+    factory = FACTORY_ROOT if factory is None else Path(factory)
+    if not live.is_dir() or not factory.is_dir():
+        return []
+    issues: List[model.Issue] = []
+    live_ids, factory_ids = _bounds_ids(live), _bounds_ids(factory)
+    if live_ids is not None and factory_ids is not None:
+        only = sorted(live_ids ^ factory_ids)
+        if only:
+            issues.append(model.Issue(
+                CROSS_CHECK_DRIFT, model.ERROR,
+                "出厂与实盘的红线 id 集合不一致（两边 id 集合不一致）：只在一侧 = %s；"
+                "出厂独有 %s，实盘独有 %s"
+                % (only, sorted(factory_ids - live_ids), sorted(live_ids - factory_ids)),
+                blocking=False))
+    live_keys, factory_keys = _identity_keys(live), _identity_keys(factory)
+    if live_keys is not None and factory_keys is not None:
+        only = sorted(live_keys ^ factory_keys)
+        if only:
+            issues.append(model.Issue(
+                CROSS_CHECK_DRIFT, model.ERROR,
+                "出厂与实盘的 identity 键集合不一致（两边 identity 键集合不一致）：只在一侧 = %s；"
+                "出厂独有 %s，实盘独有 %s"
+                % (only, sorted(factory_keys - live_keys), sorted(live_keys - factory_keys)),
+                blocking=False))
+    return issues
+
+
 # 七件里哪几件会「缺了这一格」→ 摘要那一行要把 Issue 一并带上（字数照报：占位的字也算字）。
 _DEGRADED_PARTS = {
     "名字与自称": ("display", "synonyms"),
@@ -143,9 +222,13 @@ _DEGRADED_PARTS = {
 }
 
 
-def collect(root: Path) -> List[model.Issue]:
+def collect(root: Path, cross_check: bool = True) -> List[model.Issue]:
+    """这一侧的自检 + 两边骨架的对照（cross_check=False 只考一侧，单测用）。"""
     root = Path(root)
     raw, issues = store.read_blocks(root)
+    # 放在最前：一边的红线加了一条、另一边没加，摘要里也该先看到这件事，而不是被别的 Issue 挤掉
+    if cross_check:
+        issues.extend(cross_check_issues(root))
     rows = _history_issues(root, issues)
     _kind_issues(rows, issues)
     _proposal_issues(rows, issues)

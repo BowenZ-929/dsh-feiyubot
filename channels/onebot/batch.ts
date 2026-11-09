@@ -1,18 +1,23 @@
 // 合批：把「一小段在聊什么」收成一个批次，交给核做一次调用。
 // 判据一句话：**合批的单位是「这一小段在聊什么」，不是「谁说了几句」**——换人不拆段，沉默与条数才拆段。
 // 这里只做时间的账——什么时候开批、deadline 到哪、这批都装了谁；系数一律来自注入的 policy，
-// 所以 2s / 5s / 3.5s / 8s / @ 1s / 6 条这些边界都能被测试钉成数字。
+// 所以 2s / 5s / 3.5s / 8s / 6 条这些边界都能被测试钉成数字。
 //
 // 按**会话**分批：每个 group:<id> / user:<id> 各有自己的 open、待取队列和「上一条到达时刻」。
 // 会话键直接用 gate.targetOf 那一套（与配额、账里的 target 完全同源），不许自造第二套键。
 import type { BatchPolicy, OpenTier, Tier } from "./policy.ts";
 import { targetOf } from "./gate.ts";
+import type { Attachment } from "./parse.ts";
+import type { QuoteResult } from "./quotes.ts";
 
 export type Where = { scene: "group"; groupId: number } | { scene: "private"; userId: number };
 
 // 三个判定（@ 我 / 裸图 / 纯表情）由 parse 说好结论，合批只消费结论，
 // 不再回头读一遍消息内容——同一件事只判一次，改判定时只改一处。
 export type ObserveInput = {
+  quote?: QuoteResult;
+  messageId?: number | null;
+  attachments?: Attachment[];
   senderId: number;
   // 昵称由调用方给（群名片优先）；给空退回 QQ。每行必须有个能读的人名。
   senderName: string;
@@ -24,6 +29,9 @@ export type ObserveInput = {
 };
 
 export type BatchMessage = {
+  quote?: QuoteResult;
+  messageId?: number | null;
+  attachments?: Attachment[];
   id: number;
   name: string;
   text: string;
@@ -51,8 +59,7 @@ type Open = {
   firstAt: number;
   lastAt: number;
   deadline: number;
-  // 最早一次 @ 她的时刻：@ 的上限绑在"第一次被叫"上，而不是最后一条上，
-  // 否则最后补一句 @ 就能把整批再续命一秒。
+  // 保留首次被叫时刻用于段状态；@ 不缩短静默窗口。
   atFirst: number | null;
   mentioned: boolean;
   where: Where;
@@ -99,6 +106,9 @@ export class BatchHub {
       text: input.text,
       at: now,
       mentioned: input.mentioned,
+      messageId: input.messageId,
+      ...(input.quote ? { quote: input.quote } : {}),
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     };
 
     // 已经装满 maxMsgs 的那一段必须先取走：它此刻的 deadline 就是它自己的 lastAt，
@@ -192,7 +202,7 @@ export class BatchHub {
       tier,
       firstAt: now,
       lastAt: now,
-      deadline: this.capped(now + this.policy.openMs[tier], input, now, now, input.mentioned ? now : null),
+      deadline: this.capped(now + this.policy.openMs[tier], input, now, now),
       atFirst: input.mentioned ? now : null,
       mentioned: input.mentioned,
       where: input.where,
@@ -219,7 +229,7 @@ export class BatchHub {
     // 续发不分人：换人说明这段话还在往下说，按「换人就拆段」只会把一段对白劈成两半。
     open.tier = "continuing";
     const window = this.policy.continueMs[open.where.scene];
-    open.deadline = this.capped(now + window, input, now, open.firstAt, open.atFirst);
+    open.deadline = this.capped(now + window, input, now, open.firstAt);
   }
 
   // 第 maxMsgs 条落地的那一刻就把 deadline 压到自己这条到达时刻：定时器 0ms 内取件，
@@ -238,14 +248,12 @@ export class BatchHub {
     this.opens.delete(key);
   }
 
-  // 裸图想多等 4s、纯表情只想赶紧收，但两者都逃不出硬顶与 @ 上限：
+  // 裸图多等 4s；表情和 @ 沿用普通窗口，私聊同样留时间接后续解释。
   // 系数之间不许有谁绕过硬顶，否则连着刷图的一段能把一批拖到天荒地老。
-  private capped(base: number, input: ObserveInput, now: number, firstAt: number, atFirst: number | null): number {
+  private capped(base: number, input: ObserveInput, now: number, firstAt: number): number {
     let deadline = base;
     if (input.bareImage) deadline = Math.max(deadline, now + this.policy.bareImageMs);
-    if (input.sticker) deadline = Math.min(deadline, now + this.policy.stickerMs);
     deadline = Math.min(deadline, firstAt + this.policy.hardCapMs);
-    if (atFirst !== null) deadline = Math.min(deadline, atFirst + this.policy.mentionCapMs);
     return deadline;
   }
 

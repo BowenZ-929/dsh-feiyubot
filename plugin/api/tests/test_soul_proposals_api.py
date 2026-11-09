@@ -31,6 +31,10 @@ PENDING_TWO = {"id": "bp-2026-11-04-2", "target": "manner.stance",
 
 class SoulProposalsApiTest(unittest.TestCase):
     def setUp(self) -> None:
+        from unittest.mock import patch
+        disabled = patch("organs.day.growth.enabled", return_value=False)
+        disabled.start()
+        self.addCleanup(disabled.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = copy_fixture("valid", self._tmp.name)
@@ -62,6 +66,20 @@ class SoulProposalsApiTest(unittest.TestCase):
         return [row["id"] for row in payload["proposals"]]
 
     # —— 1/2：接受之后那条从 pending 消失，all 里带 actor 与 ts，重启还在 ——
+    def test_accept_with_growth_updates_effective_profile_without_touching_baseline(self):
+        from unittest.mock import patch
+        from organs.mind import persona
+        revision = self.store.revision()
+        with patch('organs.day.growth.enabled', return_value=True):
+            status, result = self._call('POST','/soul/proposal',{'actor':'panel','proposal':dict(PENDING_ONE)})
+            self.assertEqual(status,200)
+            self.assertEqual(result['applied_to'],'profile')
+            self.assertIn(PENDING_ONE['value'],persona.render(self.store,self.brain))
+            self.assertEqual(self.store.revision(),revision)
+            again, _ = self._call('POST','/soul/proposal',{'actor':'panel','proposal':dict(PENDING_ONE)})
+            self.assertEqual(again,400)
+        self.assertEqual(self._rows()[PENDING_ONE['id']]['profile_version'],1)
+
     def test_accept_leaves_pending_and_lands_in_all(self):
         self.assertEqual(["bp-2026-11-04-1", "bp-2026-11-04-2"], self._ids(""))
         status, payload = self._call("POST", "/soul/proposal",

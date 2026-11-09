@@ -204,8 +204,8 @@ class OverTargetIsRewrittenOnce(unittest.TestCase):
         self.assertEqual(verdict.reason,
                          LINES["rewritten"].format(**_fields(COLD, lo, hi, 150, chars, lo)))
 
-    def test_without_rewrite_it_says_it_cannot(self):
-        """没给 rewrite：放行 + 记账，判词说的是「改不了」，不是「合格」。"""
+    def test_without_rewrite_preserves_text_and_records_over_target(self):
+        """没给 rewrite：保留原文、记录超目标与零次重写。"""
         lo, hi = style.target_range(COLD, BOOK)
         chars = hi + 10
         noted = []
@@ -218,7 +218,6 @@ class OverTargetIsRewrittenOnce(unittest.TestCase):
         self.assertEqual(verdict.rewrites, 0)
         self.assertFalse(verdict.over_hard_cap)
         self.assertEqual(verdict.reason, expected)
-        self.assertIn("改不了", verdict.reason)                # 说的是改不了，不是合格
         self.assertEqual(noted, [("over_target", expected)])
 
     def test_rewrite_still_over_releases_and_records(self):
@@ -308,7 +307,7 @@ class StoppedMarks(unittest.TestCase):
         self.assertEqual(verdict.rewrites, 0)
         self.assertEqual(verdict.text, text, "没给重写器就原样放行，不吞话")
         self.assertEqual(verdict.ceiling, CEILING)
-        self.assertIn("改不了", verdict.reason)
+        self.assertIn("未启用标点重写", verdict.reason)
         self.assertEqual([one[0] for one in noted], ["over_mark"])
 
     def test_fewer_sentences_than_the_minimum_is_not_judged(self):

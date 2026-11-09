@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from organs.heart import model, store
+from organs.heart import changes, model, store
 
 PROACTIVE_FILE = "proactive.json"
 VERSION = 1
@@ -126,7 +126,7 @@ def _empty() -> Dict[str, Any]:
 
 
 def _clean_history(rows: Any) -> List[Dict[str, Any]]:
-    """history 归一化：只认 {at, outcome}，认不出的行不猜、不救、直接跳过。"""
+    """旧记录保留原口径；新记录可带对象、会话与确认编号，不替旧记录补猜。"""
     cleaned: List[Dict[str, Any]] = []
     for raw in rows if isinstance(rows, list) else []:
         if not isinstance(raw, dict):
@@ -134,8 +134,13 @@ def _clean_history(rows: Any) -> List[Dict[str, Any]]:
         outcome = raw.get("outcome")
         if outcome not in OUTCOMES:
             continue
-        cleaned.append({"at": raw.get("at") if isinstance(raw.get("at"), str) else "",
-                        "outcome": outcome})
+        row = {"at": raw.get("at") if isinstance(raw.get("at"), str) else "",
+               "outcome": outcome}
+        context = raw.get("context")
+        if isinstance(context, dict) and all(isinstance(context.get(k), str) and context[k]
+                                             for k in ("who", "session_id", "delivery_id")):
+            row["context"] = {k: context[k] for k in ("who", "session_id", "delivery_id")}
+        cleaned.append(row)
     return cleaned
 
 
@@ -153,14 +158,20 @@ def _load(root: Any) -> Dict[str, Any]:
     }
 
 
-def _save(root: Any, data: Dict[str, Any]) -> None:
+def _save(root: Any, data: Dict[str, Any], *, at: str, reason: str, source: str) -> None:
     """整文件覆盖写：config 一并落盘（mute_after / mute_hours 就在那儿，人可改）。"""
+    previous = _load(root)
     store.write_json(
         _path(root),
         {"version": VERSION, "config": _config(data), "streak": int(data["streak"]),
          "muted_until": data["muted_until"], "last_sent_at": data["last_sent_at"],
          "history": list(data["history"])},
     )
+    changes.record(root, at=at, group='proactive', reason=reason, source=source,
+        before={'连续未获回应次数':previous['streak'], '暂停主动开口至':previous['muted_until'],
+                '最近主动开口':previous['last_sent_at'], '等待本次回应':_pending_index(previous['history']) is not None},
+        after={'连续未获回应次数':data['streak'], '暂停主动开口至':data['muted_until'],
+               '最近主动开口':data['last_sent_at'], '等待本次回应':_pending_index(data['history']) is not None})
 
 
 def _pending_index(history: List[Dict[str, Any]]) -> Optional[int]:
@@ -193,7 +204,7 @@ def _muted_view(data: Dict[str, Any], at: str) -> Dict[str, Any]:
 # ---- 对外：四条写读口 + 一条总览 -----------------------------------------
 
 
-def sent(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
+def sent(root: Any = None, now: Optional[str] = None, *, context=None) -> Dict[str, Any]:
     """她**主动**开口了：记一条 pending（不碰 streak，结果还没出来）。
 
     幂等：已经有一条未结算的 pending，就**不重复记**——一次开口只长一行 history，
@@ -206,9 +217,10 @@ def sent(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
         return {"ok": False, "code": "already-pending", "at": at,
                 "streak": int(data["streak"]), "muted_until": data["muted_until"],
                 "history": len(data["history"])}
-    data["history"].append({"at": at, "outcome": OUTCOME_PENDING})
+    data["history"].append({"at": at, "outcome": OUTCOME_PENDING,
+                            **({"context": dict(context)} if context else {})})
     data["last_sent_at"] = at
-    _save(root, data)
+    _save(root, data, at=at, reason='主动开口已登记，等待回应', source='proactive_sent')
     return {"ok": True, "at": at, "outcome": OUTCOME_PENDING,
             "streak": int(data["streak"]), "muted_until": data["muted_until"],
             "history": len(data["history"])}
@@ -248,11 +260,34 @@ def outcome(result: str, root: Any = None, now: Optional[str] = None) -> Dict[st
             "心·proactive：连续 %d 次主动开口没人回，安静到 %s（有人主动找她就提前结束）"
             % (int(data["streak"]), until),
             RuntimeWarning, stacklevel=2)
-    _save(root, data)
+    _save(root, data, at=at, reason='主动消息未获回应' if result == OUTCOME_IGNORED else '主动消息收到回应',
+          source='proactive_' + result)
     return {"ok": True, "at": at, "outcome": result, "streak": int(data["streak"]),
             "muted": muted, "muted_until": data["muted_until"],
             "mute_after": int(cfg["mute_after"]), "mute_hours": cfg["mute_hours"],
             "history": len(data["history"])}
+
+
+def receive_reply(who: str, session_id: str, *, root=None, now=None):
+    """同对象同会话接话：结算等待，或在已记未回应后恢复；不改旧结论。"""
+    at = _at(now)
+    data = _load(root)
+    index = _pending_index(data["history"])
+    waiting = index is not None
+    if index is None:
+        if (not data['history'] or data['history'][-1]['outcome'] != OUTCOME_IGNORED
+                or not (data['streak'] or data['muted_until'])):
+            return {"ok": False, "code": "no-pending"}
+        index = len(data['history']) - 1
+    previous = data["history"][index]
+    context = previous.get("context") or {}
+    if not who or not session_id or context.get("who") != who or context.get("session_id") != session_id:
+        return {"ok": False, "code": "different-context"}
+    sent_at, reply_at = _stamp(previous["at"]), _stamp(at)
+    if sent_at is None or reply_at is None or reply_at < sent_at:
+        return {"ok": False, "code": "before-sent"}
+    return dict(outcome(OUTCOME_REPLIED, root=root, now=at) if waiting else
+                the_other_side_spoke(root=root, now=at), context=context)
 
 
 def the_other_side_spoke(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
@@ -270,7 +305,7 @@ def the_other_side_spoke(root: Any = None, now: Optional[str] = None) -> Dict[st
     data["streak"] = 0
     data["muted_until"] = None
     if before_streak or before_until is not None:
-        _save(root, data)
+        _save(root, data, at=at, reason='对方主动开口，恢复主动交流', source='proactive_incoming')
     return {"ok": True, "at": at, "streak_before": before_streak,
             "muted_until_before": before_until, "was_muted": was_muted,
             "streak": 0, "muted_until": None, "muted": False}

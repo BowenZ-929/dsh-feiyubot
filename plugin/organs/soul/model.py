@@ -205,7 +205,7 @@ def body_parts(identity: Identity, manner: Manner, bounds: Bounds
     return [
         ("名字与自称", identity_name_chars(identity), limits.self_names, False),
         ("形象", appearance_chars(identity), limits.appearance, True),
-        ("三句自述", identity_statement_chars(identity), limits.self_statements, False),
+        ("初始性格", identity_statement_chars(identity), limits.self_statements, False),
         ("怕什么", fears_chars(identity), limits.fears, True),
         ("喜欢什么", likes_chars(identity), limits.likes, True),
         ("待人姿态", manner_chars(manner), limits.manner, False),
@@ -365,8 +365,8 @@ def _shape_identity(data: Dict[str, Any], issues: List[Issue]) -> Optional[Ident
     if not (isinstance(statements, list) and all(_is_text(item) for item in statements)):
         issues.append(_bad("identity.self_statements 必须是非空字符串数组"))
         ok = False
-    elif len(statements) != limits.statement_count:
-        issues.append(_bad("identity.self_statements 必须固定 %d 句（人写的），当前 %d 句"
+    elif not 1 <= len(statements) <= limits.statement_count:
+        issues.append(_bad("identity.self_statements 需要 1–%d 句初始性格，当前 %d 句"
                            % (limits.statement_count, len(statements))))
         ok = False
     if not ok:

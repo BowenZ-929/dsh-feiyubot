@@ -2,7 +2,7 @@
 
 判据（第四轮任务书）：
 - 素材只取今天的真东西（脑 today 里今天的、心的今晚心情档、日子自己的当天账），缺了就少给，不许编；
-- 日记 80–150 字（区间在 data/writing.json，测试不抄这两个数）；
+- 日记非空且不超过配置上限（data/writing.json），允许按素材短写；
 - 一天一张、幂等：已存在就返回既有那张，不写第二张；
 - 脑里只有一行索引，source_type 是 日记 / 梦，evidence_key 为空（梦不作证词），正文不进脑；
 - 写之前先把抽屉索引备一份到日子线根下：备份没成 = 这一步失败；
@@ -63,7 +63,182 @@ class WritingTestBase(unittest.TestCase):
         return self.brain.today_view(at(NOW))["entries"]
 
 
+class DiaryReviewTest(WritingTestBase):
+    def setUp(self):
+        super().setUp()
+        cfg = json.loads(night.writing_file().read_text())
+        cfg['entries']['日记']['review_prompt'] = '对照资料复核日记；返回text和changes。'
+        self.review_config = self.root / 'review-writing.json'
+        self.review_config.write_text(json.dumps(cfg, ensure_ascii=False))
+        seed_today(self.brain, at(NOW), text='今晚想安静待一会儿。')
+
+    def run_review(self, review):
+        draft = '他说想安静待一会儿。我关掉电视陪他坐在沙发上。'
+        seen = []
+        mind = fake_mind()
+        def transport(url, headers, payload, timeout):
+            seen.append(payload['messages'])
+            content = draft if len(seen) == 1 else review
+            return 200, json.dumps({'choices': [{'message': {'content': content}}]}).encode()
+        mind['transport'] = transport
+        result = self._run(mind=mind, writing=self.review_config, only=['home_diary'])
+        return result, seen, mind
+
+    def test_reviewed_body_and_original_are_kept_and_rerun_does_not_call_model(self):
+        final = '他说今晚想安静待一会儿。'
+        changes = [{'quote': '我关掉电视陪他坐在沙发上。', 'reason': '只有聊天，没有这些动作记录'}]
+        result, seen, mind = self.run_review(json.dumps({'text': final, 'changes': changes}))
+        self.assertEqual('ok', result['steps']['home_diary']['status'])
+        card = self._cards('日记')[0]
+        self.assertEqual(final, card['note'])
+        self.assertEqual(final, card['params']['text'])
+        self.assertEqual(changes, card['params']['review']['changes'])
+        self.assertIn('我关掉电视', card['params']['review']['draft'])
+        self.assertEqual(2, len(seen))
+        self.assertIn('今晚想安静待一会儿', seen[1][-1]['content'])
+        self._run(mind=mind, writing=self.review_config, only=['home_diary'])
+        self.assertEqual(2, len(seen))
+
+    def test_invalid_review_leaves_no_diary_or_brain_index(self):
+        for review in ('not json', json.dumps({'text': '改过了', 'changes': []}),
+                       json.dumps({'text': '改过了', 'changes': [{'quote': '不存在的引文', 'reason': '假依据'}]})):
+            with self.subTest(review=review):
+                result, _, _ = self.run_review(review)
+                self.assertEqual(night.STATUS_FAILED, result['steps']['home_diary']['status'])
+                self.assertEqual([], self._cards('日记'))
+                self.assertFalse(any(r.get('source_type') == '日记' for r in self._brain_today()))
+
+    def test_writing_trace_links_card_review_failure_retry_and_idempotence(self):
+        from unittest.mock import patch
+        from api import observe
+        with patch.dict('os.environ', {'QQAGENT_TRACE':'1','QQAGENT_HOME_ROOT':str(self.root)}):
+            failed, _, _ = self.run_review('invalid review')
+            old = failed['steps']['home_diary'].get('model_turn_id')
+            self.assertIsNotNone(old)
+            status, view = observe.dispatch({'source':'model','turn_id':old})
+            self.assertEqual(200, status)
+            self.assertEqual(['日记写作','日记事实复核'], [r['record']['purpose'] for r in view['rows']])
+            self.assertEqual([1,2], [r['record']['call_index'] for r in view['rows']])
+            final = '他说想安静待一会儿。我关掉电视陪他坐在沙发上。'
+            done, seen, mind = self.run_review(json.dumps({'text':final,'changes':[]}))
+            turn = done['steps']['home_diary']['model_turn_id']
+            self.assertNotEqual(old, turn)
+            self.assertEqual(turn, self._cards('日记')[0]['params']['model_turn_id'])
+            rerun = self._run(mind=mind, writing=self.review_config, only=['home_diary'], carry=done['steps'])
+            self.assertEqual(turn, rerun['steps']['home_diary']['model_turn_id'])
+            self.assertEqual(2, len(seen))
+            self.assertEqual(old, log_lines(self.root)[0]['steps']['home_diary']['model_turn_id'])
+            dream = self._run(only=['home_dream'], carry=done['steps'])
+            dream_id = dream['steps']['home_dream']['model_turn_id']
+            self.assertNotIn(dream_id, (old, turn))
+            self.assertEqual(turn, dream['steps']['home_diary']['model_turn_id'])
+            self.assertEqual(dream_id, self._cards('梦')[0]['params']['model_turn_id'])
+            _, traces = observe.dispatch({'source':'model','turn_id':dream_id})
+            self.assertEqual(['梦境写作'], [r['record']['purpose'] for r in traces['rows']])
+            self.assertNotIn('model_turn_id', dream['steps']['heart_settle'])
+
+
 class DiaryLandingTest(WritingTestBase):
+    def test_material_completes_linked_turns_without_reviving_filtered_entries(self):
+        from organs.brain.model import SIDE_OTHER, SIDE_SELF
+        ids = []
+        for index, text in enumerate(('更早的一问', '更早的一答', '应该补回的提问', '对应的回答', '新的提问', '新的回答')):
+            result = self.brain.ingest(who='123456789', text=text, ts=at(NOW),
+                                      side=SIDE_OTHER if index % 2 == 0 else SIDE_SELF,
+                                      turn_id='turn-' + str(index // 2))
+            ids.append(result['entry']['id'])
+        retired = self.brain.ingest(who='123456789', text='已退役的材料', ts=at(NOW), turn_id='turn-2')['entry']
+        self.brain.retire(retired['id'], ts=at(NOW))
+        mind, seen = recording_mind()
+        self._run(mind=mind)
+        user = seen[0]['messages'][1]['content']
+        self.assertIn('应该补回的提问', user)
+        self.assertNotIn('更早的一问', user)
+        self.assertNotIn('更早的一答', user)
+        self.assertNotIn('已退役的材料', user)
+        self.assertEqual(ids[2:], self._cards('日记')[0]['params']['from_memories'])
+
+    def test_legacy_same_time_messages_are_not_guessed_into_a_turn(self):
+        for index in range(4):
+            self.brain.ingest(who='123456789', text='旧记录-' + str(index), ts=at(NOW))
+        mind, seen = recording_mind()
+        self._run(mind=mind)
+        user = seen[0]['messages'][1]['content']
+        self.assertNotIn('旧记录-0', user)
+        for index in (1, 2, 3):
+            self.assertIn('旧记录-' + str(index), user)
+
+    def test_diary_and_dream_explain_the_actual_speaker_labels(self):
+        from organs.brain.model import SIDE_OTHER, SIDE_SELF
+        self.assertTrue(self.brain.ingest(who='123456789', text='今天只想安静待会儿。',
+                                         ts=at(NOW), side=SIDE_OTHER)['ok'])
+        self.assertTrue(self.brain.ingest(who='她', text='好，我陪你。',
+                                         ts=at(NOW), side=SIDE_SELF)['ok'])
+        mind, seen = recording_mind()
+        self._run(mind=mind)
+        self.assertEqual(3, len(seen))
+        for request in (seen[0], seen[2]):
+            system, user = [message['content'] for message in request['messages']]
+            for side in (SIDE_OTHER, SIDE_SELF):
+                self.assertIn('side=' + side, system)
+                self.assertIn('"side": ' + json.dumps(side, ensure_ascii=False), user)
+            self.assertIn('好，我陪你。', user)
+
+    def test_short_diary_is_saved_without_padding(self):
+        seed_today(self.brain,at(NOW),text='今天就想安静待一会儿，不用给建议。')
+        text='听他说今天只想安静待一会儿，不用给建议。'
+        payload=self._run(mind=fake_mind(text))
+        self.assertEqual('ok',payload['steps']['home_diary']['status'])
+        self.assertEqual(text,self._cards('日记')[0]['params']['text'])
+        self.assertEqual(len(text),self._cards('日记')[0]['chars'])
+
+    def test_phone_only_day_is_material_with_evidence_ids(self):
+        from organs.day import phone_browse
+        for ident,stamp,status,origin in (
+            ('observed','2026-11-06T04:30:00','partial','automatic'),
+            ('acceptance','2026-11-06T04:40:00','done','acceptance'),
+            ('yesterday','2026-11-06T03:30:00','done','automatic'),
+            ('future','2026-11-06T06:00:00','done','automatic'),
+            ('failed','2026-11-06T04:50:00','failed','automatic')):
+            phone_browse.save({'id':ident,'created_at':at(stamp),'status':status,'origin':origin,
+                'title':ident,'observations':[{'status':'ok','observation':{'subject':'猫坐在纸箱旁'}}],
+                'reflection':{'status':'ok','at':at(stamp),'effect':'positive',
+                              'impression':'这个动作有点可爱','evidence':'猫坐在纸箱旁'},
+                'audio':{'status':'unclear','transcript':'不可靠的对白','raw_transcript':'不能引入'}},self.root)
+        mind,seen=recording_mind()
+        result=self._run(mind=mind)
+        self.assertEqual('ok',result['steps']['home_diary']['status'])
+        user=seen[0]['messages'][1]['content']
+        self.assertIn('猫坐在纸箱旁',user)
+        self.assertIn('这个动作有点可爱',user)
+        for excluded in ('acceptance','yesterday','future','failed','不可靠的对白','不能引入'):
+            self.assertNotIn(excluded,user)
+        for kind in ('日记','梦'):
+            self.assertEqual(['observed'],self._cards(kind)[0]['params']['from_phone'])
+        calls=len(seen)
+        self._run(mind=mind)
+        self.assertEqual(calls,len(seen),'已写过的日记不应重复生成')
+
+    def test_simulated_schedule_alone_does_not_become_real_diary(self):
+        saved=self.brain.ingest(who='她自己',text='去海边捡贝壳',side='self',source_type='日程模拟',ts=at(NOW))
+        self.assertTrue(saved['ok'],saved)
+        (self.root/'schedule_log.jsonl').write_text(json.dumps(
+            {'day':model.day_key(at(NOW)),'slot':'清晨','item':'去海边捡贝壳'},ensure_ascii=False)+'\n')
+        mind,seen=recording_mind()
+        result=self._run(mind=mind)
+        self.assertEqual('skipped',result['steps']['home_diary']['status'])
+        self.assertEqual([],seen)
+        self.assertEqual([],self._cards())
+
+    def test_chat_material_retains_speaker_time_and_side(self):
+        row=self.brain.ingest(who='123456789',text='我搬了书架，手上都是灰',ts=at(NOW))['entry']
+        mind,seen=recording_mind()
+        self._run(mind=mind)
+        user=seen[0]['messages'][1]['content']
+        for key in ('who','side','ts','source_type'):
+            self.assertIn(json.dumps(key)+': '+json.dumps(row[key],ensure_ascii=False),user)
+        self.assertIn('对方的发言',seen[0]['messages'][0]['content'])
+
     def test_diary_lands_in_the_drawer_with_the_core_text(self):
         seed_today(self.brain, at(NOW))
         text = article()
@@ -110,6 +285,7 @@ class DiaryLandingTest(WritingTestBase):
         payload = self._run()
         step = payload["steps"]["home_diary"]
         self.assertEqual(night.STATUS_SKIPPED, step["status"])
+        self.assertNotIn('model_turn_id', step)
         self.assertIn("没素材" if False else "真素材", step["detail"])
         self.assertEqual([], self._cards("日记"))
         self.assertEqual([], [row for row in self._brain_today()
@@ -133,7 +309,7 @@ class DiaryLandingTest(WritingTestBase):
         system = seen[0]["messages"][0]["content"]
         self.assertIn("只能写今天真的发生过的事", system, "任务书要求的那句硬话必须在提示词里")
         span = self.writing["entries"]["home_diary"]["prompt_range"]
-        self.assertIn("%d–%d" % (span["min"], span["max"]), system,
+        self.assertIn("不超过 %d 字" % span["max"], system,
                       "提示词里的字数来自数据文件，不是代码里的字面量")
 
 
@@ -153,7 +329,7 @@ class DreamLandingTest(WritingTestBase):
         seed_today(self.brain, at(NOW))
         mind, seen = recording_mind()
         self._run(mind=mind)
-        system = seen[1]["messages"][0]["content"]
+        system = seen[-1]["messages"][0]["content"]
         self.assertIn("不许凭空造人物与事件", system)
         self.assertIn("重组", system)
         self.assertIn("荒诞", system)
@@ -212,6 +388,9 @@ class IdempotentAndFailureTest(WritingTestBase):
         self.assertEqual(night.STATUS_FAILED, step["status"])
         self.assertTrue(step["detail"].startswith("timeout: "), step["detail"])
         self.assertEqual("timeout", step["error_kind"])
+        self.assertEqual(32, len(step['model_turn_id']))
+        self.assertNotEqual(step['model_turn_id'], payload['steps']['home_dream']['model_turn_id'])
+        self.assertNotIn('model_turn_id', payload['steps']['heart_settle'])
         self.assertIn("模型没在时限内回话", step["detail"])
         self.assertEqual([], self._cards(), "失败时抽屉里一张都不许多")
         self.assertEqual([], [row for row in self._brain_today()
@@ -224,11 +403,17 @@ class IdempotentAndFailureTest(WritingTestBase):
     def test_wrong_length_is_refused_instead_of_truncated(self):
         seed_today(self.brain, at(NOW))
         span = self.writing["word_range"]
-        payload = self._run(mind=fake_mind("短" * (span["min"] - 1)))
+        payload = self._run(mind=fake_mind("长" * (span["max"] + 1)))
         step = payload["steps"]["home_diary"]
         self.assertEqual(night.STATUS_FAILED, step["status"])
         self.assertIn("字", step["detail"])
         self.assertEqual([], self._cards(), "不许截半篇、也不许照样落红")
+
+    def test_blank_writing_is_not_saved(self):
+        seed_today(self.brain, at(NOW))
+        payload = self._run(mind=fake_mind(" \n\t"))
+        self.assertEqual(night.STATUS_FAILED, payload["steps"]["home_diary"]["status"])
+        self.assertEqual([], self._cards())
 
     def test_backup_failure_means_the_step_fails(self):
         seed_today(self.brain, at(NOW))
@@ -269,3 +454,52 @@ class RollbackPointTest(WritingTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutonomousWritingMaterialsTest(WritingTestBase):
+    def test_actual_autonomous_writing_enters_night_without_chat_or_phone(self):
+        from unittest.mock import patch
+        from organs.day import autonomy, growth, solitude
+        growth.configure(True, root=self.root)
+        with patch('organs.day.phone_browse._feeling', return_value={'asleep':False,'energy':{'value':80}}), \
+             patch('organs.hand.phone.config', return_value={}):
+            done = autonomy.tick(at('2026-11-06T04:30:00'), root=self.root, home_root=self.home,
+                heart_root=self.heart, brain=self.brain, complete=lambda _: json.dumps({
+                    'action':'write','reason':'想写一个故事','args':{'text':'故事里的我登上月球。'}}))
+        self.assertEqual(done['status'], 'done')
+        for ident, stamp, status, event, extra in (
+            ('old', '2026-11-06T03:59:00', 'done', 'autonomy_result', {}),
+            ('future', '2026-11-06T06:00:00', 'done', 'autonomy_result', {}),
+            ('queued', '2026-11-06T04:35:00', 'queued', 'autonomy_result', {}),
+            ('test', '2026-11-06T04:35:00', 'done', 'autonomy_result', {'origin':'acceptance'}),
+            ('paint-failed', '2026-11-06T04:40:00', 'failed', 'autonomy_finished', {})):
+            solitude.append_log(self.root, {'at':at(stamp),'event':event,'model_turn_id':ident,
+                'status':status,'action':'paint','reason':ident,'receipt':{'card_id':ident},**extra})
+        mind, seen = recording_mind('今天写了一个登月故事，画画没成功。')
+        result = self._run(mind=mind,only=['home_diary','home_dream'])
+        self.assertEqual(result['steps']['home_diary']['status'],'ok')
+        self.assertEqual(result['steps']['home_dream']['status'],'ok')
+        for request in (seen[0],seen[-1]):
+            system,user = [m['content'] for m in request['messages']]
+            self.assertIn('创作内容不代表实际经历',system)
+            self.assertIn('故事里的我登上月球。',user)
+            self.assertIn('paint-failed',user)
+            for excluded in ('"old"','"future"','"queued"','"test"'):
+                self.assertNotIn(excluded,user)
+        self.assertIn('故事里的我登上月球。',seen[1]['messages'][1]['content'])
+        for kind in ('日记','梦'):
+            self.assertEqual(self._cards(kind)[0]['params']['from_activities'],
+                [done['model_turn_id'],'paint-failed'])
+        count=len(seen)
+        self._run(mind=mind,only=['home_diary','home_dream'])
+        self.assertEqual(len(seen),count)
+
+    def test_legacy_mode_does_not_take_new_activity_material(self):
+        from organs.day import solitude
+        solitude.append_log(self.root, {'at':at(NOW),'event':'autonomy_result','model_turn_id':'unused',
+            'status':'done','action':'write','receipt':{'text':'旧的活动'}})
+        mind,seen=recording_mind()
+        result=self._run(mind=mind,only=['home_diary','home_dream'])
+        self.assertEqual(result['steps']['home_diary']['status'],night.STATUS_SKIPPED)
+        self.assertEqual(result['steps']['home_dream']['status'],night.STATUS_SKIPPED)
+        self.assertEqual(seen,[])

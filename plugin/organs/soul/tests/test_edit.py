@@ -62,6 +62,16 @@ class EditTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("不能删除也不能改 id", result["message"])
 
+    def test_explicit_minimal_personality_and_statement_count_limits(self):
+        result = self._edit('identity', 'self_statements', ['可爱'], structural=True)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(self.store.snapshot().identity.self_statements, ('可爱',))
+        self.assertIn('【性格底色】可爱。', self.store.render())
+        for value in ([], ['一', '二', '三', '四']):
+            result = self._edit('identity', 'self_statements', value, structural=True)
+            self.assertFalse(result['ok'])
+            self.assertEqual(self.store.snapshot().identity.self_statements, ('可爱',))
+
     def test_dropping_a_self_statement_is_rejected(self):
         result = self._edit("identity", "self_statements", ["只留一句"])
         self.assertFalse(result["ok"])

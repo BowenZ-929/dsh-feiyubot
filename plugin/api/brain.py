@@ -9,10 +9,12 @@ from typing import Any, Mapping
 from urllib.parse import unquote
 
 from organs.brain.model import PENDING
+from organs.brain.store import BrainReadError
 
 from .core import Result
 
 BRAIN_ROUTES = {
+    "/api/graph/snapshot": "GET",
     "/brain": "GET",
     "/brain/overview": "GET",
     "/brain/today": "GET",
@@ -50,6 +52,11 @@ def dispatch(route: str, params: Mapping[str, str], body: Any, brain: Any) -> Re
         return 503, {"ok": False, "message": "脑未载入：先起脑的数据目录（devserver --brain-root）"}
     if route in ("/brain", "/brain/overview"):
         return _overview(brain)
+    if route == "/api/graph/snapshot":
+        try:
+            return 200, brain.graph_snapshot()
+        except (BrainReadError, OSError, ValueError, KeyError, TypeError):
+            return 503, {"ok": False, "message": "记忆星图暂时读不到，请检查脑的数据；没有用空图替代。"}
     if route == "/brain/today":
         return 200, brain.today_view()
     if route == "/brain/people":
@@ -101,6 +108,24 @@ def dispatch(route: str, params: Mapping[str, str], body: Any, brain: Any) -> Re
     return 200, brain.proposals()
 
 
+def dispatch_why(method: str, route: str, brain: Any) -> Result:
+    """只解释落盘的关联/命中记录，不调用 recall，不伪造一次召回的名次。"""
+    if method != "GET":
+        return 405, {"ok": False, "message": "星图详情只读，只收 GET"}
+    status, snapshot = dispatch("/api/graph/snapshot", {}, None, brain)
+    if status != 200:
+        return status, snapshot
+    node_id = route[len("/api/memory/"):-len("/why")]
+    node = next((row for row in snapshot["nodes"] if row["id"] == node_id), None)
+    if node is None:
+        return 404, {"ok": False, "message": "这条记忆或节点已不存在"}
+    return 200, {"node": node, "edges": [row for row in snapshot["edges"] if node_id in (row["from"], row["to"])],
+                 "why": {"hitReason": None, "rank": None, "quota": None,
+                         "source": node.get("source"), "ref": node.get("evidence_key"),
+                         "note": "这里只展示已有关系和累计命中记录；没有这条记忆的逐轮召回排名。"},
+                 "readonly": True, "revision": snapshot["revision"]}
+
+
 def dispatch_note(method: str, route: str, body: Any, brain: Any) -> Result:
     """PATCH /brain/memory/<id>/note：人改理解，quote 逐字不动，历史留痕。"""
     if brain is None:
@@ -144,3 +169,27 @@ def dispatch_card(method: str, route: str, body: Any, brain: Any) -> Result:
         return (200 if result.get("ok") else 400), result
     return 405, {"ok": False,
                  "message": "%s 只收 GET/PATCH（名片字段人可写，熟稔只读）" % route}
+
+
+def dispatch_preferences(method: str, route: str, body: Any, brain: Any) -> Result:
+    """按人查看各会话偏好；面板可撤回，新增和更正从本人聊天学习。"""
+    from organs.brain import preferences
+    from organs.brain.model import now_iso
+    if brain is None:
+        return 503, {"ok": False, "message": "脑未载入"}
+    who = route[len('/brain/people/'):-len('/preferences')]
+    rows = preferences.history(brain.root, who)
+    replaced = {key for row in rows for key in row['replaces']}
+    active = [row for row in rows if row['text'] and row['id'] not in replaced]
+    if method == 'GET':
+        return 200, {'ok': True, 'current': active, 'history': rows}
+    if method != 'POST':
+        return 405, {'ok': False, 'message': '只收 GET 查看或 POST 撤回'}
+    if not isinstance(body, dict) or not isinstance(body.get('id'), str):
+        return 400, {'ok': False, 'message': '需要待撤回的偏好 id'}
+    selected = next((row for row in active if row['id'] == body['id']), None)
+    if selected is None:
+        return 404, {'ok': False, 'message': '此人没有这条现行偏好'}
+    event = preferences.record(brain.root, who=who, session_id=selected['session_id'],
+        change={'text': '', 'evidence': [], 'replaces': [selected['id']]}, at=now_iso(), actor='panel')
+    return 200, {'ok': True, 'event': event}

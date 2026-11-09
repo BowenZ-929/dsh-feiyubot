@@ -261,20 +261,19 @@ class ReportEventTest(RootCase):
     def test_zero_cooldown_lets_every_delivery_through(self) -> None:
         """验收 6 后半：cooldown_min 改成 0 → 同类连投全部 applied。
 
-        十个不同的 who：mood 自己的"同一人同一小时只算一次"是另一道闸
-        （见 test_mood_windowed_passes_through），这里只隔离冷却这一个变量。
+        同一个人也不再有额外的小时限制，热度和渐近线仍控制增量。
         """
         table = _read_contract_file(self.root)
         table["cooldown_min"] = 0
         _write_contract_file(self.root, table)
 
-        results = [self._event("praise", who="客%d" % index) for index in range(10)]
+        results = [self._event("praise", who="主人") for _ in range(10)]
         self.assertEqual([True] * 10, [row["applied"] for row in results])
         self.assertEqual([None] * 10, [row["reason"] for row in results])
         self.assertEqual(10, len(_log_rows(self.root)))
 
-    def test_mood_windowed_passes_through_as_its_own_reason(self) -> None:
-        """mood 自己那道「同一人同一小时」照旧在前面：被它挡下也落账，不静默。"""
+    def test_disabled_cooldown_keeps_repeat_gain_diminishing(self) -> None:
+        """用户关闭冷却后仍按热度递减，不偷偷增加另一层小时限制。"""
         table = _read_contract_file(self.root)
         table["cooldown_min"] = 0
         _write_contract_file(self.root, table)
@@ -282,11 +281,13 @@ class ReportEventTest(RootCase):
         first = self._event("praise", who="主人")
         second = self._event("praise", who="主人")
         self.assertTrue(first["applied"])
-        self.assertFalse(second["applied"])
-        self.assertEqual("windowed", second["reason"])
+        self.assertTrue(second["applied"])
+        self.assertGreater(second['mood_after'], second['mood_before'])
+        self.assertLess(second['mood_after'] - second['mood_before'],
+                        first['mood_after'] - first['mood_before'])
         log = _log_rows(self.root)
         self.assertEqual(2, len(log))
-        self.assertEqual("windowed", log[-1]["reason"])
+        self.assertTrue(log[-1]['applied'])
 
     def test_force_bypasses_the_cooldown_and_writes_its_reason(self) -> None:
         """force=True 绕冷却，理由写进账（静音那条 cold 就走这条）。"""

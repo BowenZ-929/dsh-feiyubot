@@ -52,9 +52,9 @@ class TimestampTest(unittest.TestCase):
 
 class LimitsTest(unittest.TestCase):
     def test_config_ships_with_the_four_thresholds(self):
-        """阈值优先读 limits.json（没给 root 就是实盘 home/organs/day 那份）；文件必须真的在。"""
-        self.assertTrue(model.limits_file().exists(), "%s 不见了" % model.limits_file())
-        values = model.load_limits()
+        """验证随包出厂阈值；用户可调的实盘额度不属于出厂常量。"""
+        self.assertTrue(model.limits_file(model.DATA_DIR).exists())
+        values = model.load_limits(model.DATA_DIR)
         self.assertEqual(60, values["tick_seconds"])
         self.assertEqual(10, values["min_gap_minutes"])
         self.assertEqual(model.DEFAULTS["daily_cap"], values["daily_cap"],
@@ -72,7 +72,7 @@ class LimitsTest(unittest.TestCase):
         self.assertNotIn("at", values["kinds"]["proactive"],
                          "有 at 的才由 ensure 按钟点排；proactive 是事件驱动的")
         # 每人每日上限与 night.max_retries 同一套摆法：顶层一节放这一类自己的参数
-        self.assertEqual({"per_who_daily_cap": 3}, values["proactive"])
+        self.assertEqual(3, values["proactive"]["per_who_daily_cap"])
         # 重试口径也在数据文件里：次数与退避都从这里读，代码只留兜底
         self.assertEqual(3, values["night"]["max_retries"])
         self.assertEqual([1, 5, 15], values["night"]["backoff_minutes"])

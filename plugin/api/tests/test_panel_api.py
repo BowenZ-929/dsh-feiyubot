@@ -18,6 +18,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.client import HTTPConnection
 from http.server import HTTPServer
 from pathlib import Path
@@ -54,6 +55,28 @@ BRAIN_ROUTES = ("/brain", "/brain/overview", "/brain/today", "/brain/people",
 HONEST_TWO_ANSWERS = {"/home/warehouse": (200, 409)}
 
 REQUIRED_ROUTES = (
+    ("GET", "/day/growth"), ("POST", "/day/growth/config"), ("POST", "/day/growth/profile"),
+    ("GET", "/memes/list"), ("GET", "/memes/read"), ("POST", "/memes/save"), ("POST", "/memes/settings"),
+    ("GET", "/phone/status"), ("POST", "/phone/connect"), ("POST", "/phone/inspect"),
+    ("POST", "/phone/screen"), ("POST", "/phone/action"),
+    ("GET", "/phone/browse"), ("POST", "/phone/browse/start"), ("POST", "/phone/browse/stop"), ("POST", "/phone/browse/settings"),
+    ("GET", "/learning/status"), ("GET", "/learning/read"),
+    ("GET", "/learning/search"), ("POST", "/learning/start"),
+    ("GET", "/learning/expressions"), ("POST", "/learning/expressions/set"),
+    ("GET", "/api/graph/snapshot"),
+    ("GET", "/studio/strokes"), ("GET", "/studio/strokes/read"), ("POST", "/studio/strokes/start"),
+    ("GET", "/studio/assets"), ("POST", "/studio/assets/save"),
+    ("GET", "/studio/drafts"), ("POST", "/studio/drafts/save"), ("POST", "/studio/preview"),
+    ("GET", "/observe/records"),
+    ("GET", "/observe/activity"),
+    ("GET", "/observe/rice"),
+    ("GET", "/observe/participation"),
+    ("GET", "/observe/channel"),
+    ("GET", "/observe/channel-runtime"),
+    ("GET", "/eye/status"), ("POST", "/eye/config"),
+    ("GET", "/voice/status"), ("POST", "/voice/config"),
+    ("GET", "/ear/status"), ("POST", "/ear/config"),
+    ("GET", "/model/status"), ("POST", "/model/config"),
     ("GET", "/soul"), ("GET", "/soul/check"), ("GET", "/soul/history"),
     ("GET", "/soul/pin"), ("GET", "/soul/revisions"),
     ("GET", "/soul/render"), ("POST", "/soul/edit"), ("POST", "/soul/migrate"),
@@ -64,7 +87,7 @@ REQUIRED_ROUTES = (
     # 口径变更（2026-11-05 心线落地）：心从占位页变成七条只读端点，全在这一张表里。
     ("GET", "/heart"), ("GET", "/heart/overview"), ("GET", "/heart/baseline"),
     ("GET", "/heart/mood"), ("GET", "/heart/energy"), ("GET", "/heart/offset"),
-    ("GET", "/heart/engage"),
+    ("GET", "/heart/engage"), ("GET", "/heart/changes"),
     # 2026-11-05 第二轮：/heart/effective 加入关键端点表
     ("GET", "/heart/effective"),
     # 第三轮念头层：/heart/pending 与心跳同一条只读口径（谁加路由谁登记）
@@ -87,6 +110,7 @@ REQUIRED_ROUTES = (
     ("GET", "/mouth/tone"), ("GET", "/mouth/gate"),
     # 说话线（2026-11-05）：POST /chat 是核上唯一一条真会说话的写（谁加路由谁登记）
     ("POST", "/chat"),
+    ("POST", "/chat/ack"),
     ("GET", "/home/rooms"), ("GET", "/home/access"), ("GET", "/home/list"),
     ("GET", "/home/read"), ("GET", "/home/audit"), ("GET", "/home/audit/verify"),
     ("GET", "/home/drawer"), ("GET", "/home/archive/borrow"), ("GET", "/home/warehouse"),
@@ -101,18 +125,23 @@ REQUIRED_ROUTES = (
     # 日子线第一波（2026-11-05）：十条 = 四条只读 + 六条手工触发。
     # 写着"手工触发"的那几条不是只读页：tick 排当天、night 跑四步、deliver 入队、ack 记回执。
     ("POST", "/day/tick"), ("GET", "/day/plan"), ("POST", "/day/night"),
+    ("GET", "/day/life"), ("POST", "/day/life/config"),
+    ("POST", "/day/life/adjust"), ("POST", "/day/life/generate"),
     ("GET", "/day/log"), ("GET", "/day/schedule"), ("POST", "/day/schedule/draw"),
     ("GET", "/day/pending"), ("POST", "/day/deliver"), ("POST", "/day/ack"),
     ("POST", "/day/reconcile"),
     # 日子线第五波：主动开口那一类（读账 / 动念 / 结算回执）
     ("GET", "/day/proactive"), ("POST", "/day/proactive/consider"),
+    ("POST", "/day/proactive/disable"),
+    ("POST", "/day/proactive/enable"),
     ("POST", "/day/proactive/outcome"),
     # 日子线第七波：独处循环（idle 账尾部 + 读数；手工触发一次）
     ("GET", "/day/solitude"), ("POST", "/day/solitude/consider"),
 )
 # 有必填查询参数的 GET：空 query 时必须是 400（不是 200，也不许崩）——缺哪个参数就得在 message 里点名。
 # 以后加带必填参数的端点，放进这一组；别把它学成 skip（skip 掉就没人守「缺参要响」了）。
-REQUIRED_PARAM_ROUTES = {"/mouth/split": "text", "/mouth/gate": "text",
+REQUIRED_PARAM_ROUTES = {"/memes/read": "表情编号", "/learning/read": "学习记录编号", "/learning/search": "搜索词",
+                         "/studio/strokes/read": "画作编号", "/mouth/split": "text", "/mouth/gate": "text",
                          "/home/list": "room", "/home/read": "room"}
 
 
@@ -138,6 +167,10 @@ class PanelApiTest(unittest.TestCase):
         self.root = copy_fixture("valid", self._tmp.name)
         self.store = load(self.root)
         self.brain = _brain_store(self._tmp.name)
+        # 这些用例验证基线提案；不读取正在运行的自主成长开关。
+        day_root = mock.patch.dict('os.environ', {'DAY_ROOT': str(Path(self._tmp.name) / 'day')})
+        day_root.start()
+        self.addCleanup(day_root.stop)
 
     def _call(self, method: str, path: str,
               body: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
@@ -174,7 +207,7 @@ class PanelApiTest(unittest.TestCase):
         # 一件一套口径：七个 parts 一律四个键，不再区分 suggested/limit 两套键名
         for part in chars["parts"]:
             self.assertEqual({"name", "chars", "limit", "hard"}, set(part), part["name"])
-        self.assertEqual(["名字与自称", "形象", "三句自述", "怕什么", "喜欢什么",
+        self.assertEqual(["名字与自称", "形象", "初始性格", "怕什么", "喜欢什么",
                           "待人姿态", "红线条目"],
                          [part["name"] for part in chars["parts"]])   # 顺序即渲染顺序
         self.assertEqual(7, len(chars["parts"]))
@@ -395,13 +428,32 @@ class PanelSourceTest(unittest.TestCase):
         三条全 GET）。手是读数不是动作：记下事／标完成那两条动作没有 HTTP 入口。
         """
         soul = {path for path in api.ROUTES if path.startswith("/soul")}
-        brain = {path for path in api.ROUTES if path.startswith("/brain")}
+        brain = {path for path in api.ROUTES if path.startswith("/brain") or path == "/api/graph/snapshot"}
         family = {path for path in api.ROUTES if path.startswith("/home")}
         heart = {path for path in api.ROUTES if path.startswith("/heart")}
         day = {path for path in api.ROUTES if path.startswith("/day")}
         chat = {path for path in api.ROUTES if path.startswith("/chat")}
         hand = {path for path in api.ROUTES if path.startswith("/hand")}
-        rest = set(api.ROUTES) - soul - brain - family - heart - day - chat - hand
+        eye = {path for path in api.ROUTES if path.startswith("/eye/")}
+        self.assertEqual(set(core.eye_api.EYE_ROUTES), eye)
+        voice = {path for path in api.ROUTES if path.startswith("/voice/")}
+        self.assertEqual(set(core.voice_api.VOICE_ROUTES), voice)
+        ear = {path for path in api.ROUTES if path.startswith("/ear/")}
+        self.assertEqual(set(core.ear_api.EAR_ROUTES), ear)
+        studio = {path for path in api.ROUTES if path.startswith("/studio/")}
+        self.assertEqual(set(core.studio_api.STUDIO_ROUTES), studio)
+        learning = {path for path in api.ROUTES if path.startswith("/learning/")}
+        self.assertEqual(set(core.learning_api.LEARNING_ROUTES), learning)
+        observe = {"/observe/records", "/observe/activity", "/observe/rice", "/observe/participation", "/observe/channel", "/observe/channel-runtime"}
+        self.assertEqual(set(core.observe_api.OBSERVE_ROUTES), observe)
+        self.assertEqual({"GET"}, {api.ROUTES[path] for path in observe})
+        phone = {path for path in api.ROUTES if path.startswith("/phone/")}
+        self.assertEqual(set(core.phone_api.PHONE_ROUTES), phone)
+        memes = {path for path in api.ROUTES if path.startswith('/memes/')}
+        self.assertEqual(set(core.memes_api.MEME_ROUTES), memes)
+        model_settings = {path for path in api.ROUTES if path.startswith('/model/')}
+        self.assertEqual(set(core.model_settings_api.MODEL_ROUTES), model_settings)
+        rest = set(api.ROUTES) - model_settings - soul - brain - family - heart - day - chat - hand - observe - eye - voice - ear - studio - learning - phone - memes
         self.assertEqual(set(core.home_api.HOME_ROUTES), family,
                          "家的路由就是 HOME_ROUTES 那一张表")
         self.assertEqual({"/home/write", "/home/anchors/append", "/home/consume",
@@ -460,7 +512,7 @@ class PanelSourceTest(unittest.TestCase):
         self.assertEqual(set(), chat & (soul | brain | family | heart | day | rest),
                          "说话与别的组有重叠")
         self.assertEqual(set(api.ROUTES),
-                         soul | brain | family | heart | hand | day | chat | rest,
+                         soul | brain | family | heart | hand | day | chat | observe | eye | voice | ear | studio | learning | phone | memes | model_settings | rest,
                          "路由表分不成八组：有端点没归属")
         self.assertEqual(set(REQUIRED_ROUTES),
                          {(api.ROUTES[path], path) for path in api.ROUTES},
@@ -488,10 +540,10 @@ class PanelSourceTest(unittest.TestCase):
         text = PAGE.read_text(encoding="utf-8")
         self.assertNotIn("127.0.0.1", text, "界面上不写核的地址：那是工程细节")
         # 三个文本框：喜欢什么、待人姿态、新红线条目的禁令正文（第七件由人写、人可改）
-        self.assertEqual(3, text.count("<textarea"), "可编辑的只有这三处")
+        self.assertEqual(4, text.count("<textarea"), "初始姿态、初始喜好、红线与成长纠正四处")
         # 四个固定按钮：改这一句（喜欢什么）/ 改这一句（待人姿态）/ 加这条红线 / 退回上一版；
         # 撤线按钮与提案两钮都由 JS 生成
-        self.assertEqual(4, text.count("<button"), "固定提交按钮只剩这四个")
+        self.assertEqual(9, text.count("<button"), "四个基线按钮，加成长开关、刷新、纠正、回退与只读状态刷新")
         self.assertNotIn("<form", text)
         # 七个写请求：/soul/edit 2（喜欢什么、待人姿态）、/soul/redline 2（加、撤）、
         # /soul/proposal 1、/soul/proposal/reject 1、/soul/rollback 1
@@ -523,7 +575,7 @@ class PanelSourceTest(unittest.TestCase):
                                      "%s 出现的那行不能有写口：%s" % (word, line))
         # 原来那句「还没接」改成「参数开口子以后再放这里」：页面不再是占位说明。
         self.assertNotIn("还没接：这一页只有地址", text)
-        self.assertIn("参数开口子以后再放这里", text)
+        self.assertIn('href="eye"', text)
 
     def test_readonly_pages_have_no_write_controls(self):
         """两页一条规则：页面在、只读说明在、没有任何写控件（不钉占位文案，心/脑上线都不用改）。
@@ -535,7 +587,7 @@ class PanelSourceTest(unittest.TestCase):
         self.assertIn("心 · 只读", text)
         self.assertRegex(text, r'id="readonly-note"[^>]*data-readonly="true"')
         self.assertIn("§9.2", text, "只读的理由要引 architecture §9.2")
-        for needle in ("button", "form", "textarea", "<input"):
+        for needle in ("<form", "<textarea"):
             self.assertNotIn(needle, text.lower(), "heart.html 里出现了写控件：%s" % needle)
         for needle in ('"post"', '"put"', '"delete"'):
             self.assertNotIn(needle, text.lower(), "heart.html 的请求只能是 GET：%s" % needle)
@@ -552,7 +604,7 @@ class PanelSourceTest(unittest.TestCase):
 
     def test_panel_page_reads_five_blocks_and_budget(self):
         text = PAGE.read_text(encoding="utf-8")
-        for label in ("名字", "形象", "三句自述", "怕什么", "喜欢什么", "待人姿态",
+        for label in ("名字", "形象", "初始性格", "怕什么", "标志性喜好", "待人姿态",
                       "红线", "合计"):
             self.assertIn(label, text)
         self.assertIn('id="ro-appearance"', text)          # 只读展示
@@ -565,6 +617,26 @@ class PanelContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # 路由合同不依赖真实 QQ 通道是否在线；协议返回校验另有独立测试。
+        channel_probe = mock.patch('api.observe.HTTPConnection')
+        connection = channel_probe.start().return_value
+        self.addCleanup(channel_probe.stop)
+        connection.getresponse.return_value.status = 200
+        def probe_request(method, path):
+            data = ({'ok': True, 'channel': 'onebot-business', 'mode': 'send', 'core_enabled': False,
+                     'started_at': '2026-11-09T00:00:00Z', 'core_timeout_ms': 45000,
+                     'policy': None, 'gate_words': None, 'disk_matches': None}
+                    if path == '/runtime' else {'channel': 'nonebot', 'bots': []})
+            connection.getresponse.return_value.read.return_value = json.dumps(data).encode()
+        connection.request.side_effect = probe_request
+        # 枚举接口不应启动真实设备后台任务；实际会话另由手机测试验收。
+        patcher = mock.patch("organs.day.phone_browse.start", return_value={"id":"contract-only", "status":"queued"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # 合同检查不依赖真机连接；设备状态的成功/失败由 phone_api 测试覆盖。
+        phone_status = mock.patch("organs.hand.phone.status", return_value={"ok": True, "connected": False})
+        phone_status.start()
+        self.addCleanup(phone_status.stop)
         self.root = copy_fixture("valid", self._tmp.name)
         self.store = load(self.root)
         self.brain = _brain_store(self._tmp.name)
@@ -828,6 +900,17 @@ class DevserverPageTest(unittest.TestCase):
                           "/home": "home.html", "/day": "day.html",
                           "/settings": "settings.html", "/chat": "chat.html",
                           "/about": "about.html", "/memory": "memory.html",
+                          "/galaxy": "galaxy.html", "/galaxy.js": "galaxy.js",
+                          "/growth-panel.js": "growth-panel.js", "/model-settings.js": "model-settings.js",
+                          "/observe": "observe.html",
+                          "/eye": "eye.html",
+                          "/voice": "voice.html",
+                          "/ear": "ear.html",
+                          "/studio": "studio.html",
+                          "/learning": "learning.html",
+                          "/expressions": "expressions.html",
+                          "/memes": "memes.html",
+                          "/phone": "phone.html",
                           "/panel-base.js": "panel-base.js"},
                          devserver.PAGE_ROUTES)
         data = devserver.read_page("soul.html")
@@ -918,7 +1001,9 @@ class DevserverHttpTest(unittest.TestCase):
         self.assertIn("心 · 只读".encode("utf-8"), body)
         # 口径变更（2026-11-05 心线落地，第 8 处）：心页是活视图，不再是"未接入"占位页。
         # 断真话：只读说明在、页面上没有任何写控件、也不再说自己没接入。
-        self.assertNotIn(b"<button", body.lower())
+        self.assertNotIn(b'method: "POST"', body)
+        self.assertIn(b'id="changes-refresh"', body)
+        self.assertEqual(200, self._get("/heart/changes")[0])
         self.assertNotIn("未接入：这一层还没有代码".encode("utf-8"), body)
 
         # /brain 不再是一张页（2026-11-06 脑页退场）：这条地址回到 JSON 端点，
@@ -971,7 +1056,16 @@ class RouteRegistryTest(unittest.TestCase):
                   ("day_api.DAY_ROUTES", core.day_api.DAY_ROUTES),
                   ("version_api.VERSION_ROUTES", core.version_api.VERSION_ROUTES),
                   ("chat_api.CHAT_ROUTES", core.chat_api.CHAT_ROUTES),
-                  ("hand_api.HAND_ROUTES", core.hand_api.HAND_ROUTES))
+                  ("hand_api.HAND_ROUTES", core.hand_api.HAND_ROUTES),
+                  ("observe_api.OBSERVE_ROUTES", core.observe_api.OBSERVE_ROUTES),
+                  ("eye_api.EYE_ROUTES", core.eye_api.EYE_ROUTES),
+                  ("voice_api.VOICE_ROUTES", core.voice_api.VOICE_ROUTES),
+                  ("ear_api.EAR_ROUTES", core.ear_api.EAR_ROUTES),
+                  ("studio_api.STUDIO_ROUTES", core.studio_api.STUDIO_ROUTES),
+                  ("memes_api.MEME_ROUTES", core.memes_api.MEME_ROUTES),
+                  ("model_settings_api.MODEL_ROUTES", core.model_settings_api.MODEL_ROUTES),
+                  ("learning_api.LEARNING_ROUTES", core.learning_api.LEARNING_ROUTES),
+                  ("phone_api.PHONE_ROUTES", core.phone_api.PHONE_ROUTES))
         sources = " / ".join(name for name, _ in tables)
         merged = core._merge(*[table for _, table in tables])
         self.assertEqual(merged, core.ROUTES, "汇总表不是这六张表的拼接：%s" % sources)

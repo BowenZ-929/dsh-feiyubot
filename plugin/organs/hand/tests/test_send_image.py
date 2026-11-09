@@ -402,9 +402,10 @@ class UtteranceTest(BaseCase):
 
     def test_the_keyword_is_optional_and_backward_compatible(self):
         params = inspect.signature(actions.send_image).parameters
-        self.assertEqual(("who", "scene", "target", "path", "name", "utterance", "now", "root"),
-                         tuple(params), "新键只加一个，位置在 name 后面")
+        self.assertEqual(("who", "scene", "target", "path", "name", "utterance", "now", "root", "defer"),
+                         tuple(params))
         self.assertIsNone(params["utterance"].default, "默认 None：老调用一个字都不用改")
+        self.assertIs(params["defer"].default, False, "直接发图接口默认仍立即发送")
 
 
 if __name__ == "__main__":

@@ -432,7 +432,8 @@ def _resolve_image(*, path: Any, name: Any, utterance: Any, root) -> Dict[str, A
 
 
 def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any = None,
-               utterance: Any = None, now: Any = None, root=None) -> Dict[str, Any]:
+               utterance: Any = None, now: Any = None, root=None,
+               defer: bool = False) -> Dict[str, Any]:
     """把一张图交给通道发出去：图从家里取（只取指针），或直接给绝对路径。
 
     `utterance` 是**可选**的名字来源：给了就走 imgphrase 那张短语表，解出名字再照旧去家里找。
@@ -441,6 +442,7 @@ def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any
 
     **手自己绝不声明「发过了」**：只有通道回 `ok == true` 且 `sent > 0` 才记 done，
     人话里带通道给的 sent 与理由码；sent=0、连不上、回的东西不对劲，一律 failed。
+    defer=True 只准备图片，随聊天回复统一发送；reserved 等实际发送回执再结算。
     """
     started = time.monotonic()
     params: Dict[str, Any] = {"scene": scene, "target": target, "path": path, "name": name,
@@ -481,6 +483,15 @@ def send_image(*, who: str, scene: Any, target: Any, path: Any = None, name: Any
                        detail={"stage": "resolve", "reason": resolved["origin"],
                                "path": resolved.get("path"), "name": name,
                                "utterance": utterance, "wanted": wanted_name})
+
+    if defer:
+        detail = dict(resolved, scene=scene_value, target=target_value)
+        out = _envelope("reserved", "send_image", "IMAGE_PREPARED", "图片已准备，等待通道发送",
+                        who=who, detail=detail, ledger_id=ledger_id)
+        out["receipt"] = {"ledger_id": ledger_id, "who": who,
+                          "root": str(store.hand_root(root)),
+                          "params": _accounting(params, detail, SEND_ACCOUNTING)}
+        return out
 
     outcome = channel.say_image(scene=scene_value, target=target_value, path=resolved["path"],
                                 name=resolved["name"])

@@ -94,6 +94,8 @@ class _CardBox:
         return {"id": who} if who in self.cards else None
 
     def card_view(self, person_id):
+        if self.boom:
+            raise RuntimeError("脑抖了一下")
         card = self.cards.get(person_id)
         return dict(card) if card else None
 

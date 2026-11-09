@@ -54,6 +54,21 @@ def _transport(reply: str):
 class RemindTest(unittest.TestCase):
     """记事这一条线：卡落在哪、嘴说的是什么、日子线认不认。"""
 
+    def test_confirmed_intent_without_task_or_time_asks_without_writing(self):
+        with mock.patch.object(remind.hand_actions, "add_task") as add:
+            no_task = remind.handle("", intent={"when": ["十分钟后"], "task": ""}, now=NOW)
+            no_time = remind.handle("", intent={"when": [], "task": "喝水"}, now=NOW)
+        self.assertEqual("no_task", no_task["why"])
+        self.assertEqual("no_time", no_time["why"])
+        add.assert_not_called()
+
+    def test_semantic_absolute_date_and_task_are_not_mixed_in_time_parser(self):
+        with mock.patch.object(remind.hand_actions, "add_task", return_value={"state": "done", "card_id": "test"}) as add:
+            result = remind.handle("", who=WHO, now=NOW, intent={"when": ["明天", "下午三点"], "task": "取快递"})
+        self.assertTrue(result["ok"])
+        self.assertEqual("2026-11-07T15:00:00+09:00", add.call_args.kwargs["due"])
+        self.assertEqual("取快递", add.call_args.kwargs["title"])
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

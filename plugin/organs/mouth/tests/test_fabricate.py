@@ -68,6 +68,20 @@ class NotCheckedIsNotTheSameAsJudged(unittest.TestCase):
 class HittingWordsAreEvidence(unittest.TestCase):
     """命中返回的是一条证据（哪个标记、什么细节、哪一句、为什么），不是布尔。"""
 
+    def test_current_agreement_is_not_a_claim_about_past_memory(self):
+        for line in ('那就照你说的算吧——耳朵软归耳朵软，别往可爱上再挤了。',
+                     '按你跟我说的办，我把这几句话慢慢捋清。',
+                     '你说的这个角度，我之前倒没想过。'):
+            with self.subTest(line=line):
+                self.assertIsNone(check(line, []))
+        for line in ('你说的是周三下午去看病。','你上次说的就是周三下午去看病。',
+                     '上次你跟我说的周三下午去看病，我还记着。',
+                     '之前你跟我讲的，周三下午去看病。',
+                     '刚才你跟我说的周三下午去看病。',
+                     '那就照你说的算吧，但你说过周三下午去看病。'):
+            with self.subTest(line=line):
+                self.assertIsNotNone(check(line, []))
+
     def test_the_marker_and_the_detail_come_back(self):
         hit = check(INVENTED, [])
         self.assertEqual("你当时说", hit.marker)

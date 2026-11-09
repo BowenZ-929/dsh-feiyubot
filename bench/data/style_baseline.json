@@ -1,0 +1,86 @@
+{
+  "note": "八股／人味回归的量尺口径与阈值。这张表里的每个数都是口径，不是验收线：改口径＝改这一份，代码里一个数都不写。语料到位后先按 docs/organs/mind/style-baseline.md 的「怎么读那三列判定」看读数，再动 ranges，动完把新数写回这里。",
+  "probe_version": "probes-v1",
+  "probe_count": 20,
+  "runs_default": 3,
+  "probes": "bench/probes.jsonl",
+  "detail": "bench/data/style_runs.jsonl",
+  "table": "bench/data/style_table.md",
+  "dry": {
+    "replies": "bench/data/dry_replies.json",
+    "config": {
+      "provider": "bench",
+      "model": "bench-dry",
+      "base_url": "http://bench.invalid/v1",
+      "key_env": "QQAGENT_LLM_KEY",
+      "timeout_ms": 1000,
+      "retries": 0,
+      "temperature": 0,
+      "max_tokens": 400
+    },
+    "env": {
+      "QQAGENT_LLM_KEY": "bench-dry-key"
+    }
+  },
+  "corpus": {
+    "path": "bench/data/legacy.jsonl",
+    "assistant_role": "assistant",
+    "user_role": "user",
+    "min_texts_per_role": 10,
+    "note": "语料不在仓库里：没放进来之前指标 1／2 一律 N/A、判定写 no-corpus。她自己的回话不许拿来冒充人类对照。"
+  },
+  "categories": {
+    "praise": "被夸",
+    "care": "被关心",
+    "question": "被问事",
+    "cold": "被冷落",
+    "help": "要她做事（她做不到）",
+    "repeat": "被要求重复",
+    "smalltalk": "闲聊"
+  },
+  "min_per_category": 2,
+  "scenes": {
+    "default": "private",
+    "allowed": [
+      "private",
+      "group",
+      "unknown"
+    ],
+    "group_min": 1,
+    "group_max": 2
+  },
+  "text": {
+    "sentence_ends_from": "tone_rules.sentence_end_chars",
+    "strip_chars": "，,。！？!?…；;：:、　 \"'“”‘’（）()《》<>—～~·\n\t",
+    "ngram": 3,
+    "template_window": 6
+  },
+  "ranges": {
+    "sentence_ratio": [
+      0.75,
+      2
+    ],
+    "reply_ratio": [
+      0.6,
+      2
+    ],
+    "template_rate_max": 0.25,
+    "note": "先给一组保守落地值；语料到位后用 role=user 那侧的同一把尺（human 句长中位／human 回复长中位／human 模板复现率）重标。两边哪一侧超出区间就标哪一侧：低于下限 too-short、高于上限 too-long、模板率超限 too-template。"
+  },
+  "heart": {
+    "source": "环境变量 HEART_ROOT > plugin/organs/heart/data",
+    "profiles": {
+      "source": null,
+      "low": {
+        "energy": 20,
+        "mood": 60
+      }
+    },
+    "note": "tone_rules.max_chars_low 只在低档（mood < 0.35 或 energy < 30）生效：正常行照源心读数走；--too-short 的对照行与实验行都钉在 low（energy=20）上，两行只差 tone_rules.max_chars_low 一个字段。"
+  },
+  "now": "2026-11-05T20:00:00+00:00",
+  "who": "3425635473",
+  "experiment": {
+    "too_short_max_chars_low": 8
+  }
+}

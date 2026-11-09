@@ -30,6 +30,21 @@ class PackTest(unittest.TestCase):
         self.assertEqual(0, out["skipped"][0]["remaining"]["quota"])
         self.assertEqual(1, out["skipped"][0]["need"]["slots"])
 
+    def test_spare_slots_fill_by_rank_without_stealing_other_buckets(self):
+        limits = PackLimits(slots=4, today_quota=1, longterm_quota=1, hot_quota=0)
+        candidates = [_candidate('t1', 'today', '一'), _candidate('t2', 'today', '二'),
+                      _candidate('t3', 'today', '三'), _candidate('t4', 'today', '四'),
+                      _candidate('h1', 'hot', '关闭桶'), _candidate('l1', 'longterm', '旧背景')]
+        out = pack(candidates, limits=limits)
+        self.assertEqual(['t1', 't2', 't3', 'l1'], [r['id'] for r in out['items']])
+        self.assertEqual([False, True, True, False], [r['borrowed_slot'] for r in out['items']])
+        self.assertEqual([1, 2, 3, 6], [r['rank'] for r in out['items']])
+        self.assertEqual(4, out['slots_used'])
+        self.assertTrue(all(r['remaining']['quota'] >= 0 for r in out['skipped']))
+        ample = pack(candidates, limits=PackLimits(slots=10, today_quota=1, longterm_quota=1, hot_quota=0))
+        self.assertNotIn('h1', {r['id'] for r in ample['items']})
+        self.assertEqual(5, ample['slots_used'])
+
     def test_item_cap_truncates_and_marks_capped(self):
         limits = PackLimits(slots=1, per_item_cap=5, today_quota=1, longterm_quota=1)
         out = pack([_candidate("t1", "today", "一二三四五六七八")], limits=limits)

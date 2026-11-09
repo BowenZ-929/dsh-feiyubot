@@ -117,19 +117,21 @@ def check(text: str, actions: Any, table: Optional[Mapping[str, Any]] = None) ->
     ClaimBroken，不许猜成「账上没有这个动作」。
 
     扫描按出现顺序，第一个「动作类动词对不上账、又不是说话类动词」的就返回：说话类动词一律豁免
-    （说话类动词不算动作），账上对得上的动词一律放行（真做过的就是实话）。
+    （说话类动词不算动作）。历史作品凭据仅支持过去完成式，不能证明新动作已启动。
     """
     rules = _rules(table)                 # 表先校验：坏表当场响，不许因为这一轮没给账就悄悄跳过
     if actions is None:
         return None
     ledger = _ledger(actions)
+    current = {one['verb'].strip() for one in actions if not one.get('historical')}
+    future_prefixes = tuple(rules.person + prefix for prefix in rules.bare_prefixes)
     body = _text_of(text)
     for found in _matches(body, rules):
         verb = found.group(1)
         if verb in rules.speech_verbs:
             continue                      # 纯说话不算：说话不是动作，豁免
-        if verb in ledger:
-            continue                      # 真做过（有账）：放行
+        if verb in ledger and (verb in current or not found.group(0).startswith(future_prefixes)):
+            continue                      # 旧作品支持过去创作，不证明这次又开始了新动作
         return _hit(rules, body, found, verb)
     return None
 

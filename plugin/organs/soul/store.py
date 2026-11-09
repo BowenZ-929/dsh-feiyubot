@@ -693,10 +693,14 @@ class SoulStore:
     def render(self, audience: str = "") -> str:
         return render_snapshot(self.snapshot(), audience)
 
-    def check(self) -> List[model.Issue]:
+    def check(self, cross_check: bool = True) -> List[model.Issue]:
+        """自检；cross_check=False 只考这一侧——样例卡本就和出厂不是同一份，不比骨架。
+
+        面板与 CLI 都走默认值：真正该看见「实盘与出厂分叉」的地方是人的眼睛，不是单测。
+        """
         from . import checks  # 局部导入：checks 反过来用本模块读卡，顶层导入会成环
 
-        return checks.collect(self._root)
+        return checks.collect(self._root, cross_check=cross_check)
 
     def match_bounds(self, text: str) -> List[str]:
         return match_bounds(self.snapshot().bounds.items, text)

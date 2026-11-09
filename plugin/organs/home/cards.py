@@ -45,7 +45,6 @@ SHELF_ROOM = access.DRAWER_ROOM
 DATE_KINDS: Tuple[str, ...] = ("日记", "梦")
 #: 列表里正文只带这么多字；全文去 read_item 取（一页才翻得完，一次也不会被几百篇日记撑爆）。
 LIST_EXCERPT_CHARS = 120
-DIARY_MIN_CHARS = 80
 DIARY_MAX_CHARS = 150
 
 # 家里能当正文读的后缀；别的后缀（图、音视频）只认指纹与路径，不读正文。
@@ -302,7 +301,7 @@ def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
                        room_name: str) -> Dict[str, Any]:
     """按 kind 校验字段；返回补齐后的 params。
 
-    日记与梦是**她写的**：一天一张、80–150 字；梦另带 `dream_of` 并标 `source_type=梦`。
+    日记与梦是**她写的**：一天一张、非空且最多150字；梦另带 `dream_of` 并标 `source_type=梦`。
     自画像只登记指针与指纹（不搬本体）；人设卡是参考卡，接口上要能一眼看出它不进提示词。
     """
     params = dict(raw.get("params") or {})
@@ -317,12 +316,12 @@ def _check_kind_fields(raw: Dict[str, Any], kind: str, home: Path,
                             "%s 的 date 要 YYYY-MM-DD：%r" % (kind, date))
         text = _need(params, "text", kind)
         count = len(text)
-        if count < DIARY_MIN_CHARS or count > DIARY_MAX_CHARS:
+        if count > DIARY_MAX_CHARS:
             raise CardError("KIND_TEXT_LENGTH",
                             {"kind": kind, "length": count,
-                             "min": DIARY_MIN_CHARS, "max": DIARY_MAX_CHARS},
-                            "%s 要 %d–%d 字，这篇 %d 字"
-                            % (kind, DIARY_MIN_CHARS, DIARY_MAX_CHARS, count))
+                             "min": 1, "max": DIARY_MAX_CHARS},
+                            "%s 最多 %d 字，这篇 %d 字"
+                            % (kind, DIARY_MAX_CHARS, count))
         _need(params, "mood", kind)
         memories = params.get("from_memories")
         if memories is not None and (not isinstance(memories, list)

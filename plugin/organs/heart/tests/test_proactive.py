@@ -209,6 +209,40 @@ class OtherSideSpokeTest(_Root):
         self.assertFalse(file_of(self.root).exists(), "本来就没账：清了个寂寞，不必造文件")
 
 
+class LaterReplyTest(_Root):
+    def test_return_is_scoped_to_latest_ignored_recipient_and_keeps_history(self):
+        import json
+        context={'who':'10000011','session_id':'qq:group:70001','delivery_id':'test-delivery'}
+        store.write_json(file_of(self.root),{'config':{'mute_after':1,'mute_hours':12}})
+        proactive.sent(root=self.root,now=DAY,context=context)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore');proactive.outcome('ignored',root=self.root,now=minutes_after(5))
+        before=file_of(self.root).read_bytes()
+        for who,session,when in [('10000012',context['session_id'],minutes_after(10)),
+                                  (context['who'],'qq:private:10000011',minutes_after(10)),
+                                  (context['who'],context['session_id'],minutes_after(-1))]:
+            result=proactive.receive_reply(who,session,root=self.root,now=when)
+            self.assertFalse(result['ok'])
+            self.assertEqual(before,file_of(self.root).read_bytes())
+        result=proactive.receive_reply(context['who'],context['session_id'],root=self.root,now=minutes_after(10))
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['was_muted'])
+        after=proactive.overview(root=self.root,now=minutes_after(10))
+        self.assertFalse(after['muted']);self.assertEqual(0,after['streak'])
+        self.assertEqual(json.loads(before)['history'],after['history'])
+        saved={p.name:p.read_bytes() for p in self.root.iterdir()}
+        proactive.receive_reply(context['who'],context['session_id'],root=self.root,now=minutes_after(11))
+        self.assertEqual(saved,{p.name:p.read_bytes() for p in self.root.iterdir()})
+
+    def test_legacy_unattributed_or_older_other_recipient_does_not_restore(self):
+        old={'at':DAY,'outcome':'ignored','context':{'who':'10000011','session_id':'qq:private:10000011','delivery_id':'old'}}
+        for latest in ({'at':minutes_after(1),'outcome':'ignored'},dict(old,context={**old['context'],'who':'10000012'})):
+            store.write_json(file_of(self.root),{'streak':3,'muted_until':minutes_after(60),'history':[old,latest]})
+            before=file_of(self.root).read_bytes()
+            result=proactive.receive_reply('10000011','qq:private:10000011',root=self.root,now=minutes_after(10))
+            self.assertFalse(result['ok']);self.assertEqual(before,file_of(self.root).read_bytes())
+
+
 class ExpiryTest(_Root):
     """时间到也恢复：is_muted 读时现算，不写盘、不挂定时器。"""
 

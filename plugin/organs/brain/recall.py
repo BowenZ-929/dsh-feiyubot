@@ -11,12 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from . import pack as pack_mod
 from .model import (ALPHA_DEFAULT, BETA_DEFAULT, SIDE_OTHER,
                     SOURCE_LIVED, SOURCE_MIGRATED, SOURCE_SCHEDULED, SOURCE_TYPES,
-                    pack_limits)
-
-TIME_TODAY = ("今天", "刚才", "刚刚", "这会儿")
-# 只放硬过去词：说过/记得/原来不是时间词，走 both（今天和长期都查）
-TIME_PAST = ("以前", "之前", "昨天", "前几天", "上周", "上个月", "上次")
-
+                    pack_limits, parse_ts, valid_who)
 
 def compact(text: str) -> str:
     return "".join((text or "").split())
@@ -55,14 +50,6 @@ def literal_score(query: str, text: str) -> float:
     return overlap * 3.0 / max(1, len(qb))
 
 
-def _route(query: str) -> str:
-    if any(word in query for word in TIME_TODAY):
-        return "today"
-    if any(word in query for word in TIME_PAST):
-        return "longterm"
-    return "both"
-
-
 def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
     source_type = entry.get("source_type") or SOURCE_LIVED
     if source_type not in SOURCE_TYPES:
@@ -78,9 +65,13 @@ def _candidate(entry: Dict[str, Any], source: str) -> Dict[str, Any]:
         display_text = quote
     return {
         "id": entry.get("id", ""),
+        "turn_id": entry.get("turn_id", ""),
+        "context_refs": entry.get("context_refs", []),
         "source": source,
         "kind": entry.get("kind", "fact"),
         "ts": entry.get("ts", ""),
+        # 同一时刻可写成UTC或本地时间；仅排序用，不覆盖原始证据时间。
+        "sort_time": parse_ts(entry.get("ts") or "0001-01-01T00:00:00+00:00"),
         "who": entry.get("who", ""),
         "text": entry.get("text", ""),
         "count": entry.get("count", 1),
@@ -106,24 +97,21 @@ def recall(query: str, today_entries: Sequence[Dict[str, Any]],
            longterm_entries: Sequence[Dict[str, Any]],
            hot_entries: Optional[Sequence[Dict[str, Any]]] = None,
            who: Optional[str] = None) -> Dict[str, Any]:
-    """回想：时间词路由 → 字面打分 → 装包（分桶配额 + 预算 + 每项 cap）。"""
+    """回想：在役三层候选 → 字面打分 → 装包（分桶配额 + 预算 + 每项 cap）。"""
     q = (query or "").strip()
     if not q:
         return {"query": query, "items": [], "has_material": False,
                 "slots_used": 0, "budget": {"slots": pack_limits.slots},
                 "skipped": [], "empty_reason": "没材料：query 为空"}
-    route = _route(q)
-    candidates: List[Dict[str, Any]] = []
-    if route in ("today", "both"):
-        candidates.extend(_candidate(entry, "today") for entry in today_entries)
-    if route in ("longterm", "both"):
-        candidates.extend(_candidate(entry, "longterm") for entry in longterm_entries)
-    if route in ("hot", "both"):
-        candidates.extend(_candidate(entry, "hot") for entry in (hot_entries or []))
+    # 问句中的时间不等于记录写入时间：今天的偏好可能记在昨天，今天也能纠正上周的事。
+    candidates = [_candidate(entry, source) for source, entries in (
+        ("today", today_entries), ("longterm", longterm_entries), ("hot", hot_entries or []))
+        for entry in entries]
 
     scored: List[Dict[str, Any]] = []
     for entry in candidates:
-        score = literal_score(q, entry.get("text") or entry.get("note") or "")
+        matches = {field: literal_score(q, entry.get(field, "")) for field in ("text", "note")}
+        score = max(matches.values())
         if score <= 0:
             continue
         if who and entry.get("who") == who:
@@ -134,6 +122,7 @@ def recall(query: str, today_entries: Sequence[Dict[str, Any]],
             score -= 3.0     # 日程模拟排在亲历之后；只作谈资，不作证词
         item = dict(entry)
         item["score"] = round(score, 3)
+        item["matched_by"] = [field for field, value in matches.items() if value > 0]
         scored.append(item)
     fallback = ""
     if any(word in q for word in ("说过", "记得", "上次", "以前", "之前", "聊过")):
@@ -144,17 +133,57 @@ def recall(query: str, today_entries: Sequence[Dict[str, Any]],
                   if candidate.get("id") not in scored_ids]
         for item in recent:
             item["score"] = 0.0
-        recent.sort(key=lambda pair: pair.get("ts", ""), reverse=True)
+            item["matched_by"] = ["recent"]
+        recent.sort(key=lambda pair: pair["sort_time"], reverse=True)
         scored.extend(recent)
         fallback = "recent"
 
-    scored.sort(key=lambda pair: (pair.get("score", 0), pair.get("ts", "")), reverse=True)
+    # 引文只在同人的指定回合中定位；重复候选层先按实际记忆编号合一。
+    by_id = {entry['id']: entry for entry in reversed(candidates) if entry['id']}
+    turns = {}
+    for entry in by_id.values():
+        if entry['turn_id'] and entry['testimony'] and entry['side'] == SIDE_OTHER:
+            turns.setdefault((entry['who'], entry['turn_id']), []).append(entry)
+    links = {}
+    for entry in by_id.values():
+        if not entry['note'] or not entry['testimony'] or entry['side'] != SIDE_OTHER or not valid_who(entry['who']):
+            continue
+        for ref in entry['context_refs']:
+            sources = [old for old in turns.get((entry['who'], ref['turn_id']), [])
+                       if ref['quote'] in old['text']]
+            if len(sources) == 1 and sources[0]['sort_time'] < entry['sort_time']:
+                links.setdefault(sources[0]['id'], []).append(entry)
+                # 合批理解挂在本人末条；后续引文可能指向同回合的首条。
+                carriers = [old for old in turns[(entry['who'], ref['turn_id'])]
+                            if old['note']]
+                if (len(carriers) == 1 and carriers[0]['id'] != sources[0]['id']
+                        and carriers[0]['sort_time'] < entry['sort_time']):
+                    links.setdefault(carriers[0]['id'], []).append(entry)
+    ranked = {entry['id']: entry for entry in reversed(scored) if entry['id']}
+    # 边只从早到晚；按时间走一次即可把查询相关度传给连续的后续更正/承接。
+    for source in sorted(by_id.values(), key=lambda item: item['sort_time']):
+        origin = ranked.get(source['id'])
+        if origin is None:
+            continue
+        for entry in links.get(source['id'], []):
+            item = ranked.get(entry['id'])
+            if item is None:
+                item = dict(entry, score=origin['score'], matched_by=[])
+                ranked[entry['id']] = item
+                scored.append(item)
+            item['score'] = max(item['score'], origin['score'])
+            if 'context_link' not in item['matched_by']:
+                item['matched_by'].append('context_link')
+            if source['id'] not in item.setdefault('context_from', []):
+                item['context_from'].append(source['id'])
 
-    # 去重：同一人同一句只留一条（装包前）
+    scored.sort(key=lambda pair: (pair.get("score", 0), bool(pair.get('context_from')), pair["sort_time"]), reverse=True)
+
+    # 同一原话可能承接不同前文；理解也相同才去重，避免吞掉后来的更正。
     deduped: List[Dict[str, Any]] = []
     seen = set()
     for item in scored:
-        key = (item.get("who"), item.get("text") or item.get("note"))
+        key = (item.get("who"), item.get("text"), item.get("note"))
         if key in seen:
             continue
         seen.add(key)

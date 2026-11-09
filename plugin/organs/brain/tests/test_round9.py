@@ -47,7 +47,7 @@ class NoteScoringTest(unittest.TestCase):
         store = self._store(tmp)
         from organs.mind import conversation
 
-        recalled, text = conversation._recall(store, "你为什么叫江迟", "1000001")
+        recalled, text, _audit = conversation._recall(store, "你为什么叫江迟", "1000001")
         self.assertIn("（无原话，来自旧家记录）", text)
         self.assertIn("她理解：", text)
 

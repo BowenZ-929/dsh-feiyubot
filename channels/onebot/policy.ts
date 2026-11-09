@@ -21,9 +21,9 @@ export type BatchPolicy = {
   continueMs: Record<ContinueScene, number>;
   hardCapMs: number;
   maxMsgs: number;
-  mentionCapMs: number;
+  mentionCapMs: number; // 兼容旧配置保留；@现沿用普通窗口，不再缩短等待。
   bareImageMs: number;
-  stickerMs: number;
+  stickerMs: number; // 兼容旧配置保留；表情现沿用普通消息窗口。
 };
 
 // 删掉的键不许静默被忽略：文件里还写着旧键，说明有人还在按旧口径调系数，
@@ -51,6 +51,9 @@ export type OutboundPolicy = {
   bubbleClauseMarks: string[];
   // 语气词保护：切点右边以这些词开头时不切（把切点往前挪）。
   bubbleTailParticles: string[];
+  // 逗号粘连的长句「按概率」拆两泡：命中率是百分比整数（确定性命中，不是随机数）。
+  commaSplitRatePct: number;
+  commaSplitMarks: string[];
   defaultReplies: string[];
 };
 
@@ -65,6 +68,7 @@ export type DecidePolicy = {
 };
 
 export type Policy = {
+  context: { maxMessages: number; maxChars: number; maxAgeMs: number };
   batch: BatchPolicy;
   outbound: OutboundPolicy;
   quota: QuotaPolicy;
@@ -140,8 +144,11 @@ export const readPolicy = (raw: unknown, label = "data/policy.json"): Policy => 
   const outbound = section(raw, "outbound", label);
   const quota = section(raw, "quota", label);
   const decide = section(raw, "decide", label);
+  const context = section(raw, "context", label);
 
   return {
+    context: { maxMessages: count(context.maxMessages, "context.maxMessages", label),
+      maxChars: count(context.maxChars, "context.maxChars", label), maxAgeMs: ms(context.maxAgeMs, "context.maxAgeMs", label) },
     batch: {
       quietGapMs: ms(batch.quietGapMs, "batch.quietGapMs", label),
       openMs,
@@ -161,6 +168,8 @@ export const readPolicy = (raw: unknown, label = "data/policy.json"): Policy => 
       bubbleSentenceMarks: lines(outbound.bubbleSentenceMarks, "outbound.bubbleSentenceMarks", label),
       bubbleClauseMarks: lines(outbound.bubbleClauseMarks, "outbound.bubbleClauseMarks", label),
       bubbleTailParticles: lines(outbound.bubbleTailParticles, "outbound.bubbleTailParticles", label),
+      commaSplitRatePct: count(outbound.commaSplitRatePct, "outbound.commaSplitRatePct", label),
+      commaSplitMarks: lines(outbound.commaSplitMarks, "outbound.commaSplitMarks", label),
       defaultReplies: lines(outbound.defaultReplies, "outbound.defaultReplies", label),
     },
     quota: {

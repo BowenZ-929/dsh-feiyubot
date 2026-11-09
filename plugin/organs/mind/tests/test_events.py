@@ -17,6 +17,7 @@ from organs.mind import events
 POSITIVE = [
     ("praise", dict(text="你真的很厉害，这次多亏你", scene="private"), "praise"),
     ("care", dict(text="记得吃饭，别累着", scene="private"), "care"),
+    ("care-group", dict(text="记得吃饭，别累着", scene="group"), "care"),
     ("cold", dict(text="在吗", scene="private", recent_replies=["嗯", "哦", "好"]), "cold"),
     ("insult", dict(text="你这个废物，给我滚开", scene="group"), "insult"),
     ("rejected", dict(text="不用了，我自己来", scene="private",
@@ -26,7 +27,7 @@ POSITIVE = [
 # 五类的反例：必须有话说、说的不是这一类，结果只能是 None（不许瞎猜）
 NEGATIVE = [
     ("praise", dict(text="今天下午三点开会", scene="private")),
-    ("care", dict(text="记得吃饭，别累着", scene="group")),        # 关心只认私聊
+    ("care-group", dict(text="第三季度报表我改完了", scene="group")),
     ("care-private", dict(text="第三季度报表我改完了", scene="private")),
     ("cold-single", dict(text="在吗", scene="private", recent_replies=["嗯"])),
     ("cold-long", dict(text="在吗", scene="private",
@@ -137,10 +138,10 @@ class DataDrivenTest(unittest.TestCase):
                              data_path=path)["kind"])
 
     def test_scene_switches_come_from_the_file(self):
-        path = self._copy(lambda cfg: cfg["scenes"]["care"].append("group"))
+        path = self._copy(lambda cfg: cfg["scenes"]["care"].remove("group"))
         text = "记得吃饭"
-        self.assertIsNone(events.recognize(text, scene="group")["kind"])
-        self.assertEqual(events.recognize(text, scene="group", data_path=path)["kind"], "care")
+        self.assertEqual(events.recognize(text, scene="group")["kind"], "care")
+        self.assertIsNone(events.recognize(text, scene="group", data_path=path)["kind"])
 
     def test_broken_rules_are_named_not_swallowed(self):
         bad = self.tmp / "bad.json"

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>语音 · 她的面板</title>
+<style>
+:root{color-scheme:light dark;--bg:var(--dsw-alias-bg-l1,Canvas);--fg:var(--dsw-alias-text-l1,CanvasText);--line:var(--dsw-alias-border-l2,#8884);--brand:var(--dsw-alias-brand,#5475d6)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,"PingFang SC",sans-serif}main{max-width:880px;margin:auto;padding:32px 24px}h1{font-size:27px;margin:0}h2{font-size:18px;margin:0}.muted{opacity:.65}.toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.card,article{border:1px solid var(--line);border-radius:14px;padding:20px;margin:18px 0}button{font:inherit;padding:8px 16px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);cursor:pointer}button.primary{background:var(--brand);color:white}button:disabled{opacity:.4;cursor:default}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}summary{cursor:pointer}a{color:var(--brand)}.error{color:#c44}@media(max-width:600px){main{padding:22px 14px}.card,article{padding:16px}}
+html[data-theme="dark"]{color-scheme:dark}
+html[data-theme="light"]{color-scheme:light}
+</style></head><body><main>
+<h1>听她说一句</h1><p class="muted">大肥鱼 · 迷糊版。柔软、慢半拍，按需开口。</p>
+<section class="card"><div class="toolbar"><strong id="state">读取状态中…</strong><button id="toggle" class="primary" disabled>语音开关</button><button id="refresh">刷新</button></div><p id="config" class="muted"></p>
+<details><summary>当前参数</summary><pre id="parameters">本次尚未取得参数。</pre><p class="muted">读取当前生效配置；刷新不会调用模型。变化记录只显示已有历史，不根据当前值推测过去的设置。</p><p><a href="day?source=voice#activity-card">查看这项能力的事件与参数变化</a></p></details>
+
+<p>开启后，在 QQ 说“用语音回复我……”或“/语音 ……”。会一起理解本轮补充，随后说“还是文字吧”会取消本轮语音。只朗读本轮最终回复；长文字、链接和代码继续发文字，合成失败也保留文字。语音与图片同轮时暂时保留文字和图片。</p>
+<p class="muted">待朗读文字会发给 BreezeBlue，消耗账号积分。失败或超时也可能已经计费，因此不会自动重试。这里的次数限制只管本 bot，不代表服务商账单上限。合成成功不等于 QQ 已送达，发送结果请看对话记录。</p></section>
+<section class="card"><h2>第一次使用</h2><ol>
+<li><a href="https://breezeblue.ai/zh" target="_blank" rel="noopener noreferrer">注册 BreezeBlue 账号</a>，可尝试兑换码 DAFEIYU；是否有效、领取多少以网站显示为准。</li>
+<li>在账号的 API 密钥页面创建密钥。回到项目文件夹，双击 <strong>setup-voice.command</strong>，粘贴密钥并回车。输入时不显示字符。</li>
+<li>刷新本页查看凭据状态。先完成一句本地试听，再开启 QQ 语音。</li>
+</ol><p class="muted">本页不显示或接收密钥。首次接入仍需验证真实合成、QQ 送达，以及手机和电脑播放。接收的语音可在<a href="ear">听语音记录</a>查看本地转写。</p></section>
+<div id="status" role="status" aria-live="polite"></div><section id="records" aria-label="语音合成记录"></section>
+<div class="toolbar"><button id="newer" disabled>较新记录</button><button id="older" disabled>较早记录</button></div>
+<p><a href="settings">返回设置</a> · <a href="observe">查看对话和发送记录</a> · <a href="https://breezeblue.ai/zh/voice-library/dafeiyu-dreamy-girl-voice-v8yud7hz7c9q2" target="_blank" rel="noopener noreferrer">官方音色试听</a></p>
+</main><script src="panel-base.js" data-page="voice"></script><script>
+(()=>{"use strict";const $=id=>document.getElementById(id);let enabled=false,ready=false,offset=0;
+const names={attempt:"开始合成",generated:"已生成，尚需确认发送",failed:"合成失败，保留文字"};
+const parameterNames={"enabled":"按需语音开关","provider":"合成服务","voice_id":"音色编号","voice_name":"音色名称","model":"合成模型","max_chars":"每条最多字符数","daily_attempts":"每天最多尝试次数","timeout_seconds":"单次合成等待（秒）"};
+async function load(){
+ $("parameters").textContent="本次尚未取得参数。";
+ $("refresh").disabled=true;$("toggle").disabled=true;$("status").textContent="正在读取…";
+ try{
+  const sr=await panelFetch("/voice/status"),state=await sr.json();if(!sr.ok||!state.ok)throw new Error(state.message||"状态读取失败");
+  $("parameters").textContent=Object.entries(state.config).map(([key,value])=>(parameterNames[key]||key)+"："+(typeof value==="boolean"?(value?"开启":"关闭"):value)).join("\n");
+  enabled=state.config.enabled;ready=state.credential_ready;$("state").textContent=enabled?"按需语音已开启":ready?"凭据已配置，语音尚未开启":"等待注册账号并配置密钥";$("toggle").textContent=enabled?"关闭语音":"开启按需语音";
+  $("config").textContent=`${state.config.voice_name} · 每条最多 ${state.config.max_chars} 字符 · 今天已尝试 ${state.attempts_today} / ${state.config.daily_attempts} 次`;
+  const rr=await panelFetch("/observe/records?source=voice&limit=20&offset="+offset),page=await rr.json();if(!rr.ok||!page.ok)throw new Error(page.message||"记录读取失败");
+  $("records").replaceChildren();$("status").className="muted";$("status").textContent=page.total?`共 ${page.total} 条记录`:"还没有合成记录。";
+  for(const item of page.rows){const r=item.record,card=document.createElement("article"),h=document.createElement("h2"),p=document.createElement("p"),d=document.createElement("details"),s=document.createElement("summary"),pre=document.createElement("pre");
+   h.textContent=r.kind==="setting"?`语音开关：${r.before?"开":"关"} → ${r.after?"开":"关"}`:names[r.status||r.kind]||r.kind;
+   p.textContent=`${r.at||""}${r.characters?" · "+r.characters+" 字符":""}${r.reason?" · "+r.reason:""}`;p.className="muted";s.textContent="查看详情";pre.textContent=JSON.stringify(r,null,2);d.append(s,pre);card.append(h,p,d);$("records").append(card);
+  }$("newer").disabled=offset===0;$("older").disabled=!page.has_older;
+ }catch(e){ready=false;$("status").className="error";$("status").textContent=e.message;}
+ finally{$("refresh").disabled=false;$("toggle").disabled=!ready&&!enabled;}
+}
+$("toggle").onclick=async()=>{$("toggle").disabled=true;try{const r=await panelFetch("/voice/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!enabled})});const data=await r.json();if(!r.ok||!data.ok)throw new Error(data.message||"开关保存失败");offset=0;await load();}catch(e){$("status").textContent=e.message;$("toggle").disabled=false;}};
+$("refresh").onclick=()=>{offset=0;load();};$("newer").onclick=()=>{offset=Math.max(0,offset-20);load();};$("older").onclick=()=>{offset+=20;load();};load();
+})();
+</script></body></html>

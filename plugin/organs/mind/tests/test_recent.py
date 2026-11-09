@@ -54,7 +54,54 @@ class RecentTest(unittest.TestCase):
             return []
         return path.read_text(encoding="utf-8").splitlines()
 
+    def test_quoted_utterances_reload_without_replacing_round_metadata(self):
+        quote={'message_id':'99','who':'430','speaker':'同名(430)','text':'原作者的计划','source':'inbound'}
+        original=self._row(who='420',turn_id='a'*32,session_id='qq:group:1',msg_id='t-one',
+            memory_recall={'selected':[]},utterances=[{'who':'420','speaker':'同名(420)','text':'我的回应','quote':quote}])
+        recent.append(original,root=self.root)
+        path=recent.path_of(self.root);before=path.read_bytes()
+        row=recent.load(root=self.root,session_id='qq:group:1')['turns'][0]
+        for key in ('ts','who','said','reply','turn_id','session_id','msg_id','memory_recall','utterances'):
+            self.assertEqual(original[key],row[key],key)
+        self.assertIn('引用同名(430)',recent.spoken_text(row))
+        self.assertEqual(before,path.read_bytes())
+
+    def test_session_filter_precedes_window_and_keeps_legacy_records_on_disk(self):
+        for text, session in (("A旧", "qq:group:1"), ("旧记录", ""),
+                              ("私聊", "qq:private:2"), ("A新", "qq:group:1"),
+                              ("B最新", "qq:group:3")):
+            recent.append(self._row(said=text, session_id=session), root=self.root)
+        before = recent.path_of(self.root).read_bytes()
+        got = recent.load(root=self.root, turns=1, session_id="qq:group:1")
+        self.assertEqual(["A新"], [row["said"] for row in got["turns"]])
+        self.assertEqual((2, 1), (got["total"], got["omitted"]))
+        self.assertEqual([], recent.load(root=self.root, session_id="")["turns"])
+        self.assertEqual(5, recent.load(root=self.root)["total"])
+        self.assertEqual(before, recent.path_of(self.root).read_bytes())
+
     # —— 1) 存原文 ————————————————————————————————
+
+    def test_render_keeps_recording_time_without_rewriting_relative_words(self):
+        for extra in ({}, {'mode':'proactive'}, {'fidelity':recent.RECONCILED}, {'ts':''}):
+            with self.subTest(extra=extra):
+                row = self._row(said='明天上午十点去海洋馆',reply='明天见',**extra)
+                original = json.dumps(row,ensure_ascii=False)
+                text = recent.render([row])
+                self.assertIn('[记录时间 '+(row['ts'] or '未记录')+']',text.splitlines()[0])
+                self.assertIn('明天见',text)
+                if extra.get('mode') != 'proactive':
+                    self.assertIn('明天上午十点去海洋馆',text)
+                self.assertEqual(original,json.dumps(row,ensure_ascii=False))
+
+    def test_media_stays_separate_from_speech_and_survives_delivery_receipt(self):
+        observation = "[图片观察：不是亲历] " + "画面细节" * 100
+        row = recent.append(self._row(media_context=observation, session_id="qq:group:1", msg_id="m1"),
+                            root=self.root, cap=10)
+        recent.confirm_reply(row, "实际发送的答复", root=self.root)
+        got = recent.load(root=self.root, session_id="qq:group:1")["turns"][0]
+        self.assertEqual(observation, got[recent.MEDIA_CONTEXT])
+        self.assertEqual("实际发送的答复", got["reply"])
+        self.assertNotIn("画面细节", recent.render([got]))
 
     def test_one_round_lands_as_one_line_with_both_sides(self):
         written = recent.append(self._row(), root=self.root)
@@ -99,12 +146,38 @@ class RecentTest(unittest.TestCase):
         self.assertEqual({"said": False, "reply": False}, written["truncated"])
         self.assertNotIn(recent.CUT_MARK, recent.render([written]))
 
+    def test_default_storage_preserves_long_message_and_late_correction(self):
+        text = "前面的情况。" * 80 + "最后改为周日，不是周六。"
+        written = recent.append(self._row(said=text), root=self.root)
+        self.assertEqual(text, written["said"])
+        self.assertFalse(written["truncated"]["said"])
+        self.assertEqual(text, recent.load(root=self.root)["turns"][-1]["said"])
+
+    def test_legacy_clipped_row_can_be_claimed_after_full_text_storage_enabled(self):
+        text = "已有长消息" * 50
+        recent.append(self._row(said=text, msg_id=""), root=self.root, cap=20)
+        row = recent.load(root=self.root)["turns"][0]
+        claimed = recent.claim([{"ts": row["ts"], "text": text, "id": "legacy-full"}], root=self.root, cap=0)
+        self.assertEqual(1, claimed)
+        stored = recent.load(root=self.root)["turns"][0]
+        self.assertEqual("legacy-full", stored["msg_id"])
+        self.assertEqual(text[:20], stored["said"], "只补凭据，不假装旧日志恢复了全文")
+
+    def test_delivery_receipt_preserves_full_sent_reply(self):
+        row = recent.append(self._row(reply="尚未发送的草稿", msg_id="receipt-1"), root=self.root)
+        sent = "已实际发出的内容。" * 60 + "最后确定周日。"
+        recent.confirm_reply(row, sent, root=self.root)
+        got = recent.load(root=self.root)["turns"][-1]
+        self.assertEqual(sent, got["reply"])
+        self.assertFalse(got["truncated"]["reply"])
+        self.assertEqual(QUESTION, got["said"])
+
     def test_cap_defaults_to_the_data_file(self):
-        """cap 没给就按 assembly.json 的 recent.cap 锯——数只在数据里。"""
-        cap = conversation.load_assembly()["recent"]["cap"]
-        written = recent.append(self._row(said="长" * (cap + 5)), root=self.root)
-        self.assertEqual(cap, len(written["said"]))
-        self.assertTrue(written["truncated"]["said"])
+        """默认保存全文，显式正 cap 的旧调用仍由相邻测试覆盖。"""
+        self.assertEqual(0, conversation.load_assembly()["recent"]["cap"])
+        written = recent.append(self._row(said=LONG), root=self.root)
+        self.assertEqual(LONG, written["said"])
+        self.assertFalse(written["truncated"]["said"])
 
     # —— 3) 只读最近几轮 ————————————————————————
 
@@ -235,7 +308,7 @@ class RecentTest(unittest.TestCase):
 
         lines = recent.render(got["turns"]).splitlines()
         self.assertEqual(4, len(lines))
-        self.assertEqual("- %s主人：补回来的那句" % recent.BACKFILL_MARK, lines[0])
+        self.assertEqual("- [记录时间 2025-01-15T14:01:00+08:00] %s主人：补回来的那句" % recent.BACKFILL_MARK, lines[0])
         self.assertEqual("- %s%s：%s" % (recent.BACKFILL_MARK, recent.HER, recent.MISSING_REPLY),
                          lines[1])
         self.assertNotIn(recent.BACKFILL_MARK, lines[2], "亲历那一轮被标成了补记")

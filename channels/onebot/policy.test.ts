@@ -42,6 +42,7 @@ test("落盘系数：合批/出站/配额/决策四段的每个数字都对得�
     "media_only",
     "burst_guard",
     "chitchat_skipped",
+    "superseded",
   ]);
 });
 

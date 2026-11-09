@@ -329,6 +329,28 @@ const onMessage = (data: any): void => {
     say("收到非 action 帧：" + text.slice(0, 160));
     return;
   }
+  if (frame.action === "get_msg") {
+    const askedId = frame?.params?.message_id;
+    if (getMsgMode === "silent") {
+      say("get_msg(" + String(askedId) + ") → 故意不回（等通道超时）");
+      return;
+    }
+    if (getMsgMode === "fail") {
+      socket.send(JSON.stringify({ status: "failed", retcode: 1, data: {}, echo: frame.echo }));
+      say("get_msg(" + String(askedId) + ") → retcode=1（取不到）");
+      return;
+    }
+    socket.send(
+      JSON.stringify({
+        status: "ok",
+        retcode: 0,
+        data: { message_id: askedId, message: [{ type: "text", data: { text: getMsgReplyText } }] },
+        echo: frame.echo,
+      }),
+    );
+    say("get_msg(" + String(askedId) + ") → 回原文 " + JSON.stringify(getMsgReplyText));
+    return;
+  }
   if (!ackEnabled) {
     // 该模式下一个 action 都不该有；故意不应答，让违约更刺眼（通道侧会因此 ack 超时）。
     say("!! 收到不该出现的 action 帧（不应答）" + text.slice(0, 200));
@@ -341,6 +363,8 @@ const onMessage = (data: any): void => {
     say("在飞重投 → 收到第一帧就立刻再投同一条（不等 ack）");
   }
   const ack = buildAck(frame, failRetcode, ++ackSeq);
+  const ackId = (ack as Record<string, any>)?.data?.message_id;
+  if (typeof ackId === "number" && failRetcode === null) lastSentMessageId = ackId;
   if (ackDelayMs > 0) {
     // 慢慢回 ack，这一批才会一直停在「已认领、未落账」的窗口里。
     setTimeout(() => {
@@ -358,6 +382,10 @@ const onMessage = (data: any): void => {
 };
 
 let failRetcode: number | null = null;
+// M12：get_msg 的应答方式（按 case 切）与「上一次下发拿到的 message_id」。
+let getMsgMode: "ok" | "fail" | "silent" = "ok";
+let getMsgReplyText = "被引用的那句";
+let lastSentMessageId: number | null = null;
 
 const connect = (url: string): Promise<any> =>
   new Promise((resolvePromise, rejectPromise) => {
@@ -462,6 +490,11 @@ const G23_NOPUNCT = "G23NOPUNCT";
 const G23_COMMA = "G23COMMA";
 const G23_PARTICLE = "G23PARTICLE";
 const G23_LONGNOPUNCT = "G23LONGNOPUNCT";
+// M12：引用解析（get_msg）与「她说的原话」
+const G24_OWN = "G24OWN";
+// M13：逗号抽样拆的两个 stable 文本（sha256 前 8 位 % 100：19 命中 / 30 不命中，命中率 25%）
+const G25_HIT = "G25HIT";
+const G25_MISS = "G25MISS";
 const NL5_MARK = "NLFIVE";
 const TRAIL_MARK = "NLTRAIL";
 const BLANK_MARK = "NLBLANK";
@@ -476,6 +509,9 @@ const replyTextFor = (text: string): string => {
   if (text.includes(G23_COMMA)) return "字".repeat(40) + "，" + "词".repeat(39);
   if (text.includes(G23_PARTICLE)) return "甲".repeat(40) + "，啊" + "乙".repeat(10) + "，" + "丙".repeat(10);
   if (text.includes(G23_LONGNOPUNCT)) return "字".repeat(150);
+  if (text.includes(G24_OWN)) return "她说的原话";
+  if (text.includes(G25_HIT)) return "小肥鱼 今天天气不错，我们去走走吧";
+  if (text.includes(G25_MISS)) return "小肥鱼 这家的面很好吃，下次带你来";
   if (text.includes(NL1_MARK)) return "上泡\n下泡";
   if (text.includes(TRAIL_MARK)) return "只有一行\n";
   if (text.includes(BLANK_MARK)) return "第一句\n \n第三句";
@@ -1152,7 +1188,7 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       );
     }
 
-    // ---- G4：被 @ → 从消息到出手 ≤1000ms（+ 送核/下发余量） ----
+    // ---- G4：群聊被 @ 仍等安静开段窗口，保留定向回应 ----
     {
       const groupId = nextGroup();
       const start = mark();
@@ -1166,8 +1202,8 @@ const runBatchSuite = async (config: Config): Promise<void> => {
       const rows = await waitForTargetDecisionRows(config.decisions, "group:" + groupId, sent, 1, 5000);
       add(
         "G4",
-        "@ 到出手 ≤1000ms（+ 送核/下发余量 200ms，等待上限本身是 mentionCapMs=1000）",
-        latency >= 0 && latency <= 1200,
+        "群聊@沿用安静开段2秒窗口，再经过本机送核/下发（总计不超过5秒）",
+        latency >= 2000 && latency <= 5000 && rows.at(-1)?.machine?.direct?.rule === "at",
         "实测 " + latency + "ms；决策账 human=" + JSON.stringify(String(rows[rows.length - 1]?.human ?? "")),
       );
     }
@@ -1932,6 +1968,193 @@ const runBatchSuite = async (config: Config): Promise<void> => {
         "sent " + s6.rows.length + " 行 len=" + lens(s6.rows).join(","),
       );
     }
+
+      // ---- G24：引用要把「那句话」带上（号码绝不许进她的文本） ----
+      {
+        // 每条 case 用独立的 state 目录（环是空的，get_msg 才能被真的问到）
+        const freshState = (tag: string) => join(config.state, "g24-" + tag);
+        const postQuote = async (
+          stateDir: string,
+          replyTo: number,
+          text: string,
+        ): Promise<{ messageId: number; decision: DecisionRow | undefined; hitText: string }> => {
+          await channel.stop();
+          channel = await startChannel(core.url, "send", stateDir);
+          ackEnabled = true;
+          try {
+            socket.close();
+          } catch {
+            /* 收尾而已 */
+          }
+          socket = await connect(channel.url);
+          const group = nextGroup();
+          const since = Date.now();
+          const messageId = nextMessage();
+          const event = buildGroupEvent(fixture, {
+            groupId: group,
+            speaker: SPEAKER_A,
+            messageId,
+            text,
+            mention: false,
+            selfId,
+          });
+          (event as any).message = [
+            { type: "reply", data: { id: String(replyTo) } },
+            { type: "text", data: { text } },
+          ];
+          socket.send(JSON.stringify(event));
+          const decisions = await waitForTargetDecisionRows(join(stateDir, "decisions.jsonl"), "group:" + group, since, 1, 30000);
+          await sleep(500);
+          const coreText = String(hitsOf(group).pop()?.body?.text ?? "");
+          return { messageId, decision: decisions[decisions.length - 1], hitText: coreText };
+        };
+
+        // ① 环命中：先让她收到一条入站（进 inbound 环），再引用它
+        {
+          const stateDir = freshState("ring");
+          await channel.stop();
+          channel = await startChannel(core.url, "send", stateDir);
+          ackEnabled = true;
+          try {
+            socket.close();
+          } catch {
+            /* 收尾而已 */
+          }
+          socket = await connect(channel.url);
+          const group = nextGroup();
+          const firstId = nextMessage();
+          const first = buildGroupEvent(fixture, {
+            groupId: group,
+            speaker: SPEAKER_A,
+            messageId: firstId,
+            text: "小肥鱼 环里的原话",
+            mention: false,
+            selfId,
+          });
+          socket.send(JSON.stringify(first));
+          await waitForTargetDecisionRows(join(stateDir, "decisions.jsonl"), "group:" + group, Date.now() - 100, 1, 25000);
+          await sleep(400);
+          const quoted = await postQuote(stateDir, firstId, "小肥鱼 你说啥");
+          add(
+            "G24a",
+            "环命中：展示引用原作者与原文，且展示文本不含那个 message_id",
+            quoted.hitText.includes("的消息：「小肥鱼 环里的原话」）") &&
+              !quoted.hitText.includes(String(firstId)),
+            "送核 text=" + JSON.stringify(quoted.hitText.slice(0, 120)) +
+              "，含号码=" + String(quoted.hitText.includes(String(firstId))),
+          );
+        }
+
+        // ② get_msg 命中：引用一个环里没有的 id，假协议端回原文
+        {
+          getMsgMode = "ok";
+          getMsgReplyText = "被引用的那句";
+          const quoted = await postQuote(freshState("getmsg"), 999001, "小肥鱼 这句呢");
+          add(
+            "G24b",
+            "get_msg 命中：从协议端取回原文并注入",
+            quoted.hitText.includes("的消息：「被引用的那句」）") && !quoted.hitText.includes("999001"),
+            "送核 text=" + JSON.stringify(quoted.hitText.slice(0, 120)),
+          );
+        }
+
+        // ③ 取不到：retcode=1 → 占位，且仍然照常回复
+        {
+          getMsgMode = "fail";
+          const quoted = await postQuote(freshState("fail"), 999002, "小肥鱼 再问");
+          add(
+            "G24c",
+            "取不到原文：明确标记内容读不到，且这条消息照常回复",
+            quoted.hitText.includes("的消息：内容读不到）") &&
+              quoted.decision?.machine?.reason_code === "sent" &&
+              !quoted.hitText.includes("999002"),
+            "送核 text=" + JSON.stringify(quoted.hitText.slice(0, 120)) +
+              "，reason=" + String(quoted.decision?.machine?.reason_code),
+          );
+        }
+
+        // ④ 引用她自己发过的话：ack 带回 message_id + 原文，能从 own 拿到
+        {
+          getMsgMode = "fail"; // 逼它只能走 own 环（get_msg 必然失败）
+          await channel.stop();
+          channel = await startChannel(core.url, "send", freshState("own"));
+          ackEnabled = true;
+          try {
+            socket.close();
+          } catch {
+            /* 收尾而已 */
+          }
+          socket = await connect(channel.url);
+          const group = nextGroup();
+          const since = Date.now();
+          const sendEvent = buildGroupEvent(fixture, {
+            groupId: group,
+            speaker: SPEAKER_A,
+            messageId: nextMessage(),
+            text: "小肥鱼 " + G24_OWN,
+            mention: false,
+            selfId,
+          });
+          socket.send(JSON.stringify(sendEvent));
+          await waitForTargetDecisionRows(join(freshState("own"), "decisions.jsonl"), "group:" + group, since, 1, 25000);
+          await sleep(500);
+          const ownId = lastSentMessageId;
+          const quoted = await postQuote(freshState("own"), ownId ?? -1, "小肥鱼 你刚才说啥");
+          add(
+            "G24d",
+            "引用她自己的话：从 own entries 拿到她自己说的原文",
+            ownId !== null && quoted.hitText.includes("（引用机器人自己的消息：「她说的原话」）"),
+            "own id=" + String(ownId) + "，送核 text=" + JSON.stringify(quoted.hitText.slice(0, 120)),
+          );
+        }
+        getMsgMode = "ok";
+      }
+
+      // ---- G25：逗号粘连的长句按概率拆（确定性命中） ----
+      {
+        // G24 把通道换到了各自的 state；G25 要读 config.ledger，所以先把通道换回来。
+        await channel.stop();
+        channel = await startChannel(core.url, "send", config.state);
+        ackEnabled = true;
+        try {
+          socket.close();
+        } catch {
+          /* 收尾而已 */
+        }
+        socket = await connect(channel.url);
+        const caseOf25 = async (text: string) => {
+          const group = nextGroup();
+          const since = Date.now();
+          const messageId = post(group, SPEAKER_A, text);
+          const decisions = await waitForTargetDecisionRows(config.decisions, "group:" + group, since, 1, 25000);
+          await sleep(500);
+          return {
+            rows: rowsFor(readRowsFile(config.ledger), "mid:" + messageId).filter((row) => row.kind === "sent"),
+            decision: decisions[decisions.length - 1],
+          };
+        };
+
+        const hit = await caseOf25("小肥鱼 逗号命中 " + G25_HIT);
+        const hitStyle = hit.decision?.machine?.style as Record<string, any> | null | undefined;
+        add(
+          "G25a",
+          "逗号抽样命中 → 2 泡、左段末尾没逗号、style.commaSplit 有值",
+          hit.rows.length === 2 &&
+            !String(hit.rows[0]?.text ?? "").endsWith("，") &&
+            Array.isArray(hitStyle?.commaSplit),
+          "sent " + hit.rows.length + " 行，左段尾=" + JSON.stringify(String(hit.rows[0]?.text ?? "").slice(-4)) +
+            "，commaSplit=" + JSON.stringify(hitStyle?.commaSplit),
+        );
+
+        const miss = await caseOf25("小肥鱼 逗号未命中 " + G25_MISS);
+        const missStyle = miss.decision?.machine?.style as Record<string, any> | null | undefined;
+        add(
+          "G25b",
+          "逗号抽样未命中 → 1 泡、style 里没有 commaSplit 键",
+          miss.rows.length === 1 && (missStyle === null || missStyle?.commaSplit === undefined),
+          "sent " + miss.rows.length + " 行，style=" + JSON.stringify(missStyle),
+        );
+      }
 
   } finally {
     await channel.stop();

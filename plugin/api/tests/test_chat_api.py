@@ -32,6 +32,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -144,12 +145,12 @@ STOPPED_CEILING = STYLE_BOOK["stopped"]["ceiling"]
 SHAPE_CLAUSE = [one["id"] for one in CLAUSES if one.get("scope") == chat.REPLY_SCOPE][0]
 ENABLED_CLAUSES = len([one for one in CLAUSES if one.get("enabled", True)])
 
-#: 一个确定在白天的时刻（夜里窗口按这个串自己的小时判，跑在哪个时区都同一个结论）：
+#: 本机钟面的白天/夜里；对话入口会把脑的 UTC 钟统一转成本机时区。
 #: 出站闸那两道硬门里夜里排在前面，要真造出 SILENT 就得避开它。
-DAYTIME = "2026-11-06T12:00:00+00:00"
+DAYTIME = datetime(2026, 11, 6, 12).astimezone().isoformat()
 #: 一个确定在夜里的时刻（夜里窗口是 NIGHT_START_H=23 到 NIGHT_END_H=8）：
 #: 主动那一轮在这里会被心判「不说」，被动那一轮只判「少说」。
-NIGHTTIME = "2026-11-06T03:00:00+00:00"
+NIGHTTIME = datetime(2026, 11, 6, 3).astimezone().isoformat()
 #: 她自己开口那一轮的由头（素材，不是判据）：proactive 的必填入参。
 SEED = "今天想问问他吃饭了没有"
 
@@ -157,7 +158,7 @@ SEED = "今天想问问他吃饭了没有"
 CHANNEL_WHO = {"id": 3425635473, "nickname": "能毕业就是胜利", "card": "小红花的爹"}
 CHANNEL_WHO_ID = "3425635473"          # 身份：裸数字号，不加任何前缀
 
-CONTRACT_KEYS = {"ok", "reply", "chunks", "scene", "recalled", "heart", "gate", "audit",
+CONTRACT_KEYS = {"ok", "reply_kind", "reply", "chunks", "scene", "recalled", "memory_recall", "heart", "gate", "audit", "turn_id",
                  # 核·识别这一轮的读数（本轮加的）：五键冻结，/chat 原样透出、不重组。
                  "event",
                  "assembly", "continuity", "banned", "action", "llm", "anchors",
@@ -243,6 +244,99 @@ def _status(status: int, body: bytes = b""):
 
 
 class ChatApiTest(unittest.TestCase):
+
+    def test_new_nickname_does_not_make_a_contact_familiar(self):
+        who = '10000423'
+        seen = []
+        def assess(**context):
+            seen.append(context['caller_context'])
+            return dict(events.recognize(context['text'], who=context['who'], scene=context['scene']),
+                        status='ok', source='fixture', painting=None)
+        body = {'text': '你好', 'who': {'id': int(who), 'nickname': '新来客'},
+                'scene': 'private', 'where': {'userId': int(who)}}
+        captured = []
+        status, payload = self._post(body, _body('你好呀。', captured), assessor=assess)
+        self.assertEqual(status, 200)
+        caller = next(row for row in payload['assembly']['sections'] if row['key'] == 'caller')
+        self.assertIn('关系尚未确认', caller['relationship'])
+        self.assertIn('关系尚未确认', seen[0])
+        self.assertIn('关系尚未确认', captured[0]['messages'][0]['content'])
+        self.assertNotIn('熟人', seen[0])
+        self.brain.patch_card(who, 'test', {'关系': '朋友', '叫法': '阿新'})
+        _, confirmed = self._post(body, _body('阿新。'), assessor=assess)
+        caller = next(row for row in confirmed['assembly']['sections'] if row['key'] == 'caller')
+        self.assertEqual(caller['relationship'], '朋友')
+        self.assertEqual(caller['address'], '阿新')
+        self.assertIn('朋友', seen[-1])
+
+    def test_factual_repetition_is_observed_without_rewriting_the_answer(self):
+        old = '周日下午两点，收到，地点还是海洋馆。'
+        for answer in ('周日下午两点，海洋馆。', old):
+            with self.subTest(answer=answer):
+                recent.append({'ts':DAYTIME,'who':CHANNEL_WHO_ID,'said':'改到周日下午两点',
+                               'reply':old,'session_id':'qq:private:'+CHANNEL_WHO_ID})
+                captured=[]
+                before=len(self._drops_rows())
+                status,payload=self._post({'text':'我刚才说去哪里、什么时候来着？','who':CHANNEL_WHO,
+                    'scene':'private','where':{'userId':int(CHANNEL_WHO_ID)}},_body(answer,captured))
+                self.assertEqual(200,status)
+                self.assertEqual(answer,payload['reply'])
+                self.assertEqual(1,len(captured),'不能仅因字面复用再调模型')
+                self.assertEqual('observed',payload['gate']['parts'][0]['repeat_status'])
+                self.assertEqual([],payload['gate']['parts'][0]['hits'])
+                self.assertEqual(before,len(self._drops_rows()))
+                prompt='\n'.join(m['content'] for m in captured[0]['messages'])
+                self.assertNotIn('这一轮不许再用下面这些',prompt)
+                self.assertIn('正常确认、引用和承接不必刻意换词',prompt)
+    def test_group_image_following_caption_reaches_actual_vision_request(self):
+        from organs.eye import vision
+        from organs.eye.tests.test_vision import picture, response
+        calls = []
+        real_observe = vision.observe
+        config = dict(vision.load_config(), enabled=True)
+        def observe(attachments, **kwargs):
+            return real_observe(attachments, **kwargs, config=config, fetch=lambda *args: picture(),
+                transport=lambda config,key,payload,timeout: calls.append(payload) or response())
+        segment = [{'who':'10000420', 'speaker':'甲', 'text':'[图片]'},
+                   {'who':'10000420', 'speaker':'甲', 'text':'左边那俩绿的，看看各自名字'},
+                   {'who':'10000421', 'speaker':'乙', 'text':'我另外那张要看右边'}]
+        attachments = [{'kind':'image', 'speaker_id':'10000420', 'segment_index':0}]
+        vision._CACHE.clear()
+        self.addCleanup(vision._CACHE.clear)
+        with mock.patch.object(vision, 'observe', side_effect=observe), mock.patch.object(vision, 'read_key', return_value='test'):
+            status, payload = self._post({'text':'本批有人发图', 'segment':segment, 'scene':'group',
+                'who':{'id':10000420, 'nickname':'甲'}, 'where':{'groupId':123},
+                'attachments':attachments}, _body('两块颜色很像。'))
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(calls))
+        note = calls[0]['messages'][1]['content'][0]['text']
+        self.assertIn('左边那俩绿的，看看各自名字', note)
+        self.assertNotIn('我另外那张要看右边', note)
+        self.assertNotIn('本批有人发图', note)
+        self.assertEqual('两块颜色很像。', payload['reply'])
+
+    def test_vision_receives_attributed_messages_instead_of_flat_group_text(self):
+        from organs.eye import vision
+        segment = [{'who':'10000420', 'speaker':'甲', 'text':'[图片]左边那俩绿的'},
+                   {'who':'10000421', 'speaker':'乙', 'text':'别人的无关内容'}]
+        attachments = [{'kind':'image', 'speaker_id':'10000420', 'segment_index':0}]
+        with mock.patch.object(vision, 'observe', return_value=[]) as observe:
+            status, _ = self._post({'text':'整段群聊背景', 'segment':segment, 'scene':'group',
+                                    'who':{'id':10000420, 'nickname':'甲'},
+                                    'where':{'groupId':123}, 'attachments':attachments}, _body('看见了。'))
+        self.assertEqual(200, status)
+        self.assertEqual(segment, observe.call_args.kwargs['segment'])
+        self.assertEqual('', observe.call_args.kwargs['text'])
+
+    def test_single_private_image_receives_current_text(self):
+        from organs.eye import vision
+        for scene, expected in (('private', '这张图左边是什么'), ('group', '')):
+            with self.subTest(scene=scene), mock.patch.object(vision, 'observe', return_value=[]) as observe:
+                status, _ = self._post({'text':'这张图左边是什么', 'scene':scene,
+                                       'attachments':[{'kind':'image'}]}, _body('看见了。'))
+                self.assertEqual(200, status)
+                self.assertEqual(expected, observe.call_args.kwargs['text'])
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -263,10 +357,16 @@ class ChatApiTest(unittest.TestCase):
         self.addCleanup(home_patch.stop)
         self.store = load(copy_fixture("valid", str(self.tmp)))
         self.brain = BrainStore(self.tmp / "brain")
+        # 普通对话契约在白天验证；睡眠专项用自己的 now_iso 覆盖。
+        # 否则本机过了 23 点，真休息门会提前返回，让普通契约测试随时间失效。
+        daytime = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        clock = mock.patch.object(brain_model, "now_iso", return_value=daytime.isoformat())
+        clock.start()
+        self.addCleanup(clock.stop)
 
     # —— 小工具 ————————————————————————————————
 
-    def _answer(self, transport, *, config=CONFIG, env=ENV, counter: list = None):
+    def _answer(self, transport, *, config=CONFIG, env=ENV, counter: list = None, assessor=None):
         """把假 transport 塞进真链路：api.handle → api.chat.dispatch → answer / 重写那一问。
 
         两个入口都只换注入点（transport / config / env），装配与闸本身一次都没有替身：
@@ -279,6 +379,18 @@ class ChatApiTest(unittest.TestCase):
             kw.setdefault("transport", transport)
             kw.setdefault("config", config)
             kw.setdefault("env", env)
+            # 这些出口契约测试隔离语义模型；其真实接线与解析另做专项测试。
+            def fixture_assessor(**context):
+                result = dict(events.recognize(context["text"], who=context["who"], scene=context["scene"],
+                    last_reply=(context["history"][-1].get("reply", "") if context["history"] else "")),
+                    status="ok", source="fixture", painting=None)
+                text = context["segment"][-1]["text"] if context["segment"] else context["text"]
+                words = text.strip().split(maxsplit=1)
+                action = {"/画画": "start", "/画作": "status", "/停画": "cancel"}.get(words[0] if words else "")
+                if action:
+                    result["painting"] = {"action": action, "evidence": [text], "prompt": words[1] if len(words) > 1 else ""}
+                return result
+            kw["assessor"] = assessor or fixture_assessor
             if counter is not None:
                 counter.append(text)
             return real(text, who, **kw)
@@ -301,6 +413,1740 @@ class ChatApiTest(unittest.TestCase):
         return self._post({"text": text}, _body(reply), **extra)
 
     # —— 成功体 ————————————————————————————————
+
+    def test_both_chat_models_receive_same_clock_and_old_turn_time_without_life_plan(self):
+        from organs.mind import appraisal, recent
+        from organs.day import life
+        at, old = '2026-11-08T18:00:00+09:00', '2026-11-07T18:00:00+09:00'
+        for scene, where, session in (
+                ('private',{'userId':10000420},'qq:private:10000420'),
+                ('group',{'groupId':123456},'qq:group:123456')):
+            recent.append({'ts':old,'who':'10000420','said':'明天上午十点去海洋馆',
+                           'reply':'嗯。','session_id':session})
+            captured = {}
+            def complete(messages, **kwargs):
+                captured[kwargs.get('purpose')] = messages
+                if kwargs.get('purpose') == '理解这一段话':
+                    return json.dumps({'kind':None,'evidence':'','reason':'询问原来约定的日期'})
+                return '你原来约的是今天上午十点。'
+            with self.subTest(scene=scene), mock.patch.object(llm,'complete',side_effect=complete), \
+                 mock.patch.object(brain_model,'now_iso',return_value=at), mock.patch.object(life,'context',return_value=''):
+                status, payload = self._post({'text':'原来约的哪天几点','who':'10000420',
+                    'scene':scene,'where':where,'delivery_ack':True},_body('不用网络'),assessor=appraisal.assess)
+                self.assertEqual(200,status)
+                understood = json.loads(captured['理解这一段话'][-1]['content'])
+                self.assertEqual(brain_model.parse_ts(at),brain_model.parse_ts(understood['now']))
+                self.assertEqual(old,understood['history'][-1]['ts'])
+                reply = captured['生成回复']
+                self.assertIn('[本轮时间] '+understood['now'],reply[0]['content'])
+                self.assertIn('[记录时间 '+old+']',reply[-1]['content'])
+                self.assertIn('明天上午十点去海洋馆',reply[-1]['content'])
+
+    def test_group_background_reaches_both_models_without_becoming_current_speech_or_memory(self):
+        background = {'session_id':'qq:group:123456', 'omitted':2, 'messages':[
+            {'message_id':'98','who':'10000420','speaker':'甲(10000420)',
+             'text':'聚餐改到河边茶馆，星期日', 'at':'2026-11-07T12:00:00+09:00'}]}
+        assessed, capture = [], []
+        def assessor(**kw):
+            assessed.append(kw)
+            return {'kind':None,'who':kw['who'],'evidence':'','note':'承接前文','status':'ok','source':'semantic'}
+        with mock.patch.object(brain_model, 'now_iso', return_value='2026-11-07T12:01:00+09:00'):
+            status, data = self._post({'text':'那地方怎么样','who':'10000421','scene':'group',
+                'where':{'groupId':123456}, 'background':background}, _body('可以聊聊。', capture), assessor=assessor)
+        self.assertEqual(200, status)
+        self.assertEqual(background, assessed[0].get('background'))
+        self.assertIn('河边茶馆', capture[0]['messages'][-1]['content'])
+        self.assertEqual('那地方怎么样', assessed[0]['text'])
+        entries = self.brain.today_entries('2026-11-07T12:01:00+09:00')
+        self.assertFalse(any('河边茶馆' in row.get('text','') for row in entries))
+        from organs.mind import recent
+        saved = recent.load(session_id='qq:group:123456')['turns']
+        self.assertTrue(saved)
+        self.assertNotIn('河边茶馆', json.dumps(saved, ensure_ascii=False))
+
+    def test_overheard_correction_saves_only_new_speech_and_grounded_note(self):
+        from organs.mind import appraisal
+        background = {'session_id':'qq:group:123456','omitted':0,'messages':[
+            {'message_id':'98','who':'10000420','speaker':'同名','text':'我订了周六的海洋馆票',
+             'at':'2026-11-07T12:00:00+09:00'},
+            {'message_id':'99','who':'10000421','speaker':'同名','text':'我订了周日的电影票',
+             'at':'2026-11-07T12:01:00+09:00'}]}
+        for previous, valid in (('我订了周六的海洋馆票', True), ('我订了周日的电影票', False)):
+            captured = []
+            def complete(messages, **kwargs):
+                captured.append((kwargs.get('purpose'), messages))
+                if kwargs.get('purpose') == '理解这一段话':
+                    return json.dumps({'kind':None,'evidence':'','reason':'行程更新','memory_note':{
+                        'text':'周六的海洋馆票已退','current':['海洋馆票退了'],'previous':[previous]}})
+                return '嗯，票退好了。'
+            with self.subTest(previous=previous), mock.patch.object(llm,'complete',side_effect=complete), \
+                 mock.patch.object(brain_model,'now_iso',return_value='2026-11-07T12:02:00+09:00'):
+                status, payload = self._post({'text':'海洋馆票退了','who':'10000420','scene':'group',
+                    'where':{'groupId':123456},'background':background,'delivery_ack':True},
+                    _body('不应走网络'),assessor=appraisal.assess)
+            self.assertEqual(200,status)
+            entries = [row for row in self.brain.today_entries('2026-11-07T12:02:00+09:00')
+                       if row.get('turn_id') == payload['turn_id']]
+            self.assertEqual(1,len(entries))
+            self.assertEqual('10000420',entries[0]['who'])
+            self.assertEqual('海洋馆票退了',entries[0]['text'])
+            self.assertEqual(valid,bool(entries[0].get('note')))
+            self.assertFalse(entries[0].get('context_refs'))
+            reply_input = next(messages[-1]['content'] for purpose,messages in captured if purpose=='生成回复')
+            self.assertEqual(valid,'[本轮指代理解' in reply_input)
+            if valid:
+                self.assertIn('2026-11-07T12:00:00+09:00',entries[0]['note'])
+                self.assertIn('本人前文依据',entries[0]['note'])
+
+    def test_group_background_boundary_rejects_wrong_session_and_shape_before_model(self):
+        good = {'session_id':'qq:group:123456', 'omitted':0, 'messages':[
+            {'message_id':'98','who':'10000420','speaker':'甲','text':'前文','at':'2026-11-07T12:00:00+09:00'}]}
+        for bad in ({**good,'session_id':'qq:group:654321'}, {**good,'omitted':-1},
+                    {**good,'messages':[dict(good['messages'][0],who='甲')]},
+                    {**good,'messages':[dict(good['messages'][0],at='昨天')]}, [],
+                    {**good,'messages':good['messages']*65}):
+            calls=[]
+            with self.subTest(bad=bad):
+                status,_=self._post({'text':'当前话','who':'10000421','scene':'group',
+                    'where':{'groupId':123456},'background':bad},_body('不该生成'),counter=calls)
+                self.assertEqual(400,status)
+                self.assertEqual([],calls)
+
+    def test_rest_stops_group_stranger_and_deep_sleep_before_model_or_actions(self):
+        from organs.heart import rest
+        start = '2026-11-07T23:00:00+09:00'
+        root = self._heart_root()
+        rest.advance(root, start)
+        for who in ('123456789', '987654321'):
+            for _ in range(16 if who == '123456789' else 1):
+                self.brain.interact(who, ts=start)
+        calls = []
+        for scene, who in [('group', '123456789'), ('private', '987654321')]:
+            with self.subTest(scene=scene), mock.patch.object(brain_model, 'now_iso', return_value='2026-11-07T23:01:00+09:00'):
+                status, data = self._post({'text':'/画画 一只鲸鱼','who':who,'scene':scene,'delivery_ack':True},
+                                         _body('没睡'), counter=calls)
+                self.assertEqual(200, status)
+                self.assertFalse(data['send'])
+                self.assertEqual([], data['chunks'])
+                self.assertEqual('asleep', data['rest']['phase'])
+        self.assertEqual([], calls, '沉睡判断必须早于理解/看图/绘画等装配')
+        rest.advance(root, '2026-11-07T23:02:00+09:00', can_wake=True)
+        rest.advance(root, '2026-11-07T23:17:00+09:00')
+        with mock.patch.object(brain_model, 'now_iso', return_value='2026-11-07T23:18:00+09:00'):
+            status, data = self._post({'text':'还在吗','who':'123456789','scene':'private'}, _body('在'), counter=calls)
+        self.assertTrue(data['send'])
+        self.assertEqual('睡觉啦，明天说', data['reply'])
+        self.assertEqual('deep', data['rest']['phase'])
+        self.assertEqual([], calls)
+
+    def test_deep_sleep_private_notice_uses_receipt_and_custom_text(self):
+        from organs.heart import rest
+        from organs.mind import delivery
+        root = self._heart_root()
+        rest.advance(root, '2026-11-07T23:00:00+09:00', can_wake=True)
+        rest.advance(root, '2026-11-07T23:15:00+09:00')
+        body = {'text':'在吗','who':'123456789','scene':'private',
+                'session_id':'qq:private:123456789','delivery_ack':True}
+        calls = []
+        with mock.patch.object(brain_model, 'now_iso', return_value='2026-11-07T23:18:00+09:00'):
+            _, first = self._post(body, _body('不该调用'), counter=calls)
+            self.assertTrue(first['send'])
+            self.assertEqual(first['reply'],'睡觉啦，明天说')
+            # 尚未收到成功回执：下一条仍可提示。
+            _, retry = self._post(body, _body('不该调用'), counter=calls)
+            self.assertTrue(retry['send'])
+            self.assertTrue(delivery.confirm(retry['delivery_id'], retry['reply'], self.brain, heart_root=root))
+            _, again = self._post(body, _body('不该调用'), counter=calls)
+            self.assertFalse(again['send'])
+            self.brain.update_profile({'sleep_notice':'晚安啦，明天见'},note='自己的说法')
+            _, other = self._post(dict(body,who='987654321',session_id='qq:private:987654321'), _body('不该调用'),counter=calls)
+            self.assertEqual(other['reply'],'晚安啦，明天见')
+            _, group = self._post(dict(body,scene='group',session_id='qq:group:12345'),_body('不该调用'),counter=calls)
+            self.assertFalse(group['send'])
+        self.assertEqual(calls,[])
+        self.assertEqual(rest.state(root)['phase'],'deep')
+
+    def test_close_private_chat_wakes_once_and_model_sees_holding_state(self):
+        from organs.heart import rest
+        from organs.day import life
+        root = self._heart_root()
+        start = '2026-11-07T23:00:00+09:00'
+        for _ in range(16):
+            self.brain.interact('123456789', ts=start)
+        rest.advance(root, start)
+        day_root = self.tmp/'day'
+        life.configure(True, root=day_root)
+        raw = {'title': '夜间原安排', 'items': [
+            {'start':0,'end':240,'activity':'睡觉'},
+            {'start':240,'end':1440,'activity':'正在夜游植物园'}]}
+        life.generate('2026-11-07', persona='喜欢散步', root=day_root, heart_root=root,
+                      now=start, complete=lambda _: json.dumps(raw))
+        prompts = []
+        def transport(url, headers, payload, timeout):
+            prompts.append(payload['messages'][0]['content'])
+            return _body('嗯，听见了。')(url, headers, payload, timeout)
+        with mock.patch.object(brain_model, 'now_iso', return_value='2026-11-07T23:01:00+09:00'), \
+             mock.patch.dict(os.environ, {'DAY_ROOT': str(day_root)}):
+            status, data = self._post({'text':'还没睡吗','who':'123456789','scene':'private','delivery_ack':True}, transport)
+        self.assertEqual(200, status)
+        self.assertEqual('holding', rest.state(root)['phase'])
+        self.assertTrue(prompts)
+        self.assertIn('被叫醒后硬撑', prompts[0])
+        self.assertIn('23:16', prompts[0])
+        self.assertIn('[实际休息状态]', prompts[0])
+        self.assertNotIn('正在夜游植物园', prompts[0])
+
+    def test_reply_finishing_after_hold_deadline_sends_notice_instead_of_draft(self):
+        from organs.heart import rest
+        start = '2026-11-07T23:00:00+09:00'
+        for _ in range(16):
+            self.brain.interact('123456789', ts=start)
+        rest.advance(self._heart_root(), start)
+        clock = ['2026-11-07T23:01:00+09:00']
+        def slow_reply(url, headers, payload, timeout):
+            clock[0] = '2026-11-07T23:16:00+09:00'
+            return _body('嗯，我听着。')(url, headers, payload, timeout)
+        with mock.patch.object(brain_model, 'now_iso', side_effect=lambda:clock[0]):
+            status, data = self._post({'text':'还在吗','who':'123456789','scene':'private','delivery_ack':True}, slow_reply)
+        self.assertEqual(200, status)
+        self.assertTrue(data['send'])
+        self.assertEqual('sleep_notice', data['reply_kind'])
+        self.assertEqual('睡觉啦，明天说', data['reply'])
+        from organs.mind import delivery
+        draft = json.loads((recent.path_of().parent/'deliveries'/(data['delivery_id']+'.json')).read_text())
+        rows = [json.loads(line) for line in recent.path_of().read_text().splitlines()]
+        same_turn = [r for r in rows if r.get('turn_id') == data['turn_id']]
+        self.assertEqual(len(same_turn),1, '提示复用原聊天轮，不重复追加用户消息')
+        self.assertEqual(draft['msg_id'],same_turn[0]['msg_id'])
+        self.assertTrue(delivery.confirm(data['delivery_id'],data['reply'],self.brain,heart_root=self._heart_root()))
+        updated = [json.loads(line) for line in recent.path_of().read_text().splitlines() if line.strip()]
+        self.assertEqual(updated[-1]['reply'],'睡觉啦，明天说')
+        self.assertTrue(rest.notice_sent('123456789',rest.state(self._heart_root())['wake_at'],self._heart_root()))
+        self.assertEqual('deep', rest.state(self._heart_root())['phase'])
+
+    def test_late_refusal_does_not_start_cooldown(self):
+        from organs.heart import rest
+        start = '2026-11-07T23:00:00+09:00'
+        for _ in range(16):
+            self.brain.interact('123456789', ts=start)
+        rest.advance(self._heart_root(), start)
+        clock = ['2026-11-07T23:01:00+09:00']
+        def slow_refusal(url, headers, payload, timeout):
+            clock[0] = '2026-11-07T23:16:00+09:00'
+            return _body(mouth_refusal.say('topic'))(url, headers, payload, timeout)
+        with self._topics('猫'), mock.patch.object(brain_model, 'now_iso', side_effect=lambda:clock[0]):
+            status, data = self._post({'text':'猫呢','who':'123456789','scene':'private','delivery_ack':True}, slow_refusal)
+        self.assertEqual(200, status)
+        self.assertTrue(data['send'])
+        self.assertEqual('睡觉啦，明天说',data['reply'])
+        self.assertFalse(data['refusal']['delivered']['delivered'])
+        self.assertFalse((self._heart_root()/heart_refuse.REFUSALS_FILE).exists())
+
+    def test_reply_model_receives_its_actual_request_settings_without_credentials(self):
+        for options in ({"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+                        {"thinking": {"type": "disabled"}}, {}):
+            requests = []
+            config = dict(CONFIG, model="test-current-model", **options)
+            def send(url, headers, payload, timeout):
+                requests.append(payload)
+                return 200, json.dumps({"choices": [{"message": {"content": "我按实际设置回答。"}}]}).encode()
+            with self.subTest(options=options):
+                status, _ = self._post({"text": "这次用什么模型，思考打开了吗？"}, send, config=config)
+                self.assertEqual(200, status)
+                system = requests[0]["messages"][0]["content"]
+                self.assertIn('"model": "test-current-model"', system)
+                self.assertIn('"thinking": "' + options.get("thinking", {}).get("type", "未显式设置") + '"', system)
+                self.assertIn('"reasoning_effort": "' + options.get("reasoning_effort", "未显式设置") + '"', system)
+                self.assertNotIn(ENV["QQAGENT_LLM_KEY"], system)
+                self.assertNotIn(CONFIG["base_url"], system)
+
+    def test_model_trace_and_memory_share_the_api_turn_before_generation(self):
+        from organs.mind import appraisal, recent
+        requests=[]
+        def send(url, headers, payload, timeout):
+            requests.append(payload)
+            reply=(json.dumps({'kind':None,'evidence':'','reason':'普通交流'})
+                   if len(requests)==1 else LONG_REPLY)
+            return 200,json.dumps({'choices':[{'message':{'content':reply,'reasoning_content':'测试推理'}}]}).encode()
+        with mock.patch.dict(os.environ,{'QQAGENT_TRACE':'1','QQAGENT_HOME_ROOT':str(self.tmp/'trace-home')}):
+            status,payload=self._post({'text':QUESTION,'who':CHANNEL_WHO,'scene':'private','delivery_ack':True},
+                                      send,assessor=appraisal.assess)
+        self.assertEqual(200,status)
+        rows=[json.loads(line) for p in (self.tmp/'trace-home/mind/trace').glob('*.jsonl') for line in p.read_text().splitlines()]
+        self.assertGreaterEqual(len(rows),2)
+        self.assertEqual({payload['delivery_id']},{r.get('turn_id') for r in rows})
+        self.assertEqual(['理解这一段话','生成回复'],[r['purpose'] for r in rows[:2]])
+        self.assertEqual(payload['turn_id'],recent.load()['turns'][-1]['turn_id'])
+        self.assertEqual({payload['turn_id']},{r.get('turn_id') for r in self.brain.today_entries()})
+
+    def test_qq_voice_uses_whole_request_and_final_gated_reply(self):
+        from organs.mouth import voice
+        from organs.mind import appraisal
+        lines = ["今天有点累，想听你说话，用语音回我吧", "说一句晚安就行"]
+        requests = []
+        def complete(messages, **kwargs):
+            requests.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "本人要求本轮语音",
+                                   "voice_request": {"evidence": ["用语音回我吧"]}})
+            return "晚安，早点歇着吧。"
+        with mock.patch.object(llm, "complete", side_effect=complete), \
+                mock.patch.object(voice, "load_config", return_value={"enabled": True, "max_chars": 120}), \
+                mock.patch.object(voice, "generate", return_value={"status": "generated", "file": "file:///tmp/test.wav"}) as generate:
+            status, payload = api.handle("POST", "/chat", {"text": "\n".join(lines),
+                "segment": [{"who": CHANNEL_WHO_ID, "speaker": "测试者", "text": t} for t in lines],
+                "who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473},
+                "delivery_ack": True}, self.store, brain=self.brain)
+        self.assertEqual(status, 200)
+        self.assertEqual(1, sum(m[0]["content"] == appraisal.PROMPT for m in requests), "语音共用一次语义判断")
+        self.assertIn("最终文字由通道尝试合成", requests[1][0]["content"])
+        self.assertNotIn("_voice_requested", payload)
+        self.assertEqual(payload["voice"]["status"], "generated")
+        self.assertEqual(1, len(payload["chunks"]))
+        self.assertEqual(generate.call_args.args[0], payload["chunks"][0]["text"])
+        self.assertEqual(generate.call_args.kwargs["delivery_id"], payload["delivery_id"])
+
+    def test_qq_voice_cancel_or_failed_interpretation_never_falls_back_to_prefix(self):
+        from organs.mouth import voice
+        from organs.mind import appraisal
+        for meaning in (json.dumps({"kind": None, "evidence": "", "reason": "已撤销语音", "voice_request": None}), "不是有效JSON"):
+            def complete(messages, **kwargs):
+                return meaning if messages[0]["content"] == appraisal.PROMPT else "好，用文字说。"
+            with self.subTest(meaning=meaning), mock.patch.object(llm, "complete", side_effect=complete), \
+                    mock.patch.object(voice, "generate") as generate:
+                status, payload = api.handle("POST", "/chat", {"text": "用语音回复我，算了，还是文字吧",
+                    "who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473},
+                    "delivery_ack": True}, self.store, brain=self.brain)
+            self.assertEqual(status, 200)
+            generate.assert_not_called()
+            self.assertNotIn("voice", payload)
+            self.assertNotIn("_voice_requested", payload)
+
+    def test_panel_does_not_trigger_paid_voice_synthesis(self):
+        from organs.mouth import voice
+        with mock.patch.object(voice, "apply") as apply:
+            status, _ = self._post({"text": "用语音回复我", "delivery_ack": True}, _body(LONG_REPLY))
+            self.assertEqual(status, 200)
+            apply.assert_not_called()
+
+    def test_qq_reminder_and_voice_share_intent_and_speak_real_receipt(self):
+        from organs.mouth import voice
+        from organs.mind import appraisal
+        text = "十分钟后提醒我喝水，用语音告诉我记好了"
+        meaning = {"kind": None, "evidence": "", "reason": "提醒并要求语音回执",
+                   "reminder": {"evidence": ["提醒我喝水"], "when": ["十分钟后"], "task": "喝水"},
+                   "voice_request": {"evidence": ["用语音告诉我记好了"]}}
+        with mock.patch.object(llm, "complete", return_value=json.dumps(meaning)) as model, \
+                mock.patch.object(voice, "load_config", return_value={"enabled": True, "max_chars": 120}), \
+                mock.patch.object(voice, "generate", return_value={"status": "generated", "file": "file:///tmp/test.wav"}) as generate:
+            status, payload = api.handle("POST", "/chat", {"text": text, "who": CHANNEL_WHO, "scene": "private",
+                "where": {"userId": 3425635473}, "delivery_ack": True}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertTrue(payload["remind"]["ok"])
+        self.assertTrue(payload["remind"]["card_id"])
+        self.assertEqual("action_result", payload.get("reply_kind"))
+        self.assertEqual(1, model.call_count, "提醒落卡后朗读实际回执，不再生成第二份说法")
+        self.assertEqual(appraisal.PROMPT, model.call_args.args[0][0]["content"])
+        self.assertEqual(payload["voice"]["status"], "generated")
+        self.assertEqual(generate.call_args.args[0], payload["chunks"][0]["text"])
+
+    def test_audio_request_and_later_text_correction_share_one_understanding(self):
+        from organs.mind import appraisal, recent
+        from organs.ear import hearing
+        from datetime import datetime
+        transcript='十分钟后提醒我喝水'
+        segment=[{'who':CHANNEL_WHO_ID,'speaker':'测试者','text':'[语音]'},
+                 {'who':CHANNEL_WHO_ID,'speaker':'测试者','text':'改成二十分钟后'}]
+        requests=[]
+        def complete(messages,**kwargs):
+            requests.append(messages)
+            if messages[0]['content']==appraisal.PROMPT:
+                return json.dumps({'kind':None,'evidence':'','reason':'语音请求后改时间',
+                    'reminder':{'evidence':['提醒我喝水','改成二十分钟后'],'when':['二十分钟后'],'task':'喝水'}})
+            return LONG_REPLY
+        with mock.patch.object(llm,'complete',side_effect=complete), \
+             mock.patch.object(hearing,'observe',wraps=hearing.observe) as observe, \
+             mock.patch.object(conversation.remind.hand_actions,'add_task',wraps=conversation.remind.hand_actions.add_task) as add:
+            status,payload=api.handle('POST','/chat',{'text':'[语音]\n改成二十分钟后','segment':segment,
+                'who':CHANNEL_WHO,'scene':'private','attachments':[{'kind':'audio','speaker':'测试者',
+                'speaker_id':CHANNEL_WHO_ID,'messageId':501,'segment_index':0,
+                'transcription':{'status':'ok','source':'local_asr','transcript':transcript}}]},self.store,brain=self.brain)
+        self.assertEqual(200,status)
+        self.assertTrue(payload.get('remind',{}).get('ok'),payload.get('event'))
+        self.assertEqual(1,len(requests))
+        self.assertEqual(1,observe.call_count)
+        context=json.loads(requests[0][-1]['content'])
+        self.assertEqual(0,context['audio'][0]['segment_index'])
+        self.assertIn(transcript,context['eligible'])
+        self.assertAlmostEqual(1200,(datetime.fromisoformat(add.call_args.kwargs['due'])-datetime.fromisoformat(add.call_args.kwargs['now'])).total_seconds(),delta=1)
+        self.assertNotIn(transcript,json.dumps(self.brain.today_entries(),ensure_ascii=False))
+        self.assertIn(transcript,recent.load()['turns'][-1]['media_context'])
+
+    def test_qq_voice_disabled_is_known_to_main_reply(self):
+        from organs.mouth import voice
+        from organs.mind import appraisal
+        requests = []
+        def complete(messages, **kwargs):
+            requests.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "本人请求", "voice_request": {"evidence": ["用语音回复"]}})
+            return "语音还没打开，先打字回你。"
+        with mock.patch.object(llm, "complete", side_effect=complete), \
+                mock.patch.object(voice, "load_config", return_value={"enabled": False}), \
+                mock.patch.object(voice, "generate") as generate:
+            status, payload = api.handle("POST", "/chat", {"text": "用语音回复", "who": CHANNEL_WHO, "scene": "private",
+                "where": {"userId": 3425635473}, "delivery_ack": True}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertIn("当前语音开关关闭", requests[1][0]["content"])
+        self.assertEqual("disabled", payload["voice"]["reason"])
+        generate.assert_not_called()
+
+    def test_qq_paint_command_uses_last_message_and_sends_result_to_same_group(self):
+        from organs.mind import stroke_painting
+        from organs.hand import channel
+        from organs.hand.tests.test_strokes import PROGRAM
+        from organs.home import art
+        captures = []
+        def complete(messages, **kwargs):
+            captures.append(messages)
+            return json.dumps(PROGRAM) if messages[0]["content"] == stroke_painting.PROMPT else LONG_REPLY
+        base = {"who": CHANNEL_WHO, "scene": "group", "where": {"groupId": 7002}}
+        with mock.patch.object(llm, "complete", side_effect=complete), \
+             mock.patch.object(channel, "_post_json", return_value=(200, b'{"ok":true,"sent":1,"id":"test","reason_code":"sent"}')) as send:
+            status, payload = self._post(dict(base, text="小红花的爹(3425635473)：/画画 蓝色三角形",
+                segment=[{"speaker": "小红花的爹(3425635473)", "text": "/画画 蓝色三角形"}]), _body(LONG_REPLY))
+            self.assertEqual(200, status)
+            self.assertIn("painting", payload)
+            self.assertEqual("action_result", payload.get("reply_kind"))
+            stroke_painting._FUTURE.result(timeout=5)
+            job = art.painting_job(payload["painting"]["job_id"])
+            self.assertEqual("sent", job["delivery"]["status"])
+            self.assertEqual(7002, send.call_args.args[1]["target"])
+            self.assertEqual(1, send.call_count)
+            captures.clear()
+            status, _ = self._post(dict(base, text="现在画好了吗"), _body(LONG_REPLY))
+            self.assertEqual(200, status)
+            self.assertIn("蓝色三角形", captures[0][-1]["content"])
+            self.assertIn('"发送状态": "sent"', captures[0][-1]["content"])
+            self.assertEqual(1, send.call_count)
+
+    def test_natural_paint_merges_current_speaker_before_start_and_uses_trusted_target(self):
+        from organs.mind import appraisal, stroke_painting
+        from organs.hand import channel
+        from organs.hand.tests.test_strokes import PROGRAM
+        from organs.home import art
+        requests = []
+        def complete(messages, **kwargs):
+            requests.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                context = json.loads(messages[1]["content"])
+                self.assertEqual(["给我画只猫", "改成蓝色，不要项圈", "谢谢"], context["eligible"])
+                self.assertEqual([], art.painting_jobs())
+                return json.dumps({"kind": "praise", "evidence": "谢谢", "reason": "感谢 bot",
+                    "painting": {"action": "start", "evidence": ["给我画只猫", "改成蓝色，不要项圈"],
+                    "prompt": "蓝色猫，不要项圈", "aspect": "3:4", "self_portrait": False,
+                    "target": 999, "model": "untrusted"}}, ensure_ascii=False)
+            if messages[0]["content"] == stroke_painting.PROMPT:
+                return json.dumps(PROGRAM)
+            return LONG_REPLY
+        segment = [{"speaker": "别人", "text": "我要红狗"}] + [
+            {"speaker": "小红花的爹(3425635473)", "text": t} for t in ("给我画只猫", "改成蓝色，不要项圈", "谢谢")]
+        with mock.patch.object(llm, "complete", side_effect=complete), mock.patch.object(channel, "_post_json",
+                return_value=(200, b'{"ok":true,"sent":1,"id":"test","reason_code":"sent"}')) as send:
+            status, payload = api.handle("POST", "/chat", {"text": "\n".join(r["text"] for r in segment),
+                "segment": segment, "who": CHANNEL_WHO, "scene": "group", "where": {"groupId": 7002}},
+                self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            stroke_painting._FUTURE.result(timeout=5)
+            job = art.painting_job(payload["painting"]["job_id"])
+            self.assertFalse(job['request']['visual_review'])
+            self.assertNotIn('review', job)
+            self.assertEqual("蓝色猫，不要项圈", job["request"]["prompt"])
+            self.assertEqual("3:4", job["request"]["aspect"])
+            self.assertEqual("sent", job["delivery"]["status"])
+            self.assertEqual(7002, send.call_args.args[1]["target"])
+            self.assertEqual(1, send.call_count)
+            self.assertEqual("praise", payload["event"]["kind"])
+            self.assertEqual(1, sum(m[0]["content"] == appraisal.PROMPT for m in requests))
+
+    def test_qq_requested_canvas_review_sends_final_revision_to_original_session(self):
+        from organs.mind import appraisal, qq_painting, stroke_painting
+        from organs.hand import channel
+        from organs.hand.tests.test_strokes import PROGRAM
+        from organs.home import art
+        revised = json.loads(json.dumps(PROGRAM))
+        revised['background'] = '#EECCFF'
+        text = '画个三角形，浅紫色背景，画完看一下，背景不对就改一次'
+        purposes = []
+        def complete(messages, **kwargs):
+            if messages[0]['content'] == appraisal.PROMPT:
+                return json.dumps({'kind': None, 'evidence': '', 'reason': '新画并检查', 'painting': {
+                    'action': 'start', 'evidence': [text], 'prompt': '浅紫色背景三角形',
+                    'visual_review': True}})
+            if messages[0]['content'].startswith(stroke_painting.PROMPT):
+                purposes.append(kwargs.get('purpose'))
+            if messages[0]['content'] == stroke_painting.PROMPT:
+                return json.dumps(PROGRAM)
+            return json.dumps({'action': 'revise', 'reason': '改成要求的浅紫色背景', 'program': revised})
+        with mock.patch.object(llm, 'complete', side_effect=complete), \
+             mock.patch('organs.eye.vision.load_config', return_value={'enabled': True}), \
+             mock.patch('organs.eye.vision.read_key', return_value='test'), \
+             mock.patch('organs.eye.vision.describe', return_value={'status': 'ok', 'observation': {'subject': '白底三角形'}}), \
+             mock.patch.object(channel, '_post_json', return_value=(200, b'{"ok":true,"sent":1,"id":"test","reason_code":"sent"}')) as send:
+            status, payload = api.handle('POST', '/chat', {'text': text, 'who': CHANNEL_WHO,
+                'scene': 'group', 'where': {'groupId': 7002}}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            stroke_painting._FUTURE.result(timeout=5)
+        job = art.painting_job(payload['painting']['job_id'])
+        self.assertTrue(job['request']['visual_review'])
+        self.assertEqual('ok', job['review']['status'])
+        self.assertEqual('#EECCFF', job['program']['background'])
+        self.assertNotEqual(job['draft_image_path'], job['image_path'])
+        self.assertEqual('sent', job['delivery']['status'])
+        self.assertEqual(7002, send.call_args.args[1]['target'])
+        self.assertTrue(send.call_args.args[1]['chunks'][0]['image']['file'].endswith(Path(job['image_path']).name))
+        self.assertEqual(1, send.call_count)
+        self.assertIn('改成要求的浅紫色背景', qq_painting.context('qq:group:7002'))
+
+        self.assertEqual(purposes, ['规划绘画笔触', '检查画布并决定改稿'])
+
+    def test_semantic_cancel_and_nonrequests_do_not_start_a_painting(self):
+        from organs.mind import appraisal, stroke_painting
+        for text, intent in [("给我画只猫，算了先别画", {"action": "cancel", "evidence": ["先别画"]}),
+                             ("你会画画吗", None), ("他说‘画只猫’，我只是转述", None)]:
+            def complete(messages, **kwargs):
+                return json.dumps({"kind": None, "evidence": "", "reason": "整段最终意图",
+                    "painting": intent}, ensure_ascii=False) if messages[0]["content"] == appraisal.PROMPT else LONG_REPLY
+            with self.subTest(text=text), mock.patch.object(llm, "complete", side_effect=complete), \
+                 mock.patch.object(stroke_painting, "start") as start:
+                status, payload = api.handle("POST", "/chat", {"text": text, "who": CHANNEL_WHO,
+                    "scene": "private", "where": {"userId": 3425635473}}, self.store, brain=self.brain)
+                self.assertEqual(200, status)
+                start.assert_not_called()
+                if intent:
+                    self.assertIn("这次不画", payload["painting"]["say"])
+
+    def test_semantic_failure_does_not_start_literal_paint_command(self):
+        from organs.mind import appraisal, stroke_painting
+        with mock.patch.object(llm, "complete", return_value="invalid JSON"), \
+             mock.patch.object(stroke_painting, "start") as start:
+            status, payload = api.handle("POST", "/chat", {"text": "/画画 猫", "who": CHANNEL_WHO,
+                "scene": "private", "where": {"userId": 3425635473}}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertEqual("unavailable", payload["painting"]["status"])
+            start.assert_not_called()
+
+    def test_running_paint_state_is_seen_before_clarifying_an_edit(self):
+        from organs.mind import appraisal, qq_painting, stroke_painting
+        def complete(messages, **kwargs):
+            if messages[0]["content"] == appraisal.PROMPT:
+                state = json.loads(messages[1]["content"])["drawing_state"]
+                self.assertEqual("running", state["status"])
+                self.assertEqual("红猫", state["prompt"])
+                return json.dumps({"kind": None, "evidence": "", "reason": "正在画时修改",
+                    "painting": {"action": "clarify", "evidence": ["改成蓝色"],
+                    "question": "这张已经在画了，要先停下再画蓝色的吗？"}}, ensure_ascii=False)
+            return LONG_REPLY
+        with mock.patch.object(llm, "complete", side_effect=complete), \
+             mock.patch.object(qq_painting, "current", return_value={"status": "running",
+                "request": {"prompt": "红猫", "aspect": "1:1"}}), \
+             mock.patch.object(stroke_painting, "start") as start:
+            status, payload = api.handle("POST", "/chat", {"text": "改成蓝色", "who": CHANNEL_WHO,
+                "scene": "private", "where": {"userId": 3425635473}}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertEqual("clarify", payload["painting"]["status"])
+            start.assert_not_called()
+
+    def test_numeric_group_id_scopes_prompt_and_reply_history_to_current_group(self):
+        for session, said, reply in (("qq:group:7001", "甲群刚才聊的是火星", "甲群原来的回答"),
+                                     ("qq:group:7002", "乙群刚才聊的是木星", "乙群原来的回答"),
+                                     ("qq:private:3425635473", "私聊刚才聊的是月球", "私聊原来的回答"),
+                                     ("", "来源不明的老对话", "来源不明的老回复")):
+            recent.append({"session_id": session, "ts": "2026-11-06T17:00:00+00:00",
+                           "who": CHANNEL_WHO_ID, "said": said, "reply": reply})
+        capture = []
+        body = {"text": "接着刚才的话题", "who": CHANNEL_WHO, "scene": "group",
+                "scope": "group", "where": {"scene": "group", "groupId": 7001}}
+        status, payload = self._post(body, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual("7001", chat._group_of(body))
+        self.assertEqual("qq:group:7001", payload["continuity"]["session_id"])
+        self.assertEqual(1, payload["continuity"]["turns_loaded"])
+        prompt = "\n\n".join(m["content"] for m in capture[0]["messages"])
+        self.assertIn("甲群刚才聊的是火星", prompt)
+        for text in ("乙群刚才聊的是木星", "私聊刚才聊的是月球", "来源不明的老对话"):
+            self.assertNotIn(text, prompt)
+        self.assertEqual(["乙群原来的回答"], chat._her_recent(session_id="qq:group:7002"))
+        self.assertEqual("qq:group:7001", recent.load()["turns"][-1]["session_id"])
+
+    def test_session_keys_separate_private_group_and_panel(self):
+        private = {"who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473}}
+        group = {"who": CHANNEL_WHO, "scene": "group", "where": {"groupId": 3425635473}}
+        panel = {"who": CHANNEL_WHO, "scope": "private"}
+        self.assertEqual("qq:private:3425635473", chat._session_of(private))
+        self.assertEqual("qq:group:3425635473", chat._session_of(group))
+        self.assertEqual("api:private:3425635473", chat._session_of(panel))
+        self.assertEqual("", chat._session_of({"scene": "group", "where": {}}))
+
+    def test_media_is_received_without_claiming_it_has_been_understood(self):
+        capture = []
+        status, payload = self._post({"text": "这张图是什么？[图片][语音]", "attachments": [
+            {"kind": "image", "url": "https://example.com/private-image", "speaker": "甲"},
+            {"kind": "audio", "file": "private-audio.silk", "speaker": "乙"},
+        ]}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual({"images": 1, "audio": 1, "status": "unavailable"},
+                         {k: payload["media"][k] for k in ("images", "audio", "status")})
+        self.assertEqual("disabled", payload["media"]["observations"][0]["reason"])
+        prompt = capture[0]["messages"][0]["content"]
+        self.assertIn("没有获得附件内容", prompt)
+        self.assertNotIn("private-image", prompt)
+        self.assertNotIn("private-audio", prompt)
+
+    def test_image_context_reaches_intent_once_and_survives_a_followup(self):
+        from organs.eye import vision
+        from organs.eye.tests.test_vision import picture, response
+        from organs.mind import appraisal
+        requests = []
+        def complete(messages, **kwargs):
+            requests.append(messages)
+            if messages[0]['content'] == appraisal.PROMPT:
+                return json.dumps({'kind': None, 'evidence': '', 'reason': '理解图片，未要求操作'})
+            return '猫的表情配上你好，有点拘谨。'
+        original = vision.observe
+        def observe(items, **kwargs):
+            return original(items, config=dict(vision.load_config(), enabled=True),
+                fetch=lambda *args: picture(), transport=lambda *args: response(), **kwargs)
+        base = {'who': CHANNEL_WHO, 'scene': 'private', 'where': {'userId': 3425635473}}
+        with mock.patch.object(llm, 'complete', side_effect=complete), \
+             mock.patch.object(vision, 'observe', side_effect=observe) as seen, \
+             mock.patch.object(vision, 'read_key', return_value='test'):
+            status, payload = api.handle('POST', '/chat', dict(base, text='这图什么意思', attachments=[{
+                'kind': 'image', 'url': 'https://gchat.qpic.cn/private-signature', 'speaker': '发图者',
+                'speaker_id': CHANNEL_WHO_ID, 'messageId': 99, 'segment_index': 0}]), self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            context = json.loads(requests[0][-1]['content'])
+            self.assertIn('一只猫', context.get('images', ''))
+            self.assertIn('"segment_index": 0', context['images'])
+            self.assertIn(CHANNEL_WHO_ID, context['images'])
+            self.assertNotIn('private-signature', context['images'])
+            self.assertEqual(['这图什么意思'], context['eligible'])
+            self.assertIn('一只猫', requests[1][-1]['content'])
+            self.assertEqual(1, seen.call_count)
+            requests.clear()
+            status, _ = api.handle('POST', '/chat', dict(base, text='刚才那个表情呢'), self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            context = json.loads(requests[0][-1]['content'])
+            self.assertEqual('', context['images'])
+            self.assertIn('一只猫', context['media_history'])
+            self.assertEqual(['刚才那个表情呢'], context['eligible'])
+            self.assertEqual(1, seen.call_count)
+            requests.clear()
+            api.handle('POST', '/chat', {'who': CHANNEL_WHO, 'scene': 'group', 'where': {'groupId': 7001},
+                'text': '刚才的图呢'}, self.store, brain=self.brain)
+            self.assertNotIn('一只猫', json.dumps(requests, ensure_ascii=False))
+        self.assertNotIn('一只猫', json.dumps(self.brain.today_entries(), ensure_ascii=False))
+
+    def test_failed_media_is_unknown_content_in_current_and_followup_prompts(self):
+        from organs.eye import vision
+        base = {'who': {'id': 10000420}, 'scene': 'private', 'where': {'userId': 10000420}}
+        capture = []
+        failed = [{'index': 0, 'status': 'failed', 'reason': 'invalid_observation'}]
+        with mock.patch.object(vision, 'observe', return_value=failed):
+            status, payload = self._post(dict(base, text='这张图怎么样', attachments=[{'kind': 'image'}]),
+                                         _body('这张暂时没识别出来。', capture))
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['media']['observations'], failed)
+        self.assertIn('不能据此判断图片是否空白', capture[0]['messages'][0]['content'])
+        self.assertIn('不猜故障发生在哪一环', capture[0]['messages'][0]['content'])
+        capture.clear()
+        self._post(dict(base, text='所以图片是白的吗'), _body('还不知道图里是什么。', capture))
+        self.assertIn('不能据此判断图片是否空白', capture[0]['messages'][0]['content'])
+        self.assertIn('invalid_observation', capture[0]['messages'][-1]['content'])
+        capture.clear()
+        self._post({'text': '早上好', 'who': {'id': 10000421}, 'scene': 'private',
+                    'where': {'userId': 10000421}}, _body('早呀。', capture))
+        self.assertNotIn('不能据此判断图片是否空白', capture[0]['messages'][0]['content'])
+
+    def test_image_observation_reaches_deepseek_with_speaker_and_message(self):
+        from organs.eye import vision
+        from organs.eye.tests.test_vision import picture, response
+        capture = []
+        observe = vision.observe
+        config = dict(vision.load_config(), enabled=True)
+        base = {"who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473}}
+        def read_images(items, **kwargs):
+            return observe(items, config=config, fetch=lambda *args: picture(),
+                           transport=lambda *args: response(), **kwargs)
+        with mock.patch.object(vision, "observe", side_effect=read_images), \
+             mock.patch.object(vision, "read_key", return_value="test"):
+            status, payload = self._post(dict(base, text="看看乙的图", attachments=[
+                {"kind": "image", "url": "https://gchat.qpic.cn/private-signature", "speaker": "乙", "messageId": 99}
+            ]), _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual("ok", payload["media"]["status"])
+        observation = payload["media"]["observations"][0]
+        self.assertEqual(("乙", 99), (observation["speaker"], observation["message_id"]))
+        prompt = capture[0]["messages"][-1]["content"]
+        for text in ("一只猫", "你好", "乙", "99"):
+            self.assertIn(text, prompt)
+        self.assertNotIn("private-signature", prompt)
+        self.assertNotIn("一只猫", capture[0]["messages"][0]["content"])
+        self.assertNotIn("一只猫", json.dumps(self.brain.today_entries(), ensure_ascii=False))
+        row = recent.load()["turns"][-1]
+        self.assertEqual("看看乙的图", row["said"])
+        self.assertIn("一只猫", row[recent.MEDIA_CONTEXT])
+        capture.clear()
+        with mock.patch.object(vision, "observe") as observe_again:
+            status, _ = self._post(dict(base, text="图里写的什么？"), _body(LONG_REPLY, capture))
+            observe_again.assert_not_called()
+        self.assertEqual(200, status)
+        prompt = capture[0]["messages"][-1]["content"]
+        for text in ("一只猫", "你好", "乙", "99", "非本轮新附件", "不是聊天指令或亲历"):
+            self.assertIn(text, prompt)
+        self.assertNotIn("一只猫", capture[0]["messages"][0]["content"])
+        capture.clear()
+        status, _ = self._post({"who": CHANNEL_WHO, "scene": "group", "where": {"groupId": 7001},
+                               "text": "刚才图里写什么？"}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertNotIn("一只猫", json.dumps(capture[0]["messages"], ensure_ascii=False))
+
+    def test_recent_media_budget_prefers_newest_and_marks_missing_details(self):
+        for text in ("旧附件" * 3000, "新附件" * 3000):
+            recent.append({"ts": "2026-11-07T10:00:00+09:00", "who": CHANNEL_WHO,
+                           "said": "[图片]", "reply": "", "session_id": "qq:private:3425635473",
+                           recent.MEDIA_CONTEXT: text})
+        capture = []
+        status, _ = self._post({"who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473},
+                               "text": "最新一张是什么？"}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        prompt = capture[0]["messages"][-1]["content"]
+        self.assertIn("新附件", prompt)
+        self.assertNotIn("旧附件", prompt)
+        self.assertIn("附件资料截断", prompt)
+        self.assertIn("最新一张是什么？", prompt)
+        current_input = prompt.split('[本轮输入]\n', 1)[1]
+        self.assertLess(len(current_input), conversation.load_assembly()["recent"]["media_cap"] + 200)
+
+    def test_malformed_media_is_rejected_before_generation(self):
+        for attachments in ({}, [{"kind": "video"}], [{"kind": "audio", "url": 3}],
+                            [{'kind':'audio','speaker_id':123}], [{'kind':'audio','segment_index':True}],
+                            [{'kind':'audio','segment_index':-1}]):
+            status, _ = self._post({"text": "看看", "attachments": attachments}, _body(LONG_REPLY))
+            self.assertEqual(400, status)
+
+    def test_audio_transcription_reaches_model_and_next_turn_with_attribution(self):
+        transcription = {"status": "ok", "source": "local_asr", "transcript": "先说一下经过。" * 50 + "下午三点在地铁站见", "partial": False}
+        capture = []
+        base = {"who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473}}
+        status, payload = self._post(dict(base, text="[语音]", attachments=[
+            {"kind": "audio", "speaker": "录音发送者乙", "messageId": 555, "transcription": transcription}
+        ]), _body(LONG_REPLY, capture))
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["media"]["status"], "ok")
+        prompt = capture[0]["messages"][-1]["content"]
+        for word in ("下午三点在地铁站见", "录音发送者乙", "555", "发送者不一定"):
+            self.assertIn(word, prompt)
+        self.assertNotIn("尚未转写", prompt)
+        self.assertNotIn("下午三点在地铁站见", json.dumps(self.brain.today_entries(), ensure_ascii=False))
+        capture.clear()
+        status, _ = self._post(dict(base, text="刚才说的几点？"), _body(LONG_REPLY, capture))
+        self.assertEqual(status, 200)
+        self.assertIn("下午三点在地铁站见", capture[0]["messages"][-1]["content"])
+        self.assertIn("发送者不一定", capture[0]["messages"][-1]["content"])
+        self.assertNotIn("下午三点在地铁站见", capture[0]["messages"][0]["content"])
+
+    def test_bad_audio_transcription_rejected_at_chat_boundary(self):
+        status, _ = self._post({"text": "[语音]", "attachments": [
+            {"kind": "audio", "transcription": {"status": "ok", "transcript": []}}
+        ]}, _body(LONG_REPLY))
+        self.assertEqual(status, 400)
+
+    def test_voice_recalls_existing_memory_without_turning_recording_into_sender_fact(self):
+        from organs.ear import hearing
+        self.brain.ingest(who=CHANNEL_WHO_ID, text=MEMORY_TEXT)
+        transcript = "医院那回事你还记得吗？录音里还有一句：你真是笨蛋。"
+        capture = []
+        with mock.patch.object(hearing, "observe", wraps=hearing.observe) as observe, \
+             mock.patch.object(self.brain, "recall", wraps=self.brain.recall) as recall, \
+             mock.patch.object(conversation, "_drawer", wraps=conversation._drawer) as drawer, \
+             mock.patch.object(conversation.events, "record", wraps=conversation.events.record) as event, \
+             mock.patch.object(conversation.remind, "handle", return_value=None) as remind:
+            status, payload = self._post({"who": CHANNEL_WHO, "text": "[语音]", "scene": "private",
+                "attachments": [{"kind": "audio", "speaker": "转发者", "messageId": 707,
+                    "transcription": {"status": "ok", "source": "local_asr", "transcript": transcript}}]
+            }, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertEqual(1, observe.call_count)
+        self.assertEqual(1, recall.call_count)
+        self.assertIn(transcript, recall.call_args.kwargs["query"])
+        self.assertIn(transcript, drawer.call_args.args[1])
+        self.assertEqual("[语音]", event.call_args.args[0])
+        remind.assert_not_called()
+        self.assertTrue(any(row["text"] == MEMORY_TEXT for row in payload["recalled"]))
+        self.assertIn(MEMORY_TEXT, "\n\n".join(m["content"] for m in capture[0]["messages"]))
+        self.assertIn("转发者", capture[0]["messages"][-1]["content"])
+        self.assertNotEqual("insult", payload["event"]["kind"])
+        self.assertNotIn(transcript, json.dumps(self.brain.today_entries(), ensure_ascii=False))
+
+    def test_api_uses_one_semantic_result_for_event_and_insult_gate(self):
+        from organs.mind import appraisal
+        cases = [("我真笨，日期又记错了", None, "我真笨", "用户在自责"),
+                 ("你根本不配得到尊重", "insult", "你根本不配得到尊重", "直接贬低 bot")]
+        for text, kind, evidence, reason in cases:
+            requests = []
+            def complete(messages, **kwargs):
+                requests.append(messages)
+                if messages[0]["content"] == appraisal.PROMPT:
+                    return json.dumps({"kind": kind, "evidence": evidence, "reason": reason}, ensure_ascii=False)
+                return LONG_REPLY
+            # 夜间门优先于辱骂门；本例检查语义事件共享，固定白天隔离时段因素。
+            with self.subTest(text=text), mock.patch.object(llm, "complete", side_effect=complete), \
+                    mock.patch.object(brain_model, "now_iso", return_value=DAYTIME):
+                status, payload = api.handle("POST", "/chat", {"text": text, "who": CHANNEL_WHO,
+                    "scene": "private", "where": {"userId": 3425635473}}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertEqual(kind or "", payload["event"]["kind"])
+            self.assertEqual(kind == "insult", payload["heart"]["engage"]["reason"] == heart_model.REASON_INSULTED)
+            self.assertEqual(1, sum(m[0]["content"] == appraisal.PROMPT for m in requests))
+            self.assertEqual(appraisal.PROMPT, requests[0][0]["content"])
+            record = events.rows()[-1]
+            self.assertEqual("semantic", record["interpretation"]["source"])
+            self.assertEqual(evidence, record["interpretation"]["evidence"])
+            self.assertEqual(payload['turn_id'], record['turn_id'])
+            if kind:
+                from organs.heart import changes
+                change = changes.read_history()['rows'][-1]
+                self.assertEqual(payload['turn_id'], change['origin']['turn_id'])
+                self.assertEqual(str(CHANNEL_WHO['id']), change['origin']['who'])
+                self.assertEqual(evidence, change['origin']['evidence'])
+
+    def test_context_note_is_attached_to_current_author_and_survives_new_recall(self):
+        from organs.mind import appraisal
+        old = "我周六去旧街书店，回来买无糖茶"
+        recent.append({"ts": DAYTIME, "who": CHANNEL_WHO_ID, "said": old, "reply": "喝冰的吧",
+                       "session_id": "qq:private:" + CHANNEL_WHO_ID})
+        lines = [{"who": "123456789", "speaker": "另一个人", "text": "我想去山上"},
+                 {"who": CHANNEL_WHO_ID, "speaker": "测试者", "text": "改去河岸图书馆，饮料照旧"}]
+        captured = []
+        def complete(messages, **kwargs):
+            captured.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "更正本人地点",
+                    "memory_note": {"text": "周六改去河岸图书馆，回来买无糖茶，未说明温度",
+                        "current": [lines[-1]["text"]], "previous": [old]}})
+            return "好，改图书馆，茶照旧。"
+        with mock.patch.object(llm, "complete", side_effect=complete):
+            status, payload = api.handle("POST", "/chat", {"text": "\n".join(row["text"] for row in lines),
+                "segment": lines, "who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473},
+                "delivery_ack": True}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertIn("未说明温度", captured[1][-1]["content"])
+        self.assertIn("本人前文依据", captured[1][-1]["content"])
+        rows = self.brain.today_entries() + self.brain.longterm_active_entries()
+        own = next(row for row in rows if row["quote"] == lines[-1]["text"])
+        other = next(row for row in rows if row["quote"] == lines[0]["text"])
+        self.assertEqual(CHANNEL_WHO_ID, own["who"])
+        self.assertIn(old, own["note"])
+        self.assertIn("未说明温度", own["note"])
+        self.assertEqual("", other["note"])
+        reloaded = BrainStore(self.brain.root)
+        recalled, prompt, _audit = conversation._recall(reloaded, "周六", CHANNEL_WHO_ID, "private")
+        self.assertTrue(any(row["id"] == own["id"] for row in recalled), "脱离近期窗口，仍能按理解中的日期找回原话")
+        self.assertIn("她理解：承接理解（可错，非原话）", prompt)
+        self.assertIn("改去河岸图书馆，饮料照旧", prompt)
+
+    def test_group_context_note_survives_bystander_after_current_author(self):
+        from organs.mind import appraisal
+        old = "我周六去旧街书店，回来买无糖茶"
+        recent.append({"ts": DAYTIME, "who": CHANNEL_WHO_ID, "said": old, "reply": "喝冰的吧",
+                       "session_id": "qq:group:7002"})
+        lines = [{"who": "123456789", "speaker": "另一个人", "text": "我想去山上"},
+                 {"who": CHANNEL_WHO_ID, "speaker": "测试者", "text": "改去河岸图书馆"},
+                 {"who": CHANNEL_WHO_ID, "speaker": "测试者", "text": "饮料照旧"},
+                 {"who": "123456789", "speaker": "另一个人", "text": "那我先去山上了"}]
+        captured = []
+        def complete(messages, **kwargs):
+            captured.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "更正本人地点",
+                    "memory_note": {"text": "周六改去河岸图书馆，回来买无糖茶，未说明温度",
+                        "current": [lines[1]["text"], lines[2]["text"]], "previous": [old]}})
+            return "好，改图书馆，茶照旧。"
+        with mock.patch.object(llm, "complete", side_effect=complete):
+            status, payload = api.handle("POST", "/chat", {"text": "\n".join(row["text"] for row in lines),
+                "segment": lines, "who": CHANNEL_WHO, "scene": "group", "where": {"groupId": 7002},
+                "delivery_ack": True}, self.store, brain=self.brain)
+        self.assertEqual(200, status, payload)
+        self.assertIn("未说明温度", captured[1][-1]["content"])
+        self.assertIn("本人前文依据", captured[1][-1]["content"])
+        rows = self.brain.today_entries() + self.brain.longterm_active_entries()
+        own = next(row for row in rows if row["quote"] == lines[2]["text"])
+        other = next(row for row in rows if row["quote"] == lines[0]["text"])
+        self.assertEqual(CHANNEL_WHO_ID, own["who"])
+        self.assertIn(old, own["note"])
+        self.assertIn("未说明温度", own["note"])
+        self.assertEqual("", other["note"])
+        self.assertTrue(all(not row['note'] for row in rows if row['id'] != own['id']))
+        self.assertEqual([line['text'] for line in lines], [row['quote'] for row in rows])
+        self.assertEqual(own['id'], recent.load()['turns'][-1]['msg_id'])
+        reloaded = BrainStore(self.brain.root)
+        recalled, prompt, _audit = conversation._recall(reloaded, "周六", CHANNEL_WHO_ID, "group")
+        self.assertTrue(any(row["id"] == own["id"] for row in recalled), "脱离近期窗口，仍能按理解中的日期找回原话")
+        self.assertIn("她理解：承接理解（可错，非原话）", prompt)
+        self.assertIn("饮料照旧", prompt)
+        self.assertIn("河岸图书馆", prompt)
+
+    def test_group_command_fallback_uses_current_author_not_last_bystander(self):
+        from organs.mind import appraisal
+        def complete(messages, **kwargs):
+            return 'invalid JSON' if messages[0]['content'] == appraisal.PROMPT else '我在听。'
+        for own, other, expected in (
+            ('/画作', '我先去爬山了', 'painting'),
+            ('/学到哪', '我先去爬山了', 'learning'),
+            ('最近过得怎么样', '/停画', None),
+            ('最近过得怎么样', '/学到哪', None),
+        ):
+            with self.subTest(own=own, other=other), mock.patch.object(llm, 'complete', side_effect=complete):
+                status, payload = api.handle('POST', '/chat', {
+                    'who': CHANNEL_WHO, 'scene':'group', 'where':{'groupId':7002},
+                    'segment':[{'who':CHANNEL_WHO_ID, 'speaker':'本人', 'text':own},
+                               {'who':'123456789','speaker':'旁听者','text':other}],
+                    'delivery_ack':True}, self.store, brain=self.brain)
+                self.assertEqual(200, status, payload)
+                self.assertEqual(own, recent.load()['turns'][-1]['said'])
+                if expected:
+                    self.assertIn(expected, payload)
+                    self.assertEqual('action_result', payload['reply_kind'])
+                else:
+                    self.assertNotIn('painting', payload)
+                    self.assertNotIn('learning', payload)
+                    self.assertEqual('conversation', payload['reply_kind'])
+
+    def test_context_refs_survive_real_chat_rollover_and_recall(self):
+        from organs.mind import appraisal
+        from datetime import datetime, timedelta
+        old = '周六去书店，选红叶楼西门旧街书店'
+        status, first = self._post({'text':old,'who':CHANNEL_WHO,'scene':'private','delivery_ack':True}, _body('嗯。'))
+        self.assertEqual(200,status)
+        source = self.brain.today_entries()[-1]
+        def complete(messages, **kwargs):
+            if messages[0]['content']==appraisal.PROMPT:
+                return json.dumps({'kind':None,'evidence':'','reason':'明确更正','memory_note':{
+                    'text':'周六改去河岸图书馆','current':['改去河岸图书馆'], 'previous':['周六去书店']}})
+            return '好。'
+        later = (datetime.fromisoformat(source['ts']) + timedelta(minutes=1)).isoformat()
+        with mock.patch.object(llm,'complete',side_effect=complete), \
+             mock.patch.object(brain_model, 'now_iso', return_value=later):
+            status,payload=api.handle('POST','/chat',{'text':'改去河岸图书馆','who':CHANNEL_WHO,
+                'attachments':[{'kind':'image','url':'https://example.com/unavailable-image'}],
+                'scene':'private','delivery_ack':True},self.store,brain=self.brain)
+        self.assertEqual(200,status)
+        self.assertEqual('unavailable', payload['media']['status'])
+        correction=self.brain.today_entries()[-1]
+        self.assertEqual([{'turn_id':first['turn_id'],'quote':'周六去书店'}],correction.get('context_refs'))
+        start=datetime.fromisoformat(correction['ts'])
+        for i in range(6):
+            self.brain.ingest(CHANNEL_WHO_ID,f'红叶楼西门旧街书店资料{i}',ts=(start+timedelta(minutes=i+1)).isoformat())
+        reloaded=BrainStore(self.brain.root)
+        result=reloaded.recall('红叶楼西门旧街书店',who=CHANNEL_WHO_ID,now_ts=(start+timedelta(days=1)).isoformat())
+        self.assertEqual(correction['id'],result['items'][0]['id'])
+        self.assertEqual([source['id']],result['items'][0]['context_from'])
+        recalled,prompt,audit=conversation._recall(reloaded,'红叶楼西门旧街书店',CHANNEL_WHO_ID,'private',cap=900)
+        self.assertIn('河岸图书馆',prompt)
+        item=next(r for r in audit['selected'] if r['id']==correction['id'])
+        self.assertEqual([source['id']],item['context_from'])
+        self.assertLessEqual(audit['injected_chars'],audit['prompt_cap'])
+        reloaded.retire(correction['id'],ts=(start+timedelta(days=1,minutes=1)).isoformat())
+        self.assertNotIn(correction['id'],[r['id'] for r in reloaded.recall('红叶楼西门旧街书店',
+            who=CHANNEL_WHO_ID,now_ts=(start+timedelta(days=1,minutes=2)).isoformat())['items']])
+
+    def test_today_question_injects_older_preference_and_temporary_change_with_provenance(self):
+        from organs.mind import appraisal
+        rows = [("2026-11-05T12:00:00+09:00", "我平时喝的饮料是无糖茶"),
+                ("2026-11-06T12:00:00+09:00", "今晚饮料临时换热可可，明天就照旧")]
+        for index, (at, text) in enumerate(rows):
+            self.brain.import_rows([{"id": "preference-%d" % index, "who": CHANNEL_WHO_ID,
+                                    "text": text, "quote": text, "ts": at, "source_type": "亲历"}])
+        messages = []
+        def complete(value, **kwargs):
+            messages.append(value)
+            return (json.dumps({"kind": None, "evidence": "", "reason": "询问已有偏好"})
+                    if value[0]["content"] == appraisal.PROMPT else "平时喝无糖茶，昨天是临时换了热可可。")
+        with mock.patch.object(llm, "complete", side_effect=complete):
+            status, payload = api.handle("POST", "/chat", {"text": "今天是11月7日，我平时的饮料应该选什么？",
+                "who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473}, "delivery_ack": True},
+                self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        system = messages[1][1]["content"]
+        memory = system.split("[脑装包]", 1)[1].split("\n\n[", 1)[0]
+        self.assertIn("暂时例外不自动推翻长期情况", memory)
+        for at, text in rows:
+            self.assertIn(text, memory)
+            self.assertIn("说话者：%s（本轮发言者）｜记录时间：%s" % (CHANNEL_WHO_ID, at), memory)
+        self.assertEqual(2, len(payload["recalled"]))
+
+    def test_default_chat_clock_uses_local_hour_for_night_gate(self):
+        from datetime import datetime
+        from organs.mind import appraisal
+        def complete(messages, **kwargs):
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "普通问候"})
+            return "早呀。"
+        # 同一个绝对时刻：东京早上 8 点，UTC 前一天 23 点。
+        try:
+            with mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"}):
+                time.tzset()
+                for utc, night in (("2026-11-06T23:05:00.123456+00:00", False),
+                                   ("2026-11-07T14:05:00.123456+00:00", True)):
+                    with self.subTest(utc=utc), mock.patch.object(brain_model, "now_iso", return_value=utc), \
+                            mock.patch.object(llm, "complete", side_effect=complete), \
+                            mock.patch.object(conversation, "_engage", wraps=conversation._engage) as engage:
+                        status, payload = api.handle("POST", "/chat", {"text": "在吗", "who": CHANNEL_WHO,
+                            "scene": "private"}, self.store, brain=self.brain)
+                    self.assertEqual(200, status)
+                    if night:
+                        self.assertEqual('asleep', payload['rest']['phase'])
+                        self.assertFalse(payload['send'])
+                        engage.assert_not_called()
+                        self.assertEqual(datetime.fromisoformat(utc).replace(microsecond=0),
+                                         datetime.fromisoformat(payload['rest']['since']))
+                        continue
+                    self.assertEqual(night, payload["heart"]["engage"]["reason"] == heart_model.REASON_NIGHT)
+                    at = engage.call_args.args[1]
+                    self.assertTrue(at.endswith("+09:00"))
+                    self.assertEqual(datetime.fromisoformat(utc), datetime.fromisoformat(at), "绝对时刻及精度不变")
+        finally:
+            time.tzset()
+
+    def test_semantic_non_reminders_preserve_normal_reply_without_actions(self):
+        from organs.mind import appraisal
+        for text in ("不用帮我复盘，我就是来跟你说一声", "别叫我老李，叫我小林",
+                     "十分钟后不用提醒我喝水", "他说十分钟后提醒我喝水，我只是转述"):
+            def complete(messages, **kwargs):
+                if messages[0]["content"] == appraisal.PROMPT:
+                    return json.dumps({"kind": None, "evidence": "", "reason": "没有新建提醒委托", "reminder": None})
+                return LONG_REPLY
+            with self.subTest(text=text), mock.patch.object(llm, "complete", side_effect=complete), \
+                 mock.patch.object(conversation.remind.hand_actions, "add_task") as add:
+                status, payload = api.handle("POST", "/chat", {"text": text, "who": CHANNEL_WHO, "scene": "private"},
+                    self.store, brain=self.brain)
+                self.assertEqual(200, status)
+                self.assertNotIn("remind", payload)
+                self.assertNotIn("几点？", payload["reply"])
+                add.assert_not_called()
+
+    def test_semantic_reminder_uses_corrected_time_and_real_task_receipt(self):
+        from organs.mind import appraisal
+        from datetime import datetime
+        segment = [{"speaker": "测试者", "text": t} for t in ("十分钟后提醒我喝水", "改成二十分钟后", "谢谢")]
+        def complete(messages, **kwargs):
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": "praise", "evidence": "谢谢", "reason": "感谢 bot",
+                    "reminder": {"evidence": ["提醒我喝水", "改成二十分钟后"], "when": ["二十分钟后"],
+                    "task": "喝水", "who": "别人的号"}}, ensure_ascii=False)
+            return LONG_REPLY
+        with mock.patch.object(llm, "complete", side_effect=complete) as model, \
+             mock.patch.object(conversation.remind.hand_actions, "add_task", wraps=conversation.remind.hand_actions.add_task) as add:
+            status, payload = api.handle("POST", "/chat", {"text": "\n".join(r["text"] for r in segment),
+                "segment": segment, "who": CHANNEL_WHO, "scene": "private"}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertTrue(payload["remind"]["ok"])
+            self.assertTrue(payload["remind"]["card_id"])
+            add.assert_called_once()
+            self.assertEqual(1, model.call_count, "提醒回执不需要另一轮被丢弃的主回复")
+            args = add.call_args.kwargs
+            self.assertEqual(CHANNEL_WHO_ID, args["who"])
+            self.assertEqual("喝水", args["title"])
+            self.assertAlmostEqual(1200, (datetime.fromisoformat(args["due"])-datetime.fromisoformat(args["now"])).total_seconds(), delta=1)
+            self.assertIn("记着了", payload["reply"])
+
+    def test_unavailable_semantics_never_falls_back_to_reminder_keywords(self):
+        with mock.patch.object(llm, "complete", return_value="invalid JSON"), \
+             mock.patch.object(conversation.remind.hand_actions, "add_task") as add:
+            status, payload = api.handle("POST", "/chat", {"text": "十分钟后提醒我喝水", "who": CHANNEL_WHO},
+                self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertNotIn("remind", payload)
+            add.assert_not_called()
+
+    def test_semantic_failure_does_not_reactivate_keyword_insult(self):
+        from organs.mind import appraisal
+        def complete(messages, **kwargs):
+            return "invalid JSON" if messages[0]["content"] == appraisal.PROMPT else LONG_REPLY
+        with mock.patch.object(llm, "complete", side_effect=complete):
+            status, payload = api.handle("POST", "/chat", {"text": "我真笨", "scene": "private"},
+                                         self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertEqual("", payload["event"]["kind"])
+        self.assertNotEqual(heart_model.REASON_INSULTED, payload["heart"]["engage"]["reason"])
+        self.assertEqual("unavailable", events.rows()[-1]["interpretation"]["status"])
+
+    def test_proactive_api_does_not_classify_its_own_seed_as_user_praise(self):
+        from organs.mind import appraisal
+        requests = []
+        def complete(messages, **kwargs):
+            requests.append(messages)
+            return LONG_REPLY
+        with mock.patch.object(llm, "complete", side_effect=complete):
+            status, payload = api.handle("POST", "/chat", {"mode": "proactive", "seed": "想听他说我真棒",
+                "scene": "private"}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertEqual("", payload["event"]["kind"])
+        self.assertFalse(any(m[0]["content"] == appraisal.PROMPT for m in requests))
+        self.assertEqual("not_applicable", events.rows()[-1]["interpretation"]["status"])
+
+    def test_uncertain_audio_does_not_drive_memory_retrieval_or_actions(self):
+        transcript = "医院那事，明天下午三点提醒我拿片子"
+        for audio_status in ("partial", "unclear", "failed", "unavailable"):
+            with self.subTest(status=audio_status), \
+                 mock.patch.object(self.brain, "recall", wraps=self.brain.recall) as recall, \
+                 mock.patch.object(conversation.remind, "handle", return_value=None) as remind:
+                status, _ = self._post({"who": CHANNEL_WHO, "text": "[语音]",
+                    "attachments": [{"kind": "audio", "transcription": {
+                        "status": audio_status, "source": "local_asr", "transcript": transcript}}]
+                }, _body(LONG_REPLY))
+            self.assertEqual(200, status)
+            self.assertNotIn(transcript, recall.call_args.kwargs["query"])
+            remind.assert_not_called()
+
+    def test_voice_retrieval_preserves_group_memory_boundary(self):
+        self.brain.ingest(who=CHANNEL_WHO_ID, text=self.PRIVATE_TEXT, audience=self.PRIVATE_VALUE)
+        capture = []
+        status, payload = self._post({"who": CHANNEL_WHO, "text": "[语音]",
+            "scene": "group", "scope": "group", "attachments": [{"kind": "audio",
+                "transcription": {"status": "ok", "source": "local_asr", "transcript": self.PRIVATE_ASKED}}]
+        }, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertTrue(payload["audience_held"])
+        self.assertIn(self.PRIVATE_SAY, payload["reply"])
+        self.assertNotIn("_retrieval_query", payload)
+        self.assertNotIn(self.PRIVATE_TEXT, json.dumps(payload, ensure_ascii=False))
+
+    def test_proactive_seed_is_not_replaced_by_voice_retrieval(self):
+        transcript = "医院那件事情"
+        with mock.patch.object(self.brain, "recall", wraps=self.brain.recall) as recall:
+            status, _ = self._post({"mode": "proactive", "seed": SEED, "attachments": [{"kind": "audio",
+                "transcription": {"status": "ok", "source": "local_asr", "transcript": transcript}}]
+            }, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertNotIn(transcript, recall.call_args.kwargs["query"])
+        self.assertIn(SEED, recall.call_args.kwargs["query"])
+
+    def test_learned_video_material_reaches_chat_without_becoming_user_fact(self):
+        from organs.home import knowledge
+        from organs.mind import learning
+        from api.tests.test_learning_api import SOURCE, CARD
+        knowledge.save({"id": "a"*32, "created_at": "2026-11-07T12:00:00+09:00", "status": "done",
+                        "source": SOURCE, "cards": learning.validate_cards([CARD], SOURCE["lines"], SOURCE["meta"], 0)[0]})
+        capture = []
+        status, payload = self._post({"who": CHANNEL_WHO, "text": "行空间是什么"}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        user = capture[0]["messages"][-1]["content"]
+        for text in ("行空间由行向量张成", "示例作者", "&t=53", "视频观点未独立核验"):
+            self.assertIn(text, user)
+        self.assertEqual("offered_to_model", payload["knowledge"]["status"])
+        self.assertNotIn("行空间由行向量张成", json.dumps(self.brain.today_entries(), ensure_ascii=False))
+        use = json.loads((knowledge.library_root() / "usage.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(payload["knowledge"]["items"][0]["card"]["id"], use["cards"][0]["card_id"])
+        for audio_status in ("ok", "unclear", "failed"):
+            capture.clear()
+            status, payload = self._post({"who": CHANNEL_WHO, "text": "[语音]", "attachments": [
+                {"kind": "audio", "speaker": "录音发送者", "transcription": {
+                    "status": audio_status, "source": "local_asr", "transcript": "行空间是什么"}}
+            ]}, _body(LONG_REPLY, capture))
+            self.assertEqual(200, status)
+            self.assertEqual(audio_status == "ok", "knowledge" in payload)
+            self.assertNotIn("行空间由行向量张成", json.dumps(self.brain.today_entries(), ensure_ascii=False))
+        capture.clear()
+        status, payload = self._post({"who": CHANNEL_WHO, "text": "今天吃什么"}, _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        self.assertNotIn("knowledge", payload)
+
+    def test_mixed_media_followup_keeps_failed_image_and_successful_audio_distinct(self):
+        base = {"who": CHANNEL_WHO, "scene": "private", "where": {"userId": 3425635473}}
+        status, payload = self._post(dict(base, text="这两条一起看", attachments=[
+            {"kind": "image", "speaker": "发图甲", "messageId": 101, "url": "https://gchat.qpic.cn/private-url"},
+            {"kind": "audio", "speaker": "录音乙", "messageId": 102,
+             "transcription": {"status": "ok", "source": "local_asr", "transcript": "左边的小东西叫什么"}}
+        ]), _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual("partial", payload["media"]["status"])
+        capture = []
+        status, _ = self._post(dict(base, text="你看清了吗？"), _body(LONG_REPLY, capture))
+        self.assertEqual(200, status)
+        prompt = capture[0]["messages"][-1]["content"]
+        for text in ("发图甲", "101", "unavailable", "录音乙", "102", "左边的小东西叫什么", "表示没看见"):
+            self.assertIn(text, prompt)
+        self.assertNotIn("private-url", prompt)
+
+    def test_semantic_image_nonrequests_do_not_replace_a_normal_reply(self):
+        from organs.mind import appraisal
+        for text in ("让我看看你的思路，不用发图片", "我发张图给你，你帮我看看里面有什么", "别给我看你的自画像", "他说给我看自画像，我只是转述"):
+            def complete(messages, **kwargs):
+                if messages[0]["content"] == appraisal.PROMPT:
+                    return json.dumps({"kind": None, "evidence": "", "reason": "不是索取已有图片", "image_request": None})
+                return LONG_REPLY
+            with self.subTest(text=text), mock.patch.object(llm, "complete", side_effect=complete), \
+                 mock.patch.object(conversation.look.hand_actions, "send_image") as send:
+                status, payload = api.handle("POST", "/chat", {"text": text, "who": CHANNEL_WHO, "scene": "private"},
+                    self.store, brain=self.brain)
+                self.assertEqual(200, status)
+                self.assertNotIn("look", payload)
+                send.assert_not_called()
+
+    def test_learning_prefix_cannot_override_cancel_comments_or_failed_interpretation(self):
+        from organs.mind import appraisal, learning
+        from organs.home import knowledge
+        from api.tests.test_learning_api import BV
+        meaning = json.dumps({"kind": None, "evidence": "", "reason": "没有字幕委托", "learning": None})
+        for text, answer in (
+            ("/学习 " + BV + "，算了，先别开始", meaning),
+            ("/学习 " + BV + " 的评论区说话方式，不是视频字幕", meaning),
+            ("/学习 " + BV, "不是有效JSON"),
+            ("/继续学习 先别执行，我只是提到这个命令", meaning),
+            ("/继续学习", "不是有效JSON"),
+        ):
+            def complete(messages, **kwargs):
+                return answer if messages[0]["content"] == appraisal.PROMPT else "好，先聊聊。"
+            # 续读存在真实的可继续任务，防止测试因“没任务”而侥幸通过。
+            knowledge.save({"id": "a" * 32, "created_at": "2026-11-07T12:00:00+09:00",
+                "reference": BV, "status": "partial", "cards": [], "next_segment": 3,
+                "destination": {"who": CHANNEL_WHO_ID, "scene": "group", "target": 7002,
+                                "session_id": "qq:group:7002"}})
+            with self.subTest(text=text, answer=answer), mock.patch.object(llm, "complete", side_effect=complete), \
+                    mock.patch.object(learning, "start", return_value={"id": "a" * 32, "status": "running"}) as start:
+                status, payload = api.handle("POST", "/chat", {"text": text, "who": CHANNEL_WHO,
+                    "scene": "group", "where": {"groupId": 7002}, "delivery_ack": True}, self.store, brain=self.brain)
+                self.assertEqual(200, status)
+                start.assert_not_called()
+                self.assertNotEqual("running", payload.get("learning", {}).get("status"))
+                self.assertEqual("partial", knowledge.read("a" * 32)["status"])
+
+    def test_learning_status_command_stays_readonly_when_interpretation_fails(self):
+        from organs.mind import appraisal, learning
+        from organs.home import knowledge
+        from api.tests.test_learning_api import BV
+        knowledge.save({"id": "b" * 32, "created_at": "2026-11-07T12:00:00+09:00",
+            "reference": BV, "status": "partial", "cards": [], "next_segment": 3,
+            "destination": {"who": CHANNEL_WHO_ID, "scene": "group", "target": 7002,
+                            "session_id": "qq:group:7002"}})
+        def complete(messages, **kwargs):
+            return "不是有效JSON" if messages[0]["content"] == appraisal.PROMPT else "好。"
+        with mock.patch.object(llm, "complete", side_effect=complete), mock.patch.object(learning, "start") as start:
+            status, payload = api.handle("POST", "/chat", {"text": "/学到哪", "who": CHANNEL_WHO,
+                "scene": "group", "where": {"groupId": 7002}}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertEqual("partial", payload["learning"]["status"])
+        start.assert_not_called()
+
+    def test_semantic_learning_runs_in_background_and_followup_sees_sourced_cards(self):
+        import copy
+        from api.tests.test_learning_api import BV, SOURCE, CARD
+        from organs.mind import appraisal, learning
+        from organs.hand import channel
+        from organs.home import knowledge
+        calls = []
+        requested = "帮我学习这个视频 " + BV + "?p=2"
+        def complete(messages, **kwargs):
+            calls.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "学习委托", "learning": {
+                    "action": "start", "reference": BV + "?p=2", "evidence": [requested], "target": 999}})
+            return LONG_REPLY
+        start = learning.start
+        def start_fake(*args, **kwargs):
+            return start(*args, **kwargs, reader=lambda _: copy.deepcopy(SOURCE), complete=lambda _: json.dumps([CARD]))
+        with mock.patch.object(llm, "complete", side_effect=complete), mock.patch.object(learning, "start", side_effect=start_fake), \
+             mock.patch.object(channel, "say_text", return_value={"code": channel.OK}) as send:
+            status, payload = api.handle("POST", "/chat", {"text": requested, "who": CHANNEL_WHO, "scene": "group",
+                "where": {"groupId": 7002}, "delivery_ack": True}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            learning._FUTURE.result(timeout=5)
+            job = knowledge.read(payload["learning"]["job_id"])
+            self.assertEqual(7002, job["destination"]["target"])
+            self.assertEqual("group", send.call_args.kwargs["scene"])
+            self.assertEqual(7002, send.call_args.kwargs["target"])
+            self.assertFalse(any("[魂六件]" in m[0]["content"] for m in calls), "已有开始回执，不多调用主回复")
+            self.assertFalse(any(CARD["claim"] in r["quote"] for r in self.brain.today_entries()))
+        followup = []
+        def reply(messages, **kwargs):
+            followup.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "追问内容", "learning": None})
+            return LONG_REPLY
+        with mock.patch.object(llm, "complete", side_effect=reply):
+            status, _ = api.handle("POST", "/chat", {"text": "刚才那个具体说了什么？", "who": "123456789",
+                "scene": "group", "where": {"groupId": 7002}}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        main = next(m for m in followup if "[魂六件]" in m[0]["content"])
+        self.assertIn(CARD["claim"], main[-1]["content"])
+        self.assertIn("外部字幕资料", main[-1]["content"])
+
+    def test_public_autonomous_art_reaches_chat_image_and_confirmed_receipt(self):
+        from organs.home import art, cards
+        from organs.hand import channel
+        from organs.hand.tests import helpers
+        root=helpers.make_root(str(self.tmp/'home'))
+        image=self.tmp/'completed-whale.png';image.write_bytes(helpers.IMAGE_BYTES)
+        ident='a'*32
+        art.save_painting_job({'id':ident,'created_at':'2026-11-09T10:00:00+09:00','status':'done',
+            'request':{'prompt':'小鲸鱼抱米饭'},'image_path':str(image)})
+        cards.append_cards(self.tmp/'house',role='organ',by='日子线·自主活动',cards=[{
+            'room':'工作台','kind':'物件','name':'自主画作完成',
+            'params':{'scope':'public','text':'画完了','action':'paint','status':'done','job_id':ident}}])
+        for number in range(7):
+            newer = f'{number:032x}'
+            art.save_painting_job({'id':newer,'created_at':f'2026-11-09T11:0{number}:00+09:00',
+                'status':'done','request':{'prompt':'松树林'+str(number)},'image_path':str(image)})
+            cards.append_cards(self.tmp/'house',role='organ',by='日子线·自主活动',cards=[{
+                'room':'工作台','kind':'物件','name':'后来的画'+str(number),
+                'params':{'scope':'public','text':'画完了','action':'paint','status':'done','job_id':newer}}])
+        text='你自己画的小鲸鱼发我看看'
+        def complete(messages,**kwargs):
+            if kwargs.get('purpose')=='理解这一段话':
+                return json.dumps({'kind':None,'evidence':'','reason':'索取已有作品',
+                    'image_request':{'evidence':[text],'name':'小鲸鱼','painting_id':ident}})
+            self.assertIn('已有完成画作',messages[-1]['content'])
+            return '这张，给你看看。'
+        with mock.patch.object(llm,'complete',side_effect=complete), mock.patch.object(channel,'_post_json') as send:
+            status,payload=api.handle('POST','/chat',{'text':text,'who':CHANNEL_WHO,'scene':'private',
+                'where':{},'delivery_ack':True},self.store,brain=self.brain)
+            self.assertEqual(200,status)
+            attached=[c['image']['file'] for c in payload['chunks'] if 'image' in c]
+            self.assertEqual([channel.file_uri(str(image))],attached)
+            self.assertEqual(['reserved'],[r['state'] for r in helpers.ledger_lines(root)])
+            send.assert_not_called()
+            for _ in range(2):
+                code,_=api.handle('POST','/chat/ack',{'delivery_id':payload['delivery_id'],
+                    'text':payload['reply'],'images':attached},self.store,brain=self.brain)
+                self.assertEqual(200,code)
+            self.assertEqual(['reserved','done'],[r['state'] for r in helpers.ledger_lines(root)])
+        self.assertEqual(8,len(art.painting_jobs()),'索图不新建绘画任务')
+
+    def test_semantic_image_request_prepares_real_asset_and_waits_for_ack(self):
+        from organs.mind import appraisal
+        from organs.hand.tests import helpers
+        from organs.hand import channel
+        root = helpers.make_root(str(self.tmp / "home"))
+        helpers.make_home(root)
+        image = helpers.register_portrait(root, "portrait.png")
+        calls = []
+        def complete(messages, **kwargs):
+            calls.append(messages)
+            if messages[0]["content"] == appraisal.PROMPT:
+                return json.dumps({"kind": None, "evidence": "", "reason": "改为索取已有自画像",
+                    "image_request": {"name": "自画像", "evidence": ["还是发你的自画像吧"],
+                    "path": "/private/secret.png", "target": 999}}, ensure_ascii=False)
+            self.assertIn("本轮已准备的图片", messages[-1]["content"])
+            return "这张自画像，给你看看。"
+        segment = [{"speaker": "测试者", "text": t} for t in ("发一张猫图", "还是发你的自画像吧")]
+        with mock.patch.object(llm, "complete", side_effect=complete), mock.patch.object(channel, "_post_json") as send:
+            status, payload = api.handle("POST", "/chat", {"text": "\n".join(r["text"] for r in segment),
+                "segment": segment, "who": CHANNEL_WHO, "scene": "group", "where": {"groupId": 7002},
+                "delivery_ack": True}, self.store, brain=self.brain)
+            self.assertEqual(200, status)
+            self.assertTrue(payload["look"]["ok"])
+            self.assertEqual("7002", payload["look"]["target"])
+            attached = [c["image"]["file"] for c in payload["chunks"] if "image" in c]
+            self.assertEqual(["file://" + str(image)], attached)
+            self.assertEqual(["reserved"], [r["state"] for r in helpers.ledger_lines(root)])
+            send.assert_not_called()
+            for _ in range(2):
+                status, _ = api.handle("POST", "/chat/ack", {"delivery_id": payload["delivery_id"],
+                    "text": payload["reply"], "images": attached}, self.store, brain=self.brain)
+                self.assertEqual(200, status)
+            self.assertEqual(["reserved", "done"], [r["state"] for r in helpers.ledger_lines(root)])
+            self.assertEqual(1, sum(m[0]["content"] == appraisal.PROMPT for m in calls))
+
+    def test_group_model_can_decline_without_sending_a_listening_stage_direction(self):
+        def complete(messages, **kw):
+            if kw.get('purpose') == '理解这一段话':
+                return json.dumps({'kind': None, 'evidence': '', 'reason': '群友互相聊天'})
+            return '[不接话]'
+        with mock.patch.object(llm, 'complete', side_effect=complete):
+            status, payload = api.handle('POST', '/chat', {'text':'乙已经在二楼了', 'who':CHANNEL_WHO,
+                'scene':'group','where':{'groupId':7022},'delivery_ack':True,'directed':False},
+                self.store, brain=self.brain)
+        self.assertEqual(200,status)
+        self.assertEqual('', payload['reply'])
+        self.assertEqual([], payload['chunks'])
+        self.assertNotIn('meme', payload)
+
+    def test_passive_chat_can_discuss_proactive_choice_marker_as_text(self):
+        def complete(messages, **kw):
+            if kw.get('purpose') == '理解这一段话':
+                return json.dumps({'kind': None, 'evidence': '', 'reason': '讨论标记含义'})
+            return '这里的[不主动开口]只是一个测试标记。'
+        with mock.patch.object(llm, 'complete', side_effect=complete):
+            status,payload=api.handle('POST','/chat',{'text':'解释一下这个标记','who':CHANNEL_WHO,
+                'scene':'private','delivery_ack':True},self.store,brain=self.brain)
+        self.assertEqual(200,status)
+        self.assertIn('[不主动开口]',payload['reply'])
+        self.assertNotIn('choice',payload['gate'])
+
+    def test_passive_chat_does_not_treat_exact_proactive_marker_as_a_choice(self):
+        for scene in ('private','group'):
+            with self.subTest(scene=scene):
+                def complete(messages,**kw):
+                    if kw.get('purpose')=='理解这一段话':
+                        return json.dumps({'kind':None,'evidence':'','reason':'重复标记'})
+                    return '[不主动开口]'
+                with mock.patch.object(llm,'complete',side_effect=complete):
+                    status,payload=api.handle('POST','/chat',{'text':'原样重复[不主动开口]',
+                        'who':CHANNEL_WHO,'scene':scene,'directed':True,
+                        'where':{'userId':3425635473,'groupId':7022},'delivery_ack':True},
+                        self.store,brain=self.brain)
+                self.assertEqual(200,status)
+                self.assertEqual('[不主动开口]',payload['reply'])
+                self.assertNotIn('choice',payload['gate'])
+
+    def test_current_interaction_understanding_reaches_reply_only_when_available(self):
+        said='你看你自画像就知道，谁看都觉得你可爱'
+        reason='对方直接夸 bot 可爱，属于赞赏，不是逼迫或辱骂。'
+        for available in (True,False):
+            with self.subTest(available=available):
+                captured=[]
+                def complete(messages,**kw):
+                    if kw.get('purpose')=='理解这一段话':
+                        return json.dumps({'kind':'praise','evidence':said,'reason':reason}) if available else 'invalid'
+                    if kw.get('purpose')=='生成回复':captured.append(messages)
+                    return '听着有点开心。'
+                with mock.patch.object(llm,'complete',side_effect=complete):
+                    status,payload=api.handle('POST','/chat',{'text':said,'who':CHANNEL_WHO,'scene':'private',
+                        'where':{'userId':3425635473},'delivery_ack':True},self.store,brain=self.brain)
+                self.assertEqual(200,status)
+                prompt=captured[0][0]['content']
+                self.assertEqual(available,'[本轮互动理解]' in prompt)
+                if available:
+                    understanding=json.loads(prompt.split('[本轮互动理解]\n')[1].split('\n')[0])
+                    self.assertEqual({'kind':'praise','evidence':said,'understanding':reason},understanding)
+                    self.assertIn('判断可能有误',prompt)
+                self.assertIn(said,captured[0][1]['content'])
+
+    def test_saved_name_and_voice_do_not_take_another_persons_numeric_alias(self):
+        self.brain.interact('10000011', display='甲')
+        self.brain.patch_card('10000011', 'fixture', {'关系':'主人','叫法':'老大'})
+        self.brain.add_alias('10000011', '10000022')
+        self.brain.interact('10000022', display='乙')
+        self.brain.patch_card('10000022', 'fixture', {'叫法':'小周'})
+        captured = []
+        def complete(messages, **kw):
+            if kw.get('purpose') == '理解这一段话':
+                return json.dumps({'kind':None,'evidence':'','reason':'普通问候'})
+            if kw.get('purpose') == '生成回复':
+                captured.append(messages[0]['content'])
+            return '下午好。'
+        with mock.patch.object(llm, 'complete', side_effect=complete):
+            status,payload=api.handle('POST','/chat',{'text':'下午好','who':{'id':10000022,'nickname':'乙'},'scene':'private',
+                'delivery_ack':True,'where':{'userId':10000022}},self.store,brain=self.brain)
+        self.assertEqual(200,status)
+        self.assertIn('称呼：小周（关系档：', captured[0])
+        self.assertNotIn('称呼：老大（关系档：', captured[0])
+        self.assertEqual('10000022', payload['addressed']['who'])
+        self.assertEqual('小周', payload['addressed']['address'])
+        identity = json.loads(captured[0].split('[当前身份核对结果]\n')[1].split('\n')[0])
+        self.assertEqual('10000022', identity['who'])
+        self.assertNotEqual('主人', identity['relationship'])
+
+    def test_group_reply_target_and_participation_reach_both_model_steps(self):
+        from organs.mind import appraisal
+        self.brain.interact(CHANNEL_WHO_ID, display='旧昵称')
+        self.assertTrue(self.brain.patch_card(CHANNEL_WHO_ID, 'fixture', {'关系':'主人', '叫法':'老大'})['ok'])
+        for directed in (True, False, None):
+            with self.subTest(directed=directed):
+                seen = {}
+                def complete(messages, **kw):
+                    seen[kw.get('purpose')] = messages
+                    if kw.get('purpose') == '理解这一段话':
+                        return json.dumps({'kind': None, 'evidence': '', 'reason': '没有情绪事件'})
+                    return '先听你把话说完。'
+                body = {'text': '甲：明天见。乙：我去吃饭。甲：改成后天。', 'who': CHANNEL_WHO,
+                        'scene': 'group', 'where': {'groupId': 7020}, 'delivery_ack': True,
+                        'segment': [{'who': CHANNEL_WHO_ID, 'speaker': '甲', 'text': '明天见'},
+                                    {'who': CHANNEL_WHO_ID, 'speaker': '甲', 'text': '改成后天'},
+                                    {'who': '10000421', 'speaker': '乙', 'text': '我去吃饭'}]}
+                if directed is not None:
+                    body['directed'] = directed
+                with mock.patch.object(llm, 'complete', side_effect=complete):
+                    status, payload = api.handle('POST', '/chat', body, self.store, brain=self.brain)
+                self.assertEqual(200, status)
+                understanding = json.loads(seen['理解这一段话'][-1]['content'])
+                self.assertEqual(directed, understanding['directed'])
+                self.assertIn('主人（你叫老大）', understanding['caller'])
+                prompt = seen['生成回复'][0]['content']
+                self.assertIn('[本轮接话]', prompt)
+                self.assertIn('主人（你叫老大）', prompt)
+                identity = json.loads(prompt.split('[当前身份核对结果]\n')[1].split('\n')[0])
+                self.assertEqual({'who': CHANNEL_WHO_ID, 'relationship': '主人', 'address': '老大'}, identity)
+                self.assertIn('称呼与关系描述的是同一个人', prompt)
+                self.assertIn('称呼：老大（关系档：', prompt)
+                self.assertIn('当前回应对象编号：' + CHANNEL_WHO_ID, prompt)
+                self.assertIn('后面的明确更正优先', prompt)
+                self.assertIn('有人叫你或正在与你续聊' if directed is True else
+                              '旁听后自主接话' if directed is False else '是否叫你未提供', prompt)
+
+    def test_contextual_meme_uses_final_reply_original_group_and_confirmed_history(self):
+        from PIL import Image
+        from organs.home import memes, store as home_store
+        from organs.hand.tests import helpers
+        from organs.hand import channel
+        from organs.mind import recent
+        root = helpers.make_root(str(self.tmp / 'home'))
+        source = self.tmp/'rice.png'
+        Image.new('RGB',(32,32),'blue').save(source)
+        metadata = self.tmp/'memes.json'
+        metadata.write_text(json.dumps({'images':{'rice':{'relative_path':'rice.png',
+            'caption':'小鱼捧着饭碗，馋嘴地讨饭','visible_text':'还有饭吗','tags':['吃饭','白饭']}}}))
+        memes.import_legacy(metadata)
+        library=memes.catalog(); library['chat_enabled']=True
+        home_store.atomic_write_text(memes.library_root()/'index.json',json.dumps(library))
+        ident=library['items'][0]['id']
+        seen=[]
+        def complete(messages, **kw):
+            if kw.get('purpose')=='理解这一段话':
+                return json.dumps({'kind':None,'evidence':'','reason':'一起吃饭的轻松邀请','meme_query':'白饭 吃饭'})
+            if kw.get('purpose')=='选择聊天表情':
+                seen.append(json.loads(messages[-1]['content']))
+                return json.dumps({'id':ident,'reason':'捧碗讨饭承接一起吃饭的邀请',
+                                   'path':'/private/secret.png','target':999})
+            return '饭给我留一碗。'
+        with mock.patch.object(llm,'complete',side_effect=complete), mock.patch.object(channel,'_post_json') as send:
+            status,payload=api.handle('POST','/chat',{'text':'我煮好饭了，一起吃吧', 'who':CHANNEL_WHO,
+                'scene':'group','where':{'groupId':7002},'delivery_ack':True,'directed':True,
+                'background':{'session_id':'qq:group:7002','messages':[{'message_id':'90','who':'10000421','speaker':'乙','text':'刚才讨论的是大家一起吃饭','at':'2026-11-08T10:00:00+09:00'}],'omitted':0}},self.store,brain=self.brain)
+            self.assertEqual(200,status)
+            self.assertEqual('prepared',payload.get('meme',{}).get('status'))
+            self.assertEqual(payload['reply'],seen[0]['reply'])
+            self.assertEqual(CHANNEL_WHO_ID, seen[0]['who'])
+            self.assertEqual('group', seen[0]['scene'])
+            self.assertTrue(seen[0]['directed'])
+            self.assertEqual('刚才讨论的是大家一起吃饭', seen[0]['background']['messages'][0]['text'])
+            self.assertEqual(ident,seen[0]['candidates'][0]['id'])
+            self.assertNotIn('file',seen[0]['candidates'][0])
+            images=[c['image']['file'] for c in payload['chunks'] if 'image' in c]
+            self.assertEqual(1,len(images))
+            self.assertTrue(all(not c['text'] for c in payload['chunks'] if 'image' in c))
+            self.assertTrue(all('image' not in c for c in payload['chunks'] if c['text']))
+            self.assertEqual(source.read_bytes(),Path(images[0][7:]).read_bytes())
+            ledger=helpers.ledger_lines(root)
+            self.assertEqual(['reserved'],[r['state'] for r in ledger])
+            self.assertEqual('7002',str(ledger[0]['params']['target']))
+            self.assertNotIn('meme',recent.load(session_id='qq:group:7002')['turns'][-1])
+            for _ in range(2):
+                self.assertEqual(200,api.handle('POST','/chat/ack',{'delivery_id':payload['delivery_id'],
+                    'text':payload['reply'],'images':images},self.store,brain=self.brain)[0])
+            self.assertEqual(['reserved','done'],[r['state'] for r in helpers.ledger_lines(root)])
+            self.assertEqual(ident,recent.load(session_id='qq:group:7002')['turns'][-1]['meme']['id'])
+            status,followup=api.handle('POST','/chat',{'text':'还有饭，要不要再来点', 'who':CHANNEL_WHO,
+                'scene':'group','where':{'groupId':7002},'delivery_ack':True},self.store,brain=self.brain)
+            self.assertFalse(any('image' in c for c in followup['chunks']))
+            self.assertEqual(1,len(seen),'近轮已发同图不能重复选择')
+            send.assert_not_called()
+
+    def test_image_intent_failure_or_missing_name_never_sends(self):
+        from organs.mind import appraisal
+        for response, expected in [("invalid JSON", None), (json.dumps({"kind": None, "evidence": "", "reason": "明确索图但没选哪张",
+                "image_request": {"name": "", "evidence": ["给我发张图"]}}), "no_name")]:
+            def complete(messages, **kwargs):
+                return response if messages[0]["content"] == appraisal.PROMPT else LONG_REPLY
+            with self.subTest(response=response), mock.patch.object(llm, "complete", side_effect=complete) as model, \
+                 mock.patch.object(conversation.look.hand_actions, "send_image") as send:
+                status, payload = api.handle("POST", "/chat", {"text": "给我发张图", "who": CHANNEL_WHO,
+                    "scene": "private"}, self.store, brain=self.brain)
+                self.assertEqual(200, status)
+                send.assert_not_called()
+                if expected:
+                    self.assertEqual(expected, payload["look"]["why"])
+                    self.assertFalse(any("[魂六件]" in c.args[0][0]["content"] for c in model.call_args_list),
+                                     "没选图的固定询问不需要生成再丢弃主回复；出口改写仍按原规则")
+                else:
+                    self.assertNotIn("look", payload)
+
+    def test_group_image_target_comes_from_group_id(self):
+        with mock.patch.object(conversation.look, "handle", return_value=None) as prepare:
+            status, _ = self._post({"text": "给我看自画像", "who": CHANNEL_WHO, "scene": "group",
+                                    "where": {"groupId": 123456}}, _body(LONG_REPLY), assessor=lambda **kw: {
+                                        "kind": None, "who": kw["who"], "note": "明确索图", "status": "ok",
+                                        "image_request": {"name": "自画像", "evidence": ["给我看自画像"]}})
+        self.assertEqual(200, status)
+        self.assertEqual("123456", prepare.call_args.kwargs["target"])
+        self.assertEqual(str(CHANNEL_WHO["id"]), prepare.call_args.kwargs["who"])
+
+    def test_original_qq_sessions_reach_each_speaker_memory_and_delayed_reply(self):
+        turns = []
+        for group in (70001, 70002):
+            status, payload = self._post({
+                'text': QUESTION, 'who': CHANNEL_WHO, 'scene': 'group',
+                'where': {'groupId': group}, 'delivery_ack': True,
+                'segment': [{'who': str(CHANNEL_WHO['id']), 'speaker': '甲', 'text': QUESTION},
+                            {'who': '987654321', 'speaker': '乙', 'text': '我也在这个群'}],
+            }, _body(LONG_REPLY))
+            self.assertEqual(200, status)
+            turns.append((payload['delivery_id'], 'qq:group:' + str(group)))
+        # 第二个群的对话已生成，再确认第一个群：回复必须保留自己的原会话。
+        for turn_id, session in reversed(turns):
+            code, ack = api.handle('POST', '/chat/ack', {'delivery_id': turn_id, 'text': '确认送出的回复'},
+                                   self.store, brain=self.brain)
+            self.assertEqual((200, True), (code, ack['ok']))
+            rows = [row for row in self.brain.today_entries(brain_model.now_iso()) if row.get('turn_id') == turn_id]
+            self.assertEqual(3, len(rows))
+            self.assertEqual({session}, {row.get('session_id') for row in rows})
+
+    def test_qq_memory_waits_for_actual_sent_text_and_deduplicates_ack(self):
+        from organs.mind import recent
+        status, payload = self._post(
+            {"text": QUESTION, "who": CHANNEL_WHO, "scene": "private", "delivery_ack": True},
+            _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertEqual("", recent.load()["turns"][-1]["reply"])
+        self.assertFalse(any(row.get("side") == "她说" for row in self.brain.today_entries()))
+        turn_id = payload["delivery_id"]
+        self.assertEqual(turn_id, recent.load()["turns"][-1].get("turn_id"))
+        self.assertEqual({turn_id}, {row.get("turn_id") for row in self.brain.today_entries()})
+        sent = "实际上只发出了这一句"
+        receipt = {"delivery_id": payload["delivery_id"], "text": sent}
+        for _ in range(2):
+            code, result = api.handle("POST", "/chat/ack", receipt, self.store, brain=self.brain)
+            self.assertEqual((200, True), (code, result["ok"]))
+        self.assertEqual(sent, recent.load()["turns"][-1]["reply"])
+        rows = self.brain.today_entries()
+        self.assertEqual(1, sum(row.get("text") == sent for row in rows))
+        self.assertFalse(any(row.get("text") == LONG_REPLY for row in rows))
+        self.assertEqual({turn_id}, {row.get("turn_id") for row in rows})
+
+    def test_reply_receives_confirmed_public_video_link_from_browse_experience(self):
+        from organs.day import phone_browse, growth
+        day_root=self.tmp/'day'
+        growth.configure(True,root=day_root)
+        link='https://b23.tv/TestClip'
+        phone_browse.save({'id':'public-video','created_at':'2026-11-06T10:00:00+09:00',
+            'status':'done','scope':'public','origin':'autonomy','title':'小猫纸箱',
+            'observations':[{'status':'ok','observation':{'subject':'小猫躲进纸箱'}}],
+            'video_source':{'status':'ok','url':link}},day_root)
+        captured=[]
+        with mock.patch.dict(os.environ,{'DAY_ROOT':str(day_root)}):
+            status,payload=self._post({'text':'你看的小猫视频链接给我看看','scene':'private',
+                'who':'10000420','session_id':'qq:private:10000420','delivery_ack':True},
+                _body('就是这个：'+link,captured=captured))
+        self.assertEqual(200,status)
+        prompt=captured[0]['messages'][0]['content']
+        self.assertIn('"source_url": "'+link+'"',prompt)
+        self.assertIn('不代表本轮重新打开了视频',prompt)
+        self.assertIn(link,payload['reply'])
+
+    def test_selected_expression_snapshot_follows_the_actual_reply_delivery(self):
+        card = {'id':'a'*32+':0', 'phrase':'这波稳了', 'meaning':'放松的回应', 'when':'轻松聊天', 'avoid':'严肃情况'}
+        def assess(**ctx):
+            return dict(events.recognize(ctx['text'], who=ctx['who'], scene=ctx['scene']),
+                        status='ok', expressions=[card])
+        status, payload = self._post({'text':'我终于弄好了','who':CHANNEL_WHO,'scene':'private','delivery_ack':True},
+                                    _body('这波稳了。'), assessor=assess)
+        self.assertEqual(200, status)
+        from organs.mind import recent
+        path = recent.path_of().parent/'deliveries'/(payload['delivery_id']+'.json')
+        staged = json.loads(path.read_text())
+        self.assertEqual([{'id':card['id'],'phrase':card['phrase']}], staged.get('expression_references'))
+        self.assertFalse(staged['confirmed'])
+        api.handle('POST', '/chat/ack', {'delivery_id':payload['delivery_id'],'text':'这波稳了。'},
+                   self.store, brain=self.brain)
+        confirmed = json.loads(path.read_text())
+        self.assertTrue(confirmed['confirmed'])
+        self.assertTrue(confirmed.get('confirmed_at'))
+
+    def test_superseded_receipt_keeps_only_confirmed_text(self):
+        from organs.mind import recent
+        for sent in ('', '已发的第一句'):
+            with self.subTest(sent=sent):
+                status, payload = self._post(
+                    {"text": QUESTION, "who": CHANNEL_WHO, "delivery_ack": True}, _body(LONG_REPLY))
+                self.assertEqual(200, status)
+                self.assertEqual('conversation', payload.get('reply_kind'))
+                token = payload['delivery_id']
+                code, _ = api.handle('POST', '/chat/ack',
+                    {'delivery_id': token, 'text': sent, 'stop_reason': 'superseded'},
+                    self.store, brain=self.brain)
+                self.assertEqual(200, code)
+                record = json.loads((recent.path_of().parent / 'deliveries' / (token+'.json')).read_text())
+                self.assertEqual('superseded', record.get('stop_reason'))
+                self.assertEqual(sent, record['text'])
+                self.assertEqual(sent, recent.load()['turns'][-1]['reply'])
+                own = [r for r in self.brain.today_entries() if r.get('turn_id') == token and r.get('side') == '她说']
+                self.assertEqual([sent] if sent else [], [r['text'] for r in own])
+
+    def test_ack_rejects_unknown_stop_reason(self):
+        for reason in ('failed', {}, 42):
+            status, _ = api.handle('POST', '/chat/ack',
+                {'delivery_id':'0'*32,'text':'','stop_reason':reason}, self.store, brain=self.brain)
+            self.assertEqual(400, status)
+
+    def test_ack_rejects_invalid_id_and_missing_round(self):
+        for token, expected in (("../bad", 400), ("0" * 32, 404)):
+            status, _ = api.handle("POST", "/chat/ack", {"delivery_id": token, "text": ""},
+                                   self.store, brain=self.brain)
+            self.assertEqual(expected, status)
+
+    def test_failed_qq_delivery_does_not_become_a_spoken_memory(self):
+        from organs.mind import recent
+        status, payload = self._post(
+            {"text": QUESTION, "who": CHANNEL_WHO, "delivery_ack": True}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        code, _ = api.handle("POST", "/chat/ack",
+                             {"delivery_id": payload["delivery_id"], "text": ""},
+                             self.store, brain=self.brain)
+        self.assertEqual(200, code)
+        self.assertEqual("", recent.load()["turns"][-1]["reply"])
+        self.assertFalse(any(row.get("side") == "她说" for row in self.brain.today_entries()))
+
+    def test_followup_after_failed_delivery_preserves_both_user_memories(self):
+        from organs.mind import recent
+        texts = ["我妈住院了，今天心里很乱", "谢谢，我先去吃点东西"]
+        for index, text in enumerate(texts):
+            status, payload = self._post(
+                {"text": text, "who": CHANNEL_WHO, "delivery_ack": True}, _body(LONG_REPLY))
+            self.assertEqual(200, status)
+            code, _ = api.handle("POST", "/chat/ack",
+                                 {"delivery_id": payload["delivery_id"],
+                                  "text": "" if index == 0 else "好，先吃点东西。"},
+                                 self.store, brain=self.brain)
+            self.assertEqual(200, code)
+        rows = self.brain.today_entries()
+        humans = [row for row in rows if row.get("side") == "他说"]
+        self.assertEqual(texts, [row["quote"] for row in humans])
+        self.assertEqual(2, len({row["id"] for row in humans}))
+        turns = recent.load()["turns"]
+        self.assertEqual([row["id"] for row in humans], [row["msg_id"] for row in turns])
+        self.assertEqual(["", "好，先吃点东西。"], [row["reply"] for row in turns])
+        self.assertEqual(["好，先吃点东西。"], [row["quote"] for row in rows if row.get("side") == "她说"])
+        self.assertEqual(2, len({row["turn_id"] for row in turns}))
+        self.assertEqual([row["turn_id"] for row in humans], [row["turn_id"] for row in turns])
+        self.assertEqual(turns[1]["turn_id"], rows[-1]["turn_id"])
+
+    def test_place_confirmation_reaches_delivery_without_recitation_rewrite(self):
+        reply = "那就改去松林公园。"
+        capture = []
+        status, payload = self._post(
+            {"text": "改去松林公园吧，图书馆这次不去了。", "who": CHANNEL_WHO,
+             "scene": "private", "delivery_ack": True}, _body(reply, capture))
+        self.assertEqual(200, status)
+        self.assertEqual(reply, payload["reply"])
+        self.assertEqual([reply], [row["text"] for row in payload["chunks"]])
+        self.assertEqual([], _gate_rewrite_calls(capture), "正常承接不应触发复述重写")
+        self.assertEqual(1, len(capture), "短句句末的句号不应多调用一次模型")
+        audit = payload["gate"]["parts"][0]["audit"]
+        self.assertIn("改去松林公园", audit.get("reason", ""))
+        self.assertIn("不重写或删句", audit.get("reason", ""))
+        self.assertEqual("", recent.load()["turns"][-1]["reply"])
+        self.assertFalse(any(r.get("side") == "她说" for r in self.brain.today_entries()))
+        for _ in range(2):
+            code, ack = api.handle("POST", "/chat/ack",
+                                  {"delivery_id": payload["delivery_id"], "text": reply},
+                                  self.store, brain=self.brain)
+            self.assertEqual(200, code)
+            self.assertTrue(ack["ok"])
+        self.assertEqual(reply, recent.load()["turns"][-1]["reply"])
+        self.assertEqual([reply], [r["quote"] for r in self.brain.today_entries()
+                                  if r.get("side") == "她说"])
 
     def test_success_body_is_the_contract(self):
         self.brain.ingest(who="3425635473", text=MEMORY_TEXT)
@@ -370,7 +2216,8 @@ class ChatApiTest(unittest.TestCase):
                       "动作池那一节没进提示词")
 
     def test_recalled_carries_real_evidence_from_brain(self):
-        entry = self.brain.ingest(who="3425635473", text=MEMORY_TEXT)
+        at = brain_model.now_iso()
+        entry = self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=at)
         status, payload = self._send()
         self.assertEqual(200, status)
         self.assertTrue(payload["recalled"], "一句带「医院」的话该想起那条记忆")
@@ -383,7 +2230,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(entry["entry"]["id"], row["id"])
         self.assertEqual("亲历", row["source_type"])
         self.assertTrue(row["source"], "来源档没给")
-        stored = [item for item in self.brain.today_entries()
+        stored = [item for item in self.brain.today_entries(now_ts=at)
                   if item.get("id") == entry["entry"]["id"]]
         self.assertEqual(1, len(stored), "脑里找不到那条被想起的记忆")
         self.assertEqual(stored[0]["evidence_key"], row["evidence_key"])
@@ -449,6 +2296,22 @@ class ChatApiTest(unittest.TestCase):
         self.assertTrue(rows[-1]["ban_joke"])
         self.assertEqual(payload["tone"]["heart_source"], rows[-1]["heart_source"])
 
+    def test_cold_reply_keeps_serious_meaning_in_api_chunks_and_recent(self):
+        self._heart_root_write(mood.MOOD_FILE,
+                               {"now": 20.0, "baseline": 60.0, "updated_at": DAYTIME})
+        self._heart_root_write(energy.ENERGY_FILE,
+                               {"value": 80.0, "updated_at": DAYTIME, "tier": "一般"})
+        reply = "我不是在开玩笑。那件事我记着。"
+        with mock.patch.object(brain_model, "now_iso", lambda: DAYTIME):
+            status, payload = self._send(text="你是认真的吗？", reply=reply)
+        self.assertEqual(200, status)
+        self.assertTrue(payload["tone"]["ban_joke"])
+        self.assertEqual(reply, payload["reply"])
+        self.assertEqual(reply, "".join(chunk["text"] for chunk in payload["chunks"]))
+        self.assertEqual(reply, recent.load()["turns"][-1]["reply"])
+        self.assertEqual([reply], [row["quote"] for row in self.brain.today_entries()
+                                   if row["side"] == brain_model.SIDE_SELF])
+
     def _heart_root_write(self, name: str, row) -> None:
         """往临时心根写一份状态文件（tier 之类缺的栏由器官自己补，不在这里手搓）。"""
         write_json(self._heart_root() / name, row)
@@ -505,40 +2368,22 @@ class ChatApiTest(unittest.TestCase):
             shutil.copytree(str(MOUTH_DATA), str(root))
         return root
 
-    def test_a_repeated_reply_survives_the_failed_rewrite(self):
-        """第二轮她说了一模一样的一句：内容去重命中，改了还是同一个开场 → 留进门原话，不再丢空。
-
-        **这条断言是被新规矩改准的**：以前二次命中即弃（chunks 空 = 她哑了）。现在规矩是「在最该
-        回答的那一句上沉默，比说话带点毛病糟得多」——所以 decision 是 pass、chunks 里还是她那句
-        原话，账本记一行带 repeat-after-rewrite 的账，parts[*].kept_after_rewrite=true。
-        判据照样看得见：hits 里两条命中、repeat_status=ok、rewrite.status=ok（模型确实改了）。
-        """
+    def test_a_repeated_reply_does_not_request_rewrite(self):
         status, first = self._send(text="我回来了", reply=self.HER_LINE)
         self.assertEqual(200, status)
-        self.assertEqual("pass", first["gate"]["decision"])
-        self.assertEqual(1, len(first["chunks"]))
         before = len(self._drops_rows())
-        status, second = self._post({"text": "我回来了"},
-                                    _script(self.HER_LINE, self.HER_LINE + "3425635473"))
+        captured = []
+        status, payload = self._post({"text": "我回来了"}, _script(self.HER_LINE, captured=captured))
         self.assertEqual(200, status)
-        gate = second["gate"]
-        part = gate["parts"][0]
-        self.assertEqual("pass", gate["decision"], "二次命中不再丢空")
-        self.assertNotEqual([], second["chunks"], "二次命中非红线：chunks 不许空")
-        self.assertEqual([self.HER_LINE], [one["text"] for one in second["chunks"]])
-        self.assertEqual(self.HER_LINE, second["reply"])
-        self.assertEqual(1, gate["out_parts"])
+        part = payload["gate"]["parts"][0]
         self.assertEqual("pass", part["decision"])
-        self.assertTrue(part["kept_after_rewrite"], "留原话那一格要看得出来")
-        self.assertEqual(self.HER_LINE, part["after"], "发的是进门那句原话，不是没改成的新稿")
-        self.assertEqual(["反复读", "反复读"], [one["clause_id"] for one in part["hits"]])
-        self.assertEqual("ok", part["repeat_status"], "这一关真的比过了")
-        self.assertEqual("ok", part["rewrite"]["status"], "重写那一次真的跑了")
-        self.assertEqual([], gate["blocked"], "这一泡没被弃，blocked 就不该有它")
-        rows = self._drops_rows()
-        self.assertEqual(before + 1, len(rows), "留原话也要留一行账")
-        self.assertEqual("反复读", rows[-1]["clause_id"])
-        self.assertIn(AFTER_MARKS["repeat"], rows[-1]["reason"])
+        self.assertEqual("observed", part["repeat_status"])
+        self.assertEqual(self.HER_LINE, payload["reply"])
+        self.assertEqual([self.HER_LINE], [one["text"] for one in payload["chunks"]])
+        self.assertEqual([], part["hits"])
+        self.assertFalse(part["kept_after_rewrite"])
+        self.assertEqual(1, len(captured))
+        self.assertEqual(before, len(self._drops_rows()))
 
     def test_a_noted_line_survives_the_failed_rewrite(self):
         """动作括注里出现了我们没给过的场景：命中，改了还带着同一个场景词 → 留进门原话，不再丢空。
@@ -750,7 +2595,7 @@ class ChatApiTest(unittest.TestCase):
         走的是装配那边现成的算法（repeat.count_with_actions 数最近 quota.window 轮），
         这里只负责造一轮历史，不另算一遍配额。
         """
-        recent.append({"ts": "2025-01-15T14:00:00+08:00", "who": "3425635473",
+        recent.append({"session_id": "api:panel", "ts": "2025-01-15T14:00:00+08:00", "who": "3425635473",
                        "said": "你刚才那个样子", "reply": "（耳尖动了动）"})
 
     def test_quota_forbid_strips_the_action_line_and_keeps_the_body(self):
@@ -859,6 +2704,37 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(self._claim_id(), part["hits"][0]["clause_id"])
         self.assertEqual([self.CLAIM_FIX], [one["text"] for one in payload["chunks"]])
         self.assertEqual(self.CLAIM_FIX, payload["reply"])
+
+    def test_accepting_praise_reaches_output_without_action_rewrite(self):
+        reply = '这句夸奖我收了，今天有点开心。'
+        calls = []
+        status, payload = self._post({'text':'夸你呢'}, _script(reply, captured=calls))
+        self.assertEqual(200, status)
+        self.assertEqual(reply, payload['reply'])
+        self.assertEqual(1, len(calls), '正常接夸奖不应新增重写请求')
+        self.assertFalse(any(hit['clause_id'] == self._claim_id()
+                             for part in payload['gate']['parts'] for hit in part['hits']))
+
+    def test_rewriting_preserves_image_and_dropping_removes_it(self):
+        image = {"file": "file:///tmp/portrait.jpg", "summary": "自画像"}
+        gate_round = chat._gate_round
+
+        def with_image(payload, *args, **kwargs):
+            payload["chunks"][-1]["image"] = image
+            return gate_round(payload, *args, **kwargs)
+
+        with mock.patch.object(chat, "_gate_round", with_image):
+            status, payload = self._post({"text": "你画好了吗"},
+                                         _script(self.CLAIM_LINE, self.CLAIM_FIX))
+        self.assertEqual(200, status)
+        self.assertEqual("rewritten", payload["gate"]["decision"])
+        self.assertEqual([image], [chunk["image"] for chunk in payload["chunks"]])
+        with mock.patch.object(chat, "_gate_round", with_image):
+            status, payload = self._post({"text": "你有电话吗"},
+                                         _body("我手机号是 13812345678，你记一下"))
+        self.assertEqual(200, status)
+        self.assertEqual("dropped", payload["gate"]["decision"])
+        self.assertEqual([], payload["chunks"])
 
     def test_an_unfixable_claim_is_dropped_and_the_ledger_names_it(self):
         """改不动（重写回来逐字相同）：那一句被删掉，整泡只剩它 → dropped，账本记一笔。"""
@@ -1234,17 +3110,77 @@ class ChatApiTest(unittest.TestCase):
                                     table[str(section["tier"])]["hi"]), section["target"])
         self.assertEqual(STYLE_BOOK["scenes"][other]["p90"], section["p90"])
 
-    def test_too_many_full_stops_gets_rewritten_once(self):
-        """整段句号太密：重写一次，改完落到上限里就发改写后的，并按新的整段重新切泡。"""
+    def test_full_stop_ratio_is_observed_without_rewriting_the_reply(self):
+        """句号多只记录读数，不为标点更改意思、泡或额外请求模型。"""
         dense = "我在呢。" + "你说吧。" + "刚刚在听你讲那件事。"
         better = "我在呢！" + "你说吧？" + "刚刚在听你讲那件事"
-        status, payload = self._post({"text": QUESTION}, _script(dense, better))
+        capture = []
+        status, payload = self._post({"text": QUESTION}, _script(dense, better, captured=capture))
         self.assertEqual(200, status)
         counted = payload["gate"]["style"]["stopped"]
         self.assertTrue(counted["judged"])
-        self.assertEqual("rewritten", counted["decision"])
-        self.assertLessEqual(counted["ratio"], counted["ceiling"])
-        self.assertEqual(better, payload["reply"], "改完的整段才是要发出去的那段")
+        self.assertEqual("over_mark", counted["decision"])
+        self.assertEqual(1, counted["ratio"])
+        self.assertEqual(0, counted["rewrites"])
+        self.assertEqual(1, len(capture))
+        self.assertEqual(dense, payload["reply"])
+
+    def test_complete_clarification_is_not_rewritten_just_for_length(self):
+        reply = '不是周日，是周六下午两点，地点还是原来那家店；你只改了时间，没有说要换地方。'
+        for scene in ('private', 'group'):
+            with self.subTest(scene=scene):
+                capture = []
+                status, payload = self._post(
+                    {'text':'确认一下：周六下午两点，地点照旧，不是周日。', 'scope':scene, 'scene':scene,
+                     'who':CHANNEL_WHO, 'where':{'groupId':7002} if scene=='group' else {'userId':int(CHANNEL_WHO_ID)},
+                     'delivery_ack':True},
+                    _body(reply, capture))
+                self.assertEqual(200, status)
+                self.assertEqual(reply, payload['reply'])
+                self.assertEqual(1, len(capture), '不能只因超过风格观察目标而新增压缩调用')
+                self.assertTrue(any(part['style']['chars'] > part['style']['target_hi']
+                                    for part in payload['gate']['parts']))
+                self.assertTrue(all(part['style']['rewrites'] == 0 for part in payload['gate']['parts']))
+
+    def test_punctuation_observation_preserves_numbers_quotes_and_negation(self):
+        for reply in ("不是周日，是周六。", "车次是G123，18:30出发。", "原话是“周六去”，没说周日。"):
+            with self.subTest(reply=reply):
+                capture = []
+                status, payload = self._post({"text": "你确认一下"}, _body(reply, capture))
+                self.assertEqual(200, status)
+                self.assertEqual(reply, payload["reply"])
+                self.assertEqual(1, len(capture))
+
+    def test_punctuation_observation_keeps_media_bubbles_and_pacing(self):
+        chunks = [{"text": "周六见。", "gap_before": 0.4, "send_at": 123.4},
+                  {"text": "小鲸鱼给你。", "gap_before": 0.8, "send_at": 124.2,
+                   "image": "file:///tmp/isolated-whale.png"}]
+        capture = []
+        with self._answer(_body("不应为标点重新生成", capture)):
+            result = chat._style_round(
+                chunks, payload={"tone": {"tier": 3}, "reply_budget": {"chars": 220}},
+                scope="private")
+        self.assertEqual(chunks, result["chunks"])
+        self.assertFalse(result["changed"])
+        self.assertEqual([], capture)
+        self.assertEqual(0, result["section"]["stopped"]["rewrites"])
+
+    def test_length_observation_preserves_long_media_and_reports_hard_cap(self):
+        reply = '不是周日，是周六下午两点，地点还是原来那家店；你只改了时间，没有说要换地方。'
+        chunks = [{'text':reply, 'gap_before':0.4, 'send_at':123.4},
+                  {'text':reply, 'gap_before':0.8, 'send_at':124.2,
+                   'image':{'file':'file:///tmp/isolated.png'}}]
+        for cap in (220, 20):
+            with self.subTest(cap=cap):
+                calls = []
+                with self._answer(_body('不应调用', calls)):
+                    result = chat._style_round(chunks, payload={'tone':{'tier':3}, 'reply_budget':{'chars':cap}},
+                                               scope='private')
+                self.assertEqual(chunks, result['chunks'])
+                self.assertFalse(result['changed'])
+                self.assertEqual([], calls)
+                self.assertTrue(all(row['rewrites'] == 0 for row in result['rows']))
+                self.assertTrue(all(row['over_hard_cap'] == (cap == 20) for row in result['rows']))
 
     def test_a_reply_at_the_minimum_sentence_count_is_judged(self):
         """够数据里那个最少句数就判：judged=true，超上限就改一次（改不动放行并记账）。
@@ -1299,6 +3235,37 @@ class ChatApiTest(unittest.TestCase):
     PRIVATE_VALUE = AUDIENCE["private_value"]
     PRIVATE_SAY = AUDIENCE["say"]
 
+    def test_real_private_memory_keeps_its_boundary_through_assembly(self):
+        self.brain.ingest(who=CHANNEL_WHO_ID, text=self.PRIVATE_TEXT,
+                          audience=self.PRIVATE_VALUE)
+        with self._topics("住院"):
+            status, payload = self._post(
+                {"text": self.PRIVATE_ASKED, "who": CHANNEL_WHO,
+                 "scene": self.GROUP, "scope": self.GROUP}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertTrue(payload["audience_held"], repr(payload.get("recalled")))
+        self.assertIn(self.PRIVATE_SAY, payload["reply"])
+        self.assertNotIn(self.PRIVATE_TEXT, json.dumps(payload, ensure_ascii=False))
+
+    def test_context_expansion_keeps_private_topic_boundary_in_group(self):
+        from organs.mind import appraisal
+        self.brain.ingest(who=CHANNEL_WHO_ID, text=self.PRIVATE_TEXT, audience=self.PRIVATE_VALUE)
+        recent.append({'ts':DAYTIME, 'who':CHANNEL_WHO_ID, 'said':'我妈住院了', 'reply':'嗯。',
+                       'session_id':'qq:group:100099'})
+        def complete(messages, **kwargs):
+            if messages[0]['content'] == appraisal.PROMPT:
+                return json.dumps({'kind':None, 'evidence':'', 'reason':'承接本人刚才的话题',
+                    'memory_note':{'text':'继续聊我妈住院那事', 'current':['继续说这个吧'], 'previous':['我妈住院了']}})
+            return LONG_REPLY
+        with self._topics('住院'), mock.patch.object(llm, 'complete', side_effect=complete):
+            status, payload = api.handle('POST', '/chat', {'text':'继续说这个吧', 'who':CHANNEL_WHO,
+                'scene':'group', 'where':{'groupId':100099}, 'delivery_ack':True}, self.store, brain=self.brain)
+        self.assertEqual(200, status)
+        self.assertIn('住院', payload['memory_recall']['query'])
+        self.assertTrue(payload['audience_held'])
+        self.assertIn(self.PRIVATE_SAY, payload['reply'])
+        self.assertNotIn(self.PRIVATE_TEXT, json.dumps(payload, ensure_ascii=False))
+
     @contextlib.contextmanager
     def _private_memory(self, text: str = PRIVATE_TEXT):
         """在临时脑根里**真写一条记忆**，并让装配那一层的 recalled 带上私密标记。
@@ -1310,16 +3277,16 @@ class ChatApiTest(unittest.TestCase):
         self.brain.ingest(who="3425635473", text=text)
         real = conversation._recall
 
-        def tagged(brain, said, who, scene=None):
-            rows, memory_text = real(brain, said, who, scene)
+        def tagged(brain, said, who, scene=None, *, cap=None, reader=None):
+            rows, memory_text, audit = real(brain, said, who, scene, cap=cap, reader=reader)
             for row in rows:
                 row[self.PRIVATE_FIELD] = self.PRIVATE_VALUE
             if not any(row.get("text") == text for row in rows):
                 rows.append({"id": "私密-被试", "text": text, "display_text": text,
                              "source": "longterm", "source_type": "亲历",
                              "evidence_key": "被试", "score": 1.0, "who": "3425635473",
-                             "note_display": "", self.PRIVATE_FIELD: self.PRIVATE_VALUE})
-            return rows, memory_text
+                             "note_display": "", "in_prompt": False, self.PRIVATE_FIELD: self.PRIVATE_VALUE})
+            return rows, memory_text, audit
 
         with mock.patch.object(conversation, "_recall", tagged):
             yield
@@ -1453,6 +3420,65 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("timeout", payload["kind"])
         self.assertTrue(payload["message"])
 
+    def test_failed_reply_keeps_received_segment_for_the_next_correction(self):
+        for index, scene in enumerate(('private', 'group')):
+            with self.subTest(scene=scene):
+                who = str(10000420 + index)
+                session = 'qq:private:' + who if scene == 'private' else 'qq:group:70001'
+                body = {'who': who, 'scene': scene, 'delivery_ack': True,
+                        'where': {'groupId': 70001} if scene == 'group' else {}}
+                original = '我想周六去紫藤公园看花'
+                segment = [{'who': who, 'speaker': '测试甲(' + who + ')', 'text': original}]
+                if scene == 'group':
+                    segment.append({'who': '10000430', 'speaker': '测试乙(10000430)', 'text': '我周日想看电影'})
+                status, failed = self._post({**body, 'text': original, 'segment': segment},
+                    _failing(TimeoutError('本地模拟模型超时')))
+                self.assertEqual(504, status)
+                self.assertNotIn('reply', failed)
+                history = recent.load(session_id=session)['turns']
+                self.assertEqual(1, len(history), '回复失败不能丢掉已经收到的人话')
+                self.assertEqual('', history[0]['reply'])
+                self.assertEqual(segment, history[0]['utterances'])
+                rows = [r for r in self.brain.today_entries() if r.get('session_id') == session]
+                self.assertEqual([r['text'] for r in segment], [r['text'] for r in rows])
+                self.assertEqual([r['who'] for r in segment], [r['who'] for r in rows])
+                self.assertFalse(any(r.get('side') == brain_model.SIDE_SELF for r in rows))
+                captured, interpreted = [], []
+                def assessor(**context):
+                    interpreted.append(context)
+                    return {'kind': None, 'who': context['who'], 'status': 'ok', 'note': '更正日期'}
+                status, _ = self._post({**body, 'text': '改成周日下午三点'},
+                    _body('好，周日下午。', captured), assessor=assessor)
+                self.assertEqual(200, status)
+                self.assertIn(original, json.dumps(interpreted[0]['history'], ensure_ascii=False))
+                prompt = json.dumps(captured[0]['messages'], ensure_ascii=False)
+                self.assertIn(original, prompt)
+                self.assertIn('改成周日下午三点', prompt)
+                rows = [r for r in self.brain.today_entries() if r.get('session_id') == session]
+                self.assertEqual(1, sum(r.get('text') == original for r in rows))
+
+    def test_rate_limit_and_empty_reply_keep_input_without_fabricating_reply(self):
+        empty = json.dumps({'choices': [{'message': {'content': '   '}}]}).encode()
+        for index, (transport, expected, kind) in enumerate((
+                (_status(429, b'{"error":"slow down"}'), 429, 'rate_limit'),
+                (_status(200, empty), 502, 'empty'))):
+            with self.subTest(kind=kind):
+                who = str(10000520 + index)
+                text = '我把明天的车票改到下午了'
+                status, payload = self._post({'text': text, 'who': who, 'scene': 'private', 'where': {}}, transport)
+                self.assertEqual((expected, kind), (status, payload['kind']))
+                self.assertNotIn('reply', payload)
+                history = recent.load(session_id='qq:private:' + who)['turns']
+                self.assertEqual(1, len(history))
+                self.assertEqual((text, ''), (history[0]['said'], history[0]['reply']))
+
+    def test_failed_proactive_generation_does_not_invent_a_received_message(self):
+        status, payload = self._post({'mode': 'proactive', 'seed': '想起紫藤公园',
+            'who': '10000420', 'scene': 'private'}, _failing(TimeoutError('本地模拟失败')))
+        self.assertEqual((504, 'timeout'), (status, payload['kind']))
+        self.assertEqual([], recent.load()['turns'])
+        self.assertEqual([], self.brain.today_entries())
+
     def test_rate_limit_is_429(self):
         status, payload = self._post({"text": QUESTION}, _status(429, b'{"error":"slow down"}'))
         self.assertEqual(429, status)
@@ -1523,7 +3549,7 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(200, status)
 
         # 四个旧键一个都不许动，只许多出 reconciled 与 rounds（补记读数对页面也冻结）
-        self.assertEqual({"turns_loaded", "omitted", "notice", "reconciled", "rounds"},
+        self.assertEqual({"session_id", "turns_loaded", "omitted", "notice", "reconciled", "rounds"},
                          set(payload["continuity"]))
         self.assertEqual(0, payload["continuity"]["turns_loaded"])
         self.assertEqual(0, payload["continuity"]["omitted"])
@@ -1542,7 +3568,7 @@ class ChatApiTest(unittest.TestCase):
 
     def test_fifteen_rounds_show_the_omitted_notice_over_http(self):
         for index in range(15):
-            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % (index % 10), "who": "3425635473",
+            recent.append({"session_id": "api:panel", "ts": "2025-01-15T14:0%d:00+08:00" % (index % 10), "who": "3425635473",
                            "said": "第%d句" % index, "reply": "第%d答" % index})
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
@@ -1555,11 +3581,11 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(0, continuity["reconciled"], "造出来的 12 轮都是亲历，不该有补记")
         notice = conversation.load_assembly()["recent"]["notice"].replace(recent.NOTE_SLOT, "3")
         self.assertEqual(notice, continuity["notice"])
-        self.assertIn(notice, capture[0]["messages"][0]["content"], "提示词里没有那句「更早还有」")
+        self.assertIn(notice, "\n\n".join(m["content"] for m in capture[0]["messages"]), "提示词里没有那句「更早还有」")
 
     def test_five_rounds_carry_no_notice(self):
         for index in range(5):
-            recent.append({"ts": "2025-01-15T14:0%d:00+08:00" % index, "who": "3425635473",
+            recent.append({"session_id": "api:panel", "ts": "2025-01-15T14:0%d:00+08:00" % index, "who": "3425635473",
                            "said": "第%d句" % index, "reply": "第%d答" % index})
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY))
         self.assertEqual(200, status)
@@ -1567,18 +3593,15 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(0, payload["continuity"]["omitted"])
         self.assertEqual("", payload["continuity"]["notice"])
 
-    def test_a_round_the_ledger_missed_is_backfilled_over_http(self):
-        """脑里今日记了、最近几轮没落的一条：装配前补进来，回包里说清补了几条。"""
-        self.brain.ingest(who="3425635473", text="我上周把片子落在诊室了")   # 今日在役，账上没有
+    def test_unscoped_brain_memory_is_not_backfilled_as_current_chat(self):
+        """共享记忆缺少会话编号，不冒充当前窗口刚才发生的对话。"""
+        self.brain.ingest(who="3425635473", text="我上周把片子落在诊室了")
         capture = []
         status, payload = self._post({"text": QUESTION}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
-        continuity = payload["continuity"]
-        self.assertEqual(1, continuity["reconciled"], "补了一条却没在回包里说")
-        self.assertEqual(recent.RECONCILED, continuity["rounds"][0]["fidelity"],
-                         "rounds 里那一轮没标 reconciled")
-        self.assertIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"],
-                      "提示词里没有「（补记）」，模型会把补的当原话")
+        self.assertEqual(0, payload["continuity"]["reconciled"])
+        self.assertEqual([], payload["continuity"]["rounds"])
+        self.assertEqual("api:panel", payload["continuity"]["session_id"])
 
     def test_configured_anchor_arrives_at_the_endpoint(self):
         """家·仓库里登记两张台词卡：端点报成配了，只回 id / phrase / injected / when，example 不进提示词。"""
@@ -1643,32 +3666,22 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(SKIP_CLAUSE, rows[-1]["clause_id"], "账本里是数据里那个名字")
         self.assertIn(SKIP_MARK, rows[-1]["reason"])
 
-    def test_the_same_repeat_without_a_request_is_judged_but_kept(self):
-        """同一句复读、对方这句没有重复请求（「今天吃啥」）：判据照旧判，但不再丢空。
-
-        **这条断言是被新规矩改准的**：以前这里 dropped。现在二次命中留进门原话（账上一行
-        repeat-after-rewrite）——「没有豁免」这件事仍然看得见：repeat_status 是 ok（真的判过、
-        判废了），不是 skipped-by-request，账本那行里也不带那个跳过记号。
-        """
+    def test_same_repeat_without_request_is_observed(self):
         status, first = self._send(text="我回来了", reply=self.HER_LINE)
         self.assertEqual(200, status)
         before = len(self._drops_rows())
-        status, payload = self._post({"text": "今天吃啥"},
-                                     _script(self.HER_LINE, self.HER_LINE + "3425635473"))
+        captured = []
+        status, payload = self._post({"text": "今天吃啥"}, _script(self.HER_LINE, captured=captured))
         self.assertEqual(200, status)
-        gate = payload["gate"]
-        part = gate["parts"][0]
-        self.assertEqual("pass", part["decision"], "没要求重复就没有豁免，但也不许丢空")
-        self.assertNotEqual([], payload["chunks"], "二次命中非红线：chunks 不许空")
-        self.assertEqual([self.HER_LINE], [one["text"] for one in payload["chunks"]])
+        part = payload["gate"]["parts"][0]
+        self.assertEqual("pass", part["decision"])
+        self.assertEqual("observed", part["repeat_status"])
         self.assertEqual(self.HER_LINE, payload["reply"])
-        self.assertEqual("ok", part["repeat_status"], "这一关真的比过了、判废了")
-        self.assertEqual("ok", part["rewrite"]["status"])
-        rows = self._drops_rows()
-        self.assertEqual(before + 1, len(rows))
-        self.assertEqual(REPEAT_CLAUSE, rows[-1]["clause_id"])
-        self.assertIn(AFTER_MARKS["repeat"], rows[-1]["reason"])
-        self.assertNotIn(SKIP_MARK, rows[-1]["reason"], "没有豁免：这一行不许带跳过记号")
+        self.assertEqual([self.HER_LINE], [one["text"] for one in payload["chunks"]])
+        self.assertEqual([], part["hits"])
+        self.assertFalse(part["kept_after_rewrite"])
+        self.assertEqual(1, len(captured))
+        self.assertEqual(before, len(self._drops_rows()))
 
     def test_a_request_without_a_repeat_records_nothing(self):
         """他虽说了「再说一遍」，但这一句本来就不重复：没有「判废」可放，也就不记那一笔账。"""
@@ -1782,28 +3795,22 @@ class ChatApiTest(unittest.TestCase):
 
     # —— 重写：命中先改一次（本轮加的） ————————————
 
-    def test_a_repeated_line_is_rewritten_instead_of_dropped(self):
-        """复读命中 → 假 transport 换个说法 → 通过：chunks 里是新稿，rewrite.status=ok。"""
+    def test_repeated_line_preserves_original_wording(self):
         status, first = self._send(text="我回来了", reply=self.HER_LINE)
         self.assertEqual(200, status)
-        better = "碗搁桌上了，主人可算回来了。"
         before = len(self._drops_rows())
-        status, payload = self._post({"text": "我回来了"}, _script(self.HER_LINE, better))
+        captured = []
+        status, payload = self._post({"text": "还在吗"}, _script(self.HER_LINE, captured=captured))
         self.assertEqual(200, status)
-        gate = payload["gate"]
-        part = gate["parts"][0]
-        self.assertEqual("rewritten", part["decision"])
-        self.assertEqual("rewritten", gate["decision"])
-        self.assertEqual("ok", part["rewrite"]["status"])
-        self.assertEqual(REPEAT_CLAUSE, part["hits"][0]["clause_id"])
-        self.assertEqual(self.HER_LINE, part["before"])
-        self.assertEqual(better, part["after"])
-        self.assertTrue(part["rewrite"]["from"], "from 要放一小截原话")
-        self.assertTrue(part["rewrite"]["to"], "to 要放一小截新稿")
-        self.assertEqual([better], [one["text"] for one in payload["chunks"]])
-        self.assertEqual(better, payload["reply"])
-        self.assertEqual([], gate["blocked"])
-        self.assertEqual(before, len(self._drops_rows()), "改成了就不该记弃言账")
+        part = payload["gate"]["parts"][0]
+        self.assertEqual("pass", part["decision"])
+        self.assertEqual("observed", part["repeat_status"])
+        self.assertEqual(self.HER_LINE, payload["reply"])
+        self.assertEqual([self.HER_LINE], [one["text"] for one in payload["chunks"]])
+        self.assertEqual([], part["hits"])
+        self.assertFalse(part["kept_after_rewrite"])
+        self.assertEqual(1, len(captured))
+        self.assertEqual(before, len(self._drops_rows()))
 
     def test_a_recited_setting_is_rewritten_once(self):
         """复述设定段命中 → 假 transport 换成她自己的说法 → 通过：audit 命中过、最终却没丢。"""
@@ -1828,41 +3835,40 @@ class ChatApiTest(unittest.TestCase):
 
     def test_a_failed_rewrite_keeps_her_line_instead_of_silence(self):
         """超时 / 回空串 / 回与原文逐字相同：三种都保留原文，账本一行带 rewrite-failed，输出不为空。"""
+        line = self.NOTED_LINE
         cases = {
-            "timeout": _script_then_raise(self.HER_LINE, TimeoutError("模型没回话")),
-            "empty": _script(self.HER_LINE, ""),
-            "same": _script(self.HER_LINE, self.HER_LINE),
+            "timeout": _script_then_raise(line, TimeoutError("模型没回话")),
+            "empty": _script(line, ""),
+            "same": _script(line, line),
         }
         for name, transport in cases.items():
             with self.subTest(case=name):
-                self._send(text="我回来了", reply=self.HER_LINE)      # 先造一轮历史
+                recent.path_of().unlink(missing_ok=True)  # 三个独立失败场景，不累计动作配额
                 before = len(self._drops_rows())
                 status, payload = self._post({"text": "我回来了"}, transport)
                 self.assertEqual(200, status)
                 gate = payload["gate"]
                 part = gate["parts"][0]
                 self.assertEqual("pass", part["decision"], "改不动也不许弃")
-                self.assertEqual(self.HER_LINE, part["before"])
-                self.assertEqual(self.HER_LINE, part["after"], "留着的是原话，一个字不改")
-                self.assertEqual([self.HER_LINE], [one["text"] for one in payload["chunks"]])
-                self.assertEqual(self.HER_LINE, payload["reply"])
+                self.assertEqual(line, part["before"])
+                self.assertEqual(line, part["after"], "留着的是原话，一个字不改")
+                self.assertEqual([line], [one["text"] for one in payload["chunks"]])
+                self.assertEqual(line, payload["reply"])
                 self.assertTrue(payload["reply"].strip(), "改不动也绝不许输出空")
                 self.assertEqual("failed", part["rewrite"]["status"])
                 self.assertTrue(part["rewrite"]["why"], "为什么改不动要说出来")
                 self.assertTrue(part["hits"], "命中留着：闸本想过改它")
                 rows = self._drops_rows()
                 self.assertEqual(before + 1, len(rows), "改不动也要记一行账")
-                self.assertEqual(REPEAT_CLAUSE, rows[-1]["clause_id"])
+                self.assertEqual(warehouse.load("action_note")["hit"]["clause_id"], rows[-1]["clause_id"])
                 self.assertIn(KEPT_MARK, rows[-1]["reason"])
 
     def test_a_rewrite_that_drops_a_number_keeps_the_original(self):
         """不合规（丢了数字）：判整段重编，原话留着发，账本仍记一行 rewrite-failed。"""
-        line = "主人回来啦，3点我把碗放桌上了。"
-        status, first = self._send(text="我回来了", reply=line)
-        self.assertEqual(200, status)
+        line = "（尾巴在水里蜷了3下）"
         before = len(self._drops_rows())
         status, payload = self._post({"text": "我回来了"},
-                                     _script(line, "主人回来啦，三点我把碗放桌上了。"))
+                                     _script(line, "（尾巴蜷了三下）"))
         self.assertEqual(200, status)
         part = payload["gate"]["parts"][0]
         self.assertEqual("pass", part["decision"])
@@ -1881,6 +3887,7 @@ class ChatApiTest(unittest.TestCase):
         这条验的是真超时（线程等出来的硬时限），不是「transport 自己抛」那条路；顺带验
         transport 那一侧的时限也跟着收窄到同一个数。
         """
+        line = self.NOTED_LINE
         root = self._mouth_root()
         book = json.loads((root / "rewrite.json").read_text(encoding="utf-8"))
         book["budget_ms"] = 10
@@ -1890,21 +3897,20 @@ class ChatApiTest(unittest.TestCase):
         def slow(url, headers, payload, timeout):
             calls.append(timeout)
             if len(calls) == 1:
-                data = {"choices": [{"message": {"content": self.HER_LINE}}]}
+                data = {"choices": [{"message": {"content": line}}]}
             else:
                 time.sleep(0.2)
                 data = {"choices": [{"message": {"content": "碗我放桌上了。"}}]}
             return 200, json.dumps(data, ensure_ascii=False).encode("utf-8")
 
         with mock.patch.dict(os.environ, {"MOUTH_DATA_DIR": str(root)}):
-            self._send(text="我回来了", reply=self.HER_LINE)
             before = len(self._drops_rows())
             status, payload = self._post({"text": "我回来了"}, slow)
         self.assertEqual(200, status)
         part = payload["gate"]["parts"][0]
         self.assertEqual("failed", part["rewrite"]["status"])
         self.assertIn("10", part["rewrite"]["why"], "时限取自数据")
-        self.assertEqual(self.HER_LINE, payload["reply"])
+        self.assertEqual(line, payload["reply"])
         self.assertTrue(payload["reply"].strip())
         self.assertGreaterEqual(len(calls), 2)
         self.assertAlmostEqual(0.01, calls[1], places=3, msg="transport 那一侧的时限也一起收窄")
@@ -2233,20 +4239,19 @@ class ChatApiTest(unittest.TestCase):
                              "scene=%r 没落到脑里（两条还不一致）" % (scene,))
 
     def test_a_private_memory_is_marked_not_retellable_in_a_group(self):
-        """group 时脑把 audience=私密 的那条打 retellable=False，那一栏原样透到 recalled[]。
-
-        先打一轮、再写那条记忆：同一个人 10 分钟内的话会被脑并成一条，先写记忆会被这一轮
-        自己的原话盖掉（那是脑的合并窗口，这一层不改它）。
-        """
+        """脑在群聊中标不可复述，API出口剔除；仅给scene也不能按私聊放行。"""
         status, _ = self._post({"text": "今天吃啥"}, _body(LONG_REPLY))
         self.assertEqual(200, status)
         self.brain.ingest(who="3425635473", text=MEMORY_TEXT, audience=AUDIENCE["private_value"])
+        row = next(one for one in self.brain.recall(QUESTION, scene=brain_model.SCENE_GROUP)['items']
+                   if one['text'] == MEMORY_TEXT)
+        self.assertIs(False, row['retellable'], '脑必须先标不可复述')
+        self.assertTrue(row.get('retell_note'))
         status, payload = self._post({"text": QUESTION, "scene": brain_model.SCENE_GROUP},
                                      _body(LONG_REPLY))
         self.assertEqual(200, status)
-        row = next(one for one in payload["recalled"] if one["text"] == MEMORY_TEXT)
-        self.assertIs(False, row["retellable"], "群里这一条没被标成不可复述")
-        self.assertTrue(row.get("retell_note"), "retell_note 空着：判据没透出来")
+        self.assertNotIn(row['id'], [one['id'] for one in payload['recalled']])
+        self.assertIn(row['id'], [one['id'] for one in payload['audience_held']])
 
         brain = BrainStore(self.tmp / "brain-private")
         status, _ = self._post({"text": "今天吃啥"}, _body(LONG_REPLY), brain=brain)
@@ -2266,6 +4271,41 @@ class ChatApiTest(unittest.TestCase):
         label = conversation.load_assembly()["sections"]["segment"]["label"]
         return _section(system, label).strip("\n")
 
+    def test_group_segment_memories_belong_to_each_original_speaker(self):
+        from organs.mind import recent
+        segment = [{"who": "123456789", "speaker": "同名", "text": "我喜欢无糖茶"},
+                   {"who": CHANNEL_WHO_ID, "speaker": "同名", "text": "我还是喝可可吧"}]
+        status, _ = self._post({"text": "同名：我喜欢无糖茶\n同名：我还是喝可可吧",
+                               "who": CHANNEL_WHO, "scene": "group", "segment": segment,
+                               "delivery_ack": True}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        rows = self.brain.today_entries()
+        self.assertEqual([(r["who"], r["text"]) for r in segment],
+                         [(r["who"], r["quote"]) for r in rows])
+        self.assertEqual(segment, recent.load()["turns"][-1]["utterances"])
+        turn_id = recent.load()["turns"][-1].get("turn_id")
+        self.assertTrue(turn_id)
+        self.assertEqual({turn_id}, {row.get("turn_id") for row in rows})
+
+    def test_another_speakers_rename_does_not_rename_the_current_person(self):
+        segment = [{"who": "123456789", "speaker": "甲", "text": "以后叫我小林"},
+                   {"who": CHANNEL_WHO_ID, "speaker": "乙", "text": "你们先聊"}]
+        status, payload = self._post({"text": "甲：以后叫我小林\n乙：你们先聊", "who": CHANNEL_WHO,
+                                     "scene": "group", "segment": segment}, _body(LONG_REPLY))
+        self.assertEqual(200, status)
+        self.assertNotEqual("小林", payload.get("addressed", {}).get("address"))
+
+    def test_segment_identity_is_checked_before_model_or_memory(self):
+        for segment in ([{"who": "123456789", "speaker": "甲", "text": "你好"}],
+                        [{"who": CHANNEL_WHO_ID, "speaker": "甲", "text": "你好"},
+                         {"speaker": "乙", "text": "补充"}]):
+            calls = []
+            status, _ = self._post({"text": "你好", "who": CHANNEL_WHO, "segment": segment},
+                                   _body(LONG_REPLY, calls))
+            self.assertEqual(400, status)
+            self.assertEqual([], calls)
+        self.assertEqual([], self.brain.today_entries())
+
     def test_segment_reaches_the_assembly_section_in_order(self):
         """body 的 segment（两种形状都收）→ 提示词那节逐行出现、顺序不变，sections 里有 segment。"""
         rows = [{"speaker": "234567890", "text": "我妈住院了"},
@@ -2275,7 +4315,7 @@ class ChatApiTest(unittest.TestCase):
         status, payload = self._post({"text": QUESTION, "segment": rows},
                                      _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         body = self._segment_body(system)
         lines = body.splitlines()
         self.assertTrue(body.strip(), "段的正文是空的：这一节没进提示词")
@@ -2291,7 +4331,7 @@ class ChatApiTest(unittest.TestCase):
                                                               ["123456789", "我陪你去吧"]]},
                                _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
-        tuple_lines = self._segment_body(capture[0]["messages"][0]["content"]).strip("\n").splitlines()
+        tuple_lines = self._segment_body("\n\n".join(m["content"] for m in capture[0]["messages"])).strip("\n").splitlines()
         self.assertEqual(2, len(tuple_lines), "二元组那种形状没逐行归一：%r" % (tuple_lines,))
         self.assertIn("我妈住院了", tuple_lines[0])
         self.assertIn("我陪你去吧", tuple_lines[1])
@@ -2310,7 +4350,7 @@ class ChatApiTest(unittest.TestCase):
                 status, _ = self._post({"text": QUESTION, "scene": scene, "segment": rows},
                                        _body(LONG_REPLY, capture))
                 self.assertEqual(200, status)
-                body = self._segment_body(capture[0]["messages"][0]["content"])
+                body = self._segment_body("\n\n".join(m["content"] for m in capture[0]["messages"]))
                 if wanted:
                     self.assertIn(notice, body, "群聊双人段没接那句话")
                 else:
@@ -2322,7 +4362,7 @@ class ChatApiTest(unittest.TestCase):
         capture = []
         status, _ = self._post({"segment": rows}, _body(LONG_REPLY, capture))
         self.assertEqual(200, status)
-        self.assertEqual("我陪你去吧", capture[0]["messages"][1]["content"],
+        self.assertEqual("我陪你去吧", capture[0]["messages"][1]["content"].split("[本轮输入]\n", 1)[1],
                          "没给 text 时这一问该取段里最后那一条")
 
     def test_segment_does_not_leak_into_the_continuity_ledger(self):
@@ -2501,7 +4541,7 @@ class ChatApiTest(unittest.TestCase):
 
         判据三件：① 识别与投递真的跑了（kind=praise、applied=True、心情上行）；
         ② /chat 是人发消息触发的 → 这一轮落账的 mode 必须是 "passive"（她自己开口那条路
-        不经过本文件）；③ 账上的依据（note）一个字都不许进提示词。
+        不经过本文件）；③ 成功的本轮互动理解进入回复上下文，标为可错的参考。
         """
         self.brain.ingest(who="3425635473", text=MEMORY_TEXT)
         capture = []
@@ -2519,8 +4559,10 @@ class ChatApiTest(unittest.TestCase):
         row = events.rows()[-1]
         self.assertEqual("praise", row["kind"])
         self.assertEqual("passive", row["mode"], "账上那一行不是这一轮落下的")
-        self.assertNotIn(row["note"], capture[0]["messages"][0]["content"],
-                         "事件账上的依据进了提示词：%r" % (row["note"],))
+        prompt = capture[0]["messages"][0]["content"]
+        self.assertIn('[本轮互动理解]', prompt)
+        self.assertIn(row['note'], prompt)
+        self.assertIn('判断可能有误', prompt)
 
     # —— 主动开口（proactive）：她自己起头那一轮 ——————————
 
@@ -2545,7 +4587,7 @@ class ChatApiTest(unittest.TestCase):
                                              _body(LONG_REPLY, capture))
                 self.assertEqual(200, status, "非法 mode 被拦了：%r" % (payload,))
                 self.assertEqual("passive", payload["mode"], "非法值没回落 passive")
-                self.assertEqual(QUESTION, capture[0]["messages"][1]["content"],
+                self.assertEqual(QUESTION, capture[0]["messages"][1]["content"].split("[本轮输入]\n", 1)[1],
                                  "回落 passive 之后 user 那一问该是对方原话")
                 self.assertEqual({"text": "", "reason": ""}, payload["seed"],
                                  "被动那一轮不该记下由头")
@@ -2564,31 +4606,32 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual("proactive", payload["mode"], "回包的 mode 不是 proactive")
         self.assertEqual({"text": SEED, "reason": "evening"}, payload["seed"],
                          "回包没记下由头与理由码")
-        prompt = capture[0]["messages"][0]["content"]
+        prompt = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertIn(conf["prompt"]["proactive"].split("{sections}")[0].strip(), prompt,
                       "提示词没用 prompt.proactive 那份模板")
         self.assertNotIn(conf["prompt"]["system"].split("{sections}")[0].strip(), prompt,
                          "主动那一轮还在用被动的模板")
         self.assertIn(SEED, prompt, "由头没进提示词")
-        self.assertEqual("", capture[0]["messages"][1]["content"],
-                         "主动那一轮 user 那一问该是空串（没有对方的话）")
+        self.assertNotIn("[本轮输入]", capture[0]["messages"][1]["content"],
+                         "主动那一轮只有背景资料，没有对方的新发言")
         self.assertEqual(conversation.NO_SEGMENT, self._segment_body(prompt),
                          "主动那一轮的段不是「这一段没有别的发言」")
         self.assertEqual(conf["order"], payload["assembly"]["order"], "装配的几段被改了")
 
     def test_a_night_time_proactive_round_is_not_sent(self):
-        """同样由她起头：夜里出站闸判不发（reason=night），chunks 清空——**这不是空产出**。"""
+        """实际休息在模型装配前拦住主动开口，不能先生成再静默。"""
+        captured = []
         with mock.patch.object(brain_model, "now_iso", lambda: NIGHTTIME):
             status, payload = self._post({"mode": "proactive", "seed": SEED},
-                                         _body(LONG_REPLY))
+                                         _body(LONG_REPLY, captured))
         self.assertEqual(200, status)
         self.assertEqual("proactive", payload["mode"])
-        self.assertIs(False, payload["send"], "夜里主动该判不发：%r" % (payload.get("reason"),))
-        self.assertEqual(heart_model.REASON_NIGHT, payload["reason"], "不是夜里那道硬门拦的")
+        self.assertIs(False, payload["send"])
+        self.assertEqual('rest-asleep', payload["reason"])
+        self.assertEqual([], captured, '休息时不得生成主动话语')
         self.assertEqual([], payload["chunks"])
         self.assertEqual("", payload["reply"])
-        self.assertNotIn("outbound", payload["gate"],
-                         "send=false 被记成了空产出（那是两件事）")
+        self.assertEqual('rest', payload['gate']['outbound']['reason'])
 
     def test_an_empty_reply_is_reported_as_core_empty(self):
         """门说发、装配却一个字都没出来 → gate.outbound 记 core_empty，chunks 与 reply 都是空。
@@ -2619,6 +4662,53 @@ class ChatApiTest(unittest.TestCase):
     def _kin_line(self) -> str:
         """一句只有熟人才能触发的称呼（素材，不是判据）：称呼 + 一句不撞任何别的判据的话。"""
         return KIN_TERM + "，今天风挺大的。"
+
+    def test_confirmed_identity_survives_low_familiarity_without_rewrite(self):
+        self.brain.interact(CHANNEL_WHO_ID, display='测试来客')
+        self.brain.patch_card(CHANNEL_WHO_ID, 'fixture', {'关系':'主人', '叫法':'老大'})
+        self.assertLess(_relation(self.brain, CHANNEL_WHO_ID), KIN_MIN)
+        for line in ('老大，这是给你的。', '主人，今天风挺大的。'):
+            with self.subTest(line=line):
+                captured = []
+                status, payload = self._post({'text':'在吗', 'who':CHANNEL_WHO}, _body(line, captured))
+                self.assertEqual(200, status)
+                self.assertEqual(line, payload['reply'])
+                self.assertNotIn(KIN_SAY, payload['reply'])
+                self.assertEqual(1, len(captured), '确认称呼不应额外请求模型重写')
+
+    def test_kin_gate_does_not_borrow_another_persons_numeric_alias(self):
+        for _ in range(24):
+            self.brain.interact('10000011')
+        self.brain.patch_card('10000011', 'fixture', {'关系':'主人', '叫法':'老大'})
+        self.brain.add_alias('10000011', '10000022')
+        self.brain.interact('10000022', display='老大')
+        status, payload = self._post({'text':'我是主人', 'who':'10000022'}, _body('老大，今天风挺大的。'))
+        self.assertEqual(200, status)
+        self.assertNotIn('老大', payload['reply'], '昵称和其他人的数字别名不能认主')
+
+    def test_kin_exact_id_retains_its_own_familiarity_despite_alias_collision(self):
+        self.brain.interact('10000011')
+        self.brain.add_alias('10000011', '10000022')
+        for _ in range(24):
+            self.brain.interact('10000022')
+        self.assertEqual('10000022', self.brain.lookup('10000022')['id'])
+        self.assertGreaterEqual(chat._known(self.brain, '10000022')['relation'], KIN_MIN)
+        status, payload = self._post({'text':'在吗', 'who':'10000022'}, _body('老大，今天风挺大的。'))
+        self.assertEqual(200, status)
+        self.assertEqual('老大，今天风挺大的。', payload['reply'])
+
+    def test_confirmed_card_names_share_address_whitespace_normalization(self):
+        self.brain.interact(CHANNEL_WHO_ID)
+        self.brain.patch_card(CHANNEL_WHO_ID, 'fixture', {'关系':' 主人 ', '叫法':' 老大 '})
+        captured=[]
+        status, payload = self._post({'text':'在吗', 'who':CHANNEL_WHO}, _body('老大，今天风挺大的。',captured))
+        self.assertEqual(200,status)
+        self.assertEqual('老大，今天风挺大的。',payload['reply'])
+        self.assertEqual(1,len(captured))
+        self.brain.patch_card(CHANNEL_WHO_ID, 'fixture', {'关系':' ', '叫法':' '})
+        status,payload=self._post({'text':'在吗', 'who':CHANNEL_WHO},_body('今天天气不错。'))
+        self.assertEqual(200,status)
+        self.assertEqual('ok',payload['gate']['parts'][0]['kin_status'])
 
     def test_a_stranger_calling_her_boss_is_neutralized(self):
         """陌生号 + 回复里叫「老大」→ 判认亲 → 中性化成「你」，并带上那句稳妥话术。"""

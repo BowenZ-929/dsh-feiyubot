@@ -249,7 +249,7 @@ class ExpandTest(unittest.TestCase):
     def test_recall_hands_the_brain_the_expanded_query(self):
         """装配那一层的接缝：`_recall` 交给脑的就是展开后的那串，且只问一次。"""
         brain = _RecordOnlyBrain()
-        recalled, text = conversation._recall(brain, SAID, WHO)
+        recalled, text, _audit = conversation._recall(brain, SAID, WHO)
         self.assertEqual([], recalled)
         self.assertEqual(conversation.NO_MEMORY, text)
         self.assertEqual([themes.expand(SAID)], brain.queries, "传给脑的查询串不是扩展后的那串")
@@ -311,7 +311,7 @@ class AnswerTest(unittest.TestCase):
         """只读回忆：长期记忆那一份前后逐字节相同（写的是脑自己的命中账 usage.jsonl，不是记忆）。"""
         self._append_memory()
         before = hashlib.sha256((self.tmp / "brain" / "longterm.jsonl").read_bytes()).hexdigest()
-        recalled, _ = conversation._recall(self.brain, SAID, WHO)
+        recalled, _, _audit = conversation._recall(self.brain, SAID, WHO)
         after = hashlib.sha256((self.tmp / "brain" / "longterm.jsonl").read_bytes()).hexdigest()
 
         self.assertEqual([QUOTED], [row["text"] for row in recalled],

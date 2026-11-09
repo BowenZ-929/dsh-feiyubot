@@ -21,7 +21,7 @@
     --home-mono: ui-monospace, Menlo, monospace;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --home-fg: var(--dsw-alias-text-primary, #e6e6e6);
       --home-bg: var(--dsw-alias-bg-base, #17181a);
       --home-card: var(--dsw-alias-bg-elevated, #202225);
@@ -34,6 +34,7 @@
     }
   }
   :root[data-theme="dark"] {
+    color-scheme: dark;
     --home-fg: var(--dsw-alias-text-primary, #e6e6e6);
     --home-bg: var(--dsw-alias-bg-base, #17181a);
     --home-card: var(--dsw-alias-bg-elevated, #202225);
@@ -55,9 +56,10 @@
   nav.links a { color: var(--home-brand); }
   main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
          gap: 1.1rem; align-items: start; max-width: 1240px; }
-  @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+  @media (max-width: 960px) { main { grid-template-columns: minmax(0, 1fr); } }
   section { background: var(--home-card); border: 1px solid var(--home-border);
-            border-radius: 8px; padding: .6rem 1rem 1rem; margin-bottom: 1.1rem; }
+            border-radius: 8px; padding: .6rem 1rem 1rem; margin-bottom: 1.1rem;
+            min-width: 0; overflow-wrap: anywhere; }
   h2 { font-size: 1rem; margin: .4rem 0 .7rem; letter-spacing: .02em; }
   h2 small { font-weight: 400; color: var(--home-muted); margin-left: .5rem; }
   #room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: .5rem; }
@@ -76,6 +78,10 @@
         background: var(--home-bg); border: 1px solid var(--home-border); border-radius: 6px; padding: .4rem .5rem; }
   textarea { resize: vertical; font-family: var(--home-mono); font-size: .86rem; }
   .state { font-size: .85rem; color: var(--home-muted); margin: .5rem 0 0; }
+  .drawer-controls { border: 0; padding: 0; margin: 0 0 .8rem; min-width: 0; }
+  .drawer-paging { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+  .drawer-paging label { flex: 1; min-width: 7rem; margin: 0; }
+  button:disabled { opacity: .5; cursor: default; }
   .bad { color: var(--home-err); font-weight: 600; }
   /* 页脚：核自报版本。只报不藏——旧代码要能一眼看见。 */
   .build { margin: 1.4rem 0 0; padding-top: .7rem; border-top: 1px dashed var(--home-line, #dcdcdc);
@@ -110,6 +116,7 @@
     main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
     main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
   }
+html[data-theme="light"]{color-scheme:light}
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
      直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
@@ -174,11 +181,10 @@
     </section>
 
     <section aria-labelledby="drawer-h" id="drawer-block" data-owner="human">
-      <h2 id="drawer-h">抽屉<small>只读房：人直接改文件，程序只读</small></h2>
-      <div id="drawer-body"></div>
-      <p class="state" id="drawer-state">载入中…</p>
-      <p class="note">抽屉里的资料卡是「人直接改文件，程序只读」：这一块没有任何写控件，
-        程序写不进去——照 template 那份由人直接在盘上写。</p>
+      <h2 id="drawer-h">参考资料<small>只读资料卡</small></h2>
+      <div id="drawer-reference-body"></div>
+      <p class="state" id="drawer-reference-state">载入中…</p>
+      <p class="note">这里展示保留的参考资料；她写的日记与梦在下方抽屉。</p>
     </section>
 
     <section aria-labelledby="borrow-h">
@@ -225,8 +231,17 @@
 
     <section aria-labelledby="dr-h">
       <h2 id="dr-h">抽屉<small>她写的（日记·梦）＋ 人给的（自画像·人设卡）</small></h2>
+      <fieldset id="drawer-controls" class="drawer-controls" aria-label="浏览抽屉">
+        <label for="drawer-shelf">格子</label>
+        <select id="drawer-shelf"><option value="">全部格子</option></select>
+        <p class="state" id="drawer-state" aria-live="polite">载入中…</p>
+        <div class="drawer-paging">
+          <button id="drawer-prev" type="button" class="slim" disabled>上一页</button>
+          <label>跳到<select id="drawer-page" disabled></select></label>
+          <button id="drawer-next" type="button" class="slim" disabled>下一页</button>
+        </div>
+      </fieldset>
       <div id="drawer-body"></div>
-      <p class="state" id="drawer-state">载入中…</p>
       <p class="note">日记与梦是**她写的**：一天一张，人不能改（PATCH 一律 405）。自画像只登记指针与指纹，
         不搬本体；人设卡是参考卡，<strong>不进提示词</strong>。梦只作谈资，<code>testimony=false</code>。</p>
     </section>
@@ -262,6 +277,8 @@
   };
 
   var state = { rooms: null, access: null, room: null, item: null, seen: null };
+  var drawerOffset = 0;
+  var drawerLimit = 20;
 
   function el(id) { return document.getElementById(id); }
 
@@ -569,8 +586,8 @@
   }
 
   // —— 抽屉（只读，没有写控件） ——————————————————————
-  function showDrawer(data) {
-    var body = el("drawer-body");
+  function showDrawerReference(data) {
+    var body = el("drawer-reference-body");
     while (body.firstChild) { body.removeChild(body.firstChild); }
     var pre = document.createElement("pre");
     if (data.status === "已接入") {
@@ -582,7 +599,7 @@
         + (data.message || "缺件就报未接入，不报 0 字、不编内容。");
     }
     body.appendChild(pre);
-    mark("drawer-state", "只读房：path=" + data.path + " · status=" + data.status
+    mark("drawer-reference-state", "只读房：path=" + data.path + " · status=" + data.status
       + " · 模板 template=" + data.template + "（照这份由人直接在盘上写）");
   }
 
@@ -712,24 +729,70 @@
   }
 
   // —— 抽屉 ————————————————————————————————————————
+  function loadDrawer(offset) {
+    if (offset !== undefined) { drawerOffset = offset; }
+    el("drawer-controls").disabled = true;
+    el("refresh-all").disabled = true;
+    mark("drawer-state", "载入中…");
+    return call("GET", "/home/list?room=" + encodeURIComponent("抽屉")
+      + "&include_consumed=1&offset=" + drawerOffset + "&limit=" + drawerLimit
+      + "&shelf=" + encodeURIComponent(el("drawer-shelf").value)).then(function (res) {
+        showDrawer(res);
+        el("drawer-controls").disabled = false;
+        el("refresh-all").disabled = false;
+        return res;
+      });
+  }
+
   function showDrawer(res) {
     var body = el("drawer-body");
     while (body.firstChild) { body.removeChild(body.firstChild); }
+    if (res.status !== 200) {
+      mark("drawer-state", "读取失败：" + problem(res));
+      el("drawer-state").className = "state bad";
+      el("drawer-prev").disabled = el("drawer-next").disabled = el("drawer-page").disabled = true;
+      return;
+    }
     var data = res.data || {};
     var items = data.items || [];
+    drawerOffset = data.offset;
+    if (!data.shelf) {
+      el("drawer-shelf").textContent = "";
+      [""].concat(Object.keys(data.shelves)).forEach(function (shelf) {
+        var option = document.createElement("option");
+        option.value = shelf;
+        option.textContent = shelf ? shelf + "（" + data.shelves[shelf] + "）" : "全部格子";
+        el("drawer-shelf").appendChild(option);
+      });
+      el("drawer-shelf").value = "";
+    }
+    el("drawer-page").textContent = "";
+    var pages = Math.ceil(data.total / drawerLimit);
+    for (var page = 0; page < pages; page += 1) {
+      var option = document.createElement("option");
+      option.value = String(page * drawerLimit);
+      option.textContent = "第 " + (page + 1) + " / " + pages + " 页";
+      el("drawer-page").appendChild(option);
+    }
+    el("drawer-page").value = String(drawerOffset);
+    el("drawer-page").disabled = pages < 2;
+    el("drawer-prev").disabled = drawerOffset === 0;
+    el("drawer-next").disabled = drawerOffset + items.length >= data.total;
+    mark("drawer-state", "共 " + data.total + " 张" + (items.length
+      ? " · 当前第 " + (drawerOffset + 1) + "–" + (drawerOffset + items.length) + " 张" : ""));
     if (!items.length) {
       var none = document.createElement("pre");
-      none.textContent = "抽屉是空的。";
+      none.textContent = data.shelf ? "这个格子还没有资料。" : "抽屉是空的。";
       body.appendChild(none);
-      mark("drawer-state", "total=0");
       return;
     }
     var order = ["日记", "梦", "自画像", "人设卡"];
+    items.forEach(function (card) { if (order.indexOf(card.kind) < 0) { order.push(card.kind); } });
     order.forEach(function (kind) {
       var group = items.filter(function (card) { return card.kind === kind; });
       if (!group.length) { return; }
       var head = document.createElement("h3");
-      head.textContent = kind + "（" + group.length + (kind === "日记" || kind === "梦" ? " 天" : " 张") + "）";
+      head.textContent = kind + "（本页 " + group.length + " 张）";
       body.appendChild(head);
       group.forEach(function (card) {
         var block = document.createElement("div");
@@ -745,6 +808,58 @@
           var pre = document.createElement("pre");
           pre.textContent = text;
           block.appendChild(pre);
+          if ((card.params || {}).text_truncated) {
+            var full = document.createElement("button");
+            full.type = "button";
+            full.className = "slim";
+            full.textContent = "阅读全文（" + card.params.text_chars + " 字）";
+            var readState = document.createElement("p");
+            readState.className = "state";
+            full.addEventListener("click", function () {
+              full.disabled = true;
+              readState.textContent = "读取中…";
+              call("GET", "/home/read?room=" + encodeURIComponent("抽屉")
+                + "&name=" + encodeURIComponent(card.card_id)
+                + (card.shelf ? "&shelf=" + encodeURIComponent(card.shelf) : "")).then(function (result) {
+                  if (result.status === 200 && typeof result.data.body === "string") {
+                    pre.textContent = result.data.body;
+                    full.hidden = true;
+                    readState.textContent = result.data.truncated ? "正文超过单次读取上限，目前仍是部分内容。" : "全文已展开";
+                  } else {
+                    readState.textContent = "读取失败：" + (result.status === 200 ? "这张卡没有可读取的正文。" : problem(result));
+                    full.disabled = false;
+                  }
+                });
+            });
+            block.appendChild(full);
+            block.appendChild(readState);
+          }
+        }
+        var review = (card.params || {}).review;
+        if ((card.params || {}).model_turn_id) {
+          var modelLink = document.createElement("a");
+          modelLink.textContent = "查看写作时的模型记录（提示词、原稿与思考）";
+          modelLink.href = "observe?source=model&turn_id=" + encodeURIComponent(card.params.model_turn_id);
+          block.appendChild(modelLink);
+        }
+        if (review) {
+          var details = document.createElement("details");
+          var summary = document.createElement("summary");
+          summary.textContent = "写前复核 · " + (review.changes.length ? review.changes.length + " 处修改" : "保留原稿");
+          details.appendChild(summary);
+          var original = document.createElement("pre");
+          original.textContent = "原稿\n" + review.draft;
+          details.appendChild(original);
+          review.changes.forEach(function (change) {
+            var reason = document.createElement("p");
+            reason.textContent = "「" + change.quote + "」：" + change.reason;
+            details.appendChild(reason);
+          });
+          var note = document.createElement("p");
+          note.className = "note";
+          note.textContent = "模型对照素材所作的修改，仍可能有误。上方是最终保存的正文。";
+          details.appendChild(note);
+          block.appendChild(details);
         }
         if (card.kind === "自画像" || card.kind === "人设卡") {
           var p = document.createElement("p");
@@ -755,11 +870,6 @@
         body.appendChild(block);
       });
     });
-    var counts = {};
-    items.forEach(function (c) { counts[c.kind] = (counts[c.kind] || 0) + 1; });
-    mark("drawer-state", "共 " + items.length + " 张：" + Object.keys(counts).map(function (k) {
-      return k + " " + counts[k];
-    }).join(" · ") + (data.shelves ? "（格子 " + JSON.stringify(data.shelves) + "）" : ""));
   }
 
   // —— 她手上的事 ————————————————————————————————
@@ -853,7 +963,7 @@
     if (state.rooms === null) {
       mark("rooms-state", "载入中…");
       el("rooms-total").textContent = "载入中…";
-      mark("drawer-state", "载入中…");
+      mark("drawer-reference-state", "载入中…");
       mark("borrow-state", "载入中…");
       mark("audit-state", "载入中…");
       mark("warehouse-state", "载入中…");
@@ -870,7 +980,7 @@
       call("GET", "/home/warehouse"),
       call("GET", "/home/anchors"),
       call("GET", "/home/list?room=" + encodeURIComponent("工作台")),
-      call("GET", "/home/list?room=" + encodeURIComponent("抽屉") + "&include_consumed=1")
+      loadDrawer()
     ]).then(function (out) {
       var failures = 0;
 
@@ -900,11 +1010,11 @@
         auditNode.textContent = "读 /home/audit 失败：" + problem(out[2]);
       }
 
-      if (out[3].status === 200) { showDrawer(out[3].data); }
+      if (out[3].status === 200) { showDrawerReference(out[3].data); }
       else {
         failures += 1;
-        el("drawer-body").textContent = "";
-        var drawerNode = el("drawer-state");
+        el("drawer-reference-body").textContent = "";
+        var drawerNode = el("drawer-reference-state");
         drawerNode.className = "state bad";
         drawerNode.textContent = "读 /home/drawer 失败：" + problem(out[3]);
       }
@@ -945,14 +1055,7 @@
         handNode.textContent = "读 /home/list?room=工作台 失败：" + problem(out[7]);
       }
 
-      if (out[8].status === 200) { showDrawer(out[8]); }
-      else {
-        failures += 1;
-        el("drawer-body").textContent = "";
-        var drNode = el("drawer-state");
-        drNode.className = "state bad";
-        drNode.textContent = "读 /home/list?room=抽屉 失败：" + problem(out[8]);
-      }
+      if (out[8].status !== 200) { failures += 1; }
 
       if (state.room) { openRoom(state.room); }
 
@@ -963,7 +1066,7 @@
           + new Date().toLocaleTimeString();
       } else {
         statusNode.className = "state ok";
-        statusNode.textContent = "六条读端点都拿到了：" + new Date().toLocaleTimeString()
+        statusNode.textContent = "九条读端点都拿到了：" + new Date().toLocaleTimeString()
           + "（本页没有第二处轮询，也没有自动重试）。";
       }
     });
@@ -978,6 +1081,10 @@
   });
 
   el("refresh-all").addEventListener("click", function () { loadAll(); });
+  el("drawer-prev").addEventListener("click", function () { loadDrawer(drawerOffset - drawerLimit); });
+  el("drawer-next").addEventListener("click", function () { loadDrawer(drawerOffset + drawerLimit); });
+  el("drawer-page").addEventListener("change", function () { loadDrawer(Number(el("drawer-page").value)); });
+  el("drawer-shelf").addEventListener("change", function () { loadDrawer(0); });
   el("audit-verify").addEventListener("click", function () { verifyAudit(); });
   el("write-submit").addEventListener("click", function () { submitWrite(); });
 
@@ -993,16 +1100,17 @@
       var d = res.data;
       var line = "核 " + d.git_head + " · 启动 " + d.started_at + " · 源码 " + d.source_digest
         + "（进程 " + d.pid + "）";
-      if (d.stale) {
-        // stale：提交变了 = 进程跑的是旧代码，必须重启
-        node.textContent = "⚠ 进程旧了：" + line + " —— 现在是 " + d.git_head_now
-          + "，" + d.advice;
+      if (d.source_changed === true) {
+        node.textContent = "⚠ 源码待加载：" + line + " → 磁盘 " + d.source_digest_now + " —— " + d.advice;
         node.className = "build bad";
-      } else if (d.dirty) {
-        // dirty：有未提交改动，只是「重启更保险」，不是陈旧
-        node.textContent = line + " · 有未提交改动（dirty）—— " + d.advice;
+      } else if (d.source_changed !== false) {
+        node.textContent = line + " · 当前核心尚未提供源码同步状态，请核对启动源码与磁盘源码：" + d.source_digest_now;
+        node.className = "build warn";
+      } else if (d.stale) {
+        node.textContent = line + " · 提交记录已变化为 " + d.git_head_now + " —— " + d.advice;
         node.className = "build warn";
       } else {
+        // dirty只表示尚未提交，不据此声称核心还在跑旧源码。
         node.textContent = line + " —— " + d.advice;
         node.className = "build";
       }

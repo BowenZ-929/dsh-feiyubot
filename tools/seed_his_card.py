@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BRAIN = ROOT / "home" / "organs" / "brain"
 
 CARD = {
+    "关系": "主人",
+    "叫法": "老大",
     "称呼": "老大（可以叫主人）",
     "生日": "9 月 29 日",
     "备注": "私聊按主人模式。他叫她的外号：小肥鱼、哦鲸鲸、大肥鱼、傻鱼（后两个她不爱听）",

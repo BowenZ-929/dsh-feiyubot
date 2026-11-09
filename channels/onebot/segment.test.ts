@@ -4,6 +4,7 @@ import { BatchHub } from "./batch.ts";
 import type { BatchSnapshot, Where } from "./batch.ts";
 import { renderSegment } from "./segment.ts";
 import { loadPolicy } from "./policy.ts";
+import { parseEvent } from "./parse.ts";
 
 const A = 3000000001;
 const B = 3000000002;
@@ -14,6 +15,38 @@ const K = "group:700000001";
 const PK = "user:3000000003";
 
 const hub = () => new BatchHub(structuredClone(loadPolicy()).batch);
+
+test("引用随原消息保留，当前正文不混入被引用人的话", () => {
+  const h = hub();
+  const quote = {message_id:"99",who:String(B),speaker:`同名(${B})`,text:"给我画猫",source:"inbound" as const};
+  h.observe({senderId:A,senderName:"同名",text:"（引用）这是他说的，不是我要画",quote,
+    mentioned:false,bareImage:false,sticker:false,where:GROUP},0);
+  const rendered=renderSegment(h.consume(K,2000)!);
+  assert.deepEqual(rendered.segment[0].quote,quote);
+  assert.equal(rendered.segment[0].text,"（引用）这是他说的，不是我要画");
+  assert.ok(rendered.text.includes(`引用同名(${B})的消息`));
+  assert.ok(rendered.text.includes("给我画猫"));
+});
+
+test("图片和语音经过解析与合批后仍属于原发言者和原消息", () => {
+  const h = hub();
+  for (const [index, type] of ["image", "record"].entries()) {
+    const parsed = parseEvent({ post_type: "message", message_type: "group", group_id: 700000001,
+      user_id: A + index, message_id: 90 + index, sender: { user_id: A + index, nickname: `人${index}` },
+      message: [{ type, data: { file: `file${index}`, url: `https://example.com/${index}` } }] });
+    assert.ok(parsed.ok);
+    h.observe({ senderId: parsed.who.id, senderName: parsed.who.nickname,
+      messageId: parsed.messageId, attachments: parsed.attachments,
+      text: parsed.text, mentioned: false, bareImage: parsed.isBareImage,
+      sticker: false, where: parsed.where }, index * 100);
+  }
+  const snapshot = h.consume(K, 4000);
+  assert.ok(snapshot);
+  assert.deepEqual(renderSegment(snapshot).attachments, [
+    { kind: "image", file: "file0", url: "https://example.com/0", speaker: `人0(${A})`, speaker_id: String(A), segment_index: 0, messageId: 90 },
+    { kind: "audio", file: "file1", url: "https://example.com/1", speaker: `人1(${A + 1})`, speaker_id: String(A + 1), segment_index: 1, messageId: 91 },
+  ]);
+});
 
 test("段渲染：3 条（含 @ 她 + 一条带换行）→ 每行 昵称(id)：原话，换行原样保留", () => {
   const h = hub();
@@ -49,6 +82,11 @@ test("段渲染：3 条（含 @ 她 + 一条带换行）→ 每行 昵称(id)：
   // 3 条消息渲染出 4 个物理行：带换行的那条摊成两行，且续行也带着她的人名。
   assert.equal(rendered.text.split("\n").length, 4);
   assert.equal(rendered.text.split("\n")[2], "小美(3000000002)：刚吃完饭");
+  assert.deepEqual(rendered.segment, [
+    { who: "3000000001", speaker: "小明(3000000001)", text: "在吗" },
+    { who: "3000000002", speaker: "小美(3000000002)", text: "在的\n刚吃完饭" },
+    { who: "3000000004", speaker: "阿明(3000000004)", text: "那我说了" },
+  ]);
 
   assert.deepEqual(rendered.batch, {
     id: "b1",

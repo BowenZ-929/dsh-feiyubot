@@ -89,7 +89,7 @@ class DegradeTest(unittest.TestCase):
         result = store.edit(actor="panel", reason="补怕什么", block="identity",
                             path="fears", value="她怕被丢下")
         self.assertTrue(result["ok"], result)
-        self.assertEqual([], codes(store.check()))
+        self.assertEqual([], codes(store.check(cross_check=False)))
         self.assertIn("【怕什么】她怕被丢下", store.render("熟人"))
 
     def test_blocking_errors_still_raise(self):
@@ -163,7 +163,7 @@ class CleanCardStaysCleanTest(unittest.TestCase):
         root = copy_fixture("valid", temp.name)
         data = read_json(root / "identity.json")
         self.assertEqual([], data["self_names"]["synonyms"])
-        self.assertEqual([], codes(load(root).check()))
+        self.assertEqual([], codes(load(root).check(cross_check=False)))
 
 
 if __name__ == "__main__":

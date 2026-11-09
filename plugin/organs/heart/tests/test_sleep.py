@@ -378,6 +378,12 @@ class SleepTest(unittest.TestCase):
         sleep.overview(self.root, now=ts(3, 9))
         self.assertEqual(self.file.read_bytes(), before)
 
+    def test_open_sleep_without_rest_state_does_not_count_as_awake(self) -> None:
+        night(self.root, 1)
+        sleep.record('asleep', self.root, ts(2, 23))
+        self.assertEqual(0, sleep.awake_minutes(self.root, ts(3, 6)))
+        self.assertEqual(0, sleep.overview(self.root, ts(3, 6))['awake_minutes'])
+
     def test_bad_json_falls_back_to_defaults(self) -> None:
         helpers.write_raw(self.file, '{"version": 1, "nights": [{"asleep_at": "x"')
         snap = sleep.overview(self.root, now=ts(1, 12))

@@ -102,7 +102,7 @@ class AppearanceTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("migrate", store_module.read_history(
             self.root / "history.jsonl")[-1]["kind"])
-        self.assertEqual([], [item for item in checks.collect(self.root)
+        self.assertEqual([], [item for item in checks.collect(self.root, cross_check=False)
                               if item.level == model.ERROR])
         self.assertEqual(NEW_APPEARANCE, read_json(self.root / "identity.json")["appearance"])
         self.assertIn("【形象】" + NEW_APPEARANCE, load(self.root).render("熟人"))

@@ -26,6 +26,8 @@
    就是几千行噪声，而那几行不改变任何一个决定。
 6. 账只记**真的发生了决定**的那几次：没到阈值是常态（读数在 GET /day/solitude 里），不落账；
    到了阈值却什么都做不成，才落一行 skipped。
+7. 两次决定之间也要经过当前档位的间隔，成功和 skipped 都计时；夜间 held 不计。
+   间隔内不写卡、不落新账。摘录按已保存草稿的 from_entry 排除重复来源，包含已消费卡。
 
 idle 账（proactive_idle_log.jsonl，日子线根下，一行一次决定）：
     {"at", "action", "read": {"name", "date"}, "reason_code": "idle_mood"|"idle_time",
@@ -46,6 +48,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from organs.brain import store as brain_store
 from organs.heart import energy as heart_energy
+from organs.heart import sleep as heart_sleep
+from organs.heart import rest as heart_rest
 from organs.heart import engage as heart_engage
 from organs.heart import model as heart_model
 from organs.heart import mood as heart_mood
@@ -346,6 +350,8 @@ def is_night(now_ts: Any = None, *, heart_root: Any = None, mood_read: Mapping[s
     except (TypeError, ValueError):
         energy_value = 0.0
     inp = heart_engage.EngageInput(
+        sleep_window=heart_sleep.effective_window(heart_root, at),
+        resting=heart_rest.is_resting(heart_root),
         mood_now=float((mood_read or {}).get("now") or 0.0),
         energy=energy_value,
         familiarity=0.0,
@@ -587,13 +593,15 @@ def who_name(entry: Mapping[str, Any], brain: Any, at: str) -> str:
     return WHO_UNKNOWN
 
 
-def _material(brain: Any, at: str) -> Optional[Dict[str, str]]:
+def _material(brain: Any, at: str, recorded: set) -> Optional[Dict[str, str]]:
     """今天有没有真素材：脑 today 里的真条目（别人说的那一手优先）。
 
     "谁说的"走 who_name：平台号与长号码不进正文（display → 人名录 → "人"）。
     """
     best: Optional[Dict[str, str]] = None
     for entry in _today(brain, at):
+        if entry.get('id') in recorded:
+            continue
         text = str(entry.get("text") or entry.get("quote") or "").strip()
         if not text:
             continue
@@ -612,14 +620,25 @@ def _note_today(at: str, root: Any = None, brain: Any = None,
     """b 记一句今天的事：草稿落仓库（kind=素材）；今天没有真素材就跳过，不许编。"""
     config = cfg or load_config(root)
     draft = block(config, "draft")
-    story = _material(brain, at)
+    room = str(draft.get("room") or DEFAULTS["draft"]["room"])
+    home = _home_root(root, home_root)
+    recorded, offset = set(), 0
+    while True:
+        saved = _cards().list_room(root=home, room=room, offset=offset, limit=LIST_LIMIT,
+                                  include_consumed=True, excerpt_chars=0)
+        recorded.update(card['params']['from_entry'] for card in saved['items']
+                        if (card.get('params') or {}).get('source') == 'solitude'
+                        and card['params'].get('from_entry'))
+        offset += len(saved['items'])
+        if not saved['truncated']:
+            break
+    story = _material(brain, at, recorded)
     if story is None:
         return None
     day = model.day_key(at)
     note = _render(draft.get("note"), {"who": story["who"], "day": day,
                                       "text": _clip(story["text"], draft.get("note_chars"))})
     name = _render(draft.get("name"), {"day": day})
-    room = str(draft.get("room") or DEFAULTS["draft"]["room"])
     card = {"kind": str(draft.get("kind") or DEFAULTS["draft"]["kind"]),
             "name": name, "note": note,
             "params": {"draft": True, "day": day, "note": note,
@@ -729,22 +748,31 @@ def parse_request(request: Any = None) -> str:
 
 def readings(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
              brain: Any = None, limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """此刻的读数：两个档位、三档阈值取哪个、闲置多少分钟、是不是夜里。只读不写账。"""
+    """两个档位、闲置时长、最近独处决定与下次机会；只读不写独处账。"""
     at = _now(now_ts)
     mood_read = heart_mood.read(heart_root, at)
-    energy_read = heart_energy.read(heart_root, at)
+    sleeping = heart_sleep.overview(heart_root, at)
+    energy_read = heart_energy.read(heart_root, at, sleep_window=sleeping['effective_window'],
+                                    wake_cap=sleeping['wake_cap'])
     mood_tier = str(mood_read.get("tier") or "")
     energy_tier = str(energy_read.get("tier") or "")
     picked = threshold(mood_tier, energy_tier, limits, root)
     night, engage_read = is_night(at, heart_root=heart_root, mood_read=mood_read,
                                   energy_read=energy_read, brain=brain)
+    idle_start = idle_since(at, brain=brain, root=root)
+    last_decision = next((row['at'] for row in reversed(log_lines(root))
+                          if row.get('action') in (*ACTION_ORDER, ACT_SKIPPED)
+                          and model.parse_ts(row['at']) <= model.parse_ts(at)), None)
+    opportunity_start = max(model.parse_ts(idle_start), model.parse_ts(last_decision or idle_start))
+    next_opportunity = opportunity_start + timedelta(minutes=picked['minutes'])
     return {"at": at,
             "mood_tier": mood_tier, "energy_tier": energy_tier,
             "mood_level": picked["mood_level"], "energy_level": picked["energy_level"],
             "mood_now": mood_read.get("now"), "energy_value": energy_read.get("value"),
             "threshold_key": picked["key"], "threshold_minutes": picked["minutes"],
             "reason_code": picked["reason_code"],
-            "idle_since": idle_since(at, brain=brain, root=root),
+            "idle_since": idle_start,
+            "last_decision_at": last_decision, "next_opportunity_at": model.iso(next_opportunity),
             "idle_minutes": round(idle_minutes(at, brain=brain, root=root), 1),
             "night": bool(night), "engage": engage_read,
             "awake_minutes": awake_minutes(),
@@ -758,7 +786,7 @@ def consider(now_ts: Any = None, *, root: Any = None, brain: Any = None,
     """一次独处：判一次"该不该、该做哪一件"，做那一件，落一行账，最多写一条由头。
 
     次序钉死（先夜里、再阈值、再三件事）：夜里不做也不调核；没到阈值就什么都不做、
-    也不落账（那是常态）；到了阈值按 a → b → c 挑到第一件做得成的；一件都做不成才记
+    也不落账（那是常态）；空闲和两次决定间隔均满足才按 a → b → c 挑第一件做得成的；一件都做不成才记
     skipped。**一次只做一件**：request 里多塞的项在进来时就被拒（SolitudeError）。
     """
     at = _now(now_ts)
@@ -771,6 +799,9 @@ def consider(now_ts: Any = None, *, root: Any = None, brain: Any = None,
                 "readings": read, "row": row, "own_doing": None, "tried": []}
     if float(read["idle_minutes"]) < float(read["threshold_minutes"]):
         return {"ok": True, "at": at, "fired": False, "skipped": "not-idle",
+                "readings": read, "row": None, "own_doing": None, "tried": []}
+    if model.parse_ts(at) < model.parse_ts(read['next_opportunity_at']):
+        return {"ok": True, "at": at, "fired": False, "skipped": "activity-interval",
                 "readings": read, "row": None, "own_doing": None, "tried": []}
     tried: List[Dict[str, Any]] = []
     done: Optional[Dict[str, Any]] = None
@@ -866,6 +897,7 @@ def overview(now_ts: Any = None, *, root: Any = None, heart_root: Any = None,
             "energy_tier": read["energy_tier"], "energy_level": read["energy_level"],
             "energy_value": read["energy_value"],
             "idle_since": read["idle_since"], "idle_minutes": read["idle_minutes"],
+            "last_decision_at": read["last_decision_at"], "next_opportunity_at": read["next_opportunity_at"],
             "night": read["night"], "engage": read["engage"],
             "repeat_days": float(cfg.get("repeat_days") or DEFAULTS["repeat_days"]),
             "home_root": str(_home_root(root, home_root)),

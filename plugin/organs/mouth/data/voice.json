@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "provider": "breezeblue",
+  "voice_id": "voc_8yud7hz7c9q2",
+  "voice_name": "大肥鱼 · 迷糊版",
+  "model": "breeze-tts-2",
+  "max_chars": 120,
+  "daily_attempts": 10,
+  "timeout_seconds": 20
+}

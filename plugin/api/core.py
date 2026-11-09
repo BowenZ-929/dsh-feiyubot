@@ -51,11 +51,23 @@ from . import heart as heart_api  # noqa: E402
 from . import home as home_api  # noqa: E402
 from . import mouth as mouth_api, pages as page_api, soul as soul_api  # noqa: E402
 from . import version as version_api  # noqa: E402
+from . import observe as observe_api  # noqa: E402
+from . import eye as eye_api  # noqa: E402
+from . import voice as voice_api  # noqa: E402
+from . import studio as studio_api  # noqa: E402
+from . import ear as ear_api  # noqa: E402
+from . import learning as learning_api  # noqa: E402
+from . import phone as phone_api  # noqa: E402
+from . import memes as memes_api  # noqa: E402
+from . import model_settings as model_settings_api  # noqa: E402
 
 ROUTES = _merge(soul_api.SOUL_ROUTES, brain_api.BRAIN_ROUTES, page_api.PAGE_ROUTES,
                 mouth_api.MOUTH_ROUTES, home_api.HOME_ROUTES, heart_api.HEART_ROUTES,
                 hand_api.HAND_ROUTES, version_api.VERSION_ROUTES, day_api.DAY_ROUTES,
-                chat_api.CHAT_ROUTES)
+                chat_api.CHAT_ROUTES, observe_api.OBSERVE_ROUTES, eye_api.EYE_ROUTES,
+                voice_api.VOICE_ROUTES, ear_api.EAR_ROUTES, studio_api.STUDIO_ROUTES,
+                learning_api.LEARNING_ROUTES, phone_api.PHONE_ROUTES, memes_api.MEME_ROUTES,
+                model_settings_api.MODEL_ROUTES)
 
 
 def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
@@ -65,6 +77,10 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
     route, _, raw_query = path.partition("?")
     route = unquote(route)   # 中文人名等百分号编码的路径段要先还原，否则匹配不到
     params = dict(query) if query else _parse_query(raw_query)
+    if route.startswith("/api/memory/") and route.endswith("/why"):
+        return brain_api.dispatch_why(method, route, brain)
+    if route.startswith("/brain/people/") and route.endswith("/preferences"):
+        return brain_api.dispatch_preferences(method, route, body, brain)
     if route.startswith("/brain/people/") and route.endswith("/card"):
         return brain_api.dispatch_card(method, route, body, brain)
     if route.startswith("/brain/memory/") and route.endswith("/note"):
@@ -108,6 +124,33 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
                                     "一律 405（页在 GET 时由 devserver 直接发字节，不走这张表）"
                                     % (route, ROUTES[route])}
         return 405, {"ok": False, "message": "%s 只收 %s" % (route, ROUTES[route])}
+    if route in observe_api.OBSERVE_ROUTES:
+        if route == "/observe/channel-runtime":
+            return observe_api.channel_runtime()
+        if route == "/observe/channel":
+            return observe_api.channel()
+        if route == "/observe/participation":
+            return observe_api.participation(params)
+        if route == "/observe/rice":
+            from organs.mind import rice
+            try:
+                return 200, rice.snapshot(day=params.get('date'))
+            except ValueError:
+                return 400, {"ok": False, "message": "日期需为 YYYY-MM-DD"}
+        if route == "/observe/activity":
+            from . import activity
+            return activity.dispatch(params)
+        return observe_api.dispatch(params)
+    if route in phone_api.PHONE_ROUTES:
+        return phone_api.dispatch(route, body, store, brain)
+    if route in eye_api.EYE_ROUTES:
+        return eye_api.dispatch(route, body)
+    if route in model_settings_api.MODEL_ROUTES:
+        return model_settings_api.dispatch(route, body)
+    if route in voice_api.VOICE_ROUTES:
+        return voice_api.dispatch(route, body)
+    if route in ear_api.EAR_ROUTES:
+        return ear_api.dispatch(route, body)
     if route in chat_api.CHAT_ROUTES:
         return chat_api.dispatch(route, body, store, brain)
     if route in heart_api.HEART_ROUTES:
@@ -120,6 +163,12 @@ def handle(method: str, path: str, body: Optional[Dict[str, Any]], store: Any,
         return mouth_api.dispatch(route, params, store, brain)
     if route in home_api.HOME_ROUTES:
         return home_api.dispatch(route, params, store, brain, body)
+    if route in studio_api.STUDIO_ROUTES:
+        return studio_api.dispatch(route, body, store, params)
+    if route in memes_api.MEME_ROUTES:
+        return memes_api.dispatch(route, params, body)
+    if route in learning_api.LEARNING_ROUTES:
+        return learning_api.dispatch(route, params, body)
     if route in day_api.DAY_ROUTES:
         return day_api.dispatch(route, params, body, store, brain)
     if route in version_api.VERSION_ROUTES:

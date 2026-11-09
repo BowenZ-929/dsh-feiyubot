@@ -4,7 +4,7 @@
 warehouse），要改判据就改数据。下面出现的几段素材是测试自己的材料——魂里那句原文、对方说的
 那句话——不是判据本身：判据在数据里，素材只是拿来喂它的。
 
-四条主线，一条一条对着任务书来：照搬设定类要拦、带标记的原话放行、去掉标记就拦、拿不到注入
+四条主线：照搬设定类要拦、带标记的原话放行、原话重合只记读数、拿不到注入
 原文要如实报 audit-unavailable（不许假装通过）。
 """
 from __future__ import annotations
@@ -71,7 +71,7 @@ class SoulLineIsRecitation(unittest.TestCase):
 
 
 class QuotedSpeechRules(unittest.TestCase):
-    """第 2 条与第 3 条：对方原话带标记放行，去掉标记就拦，标记太远也拦。"""
+    """原话重合可观测，但字面匹配不承担语义归属判断。"""
 
     def setUp(self):
         self.assertTrue(MARKER in DATA["quote_markers"], "素材里的标记必须在数据词表里")
@@ -84,6 +84,25 @@ class QuotedSpeechRules(unittest.TestCase):
         self.assertIsNone(result.hit)
         self.assertEqual(THRESHOLD - 1, result.lcs_len)
 
+    def test_conversational_overlap_is_not_proof_of_misattribution(self):
+        for kind in QUOTES:
+            for source, reply in (
+                ("改去松林公园吧，图书馆这次不去了。", "那就改去松林公园。"),
+                ("我要一杯无糖乌龙茶。", "一杯无糖乌龙茶，记住了。"),
+                ("周六去河岸图书馆。", "周六去河岸图书馆，对吧？"),
+            ):
+                with self.subTest(kind=kind, reply=reply):
+                    result = recitation.audit(reply, [{"kind": kind, "text": source}])
+                    self.assertIsNone(result.hit)
+                    self.assertGreaterEqual(result.lcs_len, 6)
+
+    def test_conversation_overlap_does_not_hide_later_setting_copy(self):
+        result = recitation.audit("那就改去松林公园。" + SOUL_LINE, [
+            {"kind": QUOTE, "text": "改去松林公园吧"},
+            {"kind": SOUL, "text": SOUL_LINE},
+        ])
+        self.assertEqual(SOUL, result.hit.seg_kind)
+
     def test_marked_quote_passes(self):
         """撞够了、标记就在前面 → 放行，并在人话里点名是哪个标记。"""
         result = recitation.audit(MARKER + QUOTE_LINE, self.inject)
@@ -92,21 +111,19 @@ class QuotedSpeechRules(unittest.TestCase):
         self.assertEqual(len(QUOTE_LINE), result.lcs_len)
         self.assertIn(MARKER, result.reason)
 
-    def test_unmarked_quote_is_stopped(self):
-        """第 3 条：同一句去掉引述标记 → 拦住，理由说清是「复述原话但没标记」。"""
+    def test_unmarked_quote_records_overlap_without_blocking(self):
+        """同字原话本身不足以证明冒充，读数仍保留重合依据。"""
         result = recitation.audit(QUOTE_LINE, self.inject)
-        self.assertIsNotNone(result.hit)
-        self.assertEqual(VERDICT_QUOTE, result.hit.kind)
-        self.assertEqual(QUOTE, result.hit.seg_kind)
-        self.assertIn("引述标记", result.hit.reason)
-        self.assertIn(QUOTE_LINE, result.hit.matched)
+        self.assertIsNone(result.hit)
+        self.assertIn(QUOTE_LINE, result.reason)
+        self.assertIn("不重写或删句", result.reason)
 
-    def test_marker_too_far_is_stopped(self):
-        """标记落在窗口外（隔了超过 window 个字）→ 同样算没标记。"""
+    def test_distant_marker_does_not_turn_overlap_into_a_violation(self):
+        """标记太远仍记录为未标记重合，但不将距离当作删句依据。"""
         said = MARKER + "啊" * (WINDOW + 1) + QUOTE_LINE
         result = recitation.audit(said, self.inject)
-        self.assertIsNotNone(result.hit)
-        self.assertEqual(VERDICT_QUOTE, result.hit.kind)
+        self.assertIsNone(result.hit)
+        self.assertIn(QUOTE_LINE, result.reason)
 
     def test_marker_with_short_overlap_passes(self):
         """有标记、但压根没撞够阈值 → 放行（不是每一句带标记的都算复述）。"""
@@ -231,7 +248,9 @@ class DataIsTheSourceOfTruth(unittest.TestCase):
         inject = [{"kind": QUOTE, "text": QUOTE_LINE}]
         self.assertIsNone(recitation.audit(said, inject).hit)
         tight = dict(DATA, window=1)                       # 窗口调小到 1，同一句就变没标记
-        self.assertIsNotNone(recitation.audit(said, inject, tight).hit)
+        result = recitation.audit(said, inject, tight)
+        self.assertIsNone(result.hit)
+        self.assertIn("没有引述标记", result.reason)
 
     def test_missing_key_is_loud(self):
         with self.assertRaises(AuditBroken) as caught:
@@ -287,12 +306,12 @@ class AskedToReciteIsMarkedNotJudged(unittest.TestCase):
         self.assertEqual(STATUS_UNAVAILABLE, result.status)
         self.assertFalse(result.skipped)
 
-    def test_unmarked_quote_is_skipped_too(self):
-        """对方原话没带标记那一路同样豁免：他要引的就是那句话。"""
+    def test_requested_quote_needs_no_violation_exemption(self):
+        """引用原话不再作为违规，不虚构一次按请求豁免。"""
         result = recitation.audit(QUOTE_LINE, [{"kind": QUOTE, "text": QUOTE_LINE}], None, True)
-        self.assertEqual(VERDICT_QUOTE, result.hit.kind)
-        self.assertTrue(result.skipped)
-        self.assertIn(VERDICT_QUOTE, result.skip_reason)
+        self.assertIsNone(result.hit)
+        self.assertFalse(result.skipped)
+        self.assertIn(QUOTE_LINE, result.reason)
 
     def test_broken_skip_section_is_loud(self):
         """记账那一节坏了就当场响并点名：说不清「为什么没判废」等于没记。"""

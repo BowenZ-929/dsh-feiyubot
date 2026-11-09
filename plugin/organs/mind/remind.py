@@ -4,6 +4,9 @@
 再由日子线按 pending_task 这条由头到点提醒她。这个模块只做那一段：**认一句话 → 抽一个时刻
 → 交出手去落卡**。它不是通用工具框架，只认「记事」这一件事。
 
+线上 API 由 appraisal 先确认整段委托，再以 intent 传入逐字时间片段和事项。
+下述词表 plan 仅保留给未接语义解释器的旧离线调用，不代表线上意图判断。
+
 三段，次序钉死：
 
 1. **意图**（intent.words）：句子里出现「叫我／提醒我／说一声」任一个词，这一轮就算
@@ -309,14 +312,23 @@ def _title(text: str, phrase: str, cfg: Mapping[str, Any]) -> str:
 
 
 def handle(text: Any, *, who: str = "", now: Any = None, root: Optional[Any] = None,
-           config: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+           config: Optional[Mapping[str, Any]] = None, intent: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """认出来就落卡。**普通闲聊回 None**（调用方据此一个字节都不动）。
 
     root 是**手自己的实盘根**（家按兄弟目录换算，与手那边同一条口径）。who 是这一轮的号：
     卡上记的是「他要记的事」，不记成她自己的。
     """
     cfg = config or load_config()
-    found = plan(text, now=now, config=cfg)
+    if intent is None:
+        found = plan(text, now=now, config=cfg)
+    else:
+        # 意图和逐字时间片段已由 appraisal 在模型输出边界校验；时间仍只由现有解析器解释。
+        if not intent["task"]:
+            return {"parsed": False, "due": None, "card_id": None, "ok": False,
+                    "why": "no_task", "say": "要提醒你做什么？", "title": ""}
+        when = _normalize("".join(intent["when"]), cfg)
+        parsed = _relative(when, cfg, now) or _absolute(when, cfg, now)
+        found = {"due": parsed[0] if parsed else None, "title": intent["task"]}
     if found is None:
         return None
     if found["due"] is None:

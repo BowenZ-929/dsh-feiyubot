@@ -28,6 +28,7 @@ const policy = {
       "media_only",
       "burst_guard",
       "chitchat_skipped",
+      "superseded",
     ],
   },
 };
@@ -334,4 +335,9 @@ test("决策：写不进去只 warn 不抛，行照常返回", () => {
   assert.equal(row.machine.reason_code, "sent");
   assert.equal(warns.length, 1);
   assert.match(warns[0], /决策账写不进去/);
+});
+
+test('旧稿因补充停止是静默，不能算参与或发送失败', () => {
+  assert.equal(decidedOf('superseded'), 'silent');
+  assert.match(humanOf('superseded', false), /补充/);
 });

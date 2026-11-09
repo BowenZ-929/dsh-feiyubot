@@ -1,5 +1,5 @@
 #!/bin/bash
-# 启动「她」：核（python devserver）+ 通道（node server.ts）+ NapCat（跑在 QQ 进程里）。
+# 启动「她」：器官核 + 业务通道 + NoneBot + NapCat（QQ 内）。
 # 免扫码登录：把账号密码写进 channels/onebot/.state/qq.env（已 gitignore），格式见文件里的注释。
 # 用法：start.command [silent|send]
 set -uo pipefail
@@ -10,6 +10,14 @@ QQ="/Applications/QQ.app/Contents/MacOS/QQ"
 CORE_PORT="${QQAGENT_CORE_PORT:-8787}"
 LOGS="$CH/.state/logs"
 MODE="${1:-${QQAGENT_CHANNEL_MODE:-silent}}"
+TRANSPORT="${QQAGENT_TRANSPORT:-nonebot}"
+NB_PYTHON="$REPO/.scratch/nonebot-venv/bin/python"
+if [ "$TRANSPORT" != "nonebot" ] && [ "$TRANSPORT" != "direct" ]; then
+  echo "QQAGENT_TRANSPORT 只能是 nonebot 或 direct"; exit 1
+fi
+if [ "$TRANSPORT" = "nonebot" ] && { [ ! -x "$NB_PYTHON" ] || [ ! -f "$CH/.state/nonebot.json" ]; }; then
+  echo "NoneBot 尚未配置，见 channels/nonebot/README.md"; exit 1
+fi
 
 mkdir -p "$LOGS"
 
@@ -29,6 +37,11 @@ echo " 仓库：$REPO"
 echo " 模式：${MODE}（改模式就换一个词再启动：silent / send）"
 echo
 
+# 模型环境独立运行；未启用时不占用本机 GPU。
+if (cd "$REPO/plugin" && python3 -c 'from organs.hand import comfy; raise SystemExit(0 if comfy.config()["enabled"] else 1)'); then
+  bash "$REPO/tools/start-image.command" || echo "生图服务未启动；QQ 和逐笔绘画继续启动。"
+fi
+
 # ── 1) 核 ────────────────────────────────────────────────────────────
 echo "• 核："
 HEALTH="$(curl -s --max-time 2 "http://127.0.0.1:$CORE_PORT/healthz" 2>/dev/null)"
@@ -37,7 +50,7 @@ if [ -n "$HEALTH" ]; then
   # stale = 进程跑的是旧提交：本轮改了 organs/ 或 api/ 就必须重启，否则她说的还是旧代码。
   printf "%s" "$HEALTH" | grep -q '"stale": true' && echo "  ⚠ 跑的是旧提交（stale=true），要吃到新代码请先停核再启动"
 else
-  ( cd "$REPO/plugin" && nohup python3 -m api.devserver --port "$CORE_PORT" > "$LOGS/core.log" 2>&1 & )
+  ( cd "$REPO/plugin" && QQAGENT_TRACE=1 nohup python3 -m api.devserver --port "$CORE_PORT" > "$LOGS/core.log" 2>&1 & )
   for i in $(seq 1 25); do
     curl -s --max-time 1 "http://127.0.0.1:$CORE_PORT/healthz" >/dev/null 2>&1 && break
     sleep 1
@@ -69,6 +82,23 @@ else
   else
     echo "  ✗ 没起来（6200 被占或 node 报错），看：tail -40 \"$LOGS/channel.log\""
   fi
+fi
+
+echo
+# ── 2b) 成熟协议适配器：业务通道仍在 6200，NapCat 改连 6290 ───────────
+if [ "$TRANSPORT" = "nonebot" ]; then
+  echo "• NoneBot："
+  if ! curl -fsS --max-time 2 http://127.0.0.1:6290/healthz >/dev/null 2>&1; then
+    ( cd "$REPO/channels/nonebot" && nohup "$NB_PYTHON" run.py > "$LOGS/nonebot.log" 2>&1 & )
+    for i in $(seq 1 20); do
+      curl -fsS --max-time 1 http://127.0.0.1:6290/healthz >/dev/null 2>&1 && break
+      sleep 0.5
+    done
+  fi
+  if ! curl -fsS --max-time 2 http://127.0.0.1:6290/healthz >/dev/null 2>&1; then
+    echo "  ✗ 启动失败，查看 $LOGS/nonebot.log"; exit 1
+  fi
+  echo "  ✓ 已起（NapCat → 6290 → 业务通道 6200）"
 fi
 
 echo
@@ -107,7 +137,10 @@ echo
 echo "• 等 NapCat 连上通道（最多 35 秒）…"
 CONNECTED=0
 for i in $(seq 1 35); do
-  if grep -q '已连接' "$LOGS/channel.log" 2>/dev/null; then CONNECTED=1; break; fi
+  if [ "$TRANSPORT" = "nonebot" ]; then
+    if curl -fsS --max-time 1 http://127.0.0.1:6290/healthz 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(b["business_connected"] and b["running"] for b in d["bots"]) else 1)' 2>/dev/null; then CONNECTED=1; break; fi
+  elif grep -q '已连接' "$LOGS/channel.log" 2>/dev/null; then CONNECTED=1; break
+  fi
   sleep 1
 done
 if [ "$CONNECTED" = "1" ]; then
@@ -117,7 +150,7 @@ else
     echo "  ✗ 没连上——QQ 还停在登录界面。"
     [ -z "${NAPCAT_QUICK_PASSWORD:-}${NAPCAT_QUICK_PASSWORD_MD5:-}" ] && echo "     现在没有密码可用，所以只能扫码；写进 $CRED 后重启即可免扫码。"
   else
-    echo "  ✗ 没连上：已登录但客户端没起来，去 WebUI → 网络配置，确认 ws://127.0.0.1:6200/ws 那条是启用状态"
+    echo "  ✗ 没连上：查看网络配置（NoneBot: 6290/onebot/v11/ws；direct: 6200/ws）"
   fi
   echo "  面板：http://localhost:6099/webui"
 fi
@@ -125,7 +158,7 @@ fi
 echo
 echo "─────────────────────────────"
 echo " 她说话的开关 : 本次 ${MODE}（silent=只记账不发 / send=真发）"
-echo " 通道         : ws://127.0.0.1:6200/ws"
+echo " 通道         : ${TRANSPORT}（业务入口 6200；NoneBot 入口 6290）"
 echo " 核           : http://127.0.0.1:$CORE_PORT/healthz"
 echo " NapCat 面板  : http://localhost:6099/webui"
 echo " 账           : $CH/.state/ledger.jsonl"

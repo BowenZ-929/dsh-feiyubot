@@ -545,15 +545,13 @@ class RecitedLineIsCutOut(unittest.TestCase):
         self.assertIn(self.RECITED["status"], seen[0][1])
         self.assertEqual(2, len(verdict.hits), "两句照搬各留一条命中，弃的时候都在")
 
-    def test_the_rest_of_the_bubble_still_goes_through_the_other_judges(self):
-        """删过不等于放行：剩下的正文撞上内容重复，照旧弃掉，reason 用数据里那句 leftover。"""
+    def test_recitation_is_removed_but_repeated_remainder_is_kept(self):
         seen, sink = self._spy()
         verdict = enforce(self.BOTH, CLAUSES, None, sink, inject=self._inject(),
-                          policy=self.BOOK, recent=[self.REST + self.MARKS[0]],
-                          repeat_table=self.REPEAT)
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)
-        self.assertIn(self.REPEAT["hit"]["clause_id"], verdict.reason)
+                          policy=self.BOOK, recent=[self.REST + self.MARKS[0]], repeat_table=self.REPEAT)
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.REST + self.MARKS[0], verdict.text)
+        self.assertEqual("ok", verdict.repeat_status)  # 读数仍描述进门原稿
         self.assertIn(self.RECITED["status"], seen[-1][1])
 
 
@@ -579,7 +577,7 @@ class ActionNoteRidesTheGate(unittest.TestCase):
         self.assertIsInstance(hit, Hit)
         self.assertEqual(self.CLAUSE_ID, hit.clause_id)      # 名字取自数据，闸不自己造
         self.assertEqual(self.KIND, hit.kind)
-        self.assertIn("没给过", hit.reason)                   # 是一句人话，说清毛病在哪
+        self.assertIn("不判断场景是否真实", hit.reason)                   # 是一句人话，说清毛病在哪
 
     def test_check_does_not_judge_without_the_table(self):
         """没给判据表就整段不跑——但也不许把「没跑」说成「没问题」。"""
@@ -720,13 +718,8 @@ class RepeatRidesTheGate(unittest.TestCase):
         seen = []
         return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
 
-    def test_check_reports_it(self):
-        hit = check(self.THIRD, CLAUSES, recent=[self.FIRST, self.SECOND])
-        self.assertIsInstance(hit, Hit)
-        self.assertEqual(self.CLAUSE_ID, hit.clause_id)       # 两个名字都取自数据，闸不自己造
-        self.assertEqual(self.KIND, hit.kind)
-        self.assertIn(self.TAG, hit.reason)                   # 弃言账靠这个记号认判据
-        self.assertIn(hit.matched, hit.reason)                # 人话里点名撞上的那几个字
+    def test_check_does_not_block_literal_overlap(self):
+        self.assertIsNone(check(self.THIRD, CLAUSES, recent=[self.FIRST, self.SECOND]))
 
     def test_check_does_not_judge_without_history(self):
         """recent 为 None 就整段不跑——但也不许把「没跑」说成「没问题」。"""
@@ -753,45 +746,34 @@ class RepeatRidesTheGate(unittest.TestCase):
         self.assertIn(self.BOOK["reason"]["clear"].format(rounds=self.BOOK["rounds"]),
                       verdict.reason)                          # 放行要有据
 
-    def test_second_line_is_rewritten(self):
-        verdict = enforce(self.SECOND, CLAUSES, lambda text: self.CLEAN, recent=[self.FIRST])
-        self.assertEqual("rewritten", verdict.decision)
-        self.assertEqual(self.CLEAN, verdict.text)
-        self.assertEqual(1, len(verdict.hits))
-        self.assertEqual(self.CLAUSE_ID, verdict.hits[0].clause_id)
-        self.assertIsNone(check(verdict.text, CLAUSES, recent=[self.FIRST]))   # 改完真的不再重复
+    def test_second_line_is_observed_without_rewrite(self):
+        def rewrite(text):
+            self.fail("字面重合不应调用重写")
+        verdict = enforce(self.SECOND, CLAUSES, rewrite, recent=[self.FIRST])
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.SECOND, verdict.text)
+        self.assertEqual("observed", verdict.repeat_status)
+        self.assertEqual([], verdict.hits)
 
-    def test_third_line_kept_and_the_ledger_carries_the_tag(self):
-        """二次命中留原话（这条断言被新规矩改准了：以前 dropped + text=""）。
-
-        「她复读了」这件事仍然看得见：两次命中都在、账本里是数据里那个名字、reason 带 repeat 的记号
-        与 after-rewrite 的记号。
-        """
+    def test_opening_overlap_is_observed_without_a_drop_entry(self):
         seen, sink = self._spy()
         verdict = enforce(self.THIRD, CLAUSES, _same, sink, recent=[self.FIRST, self.SECOND])
         self.assertEqual("pass", verdict.decision)
-        self.assertEqual(self.THIRD, verdict.text)              # 发的是进门那句原话
-        self.assertTrue(verdict.kept_after_rewrite)
-        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
-                         [one.clause_id for one in verdict.hits])   # 两次命中都在，按发生顺序
-        self.assertEqual(1, len(seen), "留原话也要留一笔账")
-        self.assertEqual(self.CLAUSE_ID, seen[0][0])           # 账本里是数据里那个名字
-        self.assertIn(self.TAG, seen[0][1])                    # reason 里带着 repeat 记号
-        self.assertIn(load("rewrite")["after_rewrite"]["marks"]["repeat"], seen[0][1])
-        self.assertEqual(verdict.reason, seen[0][1])
-
-    def test_rewritten_text_is_judged_against_the_same_history(self):
-        """改写回来又撞上同一句：第二次照样判（窗口没变，判据也没变），但留的是进门那句原话。
-
-        这条断言被新规矩改准：以前 dropped + text=""。现在 decision 是 pass、text 是进门那句
-        （THIRD，不是那个没改成的新稿 FIRST）、hits 两条都在。
-        """
-        verdict = enforce(self.THIRD, CLAUSES, lambda text: self.FIRST, recent=[self.FIRST])
-        self.assertEqual("pass", verdict.decision)
         self.assertEqual(self.THIRD, verdict.text)
-        self.assertTrue(verdict.kept_after_rewrite)
-        self.assertEqual([self.CLAUSE_ID, self.CLAUSE_ID],
-                         [one.clause_id for one in verdict.hits])
+        self.assertFalse(verdict.kept_after_rewrite)
+        self.assertEqual("observed", verdict.repeat_status)
+        self.assertEqual([], verdict.hits)
+        self.assertEqual([], seen)
+        self.assertIn(self.TAG, verdict.reason)
+        self.assertIn("主人回来啦，", verdict.reason)
+        self.assertNotIn(self.BOOK["reason"]["clear"].format(rounds=self.BOOK["rounds"]), verdict.reason)
+
+    def test_other_violation_still_rewrites_and_observes_repeated_result(self):
+        verdict = enforce(SPEECH + self.THIRD, CLAUSES, lambda text: self.FIRST, recent=[self.FIRST])
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(self.FIRST, verdict.text)
+        self.assertEqual("ok", verdict.repeat_status)  # 读数仍描述进门原稿
+        self.assertEqual(["courtesy-open"], [one.clause_id for one in verdict.hits])
 
     def test_not_checked_is_not_the_same_as_checked_and_clean(self):
         """验收 4：同一句、同一份结局，状态必须分得开——一个没比、一个比过没重复。"""
@@ -806,10 +788,11 @@ class RepeatRidesTheGate(unittest.TestCase):
         self.assertNotIn(load("repeat")["reason"]["clear"].format(rounds=self.BOOK["rounds"]),
                          unchecked.reason)
 
-    def test_unchecked_cannot_rescue_the_repeat(self):
-        """拿不到历史时按既有规矩放行（不替调用方做主），但给历史就拦得下来。"""
-        self.assertEqual("pass", enforce(self.THIRD, CLAUSES, None).decision)
-        self.assertEqual("dropped", enforce(self.THIRD, CLAUSES, None, recent=[self.FIRST]).decision)
+    def test_missing_history_and_observed_overlap_are_distinct(self):
+        self.assertEqual("not-checked", enforce(self.THIRD, CLAUSES, None).repeat_status)
+        verdict = enforce(self.THIRD, CLAUSES, None, recent=[self.FIRST])
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual("observed", verdict.repeat_status)
 
     def test_gate_source_has_no_repeat_word(self):
         """去重的名字与说法也不许进闸：闸只接判据，不持判据。"""
@@ -841,9 +824,9 @@ class ARequestToRepeatSkipsTheGate(unittest.TestCase):
         seen = []
         return seen, (lambda clause_id, reason: seen.append((clause_id, reason)))
 
-    def test_check_returns_no_hit_when_the_user_asked_for_it(self):
+    def test_check_returns_no_blocking_hit_with_or_without_request(self):
         self.assertIsNone(check(self.THIRD, CLAUSES, recent=[self.FIRST], asked=self.ASKED))
-        self.assertIsInstance(check(self.THIRD, CLAUSES, recent=[self.FIRST]), Hit)
+        self.assertIsNone(check(self.THIRD, CLAUSES, recent=[self.FIRST]))
 
     def test_enforce_sends_it_verbatim_and_records_one_row(self):
         seen, sink = self._spy()
@@ -858,22 +841,20 @@ class ARequestToRepeatSkipsTheGate(unittest.TestCase):
         self.assertIn("skipped-by-request", seen[0][1])
         self.assertIn("skipped-by-request", verdict.reason)         # 面板上也看得见
 
-    def test_without_the_request_it_is_still_dropped(self):
+    def test_without_request_overlap_is_observed_not_exempted(self):
         seen, sink = self._spy()
-        verdict = enforce(self.THIRD, CLAUSES, None, sink,
-                          recent=[self.FIRST], asked="今天吃啥")
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)
-        self.assertEqual("ok", verdict.repeat_status)               # 真的比过、判废了
-        self.assertEqual(self.CLAUSE_ID, seen[0][0])
+        verdict = enforce(self.THIRD, CLAUSES, None, sink, recent=[self.FIRST], asked="今天吃啥")
+        self.assertEqual("pass", verdict.decision)
+        self.assertEqual(self.THIRD, verdict.text)
+        self.assertEqual("observed", verdict.repeat_status)
+        self.assertEqual([], seen)
 
     def test_an_empty_asked_never_exempts(self):
         for asked in ("", None, "   "):
             with self.subTest(asked=asked):
-                verdict = enforce(self.THIRD, CLAUSES, None, None,
-                                  recent=[self.FIRST], asked=asked)
-                self.assertEqual("dropped", verdict.decision)
-                self.assertEqual("ok", verdict.repeat_status)
+                verdict = enforce(self.THIRD, CLAUSES, None, None, recent=[self.FIRST], asked=asked)
+                self.assertEqual("pass", verdict.decision)
+                self.assertEqual("observed", verdict.repeat_status)
 
     def test_a_request_without_a_repeat_records_nothing(self):
         seen, sink = self._spy()
@@ -1050,15 +1031,15 @@ class ASecondHitKeepsTheOriginalLine(unittest.TestCase):
         self.assertEqual(self.NOTE["hit"]["clause_id"], verdict.hits[-1].clause_id)
         self.assertIn(self.MARKS["action"], seen[0][1])
 
-    def test_the_repeat_that_survives_the_rewrite(self):
+    def test_overlap_never_needs_failed_rewrite_fallback(self):
         seen, sink = self._spy()
         verdict = enforce(self.AGAIN, CLAUSES, lambda text: text + "主人", sink,
                           recent=[self.FIRST], repeat_table=self.BOOK, fatal=self.FATAL)
         self.assertEqual("pass", verdict.decision)
         self.assertEqual(self.AGAIN, verdict.text)
-        self.assertTrue(verdict.kept_after_rewrite)
-        self.assertEqual("ok", verdict.repeat_status)
-        self.assertIn(self.MARKS["repeat"], seen[0][1])
+        self.assertFalse(verdict.kept_after_rewrite)
+        self.assertEqual("observed", verdict.repeat_status)
+        self.assertEqual([], seen)
 
     def test_the_recitation_that_survives_the_rewrite_is_cut_out(self):
         """复述二次命中不在「留原话」那一格：只删照搬的那一句，剩下的照发，两条命中都留着。"""
@@ -1260,20 +1241,14 @@ class QuotaOverruns(unittest.TestCase):
         self.assertEqual("pass", verdict.decision)
         self.assertEqual(line, verdict.text)
 
-    def test_stripped_body_still_runs_the_other_criteria(self):
-        """验收 6：剥过不等于放行——正文里还有动作带场景，动作括注照样拦下。
-
-        正文不能以身体部位开头（那样的整行本身就是动作，会被一起剥掉），所以用一句以场景词
-        开头、身体部位在后的话：剥得掉的只有前面那个动作，正文留在那儿，再由动作括注判它。
-        """
+    def test_stripped_aside_keeps_ordinary_image_description(self):
         seen, sink = self._spy()
-        note = load("action_note")
-        verdict = enforce("（尾巴晃了一下）外面下雨了，尾巴都翘起来了。", CLAUSES, None, sink,
-                          action=note, quota="forbid")
-        self.assertEqual("dropped", verdict.decision)
-        self.assertEqual("", verdict.text)
-        self.assertEqual(note["hit"]["clause_id"], verdict.hits[-1].clause_id)
-        self.assertEqual(note["hit"]["clause_id"], seen[0][0])   # 账本记的是剥行后拦下它的那条
+        text = "房间里的人手里拿着杯子。"
+        verdict = enforce("（尾巴晃了一下）" + text, CLAUSES, None, sink,
+                          action=load("action_note"), quota="forbid")
+        self.assertEqual("rewritten", verdict.decision)
+        self.assertEqual(text, verdict.text)
+        self.assertEqual(["动作超配额"], [row[0] for row in seen])
         self.assertIn("action-over-quota", verdict.reason)
 
     def test_stripped_body_still_runs_the_clauses(self):

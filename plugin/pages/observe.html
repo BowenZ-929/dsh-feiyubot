@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>她的观察记录</title>
+<style>
+[hidden]{display:none!important}
+:root{color-scheme:light dark;--bg:var(--dsw-alias-bg-l1,Canvas);--fg:var(--dsw-alias-text-l1,CanvasText);--dim:var(--dsw-alias-text-l2,GrayText);--line:rgba(128,128,128,.3);--brand:var(--dsw-alias-brand,#4d6bfe)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 -apple-system,"PingFang SC",sans-serif}main{max-width:1120px;margin:auto;padding:32px 24px}h1{font-size:27px;margin:0}p{margin:8px 0 18px}.muted{color:var(--dim)}.toolbar{display:flex;flex-wrap:wrap;align-items:end;gap:14px;padding:18px 0;border-block:1px solid var(--line)}label{display:flex;flex-direction:column;gap:5px;font-size:13px}select,input,button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 12px}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}button.primary{background:var(--brand);color:white;border-color:transparent}#status{margin:18px 0;font-size:13px}article{border:1px solid var(--line);border-radius:12px;margin:14px 0;padding:18px 20px}article h2{font-size:16px;margin:0 0 8px;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:14px;line-height:1.7;margin:12px 0}summary{cursor:pointer;color:var(--brand);padding:8px 0}details+details{border-top:1px solid var(--line)}.note{font-size:13px;padding:12px 0}.pager{display:flex;gap:12px;margin:20px 0}.error{color:#cf5447}#search{min-width:210px}a{color:var(--brand)}@media(max-width:600px){main{padding:20px 14px}.toolbar>*{flex:1}article{padding:14px}}
+html[data-theme="dark"]{color-scheme:dark}
+html[data-theme="light"]{color-scheme:light}
+.participation-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.participation-metrics strong{display:block;font-size:24px}.participation-metrics p{margin:0;font-size:13px;color:var(--dim)}#participation-groups article{overflow-wrap:anywhere}#participation .toolbar{border:0;padding:0}#participation-status{margin-top:16px}@media(max-width:600px){.participation-metrics{grid-template-columns:1fr;gap:10px}.participation-metrics strong{font-size:20px}}
+</style>
+</head>
+<body><main>
+<h1>观察她的每一步</h1>
+<p class="muted">从模型看见的上下文，到生成原稿，再到发送结果。记录只读，刷新不会调用模型。</p>
+<article aria-label="大白饭账本">
+<h2>她的大白饭账本</h2>
+<p class="muted">理解、思考和说话都会吃饭。这里记录饭量、饭钱和官方账户的余粮。</p>
+<label>查看哪天的饭量（北京时间）<input type="date" id="rice-date"></label>
+<p id="rice-usage" aria-live="polite">正在读取饭账…</p>
+<p id="rice-balance"></p><p id="rice-note" class="muted note"></p>
+<button id="rice-refresh">刷新饭账</button>
+<details><summary>用量明细与统计口径</summary><pre id="rice-detail"></pre></details>
+</article>
+<div class="toolbar">
+<label>记录来源<select id="source"><option value="model">模型调用与思考</option><option value="chat">近期对话记录</option><option value="delivery">QQ 发送账本</option><option value="decision">发言判断</option><option value="eye">图片观察</option><option value="ear">语音识别</option><option value="voice">语音合成</option><option value="learning">外部知识参考</option><option value="emotion">情绪事件判断</option><option value="tone">语气与回复限制</option></select></label>
+<label id="session-label">会话<select id="session"><option value="">全部会话</option></select></label>
+<label id="date-label">记录日期<select id="date" aria-label="记录日期"></select></label>
+<label id="turn-label">只看这一轮<input id="turn" type="search" placeholder="回合编号，留空查看全部"></label>
+<label>本页搜索<input id="search" type="search" placeholder="关键词、名字或消息编号"></label>
+<button class="primary" id="refresh">刷新记录</button>
+</div>
+<section id="participation" aria-label="群聊参与概况" hidden>
+<h2>群聊参与概况</h2>
+<div class="toolbar"><label>统计日期（本机时区）<input type="date" id="participation-date"></label><button id="participation-refresh">刷新参与统计</button></div>
+<p id="participation-status" role="status" aria-live="polite"></p>
+<p id="participation-note" class="muted note"></p>
+<div id="participation-groups"></div>
+</section>
+<p id="note" class="note muted"></p><div id="status" role="status" aria-live="polite">正在读取…</div>
+<section id="records" aria-label="记录列表"></section>
+<div class="pager"><button id="newer" disabled>较新记录</button><button id="older" disabled>较早记录</button></div>
+</main>
+<script src="panel-base.js" data-page="observe"></script>
+<script>
+(function(){
+"use strict";
+const $ = id => document.getElementById(id);
+let offset=0, page=null;
+const turnSources={model:"模型调用",chat:"对话与发送回执",emotion:"理解与情绪",tone:"语气与回复限制"};
+const silenceLabels={"rest-deep":"彻底睡着","rest-asleep":"正在睡觉","rest-holding":"硬撑期间未参与这段",
+ chitchat_skipped:"本段未抽中接话机会",core_empty:"本轮没有可发送的回复",core_error:"核心调用出错",
+ outbound_failed:"发送未确认",superseded:"收到补充，旧回复已取消",burst_guard:"刚说过话，暂缓接话",
+ quota_exceeded:"通道发言额度用尽",silent_mode:"通道处于静默模式",media_only:"纯图片段未触发接话",sticker:"纯表情段未触发接话"};
+const notes={model:"这里展示已保存的模型调用。新记录包含用途、回合编号、失败与重试；按回合查询跨日期，按发起次序排列。服务端返回的思考内容按原文展示；没有返回时不补写。旧记录没有回合编号，不能仅凭时间认定属于同一轮。",chat:"这里是核保存的对话底稿，可能含截断或历史补记。旧版回复不等于实际送达；QQ 最终发送结果请查看发送账本。",delivery:"sent 表示协议端确认发送；uncertain 表示回执不确定，不能视为失败后重发。其他状态按原账展示。",decision:"展示通道为什么发言或没有发言。记忆关联可在记忆星图查看。"};
+function block(parent,title,text,open=false){const d=document.createElement("details"),s=document.createElement("summary"),p=document.createElement("pre");s.textContent=title;p.textContent=typeof text==="string"?text:JSON.stringify(text,null,2);d.open=open;d.append(s,p);parent.append(d);}
+Object.assign(notes,{eye:"图片的识别结果与状态，不等于发图者的经历。",ear:"语音的机器转写与不确定状态。",voice:"语音合成记录；是否送达仍以 QQ 发送账本为准。",learning:"记录哪些外部知识交给了聊天模型参考。它不代表模型一定采用，也不代表已向 QQ 发出。",emotion:"展示整段互动的语义判断、逐字证据与是否影响心情；旧记录仍标为规则判断。模型判断也可能错，依据可展开核对。",tone:"这一轮的心情、精力、语气和回复限制读数。它不是全部参数的修改历史；新记录按回合关联；旧记录没有编号，不能仅凭时间与别的记录强行关联。"});
+function remember(){
+ const query=new URLSearchParams({source:$("source").value});
+ if(turnSources[$("source").value]&&recordSession)query.set("session_id",recordSession);
+ if(turnSources[$("source").value]&&$("turn").value.trim())query.set("turn_id",$("turn").value.trim());
+ else if(recordDate)query.set("date",recordDate);
+ if(offset)query.set("offset",String(offset));
+ if($("search").value)query.set("q",$("search").value);
+ if($("source").value==="decision"&&$("participation-date").value)query.set("participation_date",$("participation-date").value);
+ history.replaceState(null,"","?"+query+location.hash);
+ window.dispatchEvent(new Event("panel-routechange"));
+}
+function render(){
+ const root=$("records");root.replaceChildren();if(!page)return;
+ const source=page.source,query=$("search").value.toLocaleLowerCase();
+ const rows=page.rows.filter(item=>JSON.stringify(item).toLocaleLowerCase().includes(query));
+ $("note").textContent=notes[source];
+ if(page.session_id)$("note").textContent+=" 已按会话筛选全部匹配记录后分页；缺少会话编号的旧记录不猜归属，可切回全部会话查看。";
+ $("status").className="muted";
+ $("status").textContent=!page.exists?"还没有这份记录。":`共 ${page.total} 条 · 当前 ${page.rows.length?offset+1:0}–${Math.min(offset+20,page.total)} 条 · 本页匹配 ${rows.length} 条`;
+ if(page.turn_id)$("status").textContent+=` · 回合 ${page.turn_id}${source==="model"?" · 按调用顺序":""}`;
+ if(page.turn_id&&!page.total)$("status").textContent+=" · 没有已关联的记录；旧日志不会按时间补猜。";
+ if(page.exists&&!page.turn_id)$("status").textContent+=" · "+(page.date||"全部日期")+(page.timezone?" · "+page.timezone:"");
+ if(page.undated_records&&!page.turn_id)$("status").textContent+=` · ${page.undated_records} 条缺有效时间，按日筛选时不包含`;
+ if(page.invalid_lines)$("status").textContent+=` · ${page.invalid_lines} 行损坏或尚未写完，已跳过`;
+ for(const item of rows){
+  const r=item.record,card=document.createElement("article"),heading=document.createElement("h2");
+  heading.textContent=`${r.at||r.ts||"时间未记录"} · 原记录第 ${item.line} 行${r.session_id?" · "+r.session_id:""}`;card.append(heading);
+  if(r.turn_id){const id=document.createElement("p");id.className="muted";id.textContent="回合 "+r.turn_id;card.append(id);for(const [kind,label] of Object.entries(turnSources)){if(kind===source)continue;const link=document.createElement("a");link.textContent="查看这一轮"+label;link.href=window.PANEL_BASE+"/observe?source="+kind+"&turn_id="+encodeURIComponent(r.turn_id);card.append(link," · ");}}
+  if(source==="model"){
+   let response={};try{response=JSON.parse(r.raw||"{}");}catch(e){block(card,"回包无法解析：查看原始内容",r.raw||"");}
+   const message=response.choices?.[0]?.message||{},request=r.request||{};
+   const info=document.createElement("p");info.className="muted";
+   info.textContent=`HTTP ${r.status??"未记录"} · 请求 ${request.model||"未记录"} → 返回 ${response.model||"未记录"} · 思考 ${request.thinking?.type||"未记录"} / ${request.reasoning_effort||"未记录"}`;card.append(info);
+   if(r.call_id){const step=document.createElement("p");step.textContent=`${r.call_index?"第 "+r.call_index+" 次调用 · ":""}${r.purpose||"用途未标注"} · 尝试 ${r.attempt} · ${r.duration_ms} 毫秒${r.error?" · 失败："+r.error:" · 返回正文"}`;card.append(step);}
+   block(card,"模型生成原稿（不代表最终发送）",r.reply||message.content||"没有正文",true);
+   block(card,"模型返回的思考内容",message.reasoning_content||"这次记录没有 reasoning_content，不能据此判断模型完全没有进行内部计算。");
+   block(card,`完整提示词 · ${(r.messages||[]).length} 段`,(r.messages||[]).map(m=>`[${m.role}]\n${m.content}`).join("\n\n"));
+   block(card,"请求参数与用量",{request,usage:response.usage||null,finish_reason:response.choices?.[0]?.finish_reason||null});
+  }else if(source==="chat"){
+   if(r.mode==="proactive")block(card,"她主动开口",`对象：${r.who||"未记录"}；这一轮没有对方的新发言。`,true);
+   else block(card,`${r.who||"对方"} 说`,r.said||"未记录",true);
+   const receipt=item.delivery;
+   if(receipt?.state==="confirmed"){
+    const superseded=receipt.stop_reason==="superseded";
+    block(card,"QQ 回执确认的文字",receipt.text||(superseded?"收到补充，旧稿剩余部分已停发，没有确认发出的文字。":"回执没有确认任何文字；可能只有媒体或没有确认成功的部分，请查看 QQ 发送账本。"),true);
+    const note=document.createElement("p");note.className="muted note";note.textContent=superseded?"收到补充，旧稿未发部分已停止；这里只保留实际确认发出的内容。":"这里只列回执确认的部分，不代表整轮全部发送成功。";card.append(note);
+   }else{
+    const state=receipt?.state||"unrecorded";
+    block(card,"发送确认",({pending:"尚无发送结果回执，不能据此判断没有发送或发送失败。",unavailable:"回执读取失败，当前无法确认发送结果；底稿不能代替回执。",unrecorded:"没有可关联的 QQ 回执；旧记录或未采用回执的路径不能据底稿判断已送达。"})[state],true);
+   }
+   block(card,"底稿里的回复",r.reply||"没有记到回复",receipt?.state!=="confirmed");
+   if(r.media_context)block(card,"这一轮附件识别资料（不是人的原话）",r.media_context);
+   if(r.memory_recall){
+    const a=r.memory_recall,selected=a.selected||[],skipped=a.skipped||[];
+    const names={text:"原文匹配",note:"理解匹配",recent:"近期补入",person_context:"按人回读的近期相处",context_link:"承接前文",included:"完整交给回复模型",included_excerpt:"回读后交给回复模型的逐字摘录",prompt_budget:"上下文长度放不下",memory_disabled:"记忆段未启用",fixed_receipt:"已装配，但固定回执未调用回复模型",quota_full:"该层名额已满",budget_full:"总名额已满"};
+    const isPersonContext=x=>x.reason==="person_context"||(x.matched_by||[]).includes("person_context");
+    const lines=[`入选 ${selected.length} 条 · 交给回复模型 ${selected.filter(x=>x.sent_to_model).length} 条 · 名额落选 ${skipped.length} 条`,
+     `普通召回段正文 ${a.injected_chars} / ${a.prompt_cap??"不限"} 字（不含段首说明）`,
+     ...(selected.some(isPersonContext)?["按人回读的近期相处另行补入，不参与相关性排名；上面的字数仅统计普通召回段。"]:[]),
+     a.reply_model_called?"本轮调用了回复模型。":"本轮使用固定回执，未调用回复模型。",
+     "排名是去重后候选顺序；分数来自字面相关、来源加权及关联前文，不表示事实可信度。",
+     ...(a.budget?.quota_mode==="reserve_then_fill"?["各层先按配额选取，剩余总名额再按排名补位；总名额和正文上限不增加。"]:[]),
+     ...selected.concat(skipped).sort((x,y)=>(x.rank??Infinity)-(y.rank??Infinity)).map(x=>isPersonContext(x)?
+      `相处原话 · ${x.id} · 按人回读的近期相处 · ${x.sent_to_model?"已交给回复模型":"未交给回复模型"}`:
+      `第 ${x.rank??"未知"} 位 · ${x.id} · ${names[x.reason]||x.reason}${x.borrowed_slot?" · 剩余名额补入":""}\n  ${(x.matched_by||[]).map(v=>names[v]||v).join("、")||"匹配依据未记录"} · 分数 ${x.score??"未记录"}${x.context_from?.length?"\n  关联来源："+x.context_from.join("、"):""}`)];
+    block(card,"这轮记忆取舍",lines.join("\n"),true);
+    for(const x of selected.filter(x=>x.source_read)){
+     const read=x.source_read,status={ok:"取得逐字摘录",invalid:"摘录未通过核对",unavailable:"回读调用失败",source_too_large:"原记录超过回读上限，未发送"};
+     block(card,`长记忆回读 · ${x.id}`,
+      `${status[read.status]||read.status} · 原记录 ${read.source_chars??"未知"} 字\n摘录不等于全文；逐字核对不保证相关信息已选全。\n`+
+      (read.spans||[]).map(s=>`${s.field==="quote"?"原话":"她的理解（非原话）"} · 原字段第 ${s.start+1}–${s.end} 字\n${s.text}`).join("\n\n"),true);
+    }
+    const links=document.createElement("p");links.className="muted";links.append("查看当前原记录（当时的取舍以上方快照为准）： ");
+    for(const x of selected.concat(skipped).sort((x,y)=>(x.rank??Infinity)-(y.rank??Infinity))){
+     const link=document.createElement("a");link.textContent=isPersonContext(x)?`相处原话 · ${x.id}`:`第 ${x.rank??"未知"} 位`;link.href=window.PANEL_BASE+"/galaxy?memory="+encodeURIComponent("event:"+x.id);links.append(link," · ");
+    }
+    card.append(links);
+    block(card,"实际查询、配额与取舍参数",a);
+   }else block(card,"这轮记忆取舍","旧记录未保存，不能用现在的召回结果补猜当时排名。");
+  }else if(source==="delivery"){
+   block(card,`${r.kind||"未知状态"} · ${r.target||"目标未记录"}`,r.text||r.note||"无文本",true);
+  }else if(source==="decision"){
+   const m=r.machine||{},sleepReason=["rest-deep","rest-asleep","rest-holding"].includes(m.reason)?m.reason:"core_empty";
+   block(card,"判断结果",m.decided==="silent"&&m.reason_code==="core_empty"?
+     silenceLabels[sleepReason]:r.human||m.reason_code||"未记录",true);
+  }
+  else if(source==="emotion"){
+   block(card,r.interpretation?"语义判断结果":"历史规则判断",`${r.kind||"未识别"} · ${r.who||"对象未记录"}`,true);
+   block(card,"依据与投递结果",{依据:r.note||"未记录",影响心情:r.applied,结果:r.reason||"未记录"},true);
+   if(r.interpretation){
+    const selection=r.interpretation;
+    const states={requested:"已提出检索词",not_requested:"本轮没有请求检索",missing:"模型没有返回选图字段",invalid:"选图字段格式不正确",unavailable:"理解调用未完成，选图意愿未知",disabled:"本轮未开放聊天选图"};
+    block(card,"聊天表情检索",(states[selection.meme_search_status]||(selection.status==='not_applicable'?"本轮主动开口，未执行聊天表情检索。":"旧记录没有保存检索判断，不能补猜她是否想发表情。"))+
+     (selection.meme_search_status==='requested'?`\n检索词：${selection.meme_query}`:"")+"\n这是理解阶段的记录，不代表已选择或发送图片；具体选图看本轮模型调用，送达看QQ回执。",true);
+   }
+   if(r.interpretation)block(card,"语义证据与调用状态",r.interpretation,true);
+  }else if(source==="tone"){
+   block(card,"心情与语气",`称呼：${r.address??"未记录"}\n心情：${r.mood_tier??"未记录"} · 精力：${r.energy_tier??"未记录"}\n语气：${r.tone_tier??"未记录"} · 软度参考：${r.softness??"未记录"}`,true);
+   const controls=r.controls||{},unknown="旧记录未记处理方式，不能按现在的规则补猜";
+   block(card,"本轮实际处理方式",`提示词字数预算：${r.max_chars??"未记录"}\n`+
+    (r.controls?`字数处理：${({sentence_clip:"超预算时按句末裁剪，完整首句可能超预算",prompt_budget:"只写入提示词，不据此截断"})[controls.length]||unknown}\n`+
+    `问句处理：${controls.questions==="not_filtered"?"不按问号删句":unknown}\n`+
+    `玩笑处理：${({prompt_only:"只作提示，不按词删句",not_filtered:"未增加禁玩笑提示，不按词删句"})[controls.jokes]||unknown}`:unknown)+
+    `\n实际截断：${r.truncated===true?"发生截断":r.truncated===false?"未截断":"未记录"}\n实际删问句数：${r.dropped_questions??"未记录"} · 删玩笑数：${r.dropped_jokes??"未记录"}`,true);
+   block(card,"读数与结果的区别","软度是参考读数，不直接改写回复。这里记录语气处理；其他出站判断及QQ实际送达仍看对应记录。",true);
+   block(card,"兼容旧记录的参数",{少问读数:r.no_question,禁玩笑读数:r.ban_joke});
+  }else{block(card,"记录内容",r,true);}
+  block(card,"完整原始记录",r);root.append(card);
+ }
+ $("newer").textContent=page.turn_id&&source==="model"?"前面的调用":"较新记录";$("older").textContent=page.turn_id&&source==="model"?"后续调用":"较早记录";
+ $("newer").disabled=offset===0;$("older").disabled=!page.has_older;
+}
+async function load(){
+ $("refresh").disabled=true;$("newer").disabled=true;$("older").disabled=true;$("source").disabled=true;$("date").disabled=true;$("turn").disabled=true;$("session").disabled=true;
+ $("status").textContent="正在读取…";
+ const source=$("source").value,turn=turnSources[source]?$("turn").value.trim():"";$("date-label").hidden=!!turn;$("turn-label").hidden=!turnSources[source];
+ $("session-label").hidden=!turnSources[source];
+ $("participation").hidden=source!=="decision";
+ if(source==="decision")loadParticipation();
+ const query=new URLSearchParams({source,offset:String(offset),limit:"20"});
+ if(turn)query.set("turn_id",turn);
+ if(turnSources[source]&&recordSession)query.set("session_id",recordSession);
+ if(!turn&&recordDate)query.set("date",recordDate);
+ remember();
+ try{
+  const response=await panelFetch("/observe/records?"+query);const data=await response.json();
+  if(!response.ok||!data.ok)throw new Error(data.message||`读取失败 ${response.status}`);
+  page=data;
+  $("session").replaceChildren();
+  for(const id of [...new Set(["",recordSession,...(data.sessions||[])])]){
+   const option=document.createElement("option");option.value=id;
+   option.textContent=!id?"全部会话":id.startsWith("qq:private:")?"私聊 · "+id.slice(11):id.startsWith("qq:group:")?"群聊 · "+id.slice(9):id;
+   $("session").append(option);
+  }
+  $("session").value=recordSession;
+  if(!turn){recordDate=data.date;$("date").replaceChildren();for(const date of [...new Set([...(source==="model"?[]:[""]),data.date,...data.dates])]){const option=document.createElement("option");option.value=date;option.textContent=date||"全部日期";$("date").append(option);}$("date").value=data.date;}
+  render();remember();
+ }catch(error){page=null;$("records").replaceChildren();$("status").className="error";$("status").textContent="读取失败："+error.message;}
+ finally{$("refresh").disabled=false;$("source").disabled=false;$("date").disabled=false;$("turn").disabled=false;$("session").disabled=false;}
+}
+$("refresh").onclick=load;$("source").onchange=()=>{offset=0;$("search").value="";load();};$("date").onchange=()=>{offset=0;recordDate=$("date").value;load();};$("search").oninput=()=>{render();remember();};$("turn").onchange=()=>{offset=0;load();};
+$("session").onchange=()=>{recordSession=$("session").value;offset=0;$("turn").value="";$("search").value="";load();};
+$("older").onclick=()=>{offset+=20;load();};$("newer").onclick=()=>{offset=Math.max(0,offset-20);load();};
+async function loadParticipation(){
+ if($("participation-refresh").disabled)return;
+ $("participation-refresh").disabled=true;$("participation-date").disabled=true;
+ $("participation-status").className="";$("participation-status").textContent="正在统计整天的合并段…";
+ $("participation-groups").replaceChildren();$("participation-note").textContent="";
+ try{
+  const query=new URLSearchParams();if($("participation-date").value)query.set("date",$("participation-date").value);
+  const response=await panelFetch("/observe/participation?"+query),data=await response.json();
+  if(!response.ok||!data.ok)throw new Error(data.message||"读取失败");
+  $("participation-date").value=data.date;
+  const pct=value=>value==null?"—":Number(value).toFixed(1)+"%";
+  $("participation-status").textContent=!data.exists?"还没有发言账，暂时无法统计。":
+   `${data.date} · ${data.timezone} · ${data.total.segments} 个合并段 · 主动接话 ${data.total.spontaneous_sent} 段（${pct(data.total.spontaneous_pct)}）`;
+  $("participation-note").textContent=(data.sample_every?`磁盘配置每 ${data.sample_every} 段给一次普通接话机会；已生效值请到设置页核对，实际是否接话另受情境和状态影响。`:"当前抽样配置不可读。")+
+   " 按段开始时间归日，不受下方分页和搜索影响。确认参与表示至少一泡收到成功回执，不表示整轮全部送达或对方已读。"+
+   (data.invalid_lines?` 账中有 ${data.invalid_lines} 行无法统计，结果可能不完整。`:"")+(data.config_error?" "+data.config_error:"");
+  for(const g of data.groups){
+   const card=document.createElement("article"),title=document.createElement("h2"),metrics=document.createElement("div");
+   title.textContent=`群 ${g.target.slice(6)} · ${g.segments} 个合并段`;metrics.className="participation-metrics";
+   for(const [label,value,detail] of [
+    ["主动接话",g.spontaneous_pct,`${g.spontaneous_sent} / ${g.segments} 段`],
+    ["被叫到后回应",g.directed_pct,`${g.directed_sent} / ${g.directed} 个定向段`],
+    ["全部确认参与",g.total_pct,`${g.sent} / ${g.segments} 段`]]){
+    const item=document.createElement("div"),name=document.createElement("span"),valueNode=document.createElement("strong"),note=document.createElement("p");
+    name.textContent=label;valueNode.textContent=pct(value);note.textContent=detail;item.append(name,valueNode,note);metrics.append(item);
+   }
+   const detail=document.createElement("p");detail.className="muted note";
+   detail.textContent=`回复未确认 ${g.unconfirmed} 段 · 另有主动分享 ${g.proactive_sent} 次（不计入回复率）`+
+    (g.proactive_unconfirmed?` · 分享未确认 ${g.proactive_unconfirmed} 次`:"")+
+    (g.other_sent?` · ${g.other_sent} 段参与来自其他或旧规则，仅计入全部参与`:"");
+   card.append(title,metrics,detail);$("participation-groups").append(card);
+   if(g.silent_reasons&&Object.keys(g.silent_reasons).length){
+    block(card,"未确认参与的原因（每段只计最终原因）",Object.entries(g.silent_reasons)
+     .sort((a,b)=>b[1]-a[1]).map(([reason,count])=>`${silenceLabels[reason]||reason} · ${count} 段`).join("\n"),true);
+   }
+  }
+  remember();
+ }catch(error){$("participation-groups").replaceChildren();$("participation-status").className="error";$("participation-status").textContent="参与统计读取失败："+error.message;}
+ finally{$("participation-refresh").disabled=false;$("participation-date").disabled=false;}
+}
+$("participation-refresh").onclick=loadParticipation;$("participation-date").onchange=()=>{remember();loadParticipation();};
+async function loadRice(){
+ $("rice-refresh").disabled=true;
+ try{
+  const query=new URLSearchParams();if($("rice-date").value)query.set("date",$("rice-date").value);
+  const response=await panelFetch("/observe/rice?"+query), data=await response.json();
+  if(!response.ok||!data.ok)throw new Error(data.message||"读取失败");
+  $("rice-date").value=data.date;
+  const d=data.daily,b=data.balance,low=Number(d.cost_cny_min).toFixed(6),high=Number(d.cost_cny_max).toFixed(6);
+  $("rice-usage").textContent=`${data.enabled?"":"饭账尚未启用 · "}${d.calls} 次调用 · ${d.total_tokens.toLocaleString()} token 大白饭 · 饭钱估算 ¥${low}${low!==high?"–"+high:""}${d.unpriced_calls?` · 另有 ${d.unpriced_calls} 次未能计价`:""}`;
+  const amounts=(b.data?.balance_infos||[]).map(r=>`${r.currency} ${r.total_balance}（赠额 ${r.granted_balance} / 充值 ${r.topped_up_balance}）`).join("；");
+  $("rice-balance").textContent=amounts?`官方余粮：${amounts} · ${b.checked_at}${b.stale?" · 旧快照，当前查询未确认":""}${b.data.is_available?"":" · 官方标记账户不可用"}`:"官方余粮：尚未取得，不能当作余额为零。";
+  $("rice-note").textContent=data.scope+" 余额约每 5 分钟查询，刷新页面不调用模型。";
+  $("rice-detail").textContent=JSON.stringify({输入:d.prompt_tokens,输出:d.completion_tokens,其中推理:d.reasoning_tokens,说明:"推理已包含在输出里，不重复计费；未记录不等于未消费。",损坏行:d.invalid_lines,价格来源:data.pricing_url},null,2);
+ }catch(error){$("rice-usage").textContent="饭账读取失败："+error.message;}
+ finally{$("rice-refresh").disabled=false;}
+}
+$("rice-refresh").onclick=loadRice;$("rice-date").onchange=loadRice;
+const requested=new URLSearchParams(location.search),requestedSource=requested.get("source"),requestedOffset=Number(requested.get("offset"));
+let recordDate=requested.get("date");
+let recordSession=turnSources[requestedSource||$("source").value]?(requested.get("session_id")||""):"";
+$("participation-date").value=requested.get("participation_date")||"";
+offset=Number.isSafeInteger(requestedOffset)&&requestedOffset>=0?requestedOffset:0;
+$("search").value=requested.get("q")||"";
+if(Object.prototype.hasOwnProperty.call(notes,requestedSource)) $("source").value=requestedSource;
+if(turnSources[requestedSource]&&requested.get("turn_id")) $("turn").value=requested.get("turn_id");
+loadRice();load();
+}());
+</script></body></html>

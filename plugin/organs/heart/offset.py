@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from organs.day import model as day_model
-from organs.heart import model, store
+from organs.heart import model, store, changes
 
 OFFSET_FILE = "offset.json"
 LEDGER_FILE = "offset_ledger.jsonl"
@@ -205,6 +205,7 @@ def apply_daily(axis: str, delta: float, root: Any = None,
     today = day_model.day_key(stamp, cutover_hour=0)
     state = _load_state(root)
 
+    previous = dict(state['axes'].get(axis, {}))
     row = _row(state, axis)
     decayed_before = _decayed_value(row, stamp)
     if (row.get("day") or "") != today:
@@ -230,6 +231,8 @@ def apply_daily(axis: str, delta: float, root: Any = None,
 
     state_path, ledger_path = _paths(root)
     store.write_json(state_path, state)
+    changes.record(root, at=stamp, group='offset', reason='回落后应用日偏移', source=source,
+                   from_at=previous.get('updated_at'), before={axis: previous.get('value')}, after={axis: value})
     if truncated:
         store.append_jsonl(ledger_path, {
             "kind": KIND_TRUNCATE, "axis": axis, "day": today,
@@ -264,6 +267,7 @@ def settle_week(values: Dict[str, float], root: Any = None,
     today = day_model.day_key(stamp, cutover_hour=0)
     state = _load_state(root)
 
+    before = {axis: state['axes'].get(axis, {}).get('value') for axis in values}
     settled: Dict[str, Dict[str, Any]] = {}
     for axis in model.AXES:
         if axis not in values:
@@ -288,6 +292,8 @@ def settle_week(values: Dict[str, float], root: Any = None,
 
     state_path, ledger_path = _paths(root)
     store.write_json(state_path, state)
+    changes.record(root, at=stamp, group='offset', reason='六轴周结覆盖', source=week,
+                   before=before, after={axis: info['value'] for axis, info in settled.items()})
     for axis, info in settled.items():
         store.append_jsonl(ledger_path, {
             "kind": KIND_OVERWRITE, "axis": axis,

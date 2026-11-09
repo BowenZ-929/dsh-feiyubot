@@ -55,6 +55,11 @@ class StyleKnobsCase(unittest.TestCase):
     def texts(self, chunks: List[Dict[str, Any]]) -> List[str]:
         return [str(one["text"]) for one in chunks]
 
+    def boundary_chunks(self, text: str, who: str) -> List[Dict[str, Any]]:
+        payload: Dict[str, Any] = {}
+        chat._say_boundary(payload, text, who)
+        return payload["chunks"]
+
     def knobs(self, who: str) -> Dict[str, Any]:
         rules = chat._policy_for(who)["split"]
         return {key: rules[key] for key in ("max_chars", "max_parts", "sentences_per_part")}
@@ -90,7 +95,7 @@ class CharLimitCase(StyleKnobsCase):
         self.assertEqual(1, knobs["sentences_per_part"], "两句一泡会突破字限，必须压成 1")
         self.assertEqual(warehouse.load("policy")["split"]["max_parts"], knobs["max_parts"],
                          "只给字限时不动泡数上限")
-        chunks = chat._resplit(EIGHT, WHO)
+        chunks = self.boundary_chunks(EIGHT, WHO)
         self.assertGreater(len(chunks), 1, "字限下不该是一整泡")
         for one in chunks:
             self.assertLessEqual(len(one["text"]), 20, "这一泡破了 20 字：%r" % (one["text"],))
@@ -106,16 +111,16 @@ class PartsCase(StyleKnobsCase):
         self.assertEqual(1, self.knobs(WHO)["max_parts"])
         self.assertEqual(warehouse.load("policy")["split"]["max_chars"],
                          self.knobs(WHO)["max_chars"], "只给泡数时不动字限")
-        chunks = chat._resplit(SIX, WHO)
+        chunks = self.boundary_chunks(SIX, WHO)
         self.assertEqual(1, len(chunks), "说了合并到 1 泡就得是 1 泡")
         self.assertEqual(SIX, chunks[0]["text"])
 
     def test_five_chunks_per_reply_merges_six_into_three(self) -> None:
         """⑤ chunks_per_reply=3：本来切得出六泡的一段话，合并到不超过三泡，字一个不丢。"""
-        default = chat._resplit(SIX, OTHER)
+        default = self.boundary_chunks(SIX, OTHER)
         self.assertGreater(len(default), 3, "这段话本来就切得出多于三泡，才测得出合并")
         self.card(WHO, chunks_per_reply=3)
-        chunks = chat._resplit(SIX, WHO)
+        chunks = self.boundary_chunks(SIX, WHO)
         self.assertLessEqual(len(chunks), 3)
         self.assertEqual(SIX, "".join(self.texts(chunks)), "合并只拼字")
 
@@ -131,14 +136,14 @@ class BothCase(StyleKnobsCase):
         self.assertEqual(1, knobs["sentences_per_part"])
         self.assertEqual(warehouse.load("policy")["split"]["max_parts"], knobs["max_parts"],
                          "字限赢时 chunks_per_reply 不许改 max_parts")
-        chunks = chat._resplit(EIGHT, WHO)
+        chunks = self.boundary_chunks(EIGHT, WHO)
         self.assertGreater(len(chunks), 1, "字限赢：泡数不许被压成 1")
         for one in chunks:
             self.assertLessEqual(len(one["text"]), 20, "这一泡破了 20 字：%r" % (one["text"],))
 
         payload: Dict[str, Any] = {}
         chat._say_boundary(payload, EIGHT, WHO)
-        self.assertGreater(len(payload["chunks"]), 1, "实发那几泡与 _resplit 同一个拼法")
+        self.assertGreater(len(payload["chunks"]), 1, "边界回复仍按同一份人物偏好分泡")
         note = payload["style"]
         self.assertEqual(["max_chars"], note["applied"])
         self.assertEqual([{"key": "chunks_per_reply", "reason": "char_limit_first"}], note["ignored"])
@@ -153,10 +158,10 @@ class OtherPersonCase(StyleKnobsCase):
         """⑥ 没设偏好的那个人走同一段话：逐条与默认 policy 的切分一致。"""
         self.card(WHO, chunks_per_reply=1, max_chars=20)      # 别人的卡不等于他的
         plain = split_text(SIX, warehouse.load("policy"), warehouse.load("action_note"))
-        mine = chat._resplit(SIX, OTHER)
+        mine = self.boundary_chunks(SIX, OTHER)
         self.assertEqual([part.text for part in plain.parts], self.texts(mine),
                          "没卡的人必须与默认 policy 逐条一致")
-        self.assertEqual(self.texts(chat._resplit(EIGHT, OTHER)),
+        self.assertEqual(self.texts(self.boundary_chunks(EIGHT, OTHER)),
                          [part.text for part in split_text(
                              EIGHT, warehouse.load("policy"), warehouse.load("action_note")).parts])
 

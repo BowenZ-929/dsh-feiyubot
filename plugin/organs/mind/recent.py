@@ -6,8 +6,10 @@
 落点：paths.organ_dir("mind")/recent_turns.jsonl（root 可由参数覆盖，供测试）。
 一条记录：{"ts", "who", "said", "reply", "truncated": {"said": bool, "reply": bool},
 "fidelity": "live"|"reconciled", "msg_id": 与脑里那条对齐的 id}。
-两侧各按 cap（默认来自 assembly.json 的 recent.cap）截断；**截断留痕**：截过的那一侧在
+新记录默认保存全文（recent.cap=0）；显式正 cap 仍支持旧的每侧截断。**截断留痕**：截过的那一侧在
 truncated 里记 true，渲染时带一句「（截断）」——绝不静默锯掉一半还当成原话。
+附件识别资料另存可选 media_context，不混进 said 或 render 的人物发言；它来自已校验的
+眼/耳结果，由装配按当前会话、近期轮次和 media_cap 单独放入用户资料区。它不是亲历事实。
 
 **补记必须留痕**：进程重启、写入失败时，某一轮可能没落进本文件而脑里已经记了；
 conversation.answer 装配前对账，把这类轮从脑回填进来，fidelity="reconciled"（正常落盘
@@ -30,6 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .. import paths
+from ..brain.model import valid_who
 
 FILE_NAME = "recent_turns.jsonl"     # 落脚的文件名
 NOTE_SLOT = "{omitted}"              # notice 模板里那个占位符
@@ -42,6 +45,8 @@ WHO = "who"
 TRUNCATED = "truncated"
 FIDELITY = "fidelity"                 # 这一轮是亲历落的，还是从脑回填的
 MSG_ID = "msg_id"                     # 与脑里那条对齐的 id（空串＝没对上，不能当对账凭据）
+SESSION_ID = "session_id"             # 近期对话所属会话；长期记忆仍共享
+MEDIA_CONTEXT = "media_context"       # 已校验附件的识别资料，独立于人的原话与亲历
 LIVE = "live"                         # 装配当场落盘：亲历
 RECONCILED = "reconciled"             # 事后从脑回填：补记
 FIDELITIES = (LIVE, RECONCILED)
@@ -149,8 +154,8 @@ def claim(entries: List[Mapping[str, Any]], root: Optional[Any] = None,
     当成缺的、全量标成「（补记）」：误标与不标一样坏，而且更糟——她与人都以为那些是补的，
     真正补的那几条于是也不可信了。认领**只补凭据**：fidelity 一个字都不动（旧行是亲历）。
 
-    比对用 (ts, 按 cap 截断后的 said)：落盘时两侧就截过，脑里存的是全文，直接比原文
-    会把「长到被截断」的旧行永远认不出来（又一次误标）。ts 或 said 缺一行就不认。
+    比对用 (ts, 按 cap 截断后的 said)。改为全文保存后，明确标记过截断的旧行也可按
+    同时刻的原文前缀认领；只补 id，不把缺失正文伪装成已恢复。ts 或 said 缺一行就不认。
 
     幂等：一条都认不出来就一个字节都不重写（返回 0）；认出来才原子写一次。
     """
@@ -187,7 +192,8 @@ def claim(entries: List[Mapping[str, Any]], root: Optional[Any] = None,
         stamp = str(item.get(TS) or "")
         said = str(item.get(SAID) or "")
         for slot in pool:
-            if slot[3] or slot[0] != stamp or slot[1] != said:
+            if slot[3] or slot[0] != stamp or not (slot[1] == said or (
+                    (item.get(TRUNCATED) or {}).get(SAID) and said and slot[1].startswith(said))):
                 continue
             slot[3] = True
             item[MSG_ID] = slot[2]
@@ -236,10 +242,41 @@ def _made(record: Mapping[str, Any], cap: int, fidelity: str) -> Dict[str, Any]:
         TRUNCATED: {SAID: said_cut, REPLY: reply_cut},
         FIDELITY: fidelity,
         MSG_ID: str(record.get(MSG_ID) or ""),
+        **({"mode": "proactive"} if record.get("mode") == "proactive" else {}),
+        **({"turn_id": record["turn_id"]} if record.get("turn_id") else {}),
+        **({"memory_recall": record["memory_recall"]} if "memory_recall" in record else {}),
+        **({SESSION_ID: record[SESSION_ID]} if record.get(SESSION_ID) else {}),
+        **({MEDIA_CONTEXT: record[MEDIA_CONTEXT]} if record.get(MEDIA_CONTEXT) else {}),
+        **({"utterances": record["utterances"]} if record.get("utterances") else {}),
     }
 
 
-def load(root: Optional[Any] = None, turns: Optional[int] = None) -> Dict[str, Any]:
+def confirm_reply(record: Mapping[str, Any], text: str, root: Optional[Any] = None) -> None:
+    """回执只更新对应轮的她那句；其它原始行不改。"""
+    path = path_of(root)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (row.get(TS), row.get(MSG_ID), row.get(WHO)) != (record[TS], record[MSG_ID], record[WHO]):
+            continue
+        row[REPLY], cut = clip(text, policy()["cap"])
+        row[TRUNCATED][REPLY] = cut
+        if record.get('meme') and record.get('image') in record.get('sent_images', []):
+            row['meme'] = record['meme']
+        lines[index] = _line(row).rstrip("\n")
+        break
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def load(root: Optional[Any] = None, turns: Optional[int] = None,
+         session_id: Optional[str] = None) -> Dict[str, Any]:
     """读最近几轮：{"turns": [...], "omitted": 更早还有几轮, "total": 盘上一共几条}。
 
     盘上留着全部行，这里只切最后 turns 条；坏行跳过，不计进 total（它本来就不算一条对话）。
@@ -247,6 +284,9 @@ def load(root: Optional[Any] = None, turns: Optional[int] = None) -> Dict[str, A
     if turns is None:
         turns = policy()["turns"]
     rows = _rows(path_of(root))
+    # None 给历史查看/旧内部调用；空串表示来路未知，不猜旧记录属于当前会话。
+    if session_id is not None:
+        rows = [row for row in rows if session_id and row.get(SESSION_ID) == session_id]
     total = len(rows)
     keep = int(turns)
     shown = rows[-keep:] if keep > 0 else []
@@ -271,6 +311,34 @@ def notice(omitted: Any, template: Any) -> str:
     return text.replace(NOTE_SLOT, str(count))
 
 
+def normalize_quote(raw):
+    """通道输入和历史文件两个边界共用的引用格式；不从昵称猜身份。"""
+    if (not isinstance(raw, dict) or any(not isinstance(raw.get(k), str) for k in ('message_id', 'who', 'speaker', 'source'))
+            or not raw['message_id'].lstrip('-').isdigit() or (raw['who'] and not valid_who(raw['who']))
+            or raw['source'] not in ('own', 'inbound', 'get_msg', 'none')
+            or (raw.get('text') is not None and not isinstance(raw['text'], str))):
+        raise ValueError('quote需要消息编号、原作者、原文及来源；未知作者留空，不用昵称冒充编号')
+    return {key: raw.get(key) for key in ('message_id', 'who', 'speaker', 'text', 'source')}
+
+
+def utterance_text(item: Mapping[str, Any]) -> str:
+    """引用只在展示时与当前原话组合；证据与记忆仍使用独立text。"""
+    quote = item.get('quote')
+    if not quote:
+        return item['text']
+    author = quote['speaker'] or quote['who'] or '作者未记录'
+    text = '内容读不到' if quote['text'] is None else '「' + quote['text'] + '」'
+    return '（引用' + author + '的消息：' + text + '）\n' + item['text']
+
+
+def spoken_text(row: Mapping[str, Any]) -> str:
+    """片段按原发送者呈现；无结构化来源的旧轮沿用原文。"""
+    if row.get("utterances"):
+        return "\n".join("%s：%s" % (item["speaker"], line)
+                         for item in row["utterances"] for line in utterance_text(item).split("\n"))
+    return str(row.get(SAID) or "")
+
+
 def render(turns: List[Mapping[str, Any]]) -> str:
     """进提示词的样子：一轮两行，谁说的 + 原文；截断过、没说出口的都留一句痕迹。
 
@@ -281,13 +349,18 @@ def render(turns: List[Mapping[str, Any]]) -> str:
     for row in turns:
         cut = row.get(TRUNCATED) or {}
         mark = BACKFILL_MARK if _fidelity(row.get(FIDELITY)) == RECONCILED else ""
-        who = str(row.get(WHO) or "") or "人"
-        said = str(row.get(SAID) or "")
+        who = "对话片段" if row.get("utterances") else (str(row.get(WHO) or "") or "人")
+        said = spoken_text(row)
         reply = str(row.get(REPLY) or "")
-        lines.append("- %s%s：%s%s" % (mark, who, said, CUT_MARK if cut.get(SAID) else ""))
-        lines.append("- %s%s：%s%s" % (mark, HER,
+        proactive = row.get("mode") == "proactive"
+        stamp = '[记录时间 %s] ' % (row.get(TS) or '未记录')
+        if not proactive:
+            lines.append("- %s%s%s：%s%s" % (stamp, mark, who, said, CUT_MARK if cut.get(SAID) else ""))
+        lines.append("- %s%s%s：%s%s" % (stamp if proactive else '', mark, "她主动说" if proactive else HER,
                                        reply or (MISSING_REPLY if mark else SILENT),
                                        CUT_MARK if cut.get(REPLY) else ""))
+        if row.get('meme'):
+            lines.append('- 她已发的表情（图库描述，可能有误）：' + json.dumps(row['meme'],ensure_ascii=False))
     return "\n".join(lines)
 
 
@@ -326,6 +399,24 @@ def _row(item: Mapping[str, Any]) -> Dict[str, Any]:
     """
     cut = item.get(TRUNCATED)
     marks = cut if isinstance(cut, dict) else {}
+    utterances = item.get("utterances")
+    if not isinstance(utterances, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("speaker"), str) and isinstance(row.get("text"), str)
+        and isinstance(row.get("who", ""), str) and (not row.get("who") or valid_who(row["who"]))
+        for row in utterances
+    ):
+        utterances = []
+    if utterances:
+        checked = []
+        for row in utterances:
+            utterance = dict(row)
+            if 'quote' in utterance:
+                try:
+                    utterance['quote'] = normalize_quote(utterance['quote'])
+                except ValueError:
+                    utterance.pop('quote')  # 损坏的历史引用不冒充原话；当前人的正文仍可读。
+            checked.append(utterance)
+        utterances = checked
     return {
         TS: str(item.get(TS) or ""),
         WHO: str(item.get(WHO) or ""),
@@ -334,4 +425,11 @@ def _row(item: Mapping[str, Any]) -> Dict[str, Any]:
         TRUNCATED: {SAID: bool(marks.get(SAID)), REPLY: bool(marks.get(REPLY))},
         FIDELITY: _fidelity(item.get(FIDELITY)),
         MSG_ID: str(item.get(MSG_ID) or ""),
+        **({"mode": "proactive"} if item.get("mode") == "proactive" else {}),
+        **({"turn_id": item["turn_id"]} if isinstance(item.get("turn_id"), str) and item["turn_id"] else {}),
+        **({"memory_recall": item["memory_recall"]} if isinstance(item.get("memory_recall"), dict) else {}),
+        **({SESSION_ID: item[SESSION_ID]} if item.get(SESSION_ID) else {}),
+        **({MEDIA_CONTEXT: item[MEDIA_CONTEXT]} if isinstance(item.get(MEDIA_CONTEXT), str) and item[MEDIA_CONTEXT] else {}),
+        **({"utterances": utterances} if utterances else {}),
+        **({'meme':item['meme']} if isinstance(item.get('meme'),dict) else {}),
     }

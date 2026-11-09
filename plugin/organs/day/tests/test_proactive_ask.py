@@ -14,6 +14,18 @@ CTX = {"who": "qq:3425635473", "because": "今天晚上她说想去看海", "ton
 
 
 class PromptTest(unittest.TestCase):
+    def test_persona_and_source_are_context_not_new_template_or_recipient(self):
+        ctx = dict(CTX, persona='她是小岚', now='2026-11-05T10:36:00+09:00',
+                   state={'mood': '平常', 'energy': '够用'}, reason_code='unfinished',
+                   source={'who':'qq:200', 'session_id':'qq:group:70001'}, root='/private-test')
+        messages = proactive_ask.build_messages(ctx, {'system':'S:{who}', 'user':'U:{because}'})
+        self.assertIn('她是小岚', messages[0]['content'])
+        self.assertIn('S:qq:3425635473', messages[0]['content'])
+        self.assertIn('qq:group:70001', messages[1]['content'])
+        self.assertIn('qq:200', messages[1]['content'])
+        self.assertIn('U:今天晚上她说想去看海', messages[1]['content'])
+        self.assertNotIn('/private-test', str(messages))
+
     def test_messages_carry_who_because_and_the_receipt_shape(self):
         messages = proactive_ask.build_messages(CTX)
         self.assertEqual(["system", "user"], [row["role"] for row in messages])

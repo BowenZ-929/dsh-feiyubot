@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>她的面板</title>
+<script src="panel-base.js" data-page="panel"></script>
 <style>
   /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --bg: var(--dsw-alias-bg-l1, Canvas);
@@ -16,7 +17,7 @@
     --fg: var(--dsw-alias-text-l1, CanvasText);
     --dim: var(--dsw-alias-text-l2, GrayText);
     --brand: var(--dsw-alias-brand, #4d6bfe);
-    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --on-brand: var(--dsw-alias-text-on-brand, #fff);
   }
   html[data-theme="dark"] { color-scheme: dark; }
   html, body { height: 100%; }
@@ -33,13 +34,14 @@
   nav a:hover { color: var(--fg); }
   nav a.on { background: var(--brand); color: var(--on-brand); }
   iframe { flex: 1; border: 0; width: 100%; display: block; background: var(--bg); }
+html[data-theme="light"]{color-scheme:light}
 </style>
 </head>
 <body>
 <!-- 导航只是搬运：每一项都是**相对地址**，解析出来就是核上那一页。
      直开核时文档在 /panel，相对 about 解析成 /about；
      壳里文档在 /qqagent/panel/panel，相对 about 解析成 /qqagent/panel/about，剥前缀后还是 /about。
-     六项一一对应核上真实路由（魂 / 、关于他 /about、记忆 /memory、聊天 /chat、今天 /day、设置 /settings）：
+     主导航对应真实页面，观察入口也保留；子页实际加载后同步选中状态与地址。
      点不出 404 是这一页的硬要求，删一个按钮比留一个死按钮强。
      心与家两条只读面不占导航位，入口在「设置」里。 -->
 <nav id="tabs" aria-label="她的面板导航">
@@ -47,6 +49,7 @@
   <a href="about" target="organ">关于他</a>
   <a href="memory" target="organ">记忆</a>
   <a href="chat" target="organ">聊天</a>
+  <a href="observe" target="organ">观察</a>
   <a href="day" target="organ">今天</a>
   <a href="settings" target="organ">设置</a>
 </nav>
@@ -55,17 +58,56 @@
 (function () {
   "use strict";
 
-  // 导航条只做两件事：换 iframe 的地址（target="organ" 干的）并把当前这一项点亮。
-  // 不整页刷新，页里没有任何她的判断，也没有第二条取数路径。
   var tabs = document.getElementById("tabs");
-  var links = tabs.querySelectorAll("a");
-  tabs.addEventListener("click", function (event) {
-    var target = event.target;
-    if (target.tagName !== "A") { return; }
-    for (var i = 0; i < links.length; i += 1) {
-      links[i].className = links[i] === target ? "on" : "";
+  var links = Array.from(tabs.querySelectorAll("a"));
+  var frame = document.querySelector('iframe[name="organ"]');
+  var base = window.PANEL_BASE;
+  // 子页归属；主页面直接从现有导航读取，不另建菜单。
+  var sections = {"/galaxy": "memory", "/heart": "settings", "/home": "settings",
+    "/phone": "settings", "/expressions": "settings", "/memes": "settings",
+    "/learning": "settings", "/studio": "settings", "/eye": "settings",
+    "/voice": "settings", "/ear": "settings"};
+  links.forEach(function (link) {
+    sections[new URL(link.href).pathname.slice(base.length)] = link.getAttribute("href");
+  });
+  function pageOf(url) {
+    if (url.origin !== location.origin || !url.pathname.startsWith(base + "/")) { return null; }
+    var path = url.pathname.slice(base.length);
+    return sections[path] ? path : null;
+  }
+  function remember() {
+    var doc = frame.contentDocument;
+    if (!doc) { return; }
+    var url = new URL(doc.URL), page = pageOf(url);
+    if (!page) { return; }
+    links.forEach(function (link) {
+      var selected = link.getAttribute("href") === sections[page];
+      link.className = selected ? "on" : "";
+      if (selected) { link.setAttribute("aria-current", "page"); }
+      else { link.removeAttribute("aria-current"); }
+    });
+    frame.title = doc.title || "面板页";
+    history.replaceState(null, "", "#" + page + url.search + url.hash);
+  }
+  function restore() {
+    var route = location.hash.slice(1);
+    if (!route) { return; }
+    var url = route.startsWith("/") && !route.startsWith("//") && !route.includes("\\")
+      ? new URL(base + route, location.origin) : null;
+    if (!url || !pageOf(url)) { return; }
+    if (!frame.contentDocument || frame.contentDocument.URL !== url.href) {
+      frame.contentWindow.location.replace(url.href);
+    }
+  }
+  frame.addEventListener("load", function () {
+    remember();
+    if (frame.contentDocument) {
+      frame.contentWindow.addEventListener("hashchange", remember);
+      frame.contentWindow.addEventListener("panel-routechange", remember);
     }
   });
+  window.addEventListener("hashchange", restore);
+  restore();
 }());
 </script>
 </body>

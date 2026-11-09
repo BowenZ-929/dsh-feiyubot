@@ -100,6 +100,7 @@ const HUMAN_SILENT: Record<string, string> = {
   // 与「远端不确认就改判 uncertain、永不自动重发」同源。
   outbound_failed: "没回：发出去了但没确认（协议端没回执）",
   chitchat_skipped: "没回：闲聊，没抽到",
+  superseded: "没回：收到补充，旧稿留待下一轮回应",
   replaced_too_long: "回了：本来太长，换成一句短的",
 };
 

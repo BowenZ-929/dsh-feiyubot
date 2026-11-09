@@ -1,5 +1,5 @@
 """源码断言：白名单恰五个动作、「怎么说话」恰两个旋钮且没有魂的路径、没有命令执行与动态加载、
-直接碰盘只在两个文件里、网络只在两个文件里、**房名与格子名只能从家来**。
+直接碰盘只在两个文件里、网络只在登记的三个文件里、**房名与格子名只能从家来**。
 
 这些是**读源码**的断言，不是评审时眼睛看：改坏了就红。
 """
@@ -19,13 +19,13 @@ from organs.hand import stylelang, whitelist
 HAND_DIR = Path(organs.hand.__file__).resolve().parent
 #: 只有这两个文件可以直接碰盘（open 写模式 / write_text / write_bytes / append_line）。
 DISK_FILES = ("ledger.py", "store.py")
-#: 只有这两个文件可以上网（urllib / socket）。再长出一个能上网的文件 = 改这一条断言。
-NETWORK_FILES = ("channel.py", "draw.py")
+#: 通道、旧生图服务与新增的固定本机 ComfyUI；其他模块不能自行联网。
+NETWORK_FILES = ("channel.py", "draw.py", "comfy.py")
 #: 通用能力一个都不许长出来。
 FORBIDDEN = ("subprocess", "os.system", "os.popen", "eval(", "exec(", "__import__",
              "importlib", "shutil")
 #: 直接碰盘的写法。`urlopen(` 不算——那是网络，不是盘；其余一个都不许出现在别的文件里。
-DISK_TOKENS = re.compile(r"(?<!url)open\(|os\.open|write_text|write_bytes|read_bytes|"
+DISK_TOKENS = re.compile(r"(?<!url)open\((?!io\.BytesIO\()|os\.open|write_text|write_bytes|read_bytes|"
                          r"append_line|Path\.write|makedirs")
 #: 网络的入口。只有 NETWORK_FILES 里能出现。
 NETWORK_TOKENS = ("urllib", "socket", "http.client", "http.server", "requests", "httpx")
@@ -131,9 +131,17 @@ class NoGeneralCapabilityTest(unittest.TestCase):
 
 
 class NetworkTest(unittest.TestCase):
-    def test_only_the_two_named_modules_can_reach_the_network(self):
-        """网络只许在这两个文件里：别处出现 urllib／socket／http 就是又开了一个对外口子。"""
-        self.assertEqual(("channel.py", "draw.py"), NETWORK_FILES)
+    def test_comfy_requests_use_the_fixed_local_service(self):
+        from unittest.mock import patch
+        from organs.hand import comfy
+        with patch.object(comfy.request, 'urlopen') as send:
+            send.return_value.__enter__.return_value.read.return_value = b'{}'
+            comfy._api('/queue')
+        self.assertEqual('http://127.0.0.1:8188/queue', send.call_args.args[0].full_url)
+
+    def test_only_registered_modules_can_reach_the_network(self):
+        """ComfyUI 已接入；仍不允许未登记模块另开网络入口。"""
+        self.assertEqual(("channel.py", "draw.py", "comfy.py"), NETWORK_FILES)
         for path in sources():
             if path.name in NETWORK_FILES:
                 continue
@@ -141,7 +149,7 @@ class NetworkTest(unittest.TestCase):
             for bad in NETWORK_TOKENS:
                 self.assertNotIn(bad, text, "%s 里出现了网络入口 %r" % (path.name, bad))
 
-    def test_the_two_network_modules_are_the_ones_named_and_actually_use_urllib(self):
+    def test_network_modules_are_the_ones_named_and_actually_use_urllib(self):
         for name in NETWORK_FILES:
             target = HAND_DIR / name
             self.assertTrue(target.is_file(), "%s 不在" % name)
@@ -149,6 +157,11 @@ class NetworkTest(unittest.TestCase):
 
 
 class DirectDiskTest(unittest.TestCase):
+    def test_image_decoding_from_bytes_is_not_a_disk_open(self):
+        self.assertIsNone(DISK_TOKENS.search('Image.open(io.BytesIO(raw))'))
+        for source in ('Image.open(path)', 'open(path)', 'path.open("wb")', 'path.write_bytes(raw)'):
+            self.assertIsNotNone(DISK_TOKENS.search(source))
+
     def test_only_ledger_and_store_touch_the_disk(self):
         for path in sources():
             if path.name in DISK_FILES:

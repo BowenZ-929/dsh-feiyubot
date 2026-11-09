@@ -495,18 +495,19 @@ def template_transport(reply: str = TEMPLATE_REPLY) -> Callable[..., Any]:
 
 
 def vary_transport(fillers: Sequence[str] = FILLERS) -> Callable[..., Any]:
-    """--vary：在确定性回答上掺一个「第几遍」的轮次计数，模拟采样抖动。
+    """--vary：在确定性回答上掺一个「第几遍」的调用计数，模拟采样抖动。
 
     措辞每轮都不一样（B 轨该变），称呼/自称/口癖/句长档一个都不动（A 轨不该变），
     用来展示「不无效、也不死板」的通过格。
     """
-    seen: Dict[str, int] = {}
+    calls = 0
 
     def send(url: Any, headers: Any, payload: Mapping[str, Any], timeout: Any) -> Tuple[int, bytes]:
+        nonlocal calls
+        calls += 1
         digest = hashlib.sha256(_prompt_key(payload).encode("utf-8")).hexdigest()
-        seen[digest] = seen.get(digest, 0) + 1
         filler = fillers[int(digest[:8], 16) % len(fillers)]
-        return _say("嗯，%s。我听明白了，你继续说。（第%d遍）" % (filler, seen[digest]))
+        return _say("嗯，%s。我听明白了，你继续说。（第%d遍）" % (filler, calls))
     return send
 
 

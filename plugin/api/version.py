@@ -4,13 +4,12 @@
 `organs/*` 与 `api/*` 载进内存，源码改了不重启就还在跑旧代码。规矩（CONTRIBUTING §1.3）
 拦不住人，但让进程自己报一句「我的源码指纹和你磁盘上的不一样」，一眼就能看出来。
 
-四件事，分得开才算诚实：
+状态分开呈现：
 - `started_at`：进程起来的时间（重启就变）
 - `git_head` / `git_head_now`：启动时读到的 HEAD 与此刻的 HEAD；**两者不等 = stale**。
-- `dirty`：工作树有未提交改动。它**不参与 stale**——dirty 时进程可能跑旧字节，但那只是
-  「建议重启」，不是「一定在跑旧代码」。把它算进 stale，等于每改一行就报一次假警，
-  而假警多了，真 stale 就没人看。
-- `source_digest` / `source_digest_now`：源码指纹，只作诊断，不再决定 stale。
+- `dirty`：代码/文档工作树有未提交改动，不代表运行代码落后。
+- `source_changed`：启动时与当前完整Python源码摘要不同；页面/数据不进摘要。
+- `source_digest` / `source_digest_now`：用于核对的源码摘要前12位。
 
 只读端点 `GET /healthz`。不碰 organs，只读它们的源码文件算指纹。
 """
@@ -28,7 +27,7 @@ VERSION_ROUTES: Dict[str, str] = {"/healthz": "GET"}
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 REPO_DIR = PLUGIN_DIR.parent
 # 只算会进内存的 Python 源码；页面是每次请求现读磁盘，不需要重启，所以不进指纹。
-SOURCE_DIRS: Tuple[str, ...] = ("api", "organs")
+SOURCE_DIRS: Tuple[str, ...] = ("api", "organs", "adapters")
 SKIP_PARTS = {"__pycache__", "tests", "data"}
 
 STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -128,21 +127,23 @@ BOOT_DIGEST = source_digest()
 
 
 def report() -> Dict[str, Any]:
-    """现算一次，和启动时那份比：不等就是「你在跑旧代码」。"""
+    """分别比较Python源码与提交记录，未提交改动独立呈现。"""
     now = source_digest()
     head_now = _git_head()
     dirty, dirty_other = _git_dirty()
     # stale 只认「提交变了」：进程启动时记下的 HEAD 与此刻不同。HEAD 读不到（不是仓库）就当没变。
     stale = bool(GIT_HEAD != "unknown" and head_now != "unknown" and head_now != GIT_HEAD)
+    source_changed = BOOT_DIGEST != now
     others = ("另有 %d 个非代码文件有改动（参考资料之类，不计入 dirty）" % dirty_other
               if dirty_other else "")
-    if stale:
-        advice = "进程跑的是旧提交（%s → %s）：必须重启核（pkill -f api.devserver 再起）" % (
-            GIT_HEAD, head_now)
-    elif dirty:
-        advice = "提交没变，但代码与文档树有未提交改动：重启核更保险（跑的是旧字节）"
+    if source_changed:
+        advice = "核心Python源码在启动后发生变化，需重新加载核心以应用当前修改"
     else:
-        advice = "跑的就是当前提交，代码与文档树没有未提交改动"
+        advice = "核心Python源码与启动时一致"
+    if stale:
+        advice += "；提交记录已变化（%s → %s）" % (GIT_HEAD, head_now)
+    if dirty:
+        advice += "；代码或文档有未提交改动（不等于核心未加载）"
     if others:
         advice = advice + "；" + others
     return {
@@ -158,6 +159,7 @@ def report() -> Dict[str, Any]:
         "source_digest": BOOT_DIGEST[:12],
         "source_digest_now": now[:12],
         "stale": stale,
+        "source_changed": source_changed,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "advice": advice,
     }
@@ -167,5 +169,3 @@ def dispatch(route: str) -> Tuple[int, Dict[str, Any]]:
     if route == "/healthz":
         return 200, report()
     return 404, {"ok": False, "message": "版本端点没有这条：%s" % route}
-
-# 验收打点：这一行只为证明指纹会变

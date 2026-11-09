@@ -1,30 +1,7 @@
-"""嘴的动作括注判据：她可以写自己的动作与表情，但不许顺手写我们没给过的场景。
+"""检查括注中的环境词，不用身体词与地点词的共现判断普通正文。
 
-**这一关治的是「编场景」。** 动作是她自己的（部位名与表情词都在数据里），写下来没问题；问题出在
-动作顺带描述了一个我们没给过的处境——那个处境不是她「有」的，是她补的。原句与它的毛病收在
-organs/mouth/data/action_note.json 的 note 里：**例子可以进数据，词表与说法一律不进代码。**
-动作括注这一关只认一件事：这一句（或这一对括号）里，有没有把「她自己的身体」和「我们没给的
-场景」写在一起。
-
-**判据全在数据里**（经 warehouse.load("action_note") 只读借入）：环境词表、身体部位与表情词表、
-括注括号对、分句用的句末标点、两个 where 的说法、闸用的两个名字（clause_id 与 kind）、命中与
-放行各一句人话模板。本文件不写死一个词、一句说法——改判据是改数据，代码不动。缺键、坏形状当场
-抛 ActionBroken，**不补默认值**：补一个默认词表，等于代码里又多了一处真源。
-
-**两路都认，松紧不同**（这是这一关的全部内容）：
-
-- **括号内**（严）：取出每一对括号里的片段，片段里出现环境词表任一 → 命中。括号是她加「画外音」
-  的地方，那里出现场景词，等于用括号补了一个场景。
-- **括号外**（松）：先把括号片段整段挖空，再按句末标点／换行分句；某一句里**既有身体部位、
-  又有环境词** → 命中。两者必须同句——只有场景没有身体部位的那句不是动作，只有动作没有场景的
-  那句也不带场景，两条都放行。**放行要有据**：放行那句话也写在数据里，由 clear_reason 取出来，
-  由闸带进 Verdict.reason（面板上因此看得见「这一关查过了」，而不是只看见一片安静）。
-
-**返回的不是布尔。** check 命中返回一条 ActionHit（命中的那一段、哪一路、踩到的是哪个环境词、
-一句人话），没命中返回 None——布尔说不出「为什么拦」，日志与面板也就没法复盘。词表顺序即优先级：
-先报词表里靠前的那个词，先报排在前面的那一段。判据表形状坏掉当场抛 ActionBroken，照实往上抛。
-
-纯：不 import time / datetime / random，不取时钟、不联网、不写盘；文件 IO 只经 warehouse。
+这里只识别括注形式，不能核实图片或上下文是否提供了场景。
+环境词、括号对和反馈模板从 warehouse 读取；不取时钟、不联网、不写盘。
 """
 from __future__ import annotations
 
@@ -60,8 +37,8 @@ class ActionHit:
     """一次「动作里带了场景」的证据：命中的那一段、哪一路、哪个环境词、一句人话。
 
     字段（api 与闸按这个接，改字段等于改接口）：
-      matched    命中的那一段原文：括号内是括号里的片段，括号外是那句话（都没有括号与句末标点）
-      where      哪一路命中的，取值来自数据（括号内 / 身体句）
+      matched    命中的括注原文，不含括号
+      where      命中位置的名称，取值来自数据
       env_word   踩到的那个环境词，同样来自数据
       reason     一句人话，里面带着命中的那一段与那个词
       clause_id  闸用的 clause_id，取自数据——闸不自己造名字，弃言账本里看到的就是数据里那个
@@ -81,11 +58,9 @@ class _Rules:
     """判据表拆成一堆可以直接用的值：数据里没有的一样都不补。"""
 
     env_words: Tuple[str, ...]
-    body_parts: Tuple[str, ...]
+    body_parts: Tuple[str, ...]  # split 共用的动作行词表，不用于正文场景检查。
     brackets: Tuple[Tuple[str, str], ...]
-    sentence_marks: str
     where_bracket: str
-    where_sentence: str
     clause_id: str
     kind: str
     reason_hit: str
@@ -93,21 +68,12 @@ class _Rules:
 
 
 def check(text: str, table: Optional[Mapping[str, Any]] = None) -> Optional[ActionHit]:
-    """看这段字有没有把身体动作和我们没给过的场景写在一起：命中给一条证据，没命中给 None。
-
-    table 是判据表（warehouse.load("action_note") 读出来的那份），传 None 就现读仓库里的默认表。
-
-    先查括号内（严），没中再查括号外（松）；两路都中的情况下报的是括号内——括号是她自己加的
-    画外音，那里出问题更要紧。判据表缺键缺节抛 ActionBroken，报错里点名是哪一项。
-    """
+    """括注命中环境词时返回证据，普通正文不在这一关判断。"""
     rules = _rules(table)
     body = _text_of(text)
     inner, word = _in_bracket(body, rules)
     if inner is not None:
         return _hit(rules, rules.where_bracket, inner, word)
-    sentence, word = _in_sentence(body, rules)
-    if sentence is not None:
-        return _hit(rules, rules.where_sentence, sentence, word)
     return None
 
 
@@ -122,11 +88,7 @@ def clear_reason(table: Optional[Mapping[str, Any]] = None) -> str:
 
 
 def _in_bracket(body: str, rules: _Rules) -> Tuple[Optional[str], str]:
-    """括号内那一路：按括号出现的先后取片段，第一段带环境词的就算命中。
-
-    同一段里踩到多个环境词时报词表里靠前的那个（词表顺序即优先级）；括号没配对（只有开没有关）
-    就取不到片段，那一段的字仍留在句子里，交给括号外那一路判——不许因为括号写歪了就不判。
-    """
+    """按位置检查完整括号对；同一片段中按词表顺序取第一个命中。"""
     found: List[Tuple[int, str]] = []
     for opener, closer in rules.brackets:
         pattern = re.compile(re.escape(opener) + "(.*?)" + re.escape(closer), re.DOTALL)
@@ -137,37 +99,6 @@ def _in_bracket(body: str, rules: _Rules) -> Tuple[Optional[str], str]:
         if word:
             return inner.strip(), word
     return None, ""
-
-
-def _in_sentence(body: str, rules: _Rules) -> Tuple[Optional[str], str]:
-    """括号外那一路：挖掉括号片段、分句，某一句里身体部位与环境词同时出现才算命中。
-
-    必须同句：跨句凑出来的「身体 + 场景」不是动作括注，是一句话在说事、另一句话在说环境，
-    那种放行是有据的（数据里的 reason.clear 就是这么写的）。
-    """
-    for sentence in _sentences(_without_brackets(body, rules), rules.sentence_marks):
-        if not _first_word(sentence, rules.body_parts):
-            continue
-        word = _first_word(sentence, rules.env_words)
-        if word:
-            return sentence, word
-    return None, ""
-
-
-def _without_brackets(body: str, rules: _Rules) -> str:
-    """把括号片段整段挖空：括号里的字已由括号内那一路判过，不再算进句子，免得同一段话被两路重复算账。"""
-    out = body
-    for opener, closer in rules.brackets:
-        pattern = re.compile(re.escape(opener) + ".*?" + re.escape(closer), re.DOTALL)
-        out = pattern.sub(" ", out)
-    return out
-
-
-def _sentences(text: str, marks: str) -> List[str]:
-    """按句末标点与换行分句，空的段丢掉；标点本身不进返回的句子（reason 里读起来才干净）。"""
-    chars = "".join(dict.fromkeys(marks))          # 去重，别让同一个字符重复进字符类
-    pattern = re.compile("[%s]" % "".join(re.escape(ch) for ch in chars))
-    return [one.strip() for one in pattern.split(text) if one.strip()]
 
 
 def _first_word(text: str, words: Sequence[str]) -> str:
@@ -190,8 +121,6 @@ def _rules(table: Optional[Mapping[str, Any]] = None) -> _Rules:
     """把判据表读成一份只读规则；table 为 None 就去仓库现读默认表。
 
     缺节缺键一律抛 ActionBroken——数据里没有的词不在代码里补默认值（补了就是第二处真源）。
-    两个 where 的说法必须不一样：写成同一个词，面板上就分不出这话是从括号里看出来的，
-    还是从整句里看出来的。
     """
     book = table if isinstance(table, Mapping) else load("action_note")
     if not isinstance(book, Mapping):
@@ -202,16 +131,11 @@ def _rules(table: Optional[Mapping[str, Any]] = None) -> _Rules:
     rules = _Rules(env_words=_words(book, "env_words"),
                    body_parts=_words(book, "body_parts"),
                    brackets=_pairs(book, "brackets"),
-                   sentence_marks=_chars(book, "sentence_marks"),
                    where_bracket=_word(where, "bracket"),
-                   where_sentence=_word(where, "sentence"),
                    clause_id=_word(hit, "clause_id"),
                    kind=_word(hit, "kind"),
                    reason_hit=_word(reason, "hit"),
                    reason_clear=_word(reason, "clear"))
-    if rules.where_bracket == rules.where_sentence:
-        raise ActionBroken("数据", "里 where.bracket 与 where.sentence 是同一个词 %r："
-                                   "两条路要看得出区别。" % rules.where_bracket)
     return rules
 
 
@@ -241,14 +165,6 @@ def _word(data: Mapping[str, Any], key: str) -> str:
     value = _need(data, key)
     if not isinstance(value, str) or not value.strip():
         raise ActionBroken("数据", "的 %r 必须是一句非空字符串。" % key)
-    return value
-
-
-def _chars(data: Mapping[str, Any], key: str) -> str:
-    """取一串非空字符（分句用的句末标点与换行），按字符逐个用。"""
-    value = _need(data, key)
-    if not isinstance(value, str) or not value.strip():
-        raise ActionBroken("数据", "的 %r 必须是一串非空字符（分句就是按这里的字符切）。" % key)
     return value
 
 

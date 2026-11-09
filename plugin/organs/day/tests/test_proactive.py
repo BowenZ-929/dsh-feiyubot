@@ -162,8 +162,8 @@ class ConsiderTest(ProactiveCase):
         out = self.consider()
         self.assertTrue(out["fired"])
         self.assertEqual("planned", out["action"])
-        self.assertEqual(PERSON, out["who"], "24h 内说过话的人里熟稔最高的那个")
-        self.assertEqual("recent-talk", out["who_source"])
+        self.assertEqual(PERSON, out["who"], "未完话题回应原作者")
+        self.assertEqual("source-author", out["who_source"])
         row = proactive.log_tail(self.root, 1)[0]
         for key in ("at", "reason_code", "who", "because", "priority", "engage", "action"):
             self.assertIn(key, row, "账行缺 %s" % key)
@@ -297,6 +297,37 @@ class DowngradeTest(ProactiveCase):
     找过 → 减 downgrade；没找过（连名录都没有，退回 owner）→ 不减。
     """
 
+    def test_recent_contact_survives_day_cutover_and_keeps_priority_lower(self):
+        self.heard("昨晚聊过", now="2026-11-05T23:00:00")
+        now = at("2026-11-06T09:00:00")
+        self.assertEqual([], self.brain.today_entries(now))
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        view = proactive.overview(now, root=self.root, heart_root=self.heart, brain=self.brain)
+        self.assertEqual(PERSON, view['who'])
+        self.assertTrue(view['lately_talked'])
+        self.assertEqual(at("2026-11-05T23:00:00"), view['lately_talked_at'])
+        self.assertEqual(20, view['downgrade'])
+        self.assertEqual({'before': 60, 'after': 40}, view['priority']['thought'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        open_thought(self.heart, now_iso="2026-11-06T09:00:00")
+        result = self.consider(now="2026-11-06T09:00:00")
+        self.assertEqual(40, result['priority'])
+        self.assertEqual(at("2026-11-05T23:00:00"), proactive.log_tail(self.root, 1)[0]['lately_talked'])
+
+    def test_recent_contact_window_does_not_extend_from_own_reply_or_other_person(self):
+        self.heard("之前聊过", now="2026-11-05T09:00:00")
+        self.brain.ingest(who=PERSON, text="她自己说的话", side="她说", ts=at("2026-11-06T08:00:00"))
+        self.heard("另一个人来了", who="10000421", now="2026-11-06T08:30:00")
+        config = dict(proactive.load_config(self.root), lately_talked_hours=24)
+        for stamp, expected in (("2026-11-06T09:00:00", True), ("2026-11-06T09:00:01", False)):
+            with self.subTest(stamp=stamp):
+                result = proactive._lately_talked(PERSON, at(stamp), brain=self.brain, config=config)
+                self.assertEqual(expected, result['lately_talked'])
+                self.assertEqual(20 if expected else 0, result['downgrade'])
+        config['lately_talked_hours'] = 2
+        self.assertFalse(proactive._lately_talked(PERSON, at("2026-11-06T09:00:00"),
+                                               brain=self.brain, config=config)['lately_talked'])
+
     def _consider_with(self, heard_at):  # type: ignore[no-untyped-def]
         root = temp_root(self)
         heart = heart_root(root)
@@ -369,7 +400,7 @@ class DueTest(ProactiveCase):
 
         out = proactive.run_due(row, at("2026-11-06T09:00:00"), root=self.root,
                                 heart_root=self.heart, brain=self.brain, complete=complete)
-        self.assertEqual("sent", out["action"], out)
+        self.assertEqual("queued", out["action"], out)
         self.assertEqual(1, len(calls))
         self.assertIn("晚上有空吗", calls[0][1]["content"], "由头要进提示词")
         items = delivery.load(self.root)["items"]
@@ -378,9 +409,9 @@ class DueTest(ProactiveCase):
         self.assertIn("你睡了吗", items[0]["text"])
         self.assertIn("刚才想起", items[0]["text"], "几段合并成一条")
         state = heart_proactive.overview(self.heart, at("2026-11-06T09:00:00"))
-        self.assertTrue(state["pending"], "再记一条'她主动开口了'的 pending")
+        self.assertFalse(state["pending"], "入队未送达，不开始等待回复")
         self.assertEqual([], plan.listing(self.root)["pending"])
-        self.assertEqual("sent", proactive.log_tail(self.root, 1)[0]["action"])
+        self.assertEqual("queued", proactive.log_tail(self.root, 1)[0]["action"])
 
     def test_send_false_is_declined_and_nothing_is_queued(self):
         row = self._planned()
@@ -522,11 +553,11 @@ class TickIntegrationTest(ProactiveCase):
                                           "kinds": {}})
         self.assertEqual(1, len(asked), "白天这一次放行：问了一次")
         self.assertEqual(1, len(mined), "核被调了一次")
-        self.assertEqual({"sent": 1}, payload["proactive"]["actions"])
+        self.assertEqual({"queued": 1}, payload["proactive"]["actions"])
         self.assertEqual(1, len(delivery.load(self.root)["items"]))
         ledger = [item for item in proactive.log_lines(self.root)
                   if item["stage"] == "due"][-1]
-        self.assertEqual("sent", ledger["action"])
+        self.assertEqual("queued", ledger["action"])
         self.assertEqual(row["id"], ledger["plan_id"])
         # 到点那一条已经 consume；这一 tick 末尾的动念又排了一条新的（由头还在，
         # 见 TickAutoConsiderTest：那不是重试，是下一次"她想说"）
@@ -705,6 +736,25 @@ class PendingTaskCase(unittest.TestCase):
 
 class PendingTaskConsiderTest(PendingTaskCase):
     """due 在 10 分钟后 → 生成 pending_task 计划；夜里 → held；同一张卡不提醒两次。"""
+
+    def test_task_after_first_room_page_is_seen_and_planned(self):
+        from organs.home import cards
+        (self.home / 'limits.json').write_text(json.dumps({'writes_per_room_per_day': 500}))
+        for batch in range(10):
+            cards.append_cards(root=self.home, role='agent', by='agent', cards=[
+                {'kind': '物件', 'room': '工作台', 'name': f'旧作品{batch * 20 + i}',
+                 'note': '', 'params': {}} for i in range(20)])
+        ident = self.card()
+        first = cards.list_room(root=self.home, room='工作台')
+        self.assertEqual(201, first['total'])
+        self.assertTrue(first['truncated'])
+        before = {p: p.read_bytes() for p in self.home.rglob('*') if p.is_file()}
+        view = proactive.overview(at(NOW), root=self.root, heart_root=self.heart, brain=self.brain)
+        self.assertEqual(ident, view['pending_task']['fired'])
+        considered = self.considered()
+        self.assertEqual('pending_task', considered['reason_code'])
+        self.assertEqual(ident, considered['plan']['task']['card_id'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.home.rglob('*') if p.is_file()})
 
     def test_a_card_due_in_ten_minutes_becomes_a_pending_task_plan(self):
         card_id = self.card()
@@ -951,7 +1001,7 @@ class PendingTaskDueTest(PendingTaskCase):
         out = proactive.run_due(row, at("2026-11-05T10:45:00"), root=self.root,
                                 heart_root=self.heart, brain=self.brain,
                                 complete=complete)
-        self.assertEqual("sent", out["action"], out)
+        self.assertEqual("queued", out["action"], out)
         body = prompts[0][1]["content"]
         self.assertIn("整理抽屉", body)
         self.assertIn("10:40", body)
@@ -981,7 +1031,7 @@ class PendingTaskDueTest(PendingTaskCase):
                                 complete=lambda messages, **kw: json.dumps(
                                     {"send": True, "chunks": ["10:40 那件别忘了"]},
                                     ensure_ascii=False))
-        self.assertEqual("sent", out["action"], out)
+        self.assertEqual("queued", out["action"], out)
 
 
 if __name__ == "__main__":

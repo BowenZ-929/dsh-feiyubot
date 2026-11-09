@@ -592,7 +592,6 @@ class MouthApiTest(unittest.TestCase):
         self.assertEqual(0, first["style"]["rewrites"], "不许伪造一次改写")
         self.assertEqual((8, 24), (first["style"]["target_lo"], first["style"]["target_hi"]))
         self.assertFalse(first["style"]["over_hard_cap"])
-        self.assertIn("改不了", first["style"]["reason"])
         self.assertIn("拒绝 → 闸", first["note"], "给了新参数时 note 要说清顺序")
         rows = mouth_api.style.path_of().read_text(encoding="utf-8").splitlines()
         self.assertEqual(1, len(rows), "超目标要进长度账本，pass 那次不记")

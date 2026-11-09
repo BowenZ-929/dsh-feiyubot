@@ -157,11 +157,11 @@ def resolve(person: Optional[dict], table: dict,
     见 BrainStore._person_view）：person 为 None（人名录取不到人）时档位是数据里最低那一档，
     称呼取 table.fallback（默认「你」）——这是回退，不是「沿用上一次」。
 
-    这个称呼从哪儿来，优先级写死为三条：**会话里的临时覆盖 > 这一轮的 rename_request > 人名录档位**。
+    这个称呼的优先级：**会话临时覆盖 > 本轮 rename_request > 名片 address > 人名录档位**。
     - session 是一本 SessionAddressBook（或任何有 get(who) 的东西），取到就用它，source=会话覆盖；
     - 没有覆盖而 person 里有 rename_request（非空、去首尾空白），**当场就换**，source=本轮改名，
       renamed=True——退到中性等于没听人话，所以这里不退；
-    - 两者都没有，才按名录档位挑，source=人名录。
+    - 两者都没有，先用名片明确保存的address，否则按名录档位挑，source=人名录。
 
     换过来的那个词（不管来自覆盖还是改名）**照样要过 self_guard**：落在违禁自称词表里、又不在
     allowed_self 授权名单里，一律退到回退词、renamed=False，并在 note 里说清是哪条拦下的——
@@ -203,6 +203,9 @@ def resolve(person: Optional[dict], table: dict,
         note = str(need(guard, "rename_applied"))
         source = str(need(labels, "rename"))
         renamed = True
+    elif holder and _text(holder.get('address')).strip():
+        candidate = _text(holder['address']).strip()
+        note = ''
     banned = ""
     if candidate and _forbidden_self(candidate, table, allowed_self):
         banned = candidate

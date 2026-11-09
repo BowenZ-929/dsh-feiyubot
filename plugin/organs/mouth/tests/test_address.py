@@ -358,3 +358,15 @@ class RequestedNameIsReadFromTheData(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SavedAddressTest(unittest.TestCase):
+    def test_saved_address_precedes_familiarity_nickname_and_keeps_rename_priority(self):
+        for familiarity in (0, 3, 1000):
+            person = _person(familiarity, display='临时群昵称', address='老大')
+            self.assertEqual('老大', address.resolve(person, TABLE).address)
+            self.assertEqual('阿林', address.resolve(dict(person, rename_request='阿林'), TABLE).address)
+            book = address.SessionAddressBook()
+            book.remember(person['id'], '小林')
+            self.assertEqual('小林', address.resolve(person, TABLE, session=book).address)
+        self.assertNotEqual('主人', address.resolve(_person(0, display='主人'), TABLE).address)

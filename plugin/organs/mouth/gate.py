@@ -52,7 +52,7 @@ sink 也是调用方注入的 callable（clause_id, reason -> None），**只在
 
 **复述审计是另一半闸（第二轮 A）**：条款管「怎么说」，审计管「说的是不是抄来的」。注入的原文
 由调用方给（inject），判据全在 organs/mouth/audit.py 与 data/audit.json——设定类（魂、锚句、
-记忆原文、心档位词、规矩句）被照搬一律拦；对方原话只许带引述标记转述，标记离得太远也拦。
+心档位词、规矩句）被照搬一律拦；对方原话和记忆原文的字面重合只记读数，不据此拦截。
 闸把审计拦下的那一条当成一次命中，走同一条「改一次还不行就弃」的路：审计拦下的 Hit 里，
 clause_id 记违规类别、kind 记来源段那一类（两个都取自数据里的说法），所以弃言账本里看到的仍是
 一个能指认的名字。注入段形状坏掉（未知 kind 之类）由 audit 当场抛 AuditBroken，照实往上抛。
@@ -65,20 +65,16 @@ Verdict.audit（status 不是 "ok" 就是没真的比过），或者直接调 or
 **这条不影响「缺料不弃这句」**：审计判不了时 enforce 照常按条款走，decision 与既有五种结局一字
 不变，只是 audit.status 如实写着 audit-unavailable——缺料是调用侧的问题，不拿她的沉默来兜。
 
-**动作＋场景是第三道判据（第三轮 B）**：她可以写自己的动作与表情，但不许顺手写我们没给过的场景。
+**动作括注是第三道判据**：检查完整括注中的环境词，不通过身体词与地点词共现拦截普通正文。
 判据与词表全在 organs/mouth/action_note.py 与 data/action_note.json，闸只负责把它当成一次普通命中
 接进来：action 是调用方给的判据表，**None 就整段不判**——不判绝不是通过，所以判没判挂在
 Verdict.action_status 上（"ok" 真的判过，"not-checked" 这一轮没给表），由 api 层照实透出。
 命中走同一条路（改一次还不行就弃），Hit 里的 clause_id 与 kind 也取自数据，弃言账本里看到的因此
 是一个能指认的名字。判据表形状坏掉由 action_note 当场抛 ActionBroken，照实往上抛。
 
-**内容重复是第四道判据（这一轮加的）**：同一动作行、或同一开场在最近几轮里又回来一次，就是
-她在反复念那一条。判据与数值全在 organs/mouth/repeat.py 与 data/repeat.json，闸只把它当成一次
-普通命中接进来，顺序排在动作括注之后、复述审计之前（复述管「说的事是不是抄来的」，这一关管
-「这句话是不是又是我说的」——两件事都要判，先后只决定报哪一条）。recent 是她最近若干条输出的
-原文（旧的在先，由调用方给），**None 就是这一轮拿不到历史**；拿不到不许当成「没重复」，所以判没判
-挂在 Verdict.repeat_status 上（"ok" 真的比过，"not-checked" 这一轮没拿到），照 action_status 那个
-写法。闸不记账、不取时钟：谁记着她说过什么，是调用方的事。
+**字面重合只作观察**：repeat 比较最近输出的开头和文字行；不能据此判断语义复读。
+进门原稿有重合时 repeat_status=observed，原文保留、不触发改写；明确请求复述时仍记原有审计。
+无重合为 ok，未提供 recent 为 not-checked。其他内容判据照常执行。
 
 **冒充做过是第五道判据（这一轮加的）**：她说了这一轮没做过的动作，就是演一个做完的样子。判据与
 词表全在 organs/mouth/claim.py 与 data/claim.json——魂那条红线（bounds.no-fake-doing，
@@ -237,8 +233,7 @@ class Verdict:
     # 动作括注那一关判没判过：action_note.STATUS_OK（真的判过）或 STATUS_NOT_CHECKED（没给判据表）。
     # 与 audit 同理——「没判」不是「判过没问题」，两件事必须分得开，所以默认就是 not-checked。
     action_status: str = action_note.STATUS_NOT_CHECKED
-    # 内容重复那一关判没判过：repeat.STATUS_OK（拿到了 recent，真的比过）或 STATUS_NOT_CHECKED
-    # （这一轮 recent 是 None，拿不到历史）。同理——「没比」不是「没重复」，默认就是 not-checked。
+    # 进门原稿的字面重合读数：observed / skipped-by-request / ok / not-checked。
     repeat_status: str = repeat.STATUS_NOT_CHECKED
     # 动作配额那一关判没判过：quota.STATUS_OK（装配标了这一轮的配额，forbid 与 allow 都算）或
     # STATUS_NOT_CHECKED（装配没标，quota 是 None）。同理——「没标」不是「标了 allow」。
@@ -515,10 +510,8 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
     看 action_status——"ok" 表示这一轮真的判过，"not-checked" 表示没给表、这一关没跑；**没跑不是
     通过**，两者在返回值里必须分得开（这也是它不肯塞一条假 Hit 进 check 的原因）。
 
-    内容重复接在动作括注后面、复述审计前面，走的也是同一条路：同一动作行或同一开场在最近几轮里
-    又回来一次，就当一次普通命中，改一次还不行就弃。给没给 recent 看 repeat_status——"ok" 表示这
-    一轮拿到了历史、真的比过，"not-checked" 表示 recent 是 None、这一关没跑；**没比不是没重复**，
-    两者同样必须分得开。
+    字面重合仅记录进门原稿的观察读数，不阻断输出、不触发重写。
+    repeat_status 区分 observed、skipped-by-request、ok 和 not-checked。
 
     冒充做过（这一轮加的）接在内容重复后面、复述审计前面，判据与词表全在 organs/mouth/claim.py 与
     data/claim.json（魂那条红线 bounds.no-fake-doing 的出口）。actions 是这一轮的动作账，**None
@@ -866,7 +859,7 @@ def enforce(text: str, clauses: Sequence[Mapping[str, Any]],
         if _has_action(action):
             reason += action_note.clear_reason(action)     # 放行要有据：这一关查过了也要说出来
         if _has_recent(recent):
-            reason += repeat.clear_reason(repeat_table)    # 这一关查过了，也要说出来
+            reason += skipped.reason if skipped is not None else repeat.clear_reason(repeat_table)
         if _has_quota(quota):
             reason += quota_rules.clear_reason()           # 配额这一关查过了，同样要说出来
         if _has_actions(actions):
@@ -1247,38 +1240,17 @@ def _has_quota(quota: Any) -> bool:
 
 def _dedup(text: str, recent: Any, table: Any,
            requested: bool = False) -> Tuple[Optional[Hit], Any]:
-    """内容重复这一关：返回（命中, 跳过）——两者互斥，都没有就是（None, None）。
-
-    命中与跳过是两件事，所以是两样返回值、不是一种：命中要把这句拦下来（走改一次还不行就弃的
-    老路），跳过要把这句放出去（只记账）。**没给 recent 就两个都返回 None 不是放行**：这一关判
-    没判挂在 Verdict.repeat_status 上（拿不到历史与「比过没重复」挤不进同一条通道，所以不塞假 Hit）。
-
-    clause_id 与 kind 都取自判据表（repeat 带出来的那两个名字），闸不自己造名字——账本里看到的
-    因此是一个数据里能指认的名字；跳过那一笔的 clause_id 也是数据里的另一个名字（skip_clause_id），
-    因为它记的不是判废那一笔，是「按对方要求再说一遍」那一笔。
-    requested 是调用方算过一次的「他是不是在要她重复」（repeat.requested 的结论）：为真时撞上
-    重复只记一笔账，不判废。**结论只算一次**，同一轮里这一关与复述审计看的是同一个布尔——各算
-    一次就有分岔的风险（同一句话在账本上两种说法）。
-    recent 或判据表本身形状坏掉由 repeat 当场抛 RepeatBroken，照实往上抛。
-    """
+    """字面重合只作观察；明确请求复述仍保留原有审计记录。"""
     if not _has_recent(recent):
         return None, None
-    found = repeat.check(text, recent, table, requested=requested)
-    if isinstance(found, repeat.RepeatSkip):
-        return None, found
-    if found is None:
-        return None, None
-    clause_id, kind = repeat.names(table)
-    return Hit(clause_id=clause_id, kind=kind, matched=found.matched, reason=found.reason), None
+    return None, repeat.check(text, recent, table, requested=requested)
 
 
 def _dedup_status(recent: Any, skipped: Any) -> str:
-    """内容重复这一关的状态：跳过 > 真的比过 > 没拿到历史。
-
-    为什么跳过排在最前：这一轮确实比过了、也确实撞上了，只是按对方的要求放过去——把它记成 "ok"
-    会让人以为这一關判过没问题，记成 "not-checked" 又会让人以为这一关没跑。三种读数各是各的。
-    """
-    if skipped is not None:
+    """区分字面重合、明确请求复述、无重合和未比较。"""
+    if isinstance(skipped, repeat.RepeatHit):
+        return repeat.STATUS_OBSERVED
+    if isinstance(skipped, repeat.RepeatSkip):
         return skipped.status
     return repeat.STATUS_OK if _has_recent(recent) else repeat.STATUS_NOT_CHECKED
 
@@ -1292,7 +1264,7 @@ def _skip_rows(skipped: Any, seen: Optional[AuditResult]) -> List[Tuple[str, str
     没撞上的那一关不进表：没撞上就没有「判废」要放，记了只是噪音。
     """
     rows: List[Tuple[str, str]] = []
-    if skipped is not None:
+    if isinstance(skipped, repeat.RepeatSkip):
         rows.append((skipped.clause_id, skipped.reason))
     if seen is not None and seen.skipped:
         rows.append((seen.skip_clause_id, seen.skip_reason))

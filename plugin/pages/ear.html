@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>听语音 · 她的面板</title>
+<style>
+:root{color-scheme:light dark;--bg:var(--dsw-alias-bg-l1,Canvas);--fg:var(--dsw-alias-text-l1,CanvasText);--line:var(--dsw-alias-border-l2,#8884);--brand:var(--dsw-alias-brand,#5475d6)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,"PingFang SC",sans-serif}main{max-width:880px;margin:auto;padding:32px 24px}h1{font-size:27px;margin:0}h2{font-size:18px;margin:0}.muted{opacity:.65}.toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.card,article{border:1px solid var(--line);border-radius:14px;padding:20px;margin:18px 0}button{font:inherit;padding:8px 16px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);cursor:pointer}button.primary{background:var(--brand);color:white}button:disabled{opacity:.4;cursor:default}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}summary{cursor:pointer}a{color:var(--brand)}.error{color:#c44}@media(max-width:600px){main{padding:22px 14px}.card,article{padding:16px}}
+html[data-theme="dark"]{color-scheme:dark}
+html[data-theme="light"]{color-scheme:light}
+</style></head><body><main>
+<h1>她听见了什么</h1><p class="muted">本机转写与声音线索，保留没有听准的地方。</p>
+<section class="card"><div class="toolbar"><strong id="state">读取状态中…</strong><button id="toggle" class="primary" disabled>听语音开关</button><button id="refresh">刷新</button></div><p id="config" class="muted"></p>
+<details><summary>当前参数</summary><pre id="parameters">本次尚未取得参数。</pre><p class="muted">读取当前生效配置；刷新不会调用模型。变化记录只显示已有历史，不根据当前值推测过去的设置。</p><p><a href="day?source=ear#activity-card">查看这项能力的事件与参数变化</a></p></details>
+
+<p>处理进入本轮对话的 QQ 语音。音频在本机识别，识别文字作为聊天资料交给 DeepSeek；不会把原音上传到语音识别云服务。</p>
+<p class="muted">录音可能有错字。低置信片段标为“听不清”，超过一分钟先听前 30 秒。发送者不一定是声音里的人，不据声音猜身份或情绪。这里保存转写记录，原音由 QQ 自身管理。</p></section>
+<div id="status" role="status" aria-live="polite"></div><section id="records" aria-label="语音观察记录"></section>
+<div class="toolbar"><button id="newer" disabled>较新记录</button><button id="older" disabled>较早记录</button></div>
+<p><a href="settings">返回设置</a> · <a href="voice">语音回复</a> · <a href="observe">对话和思考记录</a></p>
+</main><script src="panel-base.js" data-page="ear"></script><script>
+(()=>{"use strict";const $=id=>document.getElementById(id);let enabled=false,ready=false,offset=0;
+const names={ok:"已转写，仍可能有错字",partial:"部分转写",unclear:"没听准",empty:"未识别出话语",short:"音频太短",failed:"转写失败",unavailable:"未转写",skipped:"本轮未处理"};
+const parameterNames={"enabled":"听语音开关","python":"本地识别运行环境","model":"转写模型位置","language":"识别语言","max_audio_bytes":"单条下载上限（字节）","max_audios":"每轮最多语音数","timeout_seconds":"单次识别等待（秒）","budget_seconds":"整轮处理预算（秒）","sound_model":"声音分类模型位置"};
+async function load(){
+ $("parameters").textContent="本次尚未取得参数。";
+ $("refresh").disabled=true;$("toggle").disabled=true;$("status").textContent="正在读取…";
+ try{
+  const sr=await panelFetch("/ear/status"),state=await sr.json();if(!sr.ok||!state.ok)throw new Error(state.message||"状态读取失败");
+  $("parameters").textContent=Object.entries(state.config).map(([key,value])=>(parameterNames[key]||key)+"："+(typeof value==="boolean"?(value?"开启":"关闭"):value)).join("\n");
+  enabled=state.config.enabled;ready=state.model_ready;$("state").textContent=enabled?"本地听语音已开启":ready?"模型已准备，听语音已关闭":"等待安装本地模型";$("toggle").textContent=enabled?"关闭听语音":"开启听语音";
+  $("config").textContent=`每轮最多 ${state.config.max_audios} 条 · 总处理预算 ${state.config.budget_seconds} 秒 · ${state.sound_model_ready?(enabled?"声音分类已开启":"声音分类随听语音关闭"):"声音分类未配置或模型缺失"}`;
+  const rr=await panelFetch("/observe/records?source=ear&limit=20&offset="+offset),page=await rr.json();if(!rr.ok||!page.ok)throw new Error(page.message||"记录读取失败");
+  $("records").replaceChildren();$("status").className="muted";$("status").textContent=page.total?`共 ${page.total} 条记录`:"还没有听语音记录。";
+  for(const item of page.rows){const r=item.record,t=r.transcription||{},card=document.createElement("article"),h=document.createElement("h2"),p=document.createElement("p"),body=document.createElement("pre"),d=document.createElement("details"),s=document.createElement("summary"),pre=document.createElement("pre");
+   h.textContent=r.kind==="setting"?(r.parameter==="enabled"?`听语音开关：${r.before?"开":"关"} → ${r.after?"开":"关"}`:"声音分类配置已更新"):`${names[t.status]||t.status} · ${r.speaker||"发送者未记录"}`;
+   p.textContent=`${r.at||""}${r.session_id?" · "+r.session_id:""}${r.message_id!=null?" · 消息 "+r.message_id:""}`;p.className="muted";
+   const sounds=t.sound_events,labels=sounds?.status==="ok"?sounds.events.map(e=>e.label).join("、"):"";
+   const soundText=sounds?.status==="ok"?`声音线索：${labels?"可能有"+labels:"没有明确类别，不等于没有声音"}（仅前 ${sounds.processed_seconds} 秒，可能识错）`:sounds?"本次未取得声音类别线索":"";
+   body.textContent=[t.transcript||t.reason||"",soundText].filter(Boolean).join("\n");s.textContent="分段、模型分数与来源";pre.textContent=JSON.stringify(r,null,2);d.append(s,pre);card.append(h,p,body,d);$("records").append(card);
+  }$("newer").disabled=offset===0;$("older").disabled=!page.has_older;
+ }catch(e){ready=false;$("status").className="error";$("status").textContent=e.message;}
+ finally{$("refresh").disabled=false;$("toggle").disabled=!ready&&!enabled;}
+}
+$("toggle").onclick=async()=>{$("toggle").disabled=true;try{const r=await panelFetch("/ear/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!enabled})});const data=await r.json();if(!r.ok||!data.ok)throw new Error(data.message||"开关保存失败");offset=0;await load();}catch(e){$("status").textContent=e.message;$("toggle").disabled=false;}};
+$("refresh").onclick=()=>{offset=0;load();};$("newer").onclick=()=>{offset=Math.max(0,offset-20);load();};$("older").onclick=()=>{offset+=20;load();};load();
+})();
+</script></body></html>

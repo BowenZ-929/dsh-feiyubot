@@ -6,12 +6,13 @@ import type { LedgerRowInput, Mode, Scene } from "./gate.ts";
 // 一条泡里可以带一张图：file 只认 file:// 开头的绝对路径；summary 是可读替身
 // （协议端不显示图时，至少有人能读的那句话），所以它有长度上限。
 export type ChunkImage = { file: string; summary?: string };
+export type ChunkAudio = { file: string };
 
 // text 与 image 至少一个有内容：只有图的泡同样是一个泡，不能在分泡时被当成空泡丢掉。
-export type Chunk = { text: string; image?: ChunkImage; gap_before: number; send_at: number };
+export type Chunk = { text: string; image?: ChunkImage; audio?: ChunkAudio; gap_before: number; send_at: number };
 
 // sendAt 是本批起点（performance.now() 基准）加上 send_at 秒后的绝对目标时刻。
-export type PlanEntry = { index: number; text: string; image?: ChunkImage; send_at: number; sendAt: number };
+export type PlanEntry = { index: number; text: string; image?: ChunkImage; audio?: ChunkAudio; send_at: number; sendAt: number };
 
 // 协议端不回话时最多等这么久：等太久会把后面几泡全拖晚，等太短会把还在路上的应答误判成不确定。
 export const ACK_TIMEOUT_MS = 10_000;
@@ -57,7 +58,7 @@ const asSeconds = (value: unknown): number =>
 // summary 的长度上限：替身是给人读的一句话，不是第二段正文。
 export const IMAGE_SUMMARY_MAX = 80;
 
-export type ChunkParts = { text: string; image?: ChunkImage };
+export type ChunkParts = { text: string; image?: ChunkImage; audio?: ChunkAudio };
 
 // 一条泡的字段判据只有这一份：核的回包（parseCoreResponse）与 /say 的请求体（parseSayBody）都走这里，
 // 两条入口的规则才不会慢慢长成两套。label 由调用方给（如 "chunks[0]"），错误文案才说得清是第几个泡的哪个字段。
@@ -75,6 +76,13 @@ export const parseChunkParts = (
     return { ok: false, message: `${label}.text 必须是字符串（拿到 ${JSON.stringify(text)}）` };
   }
   const image = raw.image;
+  if (raw.audio !== undefined) {
+    if (image !== undefined) return { ok: false, message: `${label} 的语音必须独占一泡` };
+    if (!isRecord(raw.audio) || typeof raw.audio.file !== "string" || !raw.audio.file.startsWith("file:///")) {
+      return { ok: false, message: `${label}.audio.file 必须是 file:/// 开头的绝对路径` };
+    }
+    return { ok: true, value: { text: text ?? "", audio: { file: raw.audio.file } } };
+  }
   if (image === undefined) {
     const value: ChunkParts = { text: text ?? "" };
     if (rejectEmpty && value.text.trim().length === 0) {
@@ -137,6 +145,7 @@ export const parseCoreResponse = (payload: unknown): CoreReply => {
       };
       // 没给 image 就不塞这个键：账与日志里的形状不许因为「有没有图」多一个空洞的 null。
       if (parts.value.image !== undefined) chunk.image = parts.value.image;
+      if (parts.value.audio !== undefined) chunk.audio = parts.value.audio;
       chunks.push(chunk);
     }
     return { ok: true, chunks };
@@ -153,12 +162,13 @@ export const planChunks = (chunks: Chunk[], origin: number): PlanEntry[] => {
   const plan: PlanEntry[] = [];
   for (const chunk of chunks) {
     const image = chunk.image;
-    if (chunk.text.trim().length === 0 && image === undefined) continue;
+    if (chunk.text.trim().length === 0 && image === undefined && chunk.audio === undefined) continue;
     const send_at = asSeconds(chunk.send_at);
     plan.push({
       index: plan.length,
       text: chunk.text,
       ...(image === undefined ? {} : { image }),
+      ...(chunk.audio === undefined ? {} : { audio: chunk.audio }),
       send_at,
       // 负的 send_at 视为「早就该发了」：不补发、不排队，发的那一刻就是现在。
       sendAt: origin + Math.max(0, send_at) * 1000,
@@ -174,11 +184,13 @@ export const buildAction = (
   text: string,
   echo: string,
   image?: ChunkImage,
+  audio?: ChunkAudio,
 ): Record<string, unknown> => {
   // 一条泡里两者都有时 text 在前、image 在后；只有图时不发空 text 段（协议端会当空消息报错）。
   // action 名、echo、where 的选择一律不动：加图不改投递方式。
   const message: Array<Record<string, unknown>> = [];
-  if (image === undefined || text.trim().length > 0) message.push({ type: "text", data: { text } });
+  if (audio !== undefined) message.push({ type: "record", data: { file: audio.file } });
+  else if (image === undefined || text.trim().length > 0) message.push({ type: "text", data: { text } });
   if (image !== undefined) {
     message.push({
       type: "image",
@@ -208,6 +220,7 @@ export type BatchInput = {
   ledger: { appendNew: (input: LedgerRowInput) => unknown };
   isGateOpen: () => boolean;
   isSocketOpen: () => boolean;
+  shouldDefer?: () => boolean;
   send: (frame: string) => void;
   waitAck: (echo: string) => Promise<AckOutcome>;
   sleep: (ms: number) => Promise<void>;
@@ -269,9 +282,18 @@ export const runBatch = async (input: BatchInput): Promise<BatchResult> => {
   let sentCount = 0;
   for (let i = 0; i < total; i += 1) {
     const entry = plan[i];
+    if (input.shouldDefer?.()) {
+      abandon(i, "收到同人补充，旧稿未发部分留待下一轮回应");
+      return { sent: sentCount, stopped: "superseded" };
+    }
     // 目标时刻已过就立刻发：不补等、也不补发，绝不为追进度连发两次。
     const wait = entry.sendAt - input.now();
     if (wait > 0) await input.sleep(wait);
+
+    if (input.shouldDefer?.()) {
+      abandon(i, "收到同人补充，旧稿未发部分留待下一轮回应");
+      return { sent: sentCount, stopped: "superseded" };
+    }
 
     // 发之前逐个复查：门可能被关，连接可能在等上一泡 ack 的时候断了。
     const blocked = !input.isGateOpen()
@@ -290,7 +312,7 @@ export const runBatch = async (input: BatchInput): Promise<BatchResult> => {
       `#${entry.index}/${total} echo=${echo} text=${JSON.stringify(entry.text).slice(0, 60)}${entry.image === undefined ? "" : ` image=${JSON.stringify(entry.image.file).slice(0, 60)}`}`,
     );
     try {
-      input.send(JSON.stringify(buildAction(input.where, entry.text, echo, entry.image)));
+      input.send(JSON.stringify(buildAction(input.where, entry.text, echo, entry.image, entry.audio)));
     } catch (error) {
       const reason = `send 抛错：${(error as Error).message}`;
       row({ kind: "failed", index: entry.index, text: entry.text, send_at: entry.send_at, note: reason });
@@ -369,6 +391,7 @@ export type SettleInput = {
   ledger: { appendNew: (input: LedgerRowInput) => unknown };
   isGateOpen: () => boolean;
   isSocketOpen: () => boolean;
+  shouldDefer?: () => boolean;
   send: (frame: string) => void;
   waitAck: (echo: string) => Promise<AckOutcome>;
   sleep: (ms: number) => Promise<void>;
@@ -462,6 +485,7 @@ export const settleRound = async (input: SettleInput): Promise<SettleResult> => 
     ledger: input.ledger,
     isGateOpen: input.isGateOpen,
     isSocketOpen: input.isSocketOpen,
+    shouldDefer: input.shouldDefer,
     send: input.send,
     waitAck: input.waitAck,
     sleep: input.sleep,

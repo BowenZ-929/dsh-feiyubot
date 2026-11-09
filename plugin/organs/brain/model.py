@@ -11,7 +11,6 @@ from organs.day.model import day_key  # noqa: F401  # 全仓唯一 day_key 真�
 
 @dataclass(frozen=True)
 class Limits:
-    merge_window_minutes: int = 10      # 同一个人 10 分钟内连发并成一条
     day_cutover_hour: int = 4           # 换日点凌晨 4:00（默认值，作息改了要人改）
     max_today_entries: int = 60         # 水位线：热记忆形状待定，本轮不触发降级
     recall_limit: int = 3               # 本轮验收：回想给出 0–3 条带来源
@@ -24,7 +23,7 @@ class Limits:
 
 @dataclass(frozen=True)
 class PackLimits:
-    """召回装包预算（都是默认值，不是验收线；名额上限将来由嘴的注入预算反推）。"""
+    """召回装包预算（各桶为优先配额，0关闭该桶；空余总名额可补位；都是默认值，不是验收线；名额上限将来由嘴的注入预算反推）。"""
     slots: int = 6                      # 总名额预算：一条纲占 1 个名额，普通条目 1 条占 1 个名额
     per_item_cap: int = 160             # 每项字符上限，超过截断；超预算的项整条跳过
     today_quota: int = 3                # 今日桶配额
@@ -119,7 +118,8 @@ def now_iso() -> str:
 
 def parse_ts(text: str) -> datetime:
     """ISO 时间戳 → 带时区的 datetime；naive 按 UTC 算（坏时间由调用方兜）。"""
-    stamp = datetime.fromisoformat(text)
+    # Python 3.9 不识别 ISO8601 的 UTC Z 后缀；不改变原始记录。
+    stamp = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
     return stamp

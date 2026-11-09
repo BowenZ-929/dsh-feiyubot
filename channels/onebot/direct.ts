@@ -75,10 +75,11 @@ export const loadGateWords = (path: string = DEFAULT_GATE_PATH): GateWords => {
   return readGateWords(parsed, path);
 };
 
-export type DirectRule = "private" | "at" | "quote" | "nickname";
+export type DirectRule = "private" | "at" | "quote" | "nickname" | "voice" | "continuation";
 export type GateBlock = "command" | "sticker" | "media_only";
 
 export type FirstLayerInput = {
+  continuation?: boolean;
   scene: "group" | "private";
   mentionedSelf: boolean;
   quotedHer: boolean;
@@ -102,11 +103,14 @@ const hasAny = (text: string, needles: string[]): boolean =>
 
 // 第一层：命令 > 定向（私聊/@/引用她/外号）> 纯表情/纯图 > 其余算闲聊。
 export const firstLayer = (input: FirstLayerInput, gateWords: GateWords): FirstLayerVerdict => {
+  // 本项目支持的语音口令，不能被「不接其它机器人的 / 命令」规则吞掉。
+  if (/^\/语音(?:\s|$)/.test(input.text.trimStart())) return { kind: "directed", rule: "voice" };
   if (startsWithAny(input.text, gateWords.commandPrefixes)) return { kind: "blocked", reason: "command" };
   if (input.scene === "private") return { kind: "directed", rule: "private" };
   if (input.mentionedSelf) return { kind: "directed", rule: "at" };
   if (input.quotedHer) return { kind: "directed", rule: "quote" };
   if (hasAny(input.text, gateWords.nicknames)) return { kind: "directed", rule: "nickname" };
+  if (input.continuation) return { kind: "directed", rule: "continuation" };
   if (input.isSticker) return { kind: "blocked", reason: "sticker" };
   if (input.isBareImage) return { kind: "blocked", reason: "media_only" };
   return { kind: "chitchat" };

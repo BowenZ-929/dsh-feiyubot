@@ -28,7 +28,7 @@ from .model import (ALPHA_DEFAULT, AUDIENCE_PARTIES, AUDIENCE_TYPES,
                     SCENE_PRIVATE, SCENE_TYPES, SCENE_UNKNOWN, SIDE_OTHER,
                     SIDE_SELF, SIDE_TYPES, SOURCE_LIVED, SOURCE_SCHEDULED,
                     SOURCE_TYPES, STATUS_ACTIVE, STATUS_ARCHIVED,
-                    STATUS_STALE, day_key, limits, now_iso, valid_who)
+                    STATUS_STALE, day_key, limits, now_iso, parse_ts, valid_who)
 
 TODAY_FILE = "today.json"
 LONGTERM_FILE = "longterm.jsonl"
@@ -47,6 +47,7 @@ PEOPLE_CARD_HISTORY = "people_card_history.jsonl"
 USAGE_FILE = "usage.jsonl"
 NOTE_HISTORY = "note_history.jsonl"
 CARD_FIELDS = {"称呼": "display", "雷点": "prefs", "备注": "notes", "照片说明": "photo_note",
+               "关系": "relationship", "叫法": "address",
                "生日": "birthday"}  # 生日是结构化字段：不占记忆名额、不被遗忘曲线淡掉
 
 TIERS_DEFAULT = {"today_max": 60, "today_demote_count": 20, "hot_max": 20, "hot_lines_max": 3}
@@ -151,6 +152,20 @@ def _usage_rows(path: Path) -> List[Dict[str, Any]]:
     return _read_jsonl(path)
 
 
+def _latest_memory_rows(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """完整版本替换前版；旧状态行只改状态，不把占位空值当成新原文。"""
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        key = row.get("id")
+        if not key:
+            continue
+        if row.get("source") == "status" and key in latest:
+            latest[key] = dict(latest[key], status=row["status"], status_changed_at=row["ts"])
+        else:
+            latest[key] = dict(row)
+    return latest
+
+
 def _as_list(value: Any) -> List[str]:
     """名片里的多行字段：字符串按行拆，列表照旧，空值給空列表。"""
     if isinstance(value, str):
@@ -172,17 +187,6 @@ def _new_id(prefix: str, taken: set) -> str:
             return candidate
 
 
-def _within_merge_window(last: Dict[str, Any], ts: str) -> bool:
-    last_ts = last.get("last_ts") or last.get("ts")
-    if not isinstance(last_ts, str):
-        return False
-    try:
-        delta = datetime.fromisoformat(ts) - datetime.fromisoformat(last_ts)
-        return 0 <= delta.total_seconds() <= limits.merge_window_minutes * 60
-    except (TypeError, ValueError):
-        return False
-
-
 def _reject(message: str) -> Dict[str, Any]:
     return {"ok": False, "message": message}
 
@@ -190,6 +194,14 @@ def _reject(message: str) -> Dict[str, Any]:
 def _normalize_row(row: Dict[str, Any], entry_id: str = "") -> Dict[str, Any]:
     """数据导入器/存量回填的统一口径：补齐 status、来源、α/β、evidence_key 缺省字段。"""
     row = dict(row)
+    if 'context_refs' in row:
+        refs = row['context_refs']
+        if (not isinstance(refs, list) or len(refs) > 2 or any(
+                not isinstance(ref, dict) or set(ref) != {'turn_id', 'quote'}
+                or not isinstance(ref['turn_id'], str) or not ref['turn_id'].strip()
+                or not isinstance(ref['quote'], str) or not 1 <= len(ref['quote'].strip()) <= 120
+                for ref in refs)):
+            raise BrainReadError('context_refs 需要最多两条回合编号与逐字引文')
     row["id"] = row.get("id") or entry_id
     row["status"] = row.get("status") or STATUS_ACTIVE
     source_type = row.get("source_type") or SOURCE_LIVED
@@ -288,6 +300,10 @@ class BrainStore:
                     "unclear": entry.get("unclear", False),
                     "beta_note": entry.get("beta_note"),
                     "side": entry.get("side", SIDE_OTHER),
+                    **({"turn_id": entry["turn_id"]} if entry.get("turn_id") else {}),
+                    **({"session_id": entry["session_id"]} if entry.get("session_id") else {}),
+                    **({"local_only": True} if entry.get("local_only") is True else {}),
+                    **({"context_refs": entry["context_refs"]} if entry.get("context_refs") else {}),
                     "scene": entry.get("scene", SCENE_UNKNOWN),
                     "audience": entry.get("audience", AUDIENCE_PARTIES),
                     "count": entry.get("count", 1),
@@ -328,6 +344,39 @@ class BrainStore:
         entry["retention"] = value
         entry["clarity"] = retention_mod.clarity(value, params)
         return entry
+
+    def person_context(self, who: str, session_id: str, now_ts: str,
+                       turns: int = 3) -> Dict[str, Any]:
+        """按人选同会话最近相处，带同回合所有作者；只读，不结算或增加熟稔。"""
+        if not who or not session_id or turns <= 0:
+            return {"turns": [], "omitted": 0}
+        at = parse_ts(now_ts)
+        params = self._retention_params()
+        rows = {r['id']: r for r in self.longterm_active_entries()
+                if not retention_mod.should_archive(r, params, now_ts)}
+        rows.update({r['id']: r for r in self._today.get('entries', [])})
+        grouped, own_times = {}, {}
+        for row in rows.values():
+            turn = row.get('turn_id')
+            if (row.get('status', STATUS_ACTIVE) != STATUS_ACTIVE or not turn
+                    or row.get('session_id') != session_id or row.get('local_only') is True
+                    or row.get('source_type', SOURCE_LIVED) != SOURCE_LIVED):
+                continue
+            # 旧导入记录的时间可能不完整，不把它猜成最近发生。
+            try:
+                stamp = parse_ts(row.get('ts') or '')
+            except ValueError:
+                continue
+            if stamp > at:
+                continue
+            grouped.setdefault(turn, []).append((stamp, row))
+            if row.get('who') == who and row.get('side', SIDE_OTHER) != SIDE_SELF:
+                own_times[turn] = max(stamp, own_times.get(turn, stamp))
+        selected = sorted(own_times, key=own_times.get)[-turns:]
+        return {'turns': [{'turn_id': turn,
+                           'entries': [dict(row) for _, row in sorted(grouped[turn], key=lambda pair: pair[0])]}
+                          for turn in selected],
+                'omitted': max(0, len(own_times) - len(selected))}
 
     def _recent_memories_for(self, who: str, now_ts: str,
                              limit: int = 5) -> List[Dict[str, Any]]:
@@ -430,6 +479,10 @@ class BrainStore:
                 "unclear": entry.get("unclear", False),
                 "beta_note": entry.get("beta_note"),
                 "side": entry.get("side", SIDE_OTHER),
+                **({"turn_id": entry["turn_id"]} if entry.get("turn_id") else {}),
+                **({"session_id": entry["session_id"]} if entry.get("session_id") else {}),
+                    **({"local_only": True} if entry.get("local_only") is True else {}),
+                **({"context_refs": entry["context_refs"]} if entry.get("context_refs") else {}),
                 "scene": entry.get("scene", SCENE_UNKNOWN),
                 "audience": entry.get("audience", AUDIENCE_PARTIES),
                 "count": entry.get("count", 1),
@@ -499,11 +552,7 @@ class BrainStore:
         return {"ok": False, "message": "没有这行热索引：%s" % hot_id}
 
     def _latest_longterm(self, entry_id: str) -> Optional[Dict[str, Any]]:
-        latest = None
-        for row in _read_jsonl(self._root / LONGTERM_FILE):
-            if row.get("id") == entry_id:
-                latest = row
-        return latest
+        return _latest_memory_rows(_read_jsonl(self._root / LONGTERM_FILE)).get(entry_id)
 
     # —— 遗忘曲线（读时结算）与冷仓 ————————————————————————————————
     def _settle_retention(self, now_ts: str) -> List[Dict[str, Any]]:
@@ -512,14 +561,10 @@ class BrainStore:
         只在真的有行要归档时才写盘；已归档的行不重复追加（并发下账本不脏）。
         """
         params = self._retention_params()
-        threshold = params.get("threshold", 0.08)
-        idle_days = params.get("idle_days", 30)
         to_archive: List[Dict[str, Any]] = []
         for entry in self.longterm_active_entries():
-            value = retention_mod.retention(entry, params, now_ts)
-            last = entry.get("last_recalled_at") or entry.get("last_accessed_at") or entry.get("ts")
-            idle = retention_mod.days_between(now_ts, last)
-            if value < threshold and (idle is None or idle >= idle_days):
+            if retention_mod.should_archive(entry, params, now_ts):
+                value = retention_mod.retention(entry, params, now_ts)
                 archived_row = dict(entry)
                 archived_row.pop("recall_count", None)
                 archived_row.pop("last_recalled_at", None)
@@ -537,10 +582,7 @@ class BrainStore:
 
     def cold_entries(self) -> List[Dict[str, Any]]:
         rows = _read_jsonl(self._root / LONGTERM_FILE)
-        latest: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            if row.get("id"):
-                latest[row["id"]] = row
+        latest = _latest_memory_rows(rows)
         return [row for row in latest.values() if row.get("status") == STATUS_ARCHIVED]
 
     def cold_lookup(self, entry_id: str) -> Optional[Dict[str, Any]]:
@@ -554,10 +596,7 @@ class BrainStore:
         today = _read_json_strict(self._root / TODAY_FILE)
         hot = _read_json_strict(self._root / HOT_FILE)
         rows = _read_jsonl_strict(self._root / LONGTERM_FILE)
-        latest: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            if row.get("id"):
-                latest[row["id"]] = row
+        latest = _latest_memory_rows(rows)
         active = [row for row in latest.values()
                   if row.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
         cold = [row for row in latest.values() if row.get("status") == STATUS_ARCHIVED]
@@ -581,10 +620,7 @@ class BrainStore:
         """重建热索引（hot.json）：从长期档 demoted_to=hot 的原文重新分组；usage 账不动。"""
         now_ts = now_ts or now_iso()
         rows = _read_jsonl(self._root / LONGTERM_FILE)
-        latest: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            if row.get("id"):
-                latest[row["id"]] = row
+        latest = _latest_memory_rows(rows)
         demoted = [row for row in latest.values()
                    if row.get("demoted_to") == "hot"
                    and row.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
@@ -601,10 +637,7 @@ class BrainStore:
         """
         now_ts = now_ts or now_iso()
         rows = _read_jsonl_strict(self._root / LONGTERM_FILE)
-        latest: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            if row.get("id"):
-                latest[row["id"]] = row
+        latest = _latest_memory_rows(rows)
         cold = [row for row in latest.values() if row.get("status") == STATUS_ARCHIVED]
         cold.sort(key=lambda row: row.get("ts", ""), reverse=True)
         if cursor:
@@ -614,6 +647,69 @@ class BrainStore:
         return {"items": page, "next_cursor": next_cursor}
 
     # —— 边（星图地基） ————————————————————————————————
+    def graph_snapshot(self, now_ts: Optional[str] = None) -> Dict[str, Any]:
+        """星图只观察：既有关系加记录归属投影，不改脑库或召回。"""
+        import hashlib
+
+        now_ts = now_ts or now_iso()
+        latest = _latest_memory_rows(_read_jsonl_strict(self._root / LONGTERM_FILE))
+        today_ids = {row["id"] for row in self._today.get("entries", [])}
+        # 今日档是仍在本层条目的现行版本，不能调用会换日/降级的 today_view。
+        for row in self._today.get("entries", []):
+            latest[row["id"]] = row
+        usage = {row["id"]: row for row in _read_jsonl_strict(self._root / USAGE_FILE) if row.get("id")}
+        graph_path = self._root / EDGES_FILE
+        graph = json.loads(graph_path.read_text(encoding="utf-8")) if graph_path.is_file() else {"nodes": {}, "edges": []}
+        people = self._people_data().get("people", {})
+        nodes = {}
+        params = self._retention_params()
+        for key, row in latest.items():
+            row = dict(row, **{k: v for k, v in usage.get(key, {}).items()
+                               if k in ("recall_count", "hit_count", "last_recalled_at")})
+            value = retention_mod.retention(row, params, now_ts)
+            node_id = "event:" + key
+            text = row.get("quote") or row.get("text") or row.get("note") or ""
+            nodes[node_id] = dict(id=node_id, memory_id=key, kind="event", label=text[:48],
+                                 text=text, quote=row.get("quote", ""), note=row.get("note", ""),
+                                 who=row.get("who", ""), at=row.get("ts", ""),
+                                 status_changed_at=row.get("status_changed_at", ""),
+                                 status=row.get("status", STATUS_ACTIVE), source=row.get("source_type", "未记录"),
+                                 evidence_key=row.get("evidence_key", ""), side=row.get("side", ""),
+                                 turn_id=row.get("turn_id", ""),
+                                 tier=("cold" if row.get("status") == STATUS_ARCHIVED else
+                                       row.get("demoted_to") or ("today" if key in today_ids else "longterm")),
+                                 retention=round(value, 2), clarity=retention_mod.clarity(value, params),
+                                 recall_count=row.get("recall_count", 0), hit_count=row.get("hit_count", 0),
+                                 last_recalled_at=row.get("last_recalled_at", ""))
+        for key, row in graph.get("nodes", {}).items():
+            if row["kind"] not in ("person", "topic"):
+                continue
+            node = dict(row)
+            if row["kind"] == "person":
+                card = people.get(row["label"], {})
+                node["label"] = card.get("display") or row["label"]
+            nodes[key] = node
+        for key, row in people.items():
+            node_id = "person:" + key
+            nodes.setdefault(node_id, dict(id=node_id, kind="person", label=row.get("display") or key))
+        edges = [dict(row) for row in graph.get("edges", [])
+                 if row.get("from") in nodes and row.get("to") in nodes]
+        unresolved = len(graph.get("edges", [])) - len(edges)
+        linked = {frozenset((edge['from'], edge['to'])) for edge in edges}
+        for node in nodes.values():
+            person = 'person:' + node.get('who', '')
+            if (node['kind'] != 'event' or node.get('who') in (*PLACEHOLDER_WHOS, SIDE_SELF) or person not in nodes
+                    or nodes[person]['kind'] != 'person'
+                    or frozenset((person, node['id'])) in linked):
+                continue
+            edges.append({'id':'record-person:' + node['id'], 'type':'record-person',
+                          'from':person, 'to':node['id'], 'ts':node['at'], 'basis':'memory.who',
+                          'status':'active' if node['status'] == STATUS_ACTIVE else 'invalid'})
+        payload = {"nodes": sorted(nodes.values(), key=lambda row: row["id"]), "edges": edges,
+                   "unresolved_edges": unresolved, "readonly": True}
+        payload["revision"] = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+        return payload
+
     def _edges(self) -> Dict[str, Any]:
         return edges_mod.load_graph(self._root)
 
@@ -716,8 +812,9 @@ class BrainStore:
                beta: int = BETA_DEFAULT, note: Optional[str] = None,
                unclear: bool = False, side: str = SIDE_OTHER,
                scene: Optional[str] = None, audience: Optional[str] = None,
-               is_bot: bool = False) -> Dict[str, Any]:
-        """一条消息进：今日追加或合并一条 + 人名录认人更新。
+               is_bot: bool = False, turn_id: str = "", session_id: str = "",
+               context_refs: Optional[List[Dict[str, str]]] = None, local_only: bool = False) -> Dict[str, Any]:
+        """一条消息进：今日追加一条 + 人名录认人更新；不覆盖先前原文。
 
         text 就是 quote（对方原话）；note 是她的理解，可为空——空 note 是正常状态。
         拿不准就 note="" + unclear=True，只存原话，不许硬编理解。
@@ -725,6 +822,8 @@ class BrainStore:
         """
         ts = ts or now_iso()
         who = (who or "").strip()
+        if type(local_only) is not bool:
+            raise ValueError('local_only 需要布尔值')
         text = (text or "").strip()
         if side == SIDE_SELF:
             who = who or "她说"
@@ -741,60 +840,44 @@ class BrainStore:
                            % (source_type, " / ".join(SOURCE_TYPES)))
         self._today, archived = self._ensure_today(ts)
         entries = self._today.setdefault("entries", [])
-        merged = False
-        if entries:
-            last = entries[-1]
-            if last.get("who") == who and _within_merge_window(last, ts):
-                last["text"] = text
-                last["quote"] = text
-                last["last_ts"] = ts
-                last["count"] = int(last.get("count", 1)) + 1
-                last["scene"] = scene if scene in SCENE_TYPES else SCENE_UNKNOWN
-                last["audience"] = audience if audience in AUDIENCE_TYPES else AUDIENCE_PARTIES
-                last["side"] = side if side in SIDE_TYPES else SIDE_OTHER
-                if note is not None:
-                    last["note"] = note
-                    last["beta_note"] = (int(last.get("beta", BETA_DEFAULT)) - 1) if note else None
-                if unclear:
-                    last["unclear"] = True
-                if mood is not None:
-                    last["mood"] = mood
-                merged = True
-        if not merged:
-            entry: Dict[str, Any] = {
-                "id": _new_id("t-", self._taken_ids()),
-                "day": self._today.get("day", day_key(ts)),
-                "ts": ts,
-                "who": who,
-                "text": text,
-                "quote": text,            # 原话逐字；note 是她的理解，可为空
-                "count": 1,
-                "status": STATUS_ACTIVE,   # 状态位和行同时落盘
-                "source_type": source_type,
-                "alpha": alpha,
-                "beta": beta,
-                "note": note or "",
-                "unclear": bool(unclear),
-                "beta_note": (int(beta) - 1) if note else None,
-                "side": side if side in SIDE_TYPES else SIDE_OTHER,
-                "scene": scene if scene in SCENE_TYPES else SCENE_UNKNOWN,
-                "audience": audience if audience in AUDIENCE_TYPES else AUDIENCE_PARTIES,
-                "evidence_key": "",   # 创建后再补：亲历指向自己这行原话，日程模拟留空
-            }
-            if mood is not None:
-                entry["mood"] = mood
-            entries.append(entry)
-            entry["evidence_key"] = entry["id"] if entry["source_type"] == SOURCE_LIVED else ""
+        # 通道负责合批；脑保留每次输入的原文、来源与证据编号。
+        entry: Dict[str, Any] = {
+            "id": _new_id("t-", self._taken_ids()),
+            "day": self._today.get("day", day_key(ts)),
+            "ts": ts,
+            "who": who,
+            "text": text,
+            "quote": text,            # 原话逐字；note 是她的理解，可为空
+            "count": 1,
+            "status": STATUS_ACTIVE,   # 状态位和行同时落盘
+            "source_type": source_type,
+            "alpha": alpha,
+            "beta": beta,
+            "note": note or "",
+            "unclear": bool(unclear),
+            "beta_note": (int(beta) - 1) if note else None,
+            "side": side if side in SIDE_TYPES else SIDE_OTHER,
+            **({"turn_id": turn_id} if turn_id else {}),
+            **({"session_id": session_id} if session_id else {}),
+            **({"local_only": True} if local_only else {}),
+            **({"context_refs": context_refs} if context_refs else {}),
+            "scene": scene if scene in SCENE_TYPES else SCENE_UNKNOWN,
+            "audience": audience if audience in AUDIENCE_TYPES else AUDIENCE_PARTIES,
+            "evidence_key": "",   # 创建后再补：亲历指向自己这行原话，日程模拟留空
+        }
+        if mood is not None:
+            entry["mood"] = mood
+        entries.append(entry)
+        entry["evidence_key"] = entry["id"] if entry["source_type"] == SOURCE_LIVED else ""
         _atomic_write_json(self._root / TODAY_FILE, self._today)
-        if not merged:
-            self._add_edges_for(entries[-1])
+        self._add_edges_for(entries[-1])
         self._demote_today(ts)
         if side == SIDE_SELF:
             person = {"skipped": True, "reason": "self-side"}
         else:
             person = self.interact(who, display=display, ts=ts, text=text,
                                    is_bot=is_bot)
-        return {"ok": True, "merged": merged, "entry": dict(entries[-1]),
+        return {"ok": True, "merged": False, "entry": dict(entries[-1]),
                 "archived_count": len(archived), "person": person}
 
     # —— 长期字面档 ————————————————————————————
@@ -820,25 +903,24 @@ class BrainStore:
                 latest = row
         return latest
 
-    def _merge_usage(self, entry: Dict[str, Any]) -> Dict[str, Any]:
-        merged = dict(entry)
-        usage = self._latest_usage(entry.get("id", ""))
-        if usage:
-            merged["recall_count"] = usage.get("recall_count", 0)
-            merged["last_recalled_at"] = usage.get("last_recalled_at", "")
-            merged["hit_count"] = usage.get("hit_count", 0)
-        return merged
-
     def longterm_active_entries(self) -> List[Dict[str, Any]]:
-        """长期档在役条目：同 id 只认最后一行，status 进查询；命中账从 usage 现合并。"""
+        """长期档在役条目：合并状态行后过滤，命中账从 usage 现合并。"""
         rows = _read_jsonl(self._root / LONGTERM_FILE)
-        latest: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            row_id = row.get("id")
-            if row_id:
-                latest[row_id] = row
-        return [self._merge_usage(row) for row in latest.values()
-                if row.get("status", STATUS_ACTIVE) == STATUS_ACTIVE]
+        latest = _latest_memory_rows(rows)
+        # 一次查询只读一遍使用账；下次查询重新读，不缓存跨回合的旧数。
+        usages = {row.get("id"): row for row in _usage_rows(self._root / USAGE_FILE)}
+        active = []
+        for row in latest.values():
+            if row.get("status", STATUS_ACTIVE) != STATUS_ACTIVE:
+                continue
+            merged = dict(row)
+            usage = usages.get(row.get("id", ""))
+            if usage:
+                merged["recall_count"] = usage.get("recall_count", 0)
+                merged["last_recalled_at"] = usage.get("last_recalled_at", "")
+                merged["hit_count"] = usage.get("hit_count", 0)
+            active.append(merged)
+        return active
 
     def import_rows(self, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         """数据导入器：旧存量行（缺 status/来源/α/β/evidence_key）归一化后追加进长期档。"""
@@ -1066,6 +1148,8 @@ class BrainStore:
         if not name:
             return None
         people = self._people_data().get("people", {})
+        if name in people:
+            return self._person_view(people[name], now_ts)
         for person in people.values():
             if person.get("id") == name or name in person.get("aliases", []) \
                     or person.get("display") == name:
@@ -1161,6 +1245,8 @@ class BrainStore:
         if person is None:
             return None
         return {"id": person.get("id", ""),
+                "relationship": person.get("relationship", ""),
+                "address": person.get("address", ""),
                 "display": person.get("display", ""),
                 "nickname": person.get("nickname", "") or "",
                 "aliases": _as_list(person.get("aliases")),
@@ -1193,6 +1279,9 @@ class BrainStore:
         if unknown:
             return _reject("只收白名单字段（称呼/雷点/备注/照片说明），收到：%s"
                            % "/".join(unknown))
+        for label in ('关系', '叫法'):
+            if label in fields and (not isinstance(fields[label], str) or len(fields[label]) > 80):
+                return _reject(label + '必须是80字以内的文字')
         data = self._people_data()
         person = data.get("people", {}).get(person_id)
         if person is None:
@@ -1208,7 +1297,8 @@ class BrainStore:
             person[key] = value
             line = {"ts": now_iso(), "actor": actor, "person_id": person_id,
                     "field": label, "old_summary": _short(old_value),
-                    "new_summary": _short(fields[label])}
+                    "new_summary": _short(fields[label]),
+                    "changes": {label: {"before": old_value, "after": value}}}
             _append_jsonl(self._root / PEOPLE_CARD_HISTORY, line)
             history_lines.append(line)
         self._write_people(data)
@@ -1227,13 +1317,18 @@ class BrainStore:
         for entry in self._today.get("entries") or []:
             if entry.get("id") == entry_id:
                 old_note = entry.get("note", "")
+                old_unclear = entry.get('unclear', False)
+                old_refs = entry.pop('context_refs', None)
                 entry["note"] = note
                 entry["unclear"] = bool(unclear) if unclear is not None else entry.get("unclear", False)
                 entry["beta_note"] = (int(entry.get("beta", BETA_DEFAULT)) - 1) if note else None
                 _atomic_write_json(self._root / TODAY_FILE, self._today)
                 _append_jsonl(self._root / NOTE_HISTORY, {
                     "ts": now_iso(), "actor": actor, "entry_id": entry_id,
-                    "old_note": old_note, "new_note": note})
+                    "old_note": old_note, "new_note": note,
+                    "changes": {"note": {"before": old_note, "after": note},
+                                "unclear": {"before": old_unclear, "after": entry['unclear']}},
+                    **({'old_context_refs': old_refs} if old_refs else {})})
                 return {"ok": True, "entry_id": entry_id, "where": "today",
                         "note": note, "quote": entry.get("quote", entry.get("text", ""))}
         latest = self._latest_longterm(entry_id)
@@ -1241,20 +1336,25 @@ class BrainStore:
             return _reject("没有这条记忆：%s" % entry_id)
         updated = dict(latest)
         old_note = updated.get("note", "")
+        old_unclear = updated.get('unclear', False)
+        old_refs = updated.pop('context_refs', None)
         updated["note"] = note
         updated["unclear"] = bool(unclear) if unclear is not None else updated.get("unclear", False)
         updated["beta_note"] = (int(updated.get("beta", BETA_DEFAULT)) - 1) if note else None
         _append_jsonl(self._root / LONGTERM_FILE, updated)
         _append_jsonl(self._root / NOTE_HISTORY, {
             "ts": now_iso(), "actor": actor, "entry_id": entry_id,
-            "old_note": old_note, "new_note": note})
+            "old_note": old_note, "new_note": note,
+            "changes": {"note": {"before": old_note, "after": note},
+                        "unclear": {"before": old_unclear, "after": updated['unclear']}},
+            **({'old_context_refs': old_refs} if old_refs else {})})
         return {"ok": True, "entry_id": entry_id, "where": "longterm",
                 "note": note, "quote": updated.get("quote", updated.get("text", ""))}
 
     # —— 回想 ————————————————————————————————
     def recall(self, query: str, who: Optional[str] = None,
                now_ts: Optional[str] = None,
-               scene: Optional[str] = None) -> Dict[str, Any]:
+               scene: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
         """回想：读时结算遗忘曲线 → 今日/热/长期三路字面检索 → 装包；命中回写想起次数。"""
         now_ts = now_ts or now_iso()
         self._settle_retention(now_ts)
@@ -1270,6 +1370,11 @@ class BrainStore:
                     if found and found.get("status") == STATUS_ACTIVE \
                             and found.get("side", SIDE_OTHER) != SIDE_SELF:
                         hot_candidates.append(found)
+        if session_id is not None:
+            from .visibility import visible
+            today = [r for r in today if visible(r, session_id=session_id)]
+            longterm = [r for r in longterm if visible(r, session_id=session_id)]
+            hot_candidates = [r for r in hot_candidates if visible(r, session_id=session_id)]
         result = recall_mod.recall(query, today, longterm,
                                    hot_entries=hot_candidates, who=who)
         self._write_back_hits(result.get("items", []), now_ts)
@@ -1306,6 +1411,43 @@ class BrainStore:
         return recall_mod.vector_rerank(query, candidates)
 
     # —— 自述 ————————————————————————————————
+    def current_profile(self) -> Dict[str, str]:
+        """最新有效结构化快照；旧文字自述仍是历史，不解释成性情。"""
+        from .visibility import PROFILE_FIELDS
+        for row in reversed(self.selfnarration_versions()):
+            profile = row.get('profile')
+            if (isinstance(profile, dict) and set(profile) <= PROFILE_FIELDS
+                    and all(isinstance(v, str) and len(v) <= 600 for v in profile.values())):
+                return dict(profile)
+        return {}
+
+    def update_profile(self, patch: Dict[str, str], *, note: str,
+                       sources: Optional[List[str]] = None, replace: bool = False) -> Dict[str, Any]:
+        """具名成长写入，只接受可成长字段。调用者负责从可共享素材中解析出处。"""
+        from .visibility import PROFILE_FIELDS
+        if (not isinstance(patch, dict) or not set(patch) <= PROFILE_FIELDS
+                or any(not isinstance(v, str) or len(v) > 600 for v in patch.values())):
+            raise ValueError('成长只接受已开放的短文本字段，每项最多600字')
+        if 'sleep_notice' in patch and not 1 <= len(patch['sleep_notice'].strip()) <= 60:
+            raise ValueError('睡眠提示需要1–60字')
+        if not isinstance(note, str) or not note.strip() or len(note) > 600:
+            raise ValueError('成长理由需要1–600字')
+        sources = [] if sources is None else sources
+        if (not isinstance(sources, list) or len(sources) > 20
+                or any(not isinstance(s, str) or not s or len(s) > 200 for s in sources)):
+            raise ValueError('出处需要最多20个已有记录编号')
+        previous = self.current_profile()
+        profile = dict({} if replace else previous, **{k: v.strip() for k, v in patch.items()})
+        if profile == previous:
+            return {'ok': True, 'changed': False, 'profile': previous}
+        versions = self.selfnarration_versions()
+        record = {'id': _new_id('sn-', {r.get('id', '') for r in versions}),
+                  'version': len(versions) + 1, 'ts': now_iso(), 'text': note.strip(),
+                  'note': note.strip(), 'profile': profile, 'sources': list(dict.fromkeys(sources)),
+                  'scope': 'public'}
+        _append_jsonl(self._root / SELF_FILE, record)
+        return {'ok': True, 'changed': True, 'record': record, 'profile': profile}
+
     def record_selfnarration(self, text: str, note: str = "") -> Dict[str, Any]:
         """只记录，不解释：她写的「我最近像变了个人」这类话，留版本，永不覆盖基线。"""
         text = (text or "").strip()
@@ -1354,6 +1496,20 @@ class BrainStore:
                         "proposal": dict(row)}
         return {"ok": False, "message": "没有这条提案：%s" % wanted}
 
+    def record_proposal_decisions(self, decisions, *, at, actor='她自己', version=None):
+        """成长入口已校验决定；保留程序建议原文及独立的处理理由。"""
+        batch = self.proposals()
+        by_id = {row['id']: row for row in batch.get('proposals', [])}
+        for decision in decisions:
+            row = by_id[decision['id']]
+            row.update(status={'accept':'accepted', 'reject':'rejected', 'defer':'pending'}[decision['decision']],
+                       actor=actor, ts=at, decision=decision['decision'], decision_reason=decision['reason'])
+            if version is not None and decision['decision'] == 'accept':
+                row['profile_version'] = version
+        _atomic_write_json(self._root / PROPOSALS_FILE, batch)
+        _append_jsonl(self._root / PROPOSAL_LOG_FILE,
+                      {'ts':at, 'event':'decisions', 'actor':actor, 'decisions':decisions, 'profile_version':version})
+
     def run_night(self, now_ts: Optional[str] = None) -> Dict[str, Any]:
         """夜结算：换日降级 + 从刚结束的一天里提炼 0–2 条改基线提案。幂等。"""
         now_ts = now_ts or now_iso()
@@ -1371,6 +1527,9 @@ class BrainStore:
         else:
             proposals = []
             note = "没有可结算的一天，不硬凑提案"
+        # 新一夜不丢弃尚未决定的建议，也不抹掉谁曾采纳/拒绝的记录。
+        new_ids = {row["id"] for row in proposals}
+        proposals = [row for row in batch.get("proposals", []) if row["id"] not in new_ids] + proposals
         _atomic_write_json(self._root / PROPOSALS_FILE,
                            {"night_of": current, "proposals": proposals})
         _append_jsonl(self._root / PROPOSAL_LOG_FILE,

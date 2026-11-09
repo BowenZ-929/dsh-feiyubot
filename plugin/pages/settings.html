@@ -7,7 +7,7 @@
 <style>
   /* 颜色只取宿主变量，兜底用系统色；深色跟随宿主 [data-theme="dark"]。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --radius: 8px;
@@ -40,14 +40,69 @@
   ul.rows > li:first-child { border-top: 0; }
   ul.rows a { color: var(--brand); font-weight: 600; }
   ul.rows .meta { display: block; color: var(--dim); }
+html[data-theme="light"]{color-scheme:light}
+  button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .bad { color: var(--dsw-alias-danger, #c35d39); }
+  summary { cursor: pointer; color: var(--dim); }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .85rem/1.7 ui-monospace, Menlo, monospace; }
+  [hidden] { display: none!important; }
+  .model-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 12px; border: 0; padding: 0; margin: 16px 0; }
+  .model-fields label { display: grid; gap: 4px; min-width: 0; }
+  .model-fields input, .model-fields select { font: inherit; padding: 8px; width: 100%; min-width: 0; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
 </style>
 </head>
 <body>
-<p class="banner">设置。这一页还没有能改的参数：先放两条只读入口，读数和规矩都在里面写着。</p>
+<p class="banner">查看运行状态、管理图片与语音能力。</p>
 <main>
+  <section class="card" aria-labelledby="runtime-title">
+    <div class="head"><h1 id="runtime-title">核心运行状态</h1><button id="runtime-refresh" type="button">刷新状态</button></div>
+    <p id="runtime-status" role="status" aria-live="polite">正在读取…</p>
+    <details id="runtime-details" hidden><summary>版本与源码详情</summary><pre id="runtime-info"></pre></details>
+    <p class="hint">这里核对核心是否加载了最新代码；下面分别查看通道与能力状态。</p>
+  </section>
+  <section class="card" id="model-card" aria-labelledby="model-title">
+    <div class="head"><h2 id="model-title">主模型与思考</h2><button id="model-refresh" type="button">刷新参数</button></div>
+    <p id="model-status" role="status" aria-live="polite">正在读取…</p>
+    <form id="model-form">
+      <fieldset class="model-fields" id="model-fields" disabled>
+        <label>模型请求名<input id="model-name" required></label>
+        <label>思考开关<select id="model-thinking"><option value="enabled">开启</option><option value="disabled">关闭</option><option value="">未显式设置</option></select></label>
+        <label>思考档位<select id="model-effort"><option value="low">low · 较少</option><option value="high">high · 高</option><option value="max">max · 最大</option><option value="none">none · 不思考</option><option value="">未显式设置</option></select></label>
+        <label>输出 token 上限<input id="model-tokens" type="number" min="1" step="1" required></label>
+        <label>等待时间（毫秒）<input id="model-timeout" type="number" min="1" step="1" required></label>
+        <label>失败重试次数<input id="model-retries" type="number" min="0" step="1" required></label>
+        <label>温度<input id="model-temperature" type="number" min="0" max="2" step="0.01" required></label>
+      </fieldset>
+      <button id="model-save" type="submit" disabled>保存参数</button>
+    </form>
+    <p class="hint">DeepSeek 的思考开关优先于档位；温度在思考模式下不生效。输出上限包含思考消耗，不等于 QQ 回复字数。</p>
+    <p class="hint">保存后用于后续调用。理解、写作等任务可能单独设置等待时间和输出上限；以每轮实际请求为准。刷新和保存不会调用模型。</p>
+    <details><summary>温度分档与配置来源</summary><pre id="model-extra"></pre></details>
+    <p><a href="day?source=model_settings#activity-card">查看参数变化</a> · <a href="observe?source=model">查看实际请求与思考记录</a></p>
+  </section>
+  <section class="card" aria-labelledby="channel-title">
+    <div class="head"><h2 id="channel-title">QQ 通道 · NoneBot 与 NapCat</h2></div>
+    <p id="channel-status" role="status" aria-live="polite" style="white-space:pre-line">正在读取连接…</p>
+    <p id="channel-checked" class="hint"></p>
+    <p class="hint">这里显示 NoneBot 的连接读数。具体消息是否送达，可查看<a href="observe?source=delivery">发送回执</a>。</p>
+    <h3>正在使用的聊天规则</h3>
+    <p id="channel-rules-state" role="status" aria-live="polite">正在读取运行参数…</p>
+    <p id="channel-rules" style="white-space:pre-line"></p>
+    <details><summary>启动时加载的完整配置</summary>
+      <p class="hint">以下来自正在运行的业务通道。mentionCapMs、stickerMs 仅兼容旧文件，@ 和表情沿用普通合并窗口；个人名片中的分段偏好还会影响实际输出。</p>
+      <pre id="channel-rules-raw"></pre>
+    </details>
+    <p><a href="observe?source=decision#participation">查看实际群聊参与记录</a></p>
+  </section>
   <section class="card">
-    <div class="head"><h2>只读入口</h2><span class="who">由程序写：这两页都是读数，人只能看</span></div>
+    <div class="head"><h2>状态与能力</h2><span class="who">查看记录，打开各项能力的操作页</span></div>
     <ul class="rows">
+      <li><a href="galaxy">记忆星图</a><span class="meta">从人、记忆与话题查看真实关联和来源。</span></li>
+      <li><a href="phone">手机 · 连接与屏幕</a><span class="meta">连接旧手机，查看屏幕与操作回执。</span></li>
+      <li><a href="expressions">评论表达 · 学习与采用</a><span class="meta">核对评论原句、适用语境，选择是否纳入聊天。</span></li>
+      <li><a href="memes">表情图库 · 看图与修正描述</a><span class="meta">查看旧表情、搜索图片文字、修正描述或停用候选。</span></li>
+      <li><a href="learning">视频资料 · B 站字幕</a><span class="meta">读取字幕与出处。</span></li>
       <li>
         <a href="heart">心 · 只读读数</a>
         <span class="meta">心的读数与脑、家是同一批只读面，不占导航位，所以入口放在这里。她此刻什么心情、念头还剩多久，都在这一页。</span>
@@ -61,9 +116,127 @@
   </section>
 
   <section class="card">
-    <div class="head"><h2>参数</h2><span class="who">还没开口子：现在没有一处能从这一页改</span></div>
-    <p class="hint">参数开口子以后再放这里。开口子之前先要裁清「谁能改哪一处」：写入口现在只有魂页那两处（改一句、加红线），多开一处就得先改判据，再改这一页。</p>
+    <div class="head"><h2>图片与语音</h2><span class="who">沿用已有视觉服务</span></div>
+    <p><a href="studio">画室 · 参考素材与构图草稿</a></p>
+    <p><a href="eye">看图 · 开关与识别记录</a></p>
+    <p id="eye-status" role="status" aria-live="polite">正在读取看图状态…</p>
+    <p><a href="voice">语音 · 迷糊版音色与合成记录</a></p>
+    <p id="voice-status" role="status" aria-live="polite">正在读取语音状态…</p>
+    <p><a href="ear">听语音 · 本地识别与转写记录</a></p>
+    <p id="ear-status" role="status" aria-live="polite">正在读取听语音状态…</p>
+    <p class="hint">这里显示开关与本地配置；实际识别和合成结果请进入对应页面查看。</p>
   </section>
 </main>
+<script src="panel-base.js" data-page="settings"></script>
+<script>
+(function () {
+  "use strict";
+  var status = document.getElementById("runtime-status");
+  var details = document.getElementById("runtime-details");
+  var refresh = document.getElementById("runtime-refresh");
+  async function loadRuntime() {
+    try {
+      var response = await panelFetch("/healthz", {method: "GET"});
+      var d = await response.json();
+      if (response.status !== 200 || d.ok !== true) { throw new Error("HTTP " + response.status); }
+      status.textContent = d.source_changed === true
+        ? "核心源码在启动后有更新，需要重新加载核心才能确保修改生效。"
+        : d.source_changed === false ? "核心源码与启动时一致。" : "当前核心尚未提供源码同步状态，请展开详情核对。";
+      if (d.stale) { status.textContent += " 提交记录已变化。"; }
+      if (d.dirty) { status.textContent += " 工作区有未提交改动。"; }
+      status.className = d.source_changed ? "bad" : "";
+      document.getElementById("runtime-info").textContent = [
+        "启动时间：" + d.started_at, "进程：" + d.pid,
+        "启动提交：" + d.git_head + " · 当前提交：" + d.git_head_now,
+        "启动源码：" + d.source_digest, "磁盘源码：" + d.source_digest_now,
+        "比较范围：核心 Python 源码；页面和运行数据不计入。"
+      ].join("\n");
+      details.hidden = false;
+    } catch (error) {
+      status.textContent = "运行状态暂时读不到：" + error.message + "。可点击刷新重试。";
+      status.className = "bad";
+      details.hidden = true;
+    }
+  }
+  async function loadChannel() {
+    var node = document.getElementById("channel-status");
+    var checked = document.getElementById("channel-checked");
+    node.textContent = "正在读取连接…"; checked.textContent = "";
+    try {
+      var response = await panelFetch("/observe/channel", {method: "GET"});
+      var d = await response.json();
+      if (response.status !== 200 || d.ok !== true) throw new Error(d.message || "HTTP " + response.status);
+      node.textContent = d.bots.length ? d.bots.map(function (bot) {
+        return "QQ " + bot.self_id + " · 协议已连接 · " + (bot.business_connected ? "业务已连接" : "业务未连接")
+          + " · " + (bot.running ? "转接运行中" : "转接未运行");
+      }).join("\n") : "NoneBot 运行中，尚无 QQ 协议连接。";
+      node.className = !d.bots.length || d.bots.some(function (bot) { return !bot.business_connected || !bot.running; }) ? "bad" : "";
+      checked.textContent = "检查时间：" + d.checked_at;
+    } catch (error) {
+      node.textContent = "QQ 通道状态暂时读不到：" + error.message;
+      node.className = "bad";
+    }
+  }
+  async function loadChannelRules() {
+    var state = document.getElementById("channel-rules-state");
+    var rules = document.getElementById("channel-rules");
+    var raw = document.getElementById("channel-rules-raw");
+    state.textContent = "正在读取运行参数…"; state.className = "";
+    rules.textContent = ""; raw.textContent = "";
+    try {
+      var response = await panelFetch("/observe/channel-runtime", {method:"GET"});
+      var d = await response.json();
+      if (response.status !== 200 || d.ok !== true) throw new Error(d.message || "HTTP " + response.status);
+      if (!d.core_enabled) { state.textContent = "业务通道未接入核心，目前不处理聊天回复。"; return; }
+      var p = d.policy, b = p.batch;
+      var summary = [
+        "私聊：首条等 " + b.openMs.privateOpen / 1000 + " 秒，续发再等 " + b.continueMs.private / 1000 + " 秒。",
+        "群聊：安静时等 " + b.openMs.quietOpen / 1000 + " 秒，活跃时等 " + b.openMs.activeOpen / 1000 + " 秒，续发再等 " + b.continueMs.group / 1000 + " 秒。",
+        "每段最多等 " + b.hardCapMs / 1000 + " 秒，最多合并 " + b.maxMsgs + " 条；纯图片至少预留 " + b.bareImageMs / 1000 + " 秒（仍受每段上限约束）。",
+        "按群内全部消息段编号，每 " + d.gate_words.chitchatSampleMod + " 段设一个抽样点；该段是普通闲聊才获得参与机会，不等于最终回复比例。定向消息另行判断，休息等规则仍会拦截。",
+        "自主发送通道的群聊额度：每 " + p.quota.windowMs / 60000 + " 分钟最多 " + p.quota.perGroupMax + " 次。收到消息后的回复额度由核心另行判断。",
+        "背景上下文最多 " + p.context.maxMessages + " 条 / " + p.context.maxChars + " 字 / " + p.context.maxAgeMs / 60000 + " 分钟。",
+        "文字输出：每段最多 " + p.outbound.maxChars + " 字、" + p.outbound.maxSentences + " 句；每轮最多 " + p.outbound.maxChunks + " 段。拆泡另受个人偏好影响。",
+        "基础等待时间 " + d.core_timeout_ms / 1000 + " 秒；聊天接收媒体时会另加处理时间。"
+      ].join("\n");
+      state.textContent = (d.mode === "send" ? "允许发送" : "静默模式，不向 QQ 发送") + " · 启动于 " + d.started_at + "。"
+        + (d.disk_matches === true ? "与磁盘配置一致。" : d.disk_matches === false
+          ? "磁盘配置已有变化，重新启动业务通道后才生效；这里显示的仍是运行值。"
+          : d.config_error || "尚未确认磁盘配置是否一致。");
+      state.className = d.disk_matches === false || d.config_error ? "bad" : "";
+      rules.textContent = summary;
+      raw.textContent = JSON.stringify({policy:p,gate_words:d.gate_words},null,2);
+    } catch (error) {
+      state.textContent = "QQ 运行参数暂时读不到：" + error.message; state.className = "bad";
+    }
+  }
+  async function loadCapability(spec) {
+    var node = document.getElementById(spec.id);
+    node.textContent = "正在读取…";
+    try {
+      var response = await panelFetch(spec.path, {method: "GET"});
+      var d = await response.json();
+      if (response.status !== 200 || d.ok !== true) throw new Error(d.message || "HTTP " + response.status);
+      if (!d.config || typeof d.config.enabled !== "boolean" || typeof d[spec.ready] !== "boolean") throw new Error("状态字段不完整");
+      node.textContent = (d.config.enabled ? "已开启" : "已关闭") + " · " + (d[spec.ready] ? spec.yes : spec.no);
+      node.className = d.config.enabled && !d[spec.ready] ? "bad" : "";
+    } catch (error) {
+      node.textContent = "状态暂时读不到：" + error.message;
+      node.className = "bad";
+    }
+  }
+  async function load() {
+    refresh.disabled = true;
+    await Promise.all([loadRuntime(), loadChannel(), loadChannelRules(),
+      loadCapability({id:"eye-status",path:"/eye/status",ready:"credential_ready",yes:"账号已配置",no:"账号未配置"}),
+      loadCapability({id:"ear-status",path:"/ear/status",ready:"model_ready",yes:"本地模型已就绪",no:"本地模型未就绪"}),
+      loadCapability({id:"voice-status",path:"/voice/status",ready:"credential_ready",yes:"账号已配置",no:"账号未配置"})]);
+    refresh.disabled = false;
+  }
+  refresh.addEventListener("click", load);
+  load();
+}());
+</script>
+<script src="model-settings.js"></script>
 </body>
 </html>

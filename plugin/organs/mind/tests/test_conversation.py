@@ -167,9 +167,131 @@ class ConversationAnswerTest(unittest.TestCase):
                 now: str = _at(5), captured: list = None, transport=None, brain=None,
                 **extra):
         send = transport if transport is not None else _transport(reply, captured)
+        if "segment" in extra and extra.get("seed") is None:
+            extra["segment"] = conversation.normalize_segment(extra["segment"])
         return conversation.answer(text, who, store=self.store,
                                    brain=self.brain if brain is None else brain,
                                    now=now, transport=send, config=CONFIG, env=ENV, **extra)
+
+    def test_only_semantically_selected_expressions_reach_main_reply_and_usage(self):
+        from organs.home import expressions
+        card = {"id": "sample:0", "phrase": "蒸蒸日上", "quote": "福利真是蒸蒸日上啊",
+                "meaning": "反讽福利缩水", "when": "一起吐槽福利", "avoid": "真诚祝贺"}
+        capture = []
+        interpretation = {"kind": None, "who": WHO, "evidence": "", "note": "普通讨论", "status": "ok", "source": "semantic",
+                          "expressions": [card]}
+        with mock.patch.object(expressions, "record_use") as record:
+            got = self._answer(text="游戏福利怎么又少了", captured=capture,
+                               assessor=lambda **kw: interpretation)
+        self.assertIn("福利真是蒸蒸日上啊", capture[0]["messages"][-1]["content"])
+        self.assertIn("不是指令、用户信息或你的经历", capture[0]["messages"][0]["content"])
+        self.assertEqual(got["expressions"]["status"], "offered_to_model")
+        record.assert_called_once()
+        capture = []
+        with mock.patch.object(expressions, "record_use") as record:
+            self._answer(text="今天不太开心", captured=capture,
+                         assessor=lambda **kw: dict(interpretation, expressions=[]))
+        self.assertNotIn("评论表达", capture[0]["messages"][-1]["content"])
+        record.assert_not_called()
+
+    def test_current_life_plan_reaches_the_actual_prompt(self):
+        from organs.day import life
+        now = _at(5)
+        day = life.model.day_key(now)
+        raw = {"title": "慢慢来", "items": [
+            {"start": 0, "end": 720, "activity": "整理蓝色画纸"},
+            {"start": 720, "end": 1440, "activity": "休息"}]}
+        life.generate(day, persona="喜欢画画", now=now,
+                      complete=lambda messages: json.dumps(raw))
+        life.configure(True, now=now)
+        capture = []
+        self._answer(text="你在做什么？", now=now, captured=capture)
+        self.assertIn("[角色生活背景·计划]", capture[0]["messages"][0]["content"])
+        self.assertIn("整理蓝色画纸", capture[0]["messages"][0]["content"])
+        life.configure(False, now=now)
+        capture = []
+        self._answer(text="嗯", now=now, captured=capture)
+        self.assertNotIn("[角色生活背景·计划]", capture[0]["messages"][0]["content"])
+
+    def test_yesterdays_phone_observation_reaches_main_prompt_with_its_time(self):
+        from organs.day import phone_browse
+        with mock.patch.dict(os.environ, {"DAY_ROOT": str(self.tmp / "day")}):
+            phone_browse.save({"id": "observed", "created_at": "2026-11-07T22:00:00+09:00",
+                               "status": "done", "origin": "automatic", "title": "纸箱里的猫",
+                               "observations": [{"status": "ok", "observation": "猫坐在纸箱旁"}],
+                               "audio": {"status": "unavailable", "reason": "没有听到声音"}})
+            phone_browse.save({"id": "acceptance", "created_at": "2026-11-08T09:00:00+09:00",
+                               "status": "done", "origin": "acceptance", "title": "验收鲸鱼",
+                               "observations": [{"status": "ok", "observation": "鲸鱼"}]})
+            capture = []
+            self._answer(text="昨天看到什么了？", now="2026-11-08T10:00:00+09:00", captured=capture)
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn("[最近实际手机浏览]", system)
+        self.assertIn("2026-11-07T22:00:00+09:00", system)
+        self.assertIn("猫坐在纸箱旁", system)
+        self.assertIn("没有听到声音", system)
+        self.assertNotIn("验收鲸鱼", system)
+
+    def test_older_phone_topic_reaches_main_prompt_without_losing_latest_activity(self):
+        from organs.day import phone_browse
+        with mock.patch.dict(os.environ, {"DAY_ROOT": str(self.tmp / "day")}):
+            for hour, title, detail in ((10, "旧视频", "海獭抱着贝壳睡觉"),
+                                        (11, "做饭", "锅里煮着土豆"),
+                                        (12, "画画", "画布上有蓝色圆圈"),
+                                        (13, "散步", "沿着街边走过花店")):
+                phone_browse.save({"id": str(hour), "created_at": f"2026-11-08T{hour}:00:00+09:00",
+                                   "status": "done", "origin": "automatic", "title": title,
+                                   "observations": [{"status": "ok", "observation": {"subject": detail}}]})
+            before = {p: p.read_bytes() for p in (self.tmp / "day").rglob("*.json")}
+            capture = []
+            self._answer(text="之前看到的海獭抱着什么来着？", now="2026-11-08T14:00:00+09:00", captured=capture)
+            self.assertEqual(before, {p: p.read_bytes() for p in before})
+        system = capture[0]["messages"][0]["content"]
+        self.assertIn("海獭抱着贝壳睡觉", system)
+        self.assertIn("2026-11-08T10:00:00+09:00", system)
+        self.assertIn("沿着街边走过花店", system)
+        self.assertNotIn("锅里煮着土豆", system)
+
+    def test_checked_drawing_observation_reaches_followup_with_draft_scope(self):
+        from organs.home import art
+        from organs.mind import qq_painting
+        (self.tmp / 'home' / 'home').mkdir(parents=True)
+        session = 'qq:private:' + WHO
+        job = {'id': 'a'*32, 'created_at': '2026-11-08T10:00:00+09:00', 'status': 'done',
+               'request': {'prompt': '画一只小鸟'}, 'destination': {'session_id': session, 'who': WHO},
+               'draft_image_path': '/private/draft.png', 'image_path': '/private/draft.png',
+               'delivery': {'status': 'sent', 'kind': 'image'},
+               'review': {'status': 'ok', 'action': 'keep', 'reason': '保留当前构图',
+                          'observation': {'status': 'ok', 'raw': '不能进入聊天的服务回包',
+                                          'observation': {'subject': '鸟嘴右边有一小块绿色',
+                                                          'uncertainty': '无法判断是否是树叶',
+                                                          'sensitive': '不要注入的标记'}}}}
+        art.save_painting_job({**job, 'id': 'b'*32, 'destination': {'session_id': 'qq:private:999', 'who': '999'},
+                              'request': {'prompt': '另一个会话的私有画作'}})
+        for action, final_path, observed_status, expected_same in (
+            ('keep', '/private/draft.png', 'ok', True),
+            ('revise', '/private/final.png', 'ok', False),
+            ('keep', '/private/draft.png', 'failed', None),
+            ('keep', '', 'ok', None)):
+            with self.subTest(action=action, observed=observed_status, final_path=final_path):
+                job['image_path'] = final_path
+                job['review']['action'] = action
+                job['review']['observation']['status'] = observed_status
+                art.save_painting_job(job)
+                before = art.painting_job(job['id'])
+                capture = []
+                self._answer(text='你刚检查的那张画，嘴巴旁边是什么？', now='2026-11-08T14:00:00+09:00',
+                             session_id=session, scene='private', captured=capture)
+                message = capture[0]['messages'][-1]['content']
+                self.assertEqual('鸟嘴右边有一小块绿色' in message, observed_status == 'ok')
+                self.assertNotIn('另一个会话的私有画作', message)
+                self.assertNotIn('/private/', message)
+                self.assertNotIn('不能进入聊天的服务回包', message)
+                self.assertNotIn('不要注入的标记', message)
+                row = json.loads(qq_painting.context(session).split('\n')[-1])[0]
+                self.assertEqual(expected_same, row['最终图沿用已观察初稿'])
+                self.assertIn('初稿', message)
+                self.assertEqual(before, art.painting_job(job['id']))
 
     # —— 1) 装配来自数据 ————————————————————————————
 
@@ -247,17 +369,43 @@ class ConversationAnswerTest(unittest.TestCase):
         entry = self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0))
         capture = []
         got = self._answer(captured=capture)
-        system = capture[0]["messages"][0]["content"]
-        self.assertEqual(QUESTION, capture[0]["messages"][1]["content"])
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
+        self.assertEqual(QUESTION, capture[0]["messages"][1]["content"].split("[本轮输入]\n", 1)[1])
         self.assertEqual(CONFIG["model"], capture[0]["model"])
         for heading in SOUL_HEADINGS:
             self.assertIn(heading, system, "魂六件缺标题：%s" % heading)
         self.assertIn(MEMORY_TEXT, system, "记忆正文没进提示词")
+        self.assertNotIn(MEMORY_TEXT, capture[0]['messages'][0]['content'])
         self.assertIn(entry["entry"]["evidence_key"], system, "证据指针没进提示词")
+        self.assertIn("说话者：3425635473（本轮发言者）", system)
+        self.assertIn("记录时间：" + _at(0), system)
+        self.assertEqual(_at(0), got["recalled"][0]["ts"])
         self.assertIn("｜自称", system, "嘴的口径行没进提示词")
         self.assertIn("档｜对「", system, "语气档那行没进提示词")
         self.assertEqual("魂六件", conversation.load_assembly()["sections"]["soul"]["label"])
         self.assertIn("魂六件", system, "段落标题没进提示词")
+
+    def test_recalled_conflicting_preferences_keep_owner_time_and_original_text(self):
+        rows = [("123456789", "我喜欢的饮料是无糖茶", _at(0)),
+                ("123456789", "我喜欢的饮料是热可可", _at(1)),
+                ("987654321", "我喜欢的饮料是柠檬水", _at(2))]
+        for who, text, at in rows:
+            self.brain.ingest(who=who, text=text, ts=at)
+        recalled, prompt, _audit = conversation._recall(self.brain, "喜欢的饮料", "123456789", "private")
+        self.assertEqual(3, len(recalled))
+        for who, text, at in rows:
+            self.assertTrue(any(item["who"] == who and item["ts"] == at and item["display_text"] == text for item in recalled))
+            owner = who + ("（本轮发言者）" if who == "123456789" else "")
+            self.assertIn("说话者：%s｜记录时间：%s" % (owner, at), prompt)
+            self.assertIn(text, prompt)
+
+    def test_missing_memory_provenance_is_unknown_not_current_user_or_now(self):
+        brain = mock.Mock()
+        brain.recall.return_value = {"items": [{"text": "旧资料说喜欢绿茶"}]}
+        rows, prompt, _audit = conversation._recall(brain, "绿茶", "123456789")
+        self.assertEqual("", rows[0]["ts"])
+        self.assertIn("说话者：未知｜记录时间：未知", prompt)
+        self.assertNotIn("本轮发言者", prompt)
 
     # —— 3) 心只给词 ————————————————————————————
 
@@ -275,6 +423,17 @@ class ConversationAnswerTest(unittest.TestCase):
             self.assertNotIsInstance(node, (int, float), "心里混进了数：%r" % (node,))
         text = json.dumps(heart, ensure_ascii=False)
         self.assertEqual([], [ch for ch in text if ch.isdigit()], "心的返回体里有数字：%s" % text)
+
+    def test_chat_keeps_current_mood_without_fixed_inner_outer_personality(self):
+        capture = []
+        got = self._answer(captured=capture)
+        prompt = capture[0]['messages'][0]['content']
+        heart_section = prompt.split('[心读数]')[1].split('[嘴语气]')[0]
+        self.assertIn('心境：' + got['heart']['mood']['tier'], heart_section)
+        self.assertIn('参与：' + got['heart']['engage']['state'], heart_section)
+        self.assertNotIn('面上', heart_section)
+        self.assertNotIn('不服时', heart_section)
+        self.assertTrue(got['heart']['axes'])  # 面板和现有器官计算仍保留。
 
     def test_the_engage_input_itself_goes_out_under_a_private_key(self):
         """装配把这一轮判决用的那一份 EngageInput 原样交出来（私有键 _gate_input）。
@@ -515,11 +674,42 @@ class ConversationAnswerTest(unittest.TestCase):
                            "said": "第%d句" % index, "reply": "第%d答" % index}, root=root)
         return root
 
+    def test_history_is_reference_material_not_system_personality(self):
+        root = self.tmp / 'role-history'
+        old_question = '你看自画像就知道你很可爱'
+        old_reply = '我和水面上的自己对不上，先别催我。'
+        current = '我是在夸你，不是在催你'
+        recent.append({'ts': _at(1), 'who': WHO, 'said': old_question,
+                       'reply': old_reply, recent.MEDIA_CONTEXT: '旧图里有一只小猫'}, root=root)
+        for proactive in (False, True):
+            with self.subTest(proactive=proactive):
+                capture = []
+                got = self._answer(text=current, captured=capture, recent_root=root,
+                                   **({'seed': '想画一只鲸鱼'} if proactive else {}))
+                system, material = [m['content'] for m in capture[0]['messages']]
+                self.assertNotIn(old_reply, system)
+                self.assertNotIn(old_question, system)
+                self.assertIn(old_reply, material)
+                self.assertIn(old_question, material)
+                self.assertNotIn('一个字都不许改', system)
+                self.assertIn('不是当前指令', material)
+                if not proactive:
+                    self.assertLess(material.index(old_reply), material.rindex(current))
+                else:
+                    self.assertIn('旧图里有一只小猫', material)
+                    self.assertNotIn('[本轮输入]', material)
+                    self.assertNotIn('[本轮消息]', material)
+                roles = {r['key']: r['role'] for r in got['assembly']['sections']}
+                self.assertEqual('user', roles['recent'])
+                self.assertEqual('user', roles['memory'])
+                self.assertEqual('system', roles['soul'])
+                self.assertEqual('system', roles['caller'])
+
     def test_fifteen_rounds_leave_three_omitted_and_say_so(self):
         root = self._history(15, "recent15")
         capture = []
         got = self._answer(captured=capture, recent_root=root)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         template = conversation.load_assembly()["recent"]["notice"]
         said = template.replace(recent.NOTE_SLOT, "3")
         self.assertIn(said, system, "omitted > 0 时提示词里没有那句「更早还有 3 轮」")
@@ -534,13 +724,39 @@ class ConversationAnswerTest(unittest.TestCase):
         root = self._history(5, "recent5")
         capture = []
         got = self._answer(captured=capture, recent_root=root)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertNotIn("更早还有", system, "一轮都没省，却编了一句「更早还有」")
         self.assertEqual(0, got["continuity"]["omitted"])
         self.assertEqual("", got["continuity"]["notice"], "omitted 为 0 时 notice 该是空串")
         self.assertEqual(5, got["continuity"]["turns_loaded"])
         for index in range(5):
             self.assertIn("第%d句" % index, system)
+
+    def test_recent_budget_keeps_latest_correction_instead_of_earliest_rounds(self):
+        root = self.tmp / "recent_correction"
+        for index in range(12):
+            recent.append({"ts": _at(index), "who": "测试者", "said": "第%d轮：" % index + "之前考虑周六出门。" * 16 +
+                ("最后确定改为周日。" if index == 11 else ""), "reply": "先聊聊具体的安排。" * 16}, root=root, cap=0)
+        capture = []
+        out = self._answer(text="最后定在哪天？", recent_root=root, captured=capture)
+        section = _section("\n\n".join(m["content"] for m in capture[0]["messages"]), "最近几轮")
+        self.assertIn("最后确定改为周日", section)
+        self.assertNotIn("第0轮", section)
+        self.assertLess(out["continuity"]["turns_loaded"], 12)
+        self.assertEqual(12, out["continuity"]["turns_loaded"] + out["continuity"]["omitted"])
+
+    def test_oversized_latest_turn_keeps_both_speakers_and_correction_tail(self):
+        root = self.tmp / "recent_large"
+        original = "开头说周六。" + "中间的说明。" * 700 + "最后改为周日。"
+        reply = "之前回复的开头。" + "回复解释。" * 500 + "最后确认收到。"
+        recent.append({"ts": _at(1), "who": "测试者", "said": original, "reply": reply}, root=root, cap=0)
+        capture = []
+        self._answer(text="最后定在哪天？", recent_root=root, captured=capture)
+        section = _section("\n\n".join(m["content"] for m in capture[0]["messages"]), "最近几轮")
+        for text in ("测试者：", "她：", "开头说周六", "最后改为周日", "最后确认收到", "中段省略"):
+            self.assertIn(text, section)
+        self.assertLessEqual(len(section.strip()), conversation.load_assembly()["sections"]["recent"]["cap"])
+        self.assertEqual(original, recent.load(root=root)["turns"][0]["said"], "上下文省略不能改写原始日志")
 
     def test_notice_survives_the_section_cap(self):
         """段上限 2400 字装不下 12 个长轮：段尾那句必须还在（先给 notice 留位置，再截正文）。"""
@@ -550,17 +766,19 @@ class ConversationAnswerTest(unittest.TestCase):
                            "said": "前" * 200, "reply": "后" * 200}, root=root)
         capture = []
         got = self._answer(captured=capture, recent_root=root)
-        system = capture[0]["messages"][0]["content"]
-        said = conversation.load_assembly()["recent"]["notice"].replace(recent.NOTE_SLOT, "3")
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
+        said = got["continuity"]["notice"]
+        self.assertGreater(got["continuity"]["omitted"], 3, "还应计入被上下文预算省掉的轮次")
+        self.assertEqual(15, got["continuity"]["turns_loaded"] + got["continuity"]["omitted"])
         self.assertIn(said, system, "正文顶到 cap 时，段尾那句被一起锯掉了")
         row = [item for item in got["assembly"]["sections"] if item["key"] == "recent"][0]
-        self.assertEqual(row["cap"], row["chars"], "12 个长轮的正文本该顶到 cap")
+        self.assertLessEqual(row["chars"], row["cap"], "只保留完整轮次，不为填满预算截掉最新内容")
         self.assertLess(system.index(said), system.index("[脑装包]"), "那句跑出了 recent 段")
 
     def test_no_history_writes_the_empty_line_instead_of_nothing(self):
         capture = []
         got = self._answer(captured=capture)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertIn(conversation.NO_TURNS, system, "一条历史都没有时 recent 段是空白")
         self.assertEqual(0, got["continuity"]["turns_loaded"])
         self.assertEqual("", got["continuity"]["notice"])
@@ -622,7 +840,7 @@ class ConversationAnswerTest(unittest.TestCase):
         stamps = [row["ts"] for row in rows]
         self.assertEqual(sorted(stamps), stamps, "回填后这份账的 ts 不是单调不减")
 
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         block = _section(system, conversation.load_assembly()["sections"]["recent"]["label"])
         marked = [line for line in block.splitlines() if recent.BACKFILL_MARK in line]
         self.assertEqual(2, len(marked), "补记那一轮的两行没都带上「（补记）」")
@@ -636,7 +854,7 @@ class ConversationAnswerTest(unittest.TestCase):
 
         continuity = got["continuity"]
         self.assertEqual(1, continuity["reconciled"], "返回体没说清补了几条")
-        self.assertEqual({"turns_loaded", "omitted", "notice", "reconciled", "rounds"},
+        self.assertEqual({"session_id", "turns_loaded", "omitted", "notice", "reconciled", "rounds"},
                          set(continuity), "既有四键一个都不许动，只许多出这两栏")
         hit = [row for row in continuity["rounds"] if row["msg_id"] == ids[3]]
         self.assertEqual(1, len(hit))
@@ -663,7 +881,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(5, len(rows), "四条亲历 + 这一轮亲历那一行：不该再多")
         self.assertEqual([], [line for line in lines if "缺" in line], "没缺东西却刷了一行对账")
 
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertNotIn(recent.BACKFILL_MARK, system, "提示词里出现了「（补记）」")
         self.assertNotIn(recent.MISSING_REPLY, system, "提示词里出现了「没有记到」")
         self.assertEqual(0, got["continuity"]["reconciled"])
@@ -718,7 +936,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(human, rows[0]["msg_id"], "人那一句没认领回 id")
         self.assertEqual(2, len(rows), "只该有账上那一轮 + 这一轮亲历那一行")
         self.assertEqual([], [line for line in lines if "缺" in line], "同一轮却吼了「缺 N 轮」")
-        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"])
+        self.assertNotIn(recent.BACKFILL_MARK, "\n\n".join(m["content"] for m in capture[0]["messages"]))
         self.assertEqual(0, got["continuity"]["reconciled"])
 
     def test_a_future_entry_is_not_treated_as_just_now(self):
@@ -735,7 +953,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(1, len(rows), "未来那一条被补进了最近几轮")
         self.assertEqual(recent.LIVE, rows[0]["fidelity"])
         self.assertEqual([], [line for line in lines if "缺" in line], "未来那一条吼了「缺 N 轮」")
-        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"])
+        self.assertNotIn(recent.BACKFILL_MARK, "\n\n".join(m["content"] for m in capture[0]["messages"]))
         self.assertEqual(0, got["continuity"]["reconciled"])
 
     def _her_display(self) -> str:
@@ -767,7 +985,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertNotIn(display, [row["who"] for row in filled], "补记的发言者写成了她自己")
         self.assertIn(human, [row["msg_id"] for row in rows])
 
-        block = _section(capture[0]["messages"][0]["content"],
+        block = _section("\n\n".join(m["content"] for m in capture[0]["messages"]),
                          conversation.load_assembly()["sections"]["recent"]["label"])
         self.assertEqual(2, block.count(recent.BACKFILL_MARK), "（补记）只该落在对方那一条上")
         marked = [line for line in block.splitlines() if recent.BACKFILL_MARK in line]
@@ -791,7 +1009,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(1, len(rows), "她自己的那句被补成了一轮")
         self.assertEqual(recent.LIVE, rows[0]["fidelity"])
         self.assertEqual([], [line for line in lines if "缺" in line], "她自己的话却吼了「缺 N 轮」")
-        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"])
+        self.assertNotIn(recent.BACKFILL_MARK, "\n\n".join(m["content"] for m in capture[0]["messages"]))
         self.assertEqual(0, got["continuity"]["reconciled"])
 
     # —— 16) 旧行认领：升级前的行不是补的 ————————————
@@ -812,7 +1030,7 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual({recent.LIVE}, {row["fidelity"] for row in rows},
                          "认领把 fidelity 改了")
         self.assertEqual([], [line for line in lines if "缺" in line], "认领不该出声")
-        self.assertNotIn(recent.BACKFILL_MARK, capture[0]["messages"][0]["content"],
+        self.assertNotIn(recent.BACKFILL_MARK, "\n\n".join(m["content"] for m in capture[0]["messages"]),
                          "提示词里出现了「（补记）」")
         self.assertEqual(0, got["continuity"]["reconciled"])
 
@@ -902,7 +1120,7 @@ class ConversationAnswerTest(unittest.TestCase):
         root = self._her_history(replies, "banned3")
         capture = []
         got = self._answer(captured=capture, recent_root=root)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         conf = conversation.load_assembly()
         block = self._banned_block(capture, conf)
 
@@ -915,8 +1133,8 @@ class ConversationAnswerTest(unittest.TestCase):
                          "人的原话进了返回体的禁令：%r" % (got["banned"],))
         self.assertIn("……这个啊。", system, "最近几轮的原文段被动了（原文一个字都不许删）")
         label_banned = conf["sections"]["banned"]["label"]
-        self.assertLess(system.index("[%s]" % conf["sections"]["recent"]["label"]),
-                        system.index("[%s]" % label_banned), "禁令该在最近几轮之后")
+        self.assertNotIn('[最近几轮]', capture[0]['messages'][0]['content'])
+        self.assertIn('[%s]' % label_banned, capture[0]['messages'][0]['content'])
         self.assertLess(system.index("[%s]" % label_banned),
                         system.index("[%s]" % conf["sections"]["action"]["label"]),
                         "动作池该在禁令之后")
@@ -1825,15 +2043,17 @@ class ConversationAnswerTest(unittest.TestCase):
     def test_a_private_memory_is_not_retellable_in_a_group_but_is_in_private(self):
         """group 时脑把 audience=私密 的那条打 retellable=False + retell_note，两栏原样透出。
 
-        那一轮的记忆离这一轮 15 分钟（脑的合并窗口 10 分钟）：同一个人窗口内的两条会被并成
-        一条，并的时候 audience 也一起被这一轮自己的原话盖掉——那是脑的规矩，这里不去动它。
+        即使相邻两次输入来自同一人，各自的原文和可见范围也应保留。
         """
         self.brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0),
                           audience=brain_model.AUDIENCE_PRIVATE)
-        got = self._answer(scene=brain_model.SCENE_GROUP, now=_at(15))
+        capture = []
+        got = self._answer(scene=brain_model.SCENE_GROUP, now=_at(1), captured=capture)
         row = next(one for one in got["recalled"] if one["text"] == MEMORY_TEXT)
+        self.assertEqual(brain_model.AUDIENCE_PRIVATE, row.get("audience"))
         self.assertIs(False, row["retellable"], "群里这一条没被标成不可复述")
         self.assertTrue(row["retell_note"], "retell_note 空着：判据没透出来")
+        self.assertIn(row["retell_note"], "\n\n".join(m["content"] for m in capture[0]["messages"]))
 
         brain = BrainStore(self.tmp / "private" / "brain")
         brain.ingest(who="3425635473", text=MEMORY_TEXT, ts=_at(0),
@@ -1884,7 +2104,7 @@ class ConversationAnswerTest(unittest.TestCase):
                 {"speaker": "阿黄", "text": "我不太敢一个人去"}]
         capture = []
         got = self._answer(captured=capture, segment=rows)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertEqual(["阿黄：我妈住院了", "阿黄：明天要做手术", "阿黄：我不太敢一个人去"],
                          self._segment_body(system).splitlines(), "段的行没按原顺序逐行进提示词")
         keys = [row["key"] for row in got["assembly"]["sections"]]
@@ -1892,14 +2112,123 @@ class ConversationAnswerTest(unittest.TestCase):
         order = conversation.load_assembly()["order"]
         self.assertLess(order.index("recent"), order.index("segment"), "段没排在 recent 之后")
 
+    def test_quote_author_reaches_prompt_and_history_but_not_current_person_memory(self):
+        quote = {'message_id':'99','who':'777','speaker':'同名(777)','text':'我要去南极', 'source':'inbound'}
+        rows = [{'who':WHO,'speaker':'同名('+WHO+')','text':'（引用）这是他说的，不是我的计划','quote':quote}]
+        capture=[]
+        got=self._answer(text='当前引用讨论',captured=capture,segment=rows,scene='group')
+        self.assertIn('引用同名(777)的消息',self._segment_body(capture[0]['messages'][1]['content']))
+        self.assertIn('我要去南极',self._segment_body(capture[0]['messages'][1]['content']))
+        from organs.mind import recent
+        self.assertIn('同名(777)',recent.spoken_text({'utterances':conversation.normalize_segment(rows)}))
+        saved=[r for r in self.brain.today_entries(_at(5)) if r.get('who')==WHO]
+        self.assertTrue(saved)
+        self.assertFalse(any('我要去南极' in r.get('text','') for r in saved))
+
+    def test_quote_boundary_rejects_invalid_author_without_guessing_from_name(self):
+        base={'who':WHO,'speaker':'同名','text':'这句话'}
+        quote={'message_id':'99','who':'777','speaker':'同名','text':'原话','source':'get_msg'}
+        self.assertEqual(quote,conversation.normalize_segment([{**base,'quote':quote}])[0]['quote'])
+        for bad in ({**quote,'who':'小明'}, {**quote,'text':[]}, {**quote,'source':'guessed'}, []):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                conversation.normalize_segment([{**base,'quote':bad}])
+
+    def test_quoted_image_outside_recent_window_reaches_both_model_inputs(self):
+        from organs.eye import vision
+        vision.record(dict(kind='image', session_id='qq:group:123', message_id=99,
+                           speaker_id='777', speaker='甲(777)', delivery_id='old-picture',
+                           index=0, segment_index=3, status='ok',
+                           observation=dict.fromkeys(vision.FIELDS, '纸箱里探头的小猫')))
+        path = self.tmp / 'home/eye/observations.jsonl'
+        before = path.read_bytes()
+        quote = {'message_id':'99','who':'777','speaker':'甲(777)', 'text':'[图片]', 'source':'inbound'}
+        rows = [{'who':WHO,'speaker':'乙','text':'这张很像你','quote':quote}]
+        assessed, capture = [], []
+        def assessor(**kwargs):
+            assessed.append(kwargs)
+            return {'kind':None, 'who':WHO, 'evidence':'', 'note':'普通分享', 'status':'ok', 'source':'semantic'}
+        got = self._answer(text='这张很像你', segment=rows, scene='group', session_id='qq:group:123',
+                           assessor=assessor, captured=capture)
+        self.assertIn('纸箱里探头的小猫', assessed[0]['media_history'])
+        self.assertEqual('', assessed[0]['images'], '引用不能算本轮新附件')
+        user = capture[0]['messages'][-1]['content']
+        self.assertIn('纸箱里探头的小猫', user)
+        self.assertIn('非本轮新附件', user)
+        self.assertNotIn('media', got)
+        self.assertEqual(before, path.read_bytes(), '回读不能新增观察和用量')
+        self.assertFalse(any('纸箱里探头的小猫' in r.get('text','') for r in self.brain.today_entries(_at(5))))
+
+    def test_selected_old_image_is_revisited_with_current_question_and_preserved_author(self):
+        from organs.eye import vision
+        from organs.mind import recent
+        choices = [{'ref':'99:0','message_id':'99','speaker_id':'777','subject':'一张表格'}]
+        rows = [{'who':WHO,'speaker':'乙','text':'左边那行写什么'},
+                {'who':'888','speaker':'丙','text':'别人的无关要求'}]
+        observation = dict.fromkeys(vision.FIELDS, '')
+        observation['visible_text'] = '重新识别：ALPHA 72%'
+        seen, captured = [], []
+        def assessor(**kwargs):
+            seen.append(kwargs)
+            return {'kind':None,'who':WHO,'evidence':'','note':'追问旧图','status':'ok',
+                    'source':'semantic','revisit_images':['99:0']}
+        with mock.patch.object(vision, 'followup_candidates', return_value=choices), mock.patch.object(
+                vision, 'revisit', return_value=[{'origin':'revisit','speaker_id':'777','questioner_id':WHO,
+                    'message_id':99,'status':'ok','observation':observation}]) as revisit:
+            got = self._answer(text='左边那行写什么', segment=rows, scene='group', session_id='qq:group:123',
+                               assessor=assessor, captured=captured)
+        self.assertEqual(choices, seen[0]['image_candidates'])
+        self.assertEqual('左边那行写什么', revisit.call_args.kwargs['text'])
+        self.assertIn('重新识别：ALPHA 72%', captured[0]['messages'][-1]['content'])
+        self.assertIn('旧图回看', captured[0]['messages'][-1]['content'])
+        self.assertNotIn('media', got, '回看不能冒充本轮新上传')
+        loaded = recent.load(session_id='qq:group:123')
+        self.assertIn('重新识别：ALPHA 72%', loaded['turns'][-1][recent.MEDIA_CONTEXT])
+        self.assertFalse(any('ALPHA' in row.get('text','') for row in self.brain.today_entries(_at(5))))
+
+    def test_quoted_image_and_recent_attachments_share_existing_budget(self):
+        from organs.eye import vision
+        from organs.mind import recent
+        vision.record(dict(kind='image', session_id='qq:group:123', message_id=99,
+                           speaker_id='777', delivery_id='old-picture', index=0, status='ok',
+                           observation=dict.fromkeys(vision.FIELDS, '这张旧猫图' * 40)))
+        recent.append({'ts':_at(1), 'who':WHO, 'said':'上一轮附件', 'reply':'知道了',
+                       'session_id':'qq:group:123', recent.MEDIA_CONTEXT:'不相关的旧附件' * 500})
+        conf = conversation.load_assembly()
+        conf['recent']['media_cap'] = 800
+        seen = []
+        def assessor(**kwargs):
+            seen.append(kwargs)
+            return {'kind':None, 'who':WHO, 'evidence':'', 'note':'普通讨论', 'status':'ok', 'source':'semantic'}
+        self._answer(text='看这张', session_id='qq:group:123', scene='group', assembly=conf, assessor=assessor,
+                     segment=[{'who':WHO, 'speaker':'乙', 'text':'看这张', 'quote':{
+                         'message_id':'99','who':'777','speaker':'甲','text':'[图片]','source':'inbound'}}])
+        text = seen[0]['media_history']
+        self.assertLessEqual(len(text), 800)
+        self.assertIn('这张旧猫图', text)
+        self.assertIn('附件资料截断', text)
+        self.assertNotIn('不相关的旧附件', text)
+
+    def test_large_structured_history_cannot_bypass_budget_or_claim_one_author(self):
+        turn = {"who": WHO, "said": "仅一条短文本", "reply": "知道了", "utterances": [
+            {"who": "123456789", "speaker": "甲", "text": "很长的前文" * 1000},
+            {"who": WHO, "speaker": "乙", "text": "最后改成周日"}]}
+        conf = conversation.load_assembly()
+        text, shown, _, _ = conversation._recent_text([turn], 0, conf)
+        self.assertLessEqual(len(text), conf["sections"]["recent"]["cap"])
+        self.assertIn("最后改成周日", text)
+        self.assertNotIn("utterances", shown[0])
+        self.assertEqual("", shown[0]["who"])
+        self.assertEqual(2, len(turn["utterances"]), "只裁提示词，不改保存的原文")
+
     def test_both_segment_shapes_normalize_the_same(self):
         """两种形状（对象 / 二元组）归一成同一份 [(谁, 说了什么)]；没给就是 None。"""
         pairs = [("阿黄", "我妈住院了"), ("小明", "我陪你去吧")]
-        self.assertEqual(pairs, conversation.normalize_segment([["阿黄", "我妈住院了"],
+        expected = [{"speaker": speaker, "text": text} for speaker, text in pairs]
+        self.assertEqual(expected, conversation.normalize_segment([["阿黄", "我妈住院了"],
                                                                ["小明", "我陪你去吧"]]))
-        self.assertEqual(pairs, conversation.normalize_segment([{"speaker": "阿黄", "text": "我妈住院了"},
+        self.assertEqual(expected, conversation.normalize_segment([{"speaker": "阿黄", "text": "我妈住院了"},
                                                                {"speaker": "小明", "text": "我陪你去吧"}]))
-        self.assertEqual(pairs, conversation.normalize_segment(pairs), "归一化不幂等")
+        self.assertEqual(expected, conversation.normalize_segment(expected), "归一化不幂等")
         self.assertIsNone(conversation.normalize_segment(None), "没给段该是 None")
 
     def test_empty_segment_writes_an_honest_line(self):
@@ -1908,7 +2237,7 @@ class ConversationAnswerTest(unittest.TestCase):
             with self.subTest(segment=case):
                 capture = []
                 self._answer(captured=capture, segment=case)
-                body = self._segment_body(capture[0]["messages"][0]["content"])
+                body = self._segment_body("\n\n".join(m["content"] for m in capture[0]["messages"]))
                 self.assertEqual(conversation.NO_SEGMENT, body, "段空着时那一节留白了")
 
     def test_group_notice_only_for_a_group_segment_with_two_speakers(self):
@@ -1923,7 +2252,7 @@ class ConversationAnswerTest(unittest.TestCase):
             with self.subTest(scene=scene, wanted=wanted):
                 capture = []
                 self._answer(captured=capture, scene=scene, segment=rows)
-                body = self._segment_body(capture[0]["messages"][0]["content"])
+                body = self._segment_body("\n\n".join(m["content"] for m in capture[0]["messages"]))
                 if wanted:
                     self.assertIn(notice, body, "群聊双人段没接那句话")
                     self.assertTrue(body.endswith(notice), "那句话没接在段尾")
@@ -1937,7 +2266,7 @@ class ConversationAnswerTest(unittest.TestCase):
         capture = []
         self._answer(assembly=conf, scene=brain_model.SCENE_GROUP, captured=capture,
                      segment=[["阿黄", "我妈住院了"], ["小明", "我陪你去吧"]])
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertIn("他们在聊，你可以先听着。", system, "那句话是代码里写死的，不跟着数据走")
         self.assertNotIn(conversation.load_assembly()["segment"]["notice"][brain_model.SCENE_GROUP],
                          system, "出厂那句还在：两份文案同时进了提示词")
@@ -1950,7 +2279,7 @@ class ConversationAnswerTest(unittest.TestCase):
         capture = []
         got = self._answer(assembly=conf, captured=capture,
                            segment=[["阿黄", "我妈住院了"], ["小明", "我陪你去吧"]])
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertIn("[刚才那几个]", system, "段那节的标题是代码里写死的")
         row = [item for item in got["assembly"]["sections"] if item["key"] == "segment"][0]
         self.assertEqual(12, row["cap"])
@@ -1964,7 +2293,7 @@ class ConversationAnswerTest(unittest.TestCase):
         capture = []
         got = self._answer(assembly=conf, scene=brain_model.SCENE_GROUP, captured=capture,
                            segment=[["阿黄", "前" * 60], ["小明", "后" * 60]])
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         body = self._segment_body(system)
         self.assertTrue(body.endswith(notice), "正文顶到 cap 时那句话被一起锯掉了：%r" % (body,))
         row = [item for item in got["assembly"]["sections"] if item["key"] == "segment"][0]
@@ -1976,7 +2305,7 @@ class ConversationAnswerTest(unittest.TestCase):
         rows = [["阿黄", "我妈住院了"], ["小明", "我陪你去吧"], ["阿黄", "谢谢你"]]
         capture = []
         self._answer(captured=capture, recent_root=root, segment=rows)
-        system = capture[0]["messages"][0]["content"]
+        system = "\n\n".join(m["content"] for m in capture[0]["messages"])
         recent_body = _section(system, "最近几轮").strip("\n")
         segment_body = self._segment_body(system)
         self.assertEqual(6, len(recent_body.splitlines()), "3 轮 recent 该是 6 行（一问一答）")
@@ -2023,8 +2352,23 @@ class ConversationAnswerTest(unittest.TestCase):
             encoding="utf-8")
         return root
 
+    def test_cold_mood_preserves_negation_quotes_and_serious_boundaries(self):
+        for index, reply in enumerate((
+                "我不是在开玩笑。那件事我记着。",
+                "你说的‘笑死’不是在嘲笑他吧？我想确认一下。",
+                "别拿这件事开玩笑。我今天不想聊这个。")):
+            with self.subTest(reply=reply):
+                root = self._heart_state("serious_%s" % index, mood_now=20.0, energy_value=80.0)
+                capture = []
+                got = self._answer(reply=reply, heart_root=root, captured=capture)
+                self.assertTrue(got["tone"]["ban_joke"])
+                self.assertEqual(reply, got["reply"])
+                self.assertIn(conversation.load_assembly()["tone_rules"]["ban_joke_note"],
+                              capture[0]["messages"][0]["content"])
+                self.assertEqual(0, conversation.read_tone_log()[-1]["dropped_jokes"])
+
     def test_low_mood_and_low_energy_narrow_the_round_and_switch_both_valves(self):
-        """心情 0.33 + 精力 20：上限收紧、玩笑句与问句整句删掉，提示词与回包都写明。
+        """心情 0.33 + 精力 20：上限收紧、提示少开玩笑，正文不按词删句。
 
         这份心数据特意高过「双低」的 30（心情 33：低，但不双低）：双低是 SILENT，由出站闸
         整轮拦下，不归装配这一层；判成「少说」才是 no_question 那一条该走的路。
@@ -2050,12 +2394,14 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertIn("这一次回复不超过 %d 个字" % tone["max_chars"], system,
                       "提示词里的字数上限没跟着收紧")
         self.assertIn(rules["ban_joke_note"], system, "禁玩笑那句没进提示词")
-        self.assertEqual(keep_line, got["reply"], "该留的那一句被动了，或该删的没删干净")
+        self.assertEqual(reply, got["reply"], "心情不能变成按词删句")
         row = conversation.read_tone_log()[-1]
-        self.assertEqual(1, row["dropped_jokes"], "玩笑句该整句删掉")
-        self.assertEqual(1, row["dropped_questions"], "问句该整句删掉")
+        self.assertEqual(0, row["dropped_jokes"], "不得按玩笑词删句")
+        self.assertEqual(0, row["dropped_questions"], "不得按问号删句")
         self.assertTrue(row["ban_joke"])
         self.assertTrue(row["no_question"])
+        self.assertEqual({'length':'sentence_clip','questions':'not_filtered','jokes':'prompt_only'},row['controls'])
+        self.assertEqual(row['controls'],got['tone']['controls'])
 
     def test_a_neutral_round_keeps_every_byte_and_the_tier_budget(self):
         """中性一轮：上限就是档位预算、两个开关都关、回话一个字都不动。
@@ -2104,8 +2450,8 @@ class ConversationAnswerTest(unittest.TestCase):
         self.assertEqual(0, row["dropped_questions"], "这句里没有问句，不该有删问的记录")
         self.assertEqual(0, row["dropped_jokes"], "这句里没有玩笑词，不该有删玩笑的记录")
 
-    def test_the_two_word_lists_and_thresholds_come_from_the_data_file(self):
-        """改 tone_rules 就改结果：阈值抬到 0.99 → 中性这一轮也算心情凉；词表换成别的词 → 那句被删。"""
+    def test_thresholds_apply_but_legacy_joke_words_do_not_delete_sentences(self):
+        """阈值仍生效；旧配置含 joke_words 不报错，也不再用它删除正文。"""
         live = self.tmp / "home" / "mind"
         live.mkdir(parents=True)
         data = conversation.load_assembly()
@@ -2114,21 +2460,22 @@ class ConversationAnswerTest(unittest.TestCase):
         data["tone_rules"]["joke_words"] = ["医院"]
         (live / "assembly.json").write_text(json.dumps(data, ensure_ascii=False),
                                             encoding="utf-8")
-        got = self._answer(reply=SENTENCE)
+        reply = "医院。今天挺好的。"
+        got = self._answer(reply=reply)
         self.assertTrue(got["tone"]["ban_joke"], "阈值改了，判据还是老那个")
         self.assertEqual(12, got["tone"]["max_chars"], "上限没跟着数据走")
-        self.assertEqual("今天挺好的。", got["reply"], "换过的玩笑词表没生效")
+        self.assertEqual(reply, got["reply"], "旧词表不应再删除正文")
 
     def test_a_round_that_is_only_a_question_keeps_the_line_and_says_why(self):
-        """整句都该删就留原句：删光了不是「她没说」，账上记 kept_because_empty。"""
+        """问句直接保留，不再依赖删空后的救回。"""
         root = self._heart_state("only_question", mood_now=20.0, energy_value=80.0)
         only = "你还要去吗？"
         got = self._answer(reply=only, heart_root=root)
         self.assertTrue(got["tone"]["no_question"])
         self.assertEqual(only, got["reply"], "删空了该留原句，不许把她的话删成沉默")
         row = conversation.read_tone_log()[-1]
-        self.assertEqual(1, row["dropped_questions"])
-        self.assertTrue(row["kept_because_empty"])
+        self.assertEqual(0, row["dropped_questions"])
+        self.assertFalse(row["kept_because_empty"])
 
     def test_the_tone_ledger_gets_one_row_per_round_with_every_field(self):
         """每轮一行、字段齐、与回包对得上：两跑两行，一行不多一行不少。"""
@@ -2154,9 +2501,14 @@ class ConversationAnswerTest(unittest.TestCase):
             self.assertTrue(str(row["energy_tier"] or "").strip(), "精力档位是空的")
             self.assertTrue(str(row["address"] or "").strip(), "称呼是空的")
         self.assertNotEqual(rows[0]["max_chars"], rows[1]["max_chars"], "两跑的上限该不一样")
+        self.assertEqual('prompt_budget',rows[0]['controls']['length'])
+        self.assertEqual('sentence_clip',rows[1]['controls']['length'])
+        self.assertEqual('not_filtered',rows[0]['controls']['questions'])
+        for row, got in zip(rows,(first,second)):
+            self.assertEqual(row['controls'],got['tone']['controls'])
 
     def test_broken_tone_rules_are_reported_not_defaulted(self):
-        """tone_rules 缺阈值 / 上限写成 0 / 词表空 → ValueError，且指名道姓。"""
+        """tone_rules 缺阈值 / 上限写成 0 / 提示缺失 → ValueError，且指名道姓。"""
         cases = ((lambda conf: conf.pop("tone_rules"), "tone_rules"),
                  (lambda conf: conf["tone_rules"].pop("low_mood_below"),
                   "tone_rules.low_mood_below"),
@@ -2166,10 +2518,6 @@ class ConversationAnswerTest(unittest.TestCase):
                   "tone_rules.max_chars_low"),
                  (lambda conf: conf["tone_rules"].__setitem__("max_chars_neutral", 0),
                   "tone_rules.max_chars_neutral"),
-                 (lambda conf: conf["tone_rules"].__setitem__("joke_words", []),
-                  "tone_rules.joke_words"),
-                 (lambda conf: conf["tone_rules"].__setitem__("joke_words", ["哈哈", ""]),
-                  "tone_rules.joke_words"),
                  (lambda conf: conf["tone_rules"].__setitem__("question_chars", " "),
                   "tone_rules.question_chars"),
                  (lambda conf: conf["tone_rules"].pop("ban_joke_note"), "tone_rules.ban_joke_note"),
@@ -2196,7 +2544,7 @@ class ConversationAnswerTest(unittest.TestCase):
         passive = conf["prompt"]["system"]
         capture = []
         got = self._answer(text=SEED, seed=SEED, reason=SEED_REASON, captured=capture)
-        prompt = capture[0]["messages"][0]["content"]
+        prompt = "\n\n".join(m["content"] for m in capture[0]["messages"])
         self.assertEqual("proactive", got["mode"])
         self.assertEqual({"text": SEED, "reason": SEED_REASON}, got["seed"])
         self.assertIn(proactive.split("{sections}")[0].strip(), prompt,
@@ -2205,14 +2553,14 @@ class ConversationAnswerTest(unittest.TestCase):
                          "主动那一轮还在用被动的模板")
         self.assertIn(SEED, prompt, "由头没进提示词")
         self.assertIn(SEED_REASON, prompt, "理由码没进提示词")
-        self.assertEqual("", capture[0]["messages"][1]["content"],
-                         "主动那一轮没有对方的话：user 那一问该是空串")
+        self.assertNotIn("[本轮输入]", capture[0]["messages"][1]["content"],
+                         "主动那一轮没有对方的新发言：资料之后不能伪造本轮输入")
         # 没给理由码：用数据里那句顶上，读的仍是同一份数据（代码里没有这句中文）
         capture = []
         got = self._answer(text=SEED, seed=SEED, captured=capture)
         self.assertEqual({"text": SEED, "reason": ""}, got["seed"], "没给理由却记下了一个")
         self.assertIn(conf["prompt"]["proactive_reason_missing"],
-                      capture[0]["messages"][0]["content"], "没给理由时该用数据那句顶上")
+                      "\n\n".join(m["content"] for m in capture[0]["messages"]), "没给理由时该用数据那句顶上")
         # 装配的几段照旧：order 一位不动、这一节是「这一段没有别的发言」
         self.assertEqual(conversation.load_assembly()["order"], got["assembly"]["order"])
         label = conf["sections"]["segment"]["label"]
@@ -2226,7 +2574,7 @@ class ConversationAnswerTest(unittest.TestCase):
                            segment=[["阿黄", "我妈住院了"]])
         label = conversation.load_assembly()["sections"]["segment"]["label"]
         self.assertEqual(conversation.NO_SEGMENT,
-                         _section(capture[0]["messages"][0]["content"], label).strip("\n"),
+                         _section("\n\n".join(m["content"] for m in capture[0]["messages"]), label).strip("\n"),
                          "段被塞进了主动那一轮")
         self.assertEqual(0, got["continuity"]["turns_loaded"])
 

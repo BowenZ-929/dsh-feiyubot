@@ -39,7 +39,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from organs.heart import energy, events, model, store
+from organs.heart import changes, energy, events, model, store
 
 SLEEP_FILE = "sleep.json"
 VERSION = 1
@@ -145,14 +145,18 @@ def _night(raw: Any) -> Optional[Dict[str, Any]]:
     awake = _stamp(raw.get("awake_at"))
     if asleep is None or awake is None or awake < asleep:
         return None
-    return {
+    result = {
         "asleep_at": model.iso(asleep),
         "awake_at": model.iso(awake),
-        # 时长是两个时刻相减，每次读都重算：不另留一份可能对不上的数。
+        # 起止时间减去实际硬撑时长；旧账未记录硬撑时仍按原口径。
         "duration_min": (awake - asleep).total_seconds() / 60.0,
         "late": bool(raw.get("late")),
         "enough": bool(raw.get("enough")),
     }
+    if raw.get('awake_minutes'):
+        result['awake_minutes'] = max(0.0, float(raw['awake_minutes']))
+        result['duration_min'] = max(0.0, result['duration_min'] - result['awake_minutes'])
+    return result
 
 
 def _load(root: Any) -> Dict[str, Any]:
@@ -253,9 +257,19 @@ def _wake_cap(short_nights: int, cfg: Dict[str, Any]) -> float:
     return float(model.ENERGY_MAX)
 
 
-def _awake_minutes(data: Dict[str, Any], now: Optional[str]) -> Optional[float]:
-    """now − last_awake_at（分钟）；没醒过 → None，时钟反了 → 0。"""
-    stamp = _stamp(data.get("last_awake_at"))
+def _awake_minutes(data: Dict[str, Any], now: Optional[str], root: Any) -> Optional[float]:
+    """本次连续清醒时长；实际休息优先，旧账仅按已记录的睡醒事件判断。"""
+    from . import rest
+    current = rest.state(root)
+    if current['phase'] in ('asleep', 'deep'):
+        return 0.0
+    if current['phase'] in ('awake', 'holding'):
+        stamp = _stamp(current['since'])
+    else:
+        stamp = _stamp(data.get("last_awake_at"))
+        asleep = _stamp(data.get("last_asleep_at"))
+        if asleep is not None and (stamp is None or asleep > stamp):
+            return 0.0
     if stamp is None:
         return None
     delta = (model.parse_ts(_at(now)) - stamp).total_seconds() / 60.0
@@ -265,11 +279,12 @@ def _awake_minutes(data: Dict[str, Any], now: Optional[str]) -> Optional[float]:
 # ---- 对外 ----------------------------------------------------------------
 
 
-def record(kind: str, root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
+def record(kind: str, root: Any = None, now: Optional[str] = None, *, awake_minutes: float = 0.0) -> Dict[str, Any]:
     """落一笔睡眠事件：kind ∈ {"asleep", "awake"}。
 
     先由 events.deliver 投进事件账本（同一笔时刻，两本账不各取各的表），再更新本账：
     asleep 记 last_asleep_at；awake 配上一笔 asleep 算 duration_min 并写进 nights。
+    实际休息生命周期仅在该夜结束时投awake，awake_minutes扣除期间硬撑，不把中断拆成两夜。
     上一笔还没醒就再来一笔 awake（同一夜重复投递）不重复记夜——一夜只落一条。
     返回 {"kind", "at", "night", "consecutive_late_nights", "consecutive_short_nights",
     "drift_hours", "wake_cap"}；night 是刚写进 nights 的那一夜，没配上就是 None。
@@ -280,6 +295,12 @@ def record(kind: str, root: Any = None, now: Optional[str] = None) -> Dict[str, 
     stamp = model.parse_ts(at)
 
     data = _load(root)
+    # 只记录实际写入的睡眠字段；窗口与回血上限仍由现有概览计算。
+    labels = {"last_asleep_at": "上次入睡", "last_awake_at": "上次醒来",
+              "last_duration_min": "上一觉时长（分钟）",
+              "consecutive_late_nights": "连续晚睡（夜）",
+              "consecutive_short_nights": "连续未睡够（夜）"}
+    before = {label: data[key] for key, label in labels.items()}
     cfg = _config(data)
     base = energy.DEFAULT_SLEEP_WINDOW
     night: Optional[Dict[str, Any]] = None
@@ -294,7 +315,7 @@ def record(kind: str, root: Any = None, now: Optional[str] = None) -> Dict[str, 
             fresh = False  # 这一笔 asleep 已经配过醒了，不再记第二夜
         if fresh:
             late = _late(last_asleep, stamp, cfg, base)
-            duration_min = (stamp - last_asleep).total_seconds() / 60.0
+            duration_min = max(0.0, (stamp - last_asleep).total_seconds() / 60.0 - awake_minutes)
             enough = duration_min >= _num(cfg.get("enough_min"), CONFIG_DEFAULTS["enough_min"])
             night = {
                 "asleep_at": model.iso(last_asleep),
@@ -303,6 +324,8 @@ def record(kind: str, root: Any = None, now: Optional[str] = None) -> Dict[str, 
                 "late": late,
                 "enough": enough,
             }
+            if awake_minutes:
+                night['awake_minutes'] = awake_minutes
             data["nights"].append(night)
             data["nights"] = data["nights"][-MAX_NIGHTS:]
             data["last_duration_min"] = duration_min
@@ -313,6 +336,8 @@ def record(kind: str, root: Any = None, now: Optional[str] = None) -> Dict[str, 
         data["last_awake_at"] = at
 
     _save(root, data)
+    changes.record(root, at=at, group="sleep", reason="入睡" if kind == KIND_ASLEEP else "醒来",
+                   source=kind, before=before, after={label: data[key] for key, label in labels.items()})
     drift = _drift(data["consecutive_late_nights"], cfg)
     return {
         "kind": kind,
@@ -350,8 +375,8 @@ def wake_cap(root: Any = None, now: Optional[str] = None) -> float:
 
 
 def awake_minutes(root: Any = None, now: Optional[str] = None) -> Optional[float]:
-    """已经清醒了多少分钟 = now − last_awake_at；没醒过 → None。就是相减，没有常数。"""
-    return _awake_minutes(_load(root), now)
+    """本次连续清醒分钟数；睡着为 0，尚无状态或睡醒记录为 None。只读不推进状态。"""
+    return _awake_minutes(_load(root), now, root)
 
 
 def overview(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
@@ -369,6 +394,6 @@ def overview(root: Any = None, now: Optional[str] = None) -> Dict[str, Any]:
         "drift_hours": drift,
         "effective_window": _shift(energy.DEFAULT_SLEEP_WINDOW, drift),
         "wake_cap": _wake_cap(data["consecutive_short_nights"], cfg),
-        "awake_minutes": _awake_minutes(data, now),
+        "awake_minutes": _awake_minutes(data, now, root),
         "nights": data["nights"][-OVERVIEW_NIGHTS:],
     }

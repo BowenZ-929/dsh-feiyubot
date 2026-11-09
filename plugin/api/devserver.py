@@ -26,8 +26,9 @@ import json
 import os
 import sys
 import threading
+from contextlib import nullcontext
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -103,23 +104,26 @@ def _tick_brief(payload: Mapping[str, Any]) -> str:
                mood))
 
 
-def _tick_loop(stop: threading.Event, every: float, brain: Any) -> None:
+def _tick_loop(stop: threading.Event, every: float, brain: Any, store: Any = None) -> None:
     """一次一觉的循环：第一觉**立刻**跑（重启后 60 秒内就能看到账），之后每 every 秒一次。
 
     线程里的错只记一行、不吃掉循环，也绝不把进程带走：一件坏事不许让节律停摆。
     """
     while True:
         try:
-            print("[devserver] tick %s" % _tick_brief(day.run_tick(brain=brain)), flush=True)
+            print("[devserver] tick %s" % _tick_brief(day.run_tick(brain=brain, proactive_guard=_Handler.business_lock,
+                  **({"store": store} if store is not None else {}))), flush=True)
         except Exception as exc:  # noqa: BLE001 - 线程里的错不许无声无息
             sys.stderr.write("[devserver] tick 失败 at=%s：%s: %s\n"
                              % (_local_now(), type(exc).__name__, exc))
             sys.stderr.flush()
+        from organs.mind import rice
+        rice.refresh()
         if stop.wait(every):
             return
 
 
-def start_tick_thread(every: Optional[float] = None, brain: Any = None) -> Dict[str, Any]:
+def start_tick_thread(every: Optional[float] = None, brain: Any = None, store: Any = None) -> Dict[str, Any]:
     """起节律线程；被 QQAGENT_NO_TICK 关掉或已经在跑就不起第二个。"""
     global _TICK_STOP, _TICK_THREAD
     if _tick_off():
@@ -130,7 +134,7 @@ def start_tick_thread(every: Optional[float] = None, brain: Any = None) -> Dict[
         return {"started": False, "interval_seconds": None, "message": "节律线程已经在跑"}
     interval = float(every if every is not None else tick_seconds())
     stop = threading.Event()
-    thread = threading.Thread(target=_tick_loop, args=(stop, interval, brain),
+    thread = threading.Thread(target=_tick_loop, args=(stop, interval, brain, store),
                               name="day-tick", daemon=True)
     _TICK_STOP, _TICK_THREAD = stop, thread
     thread.start()
@@ -165,6 +169,8 @@ def _decode_target(raw: str) -> str:
 class _Handler(BaseHTTPRequestHandler):
     store: Any = None
     brain: Any = None
+    # 慢模型调用不能堵住守护探活；其他业务保持原来逐个处理的顺序。
+    business_lock = threading.Lock()
 
     def do_GET(self) -> None:
         self._dispatch("GET")
@@ -197,11 +203,16 @@ class _Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError, UnicodeDecodeError) as exc:
                 self._send(400, {"ok": False, "message": "body 不是合法 JSON：%s" % exc})
                 return
-        if inbound.owns(method, path):
-            self._send(*inbound.handle(body))
-            return
-        status, payload = api.handle(method, target, body, self.store, brain=self.brain)
-        self._send(status, payload)
+        immediate = (method == 'GET' and path in ('/soul/check', '/healthz', '/observe/channel', '/observe/channel-runtime',
+                                                '/eye/status', '/ear/status', '/voice/status') or
+                     method == 'POST' and path == '/day/proactive/disable')
+        guard = nullcontext() if immediate else self.business_lock
+        with guard:
+            if inbound.owns(method, path):
+                self._send(*inbound.handle(body))
+                return
+            status, payload = api.handle(method, target, body, self.store, brain=self.brain)
+            self._send(status, payload)
 
     def _page(self, name: str) -> None:
         data = read_page(name)
@@ -247,6 +258,8 @@ def _load_brain(path: Path) -> Optional[BrainStore]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
+    # 用户要求保留模型调用记录；DSH 与命令行启动保持一致，显式设 0 仍可关闭。
+    os.environ.setdefault("QQAGENT_TRACE", "1")
     try:
         info = roots.bootstrap()
     except roots.RootsError as exc:
@@ -270,7 +283,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     _Handler.brain = _load_brain(brain_root)
     # 日子线：唯一的那一个循环，默认就开（QQAGENT_NO_TICK 关得掉），进程结束就跟它一起走
-    started = start_tick_thread(brain=_Handler.brain)
+    started = start_tick_thread(brain=_Handler.brain, store=_Handler.store)
     print("[devserver] 日子线节律：%s" % started["message"], flush=True)
     server = HTTPServer(("127.0.0.1", args.port), _Handler)
     print("http://127.0.0.1:%d/  root=%s  brain=%s" % (

@@ -358,6 +358,7 @@ def report_event(
     now: Optional[str] = None,
     force: bool = False,
     reason: Optional[str] = None,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """核/通道投一件情绪事件：**建议**，推多少由心按契约权重与冷却自己拍。
 
@@ -369,10 +370,11 @@ def report_event(
       ② mood.apply_event(kind, tiers=契约权重)——权重从这里进 mood，核碰不到数值
       ③ emotion_log.jsonl 落一行（applied:true + mood_before / mood_after）。
     - force=True 绕过冷却（只给"静音触发那条 cold"用，reason 写进账说明来由）；
-    - mood 自己的两道旧闸（同一人同一小时 windowed、负向日上限 capped）照样在前面：
-      被它们挡下时返回 applied=False、reason=那道的名字（"windowed"/"capped"），
+    - mood 的负向日上限 capped 保留：
+      被它挡下时返回 applied=False、reason="capped"，
       账上照落——被挡也是一件事，不能悄悄消失。
     - at 是记账时刻，now 是判冷却的此刻；只给一个就两个都用它。
+    - origin 只传递给变化账，记录原回合的出处，不参与权重、冷却或事件判断。
 
     返回 {"applied", "kind", "who", "weight", "mood_before", "mood_after",
     "reason", "at"}：weight 是这次用的契约权重（档），mood_before/after 是 mood
@@ -399,6 +401,10 @@ def report_event(
         "mood_after": None,
     }
 
+    if kind == model.EVENT_PRAISE:
+        from . import pending
+        pending.settle('praise', root=root, now=moment, who=label, reward=False)
+
     if not force and _cooling(root, kind, moment, float(contract["cooldown_min"])):
         values.update({"applied": False, "reason": REASON_COOLDOWN})
         _write_log(root, contract, kind, values)
@@ -414,7 +420,8 @@ def report_event(
         }
 
     # ② 权重交给 mood：核只递 kind，数值由这里给（契约权重 = 名义档）。
-    result = mood.apply_event(kind, root=root, now=moment, who=label, tiers=weight)
+    result = mood.apply_event(kind, root=root, now=moment, who=label, tiers=weight,
+                              **({'origin': origin} if origin else {}))
     applied = bool(result.get("ok"))
     if applied:
         values.update({"applied": True,

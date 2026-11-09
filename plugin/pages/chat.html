@@ -9,7 +9,7 @@
      没给就让 color-scheme 带着系统色走。深色跟随宿主 [data-theme="dark"]，不自造色板
      （docs/reference/ui.md §1.5）。 */
   :root {
-    color-scheme: light;
+    color-scheme: light dark;
     --gap-1: 12px;
     --gap-2: 20px;
     --radius: 8px;
@@ -19,7 +19,7 @@
     --fg: var(--dsw-alias-text-l1, CanvasText);
     --dim: var(--dsw-alias-text-l2, GrayText);
     --brand: var(--dsw-alias-brand, #4d6bfe);
-    --on-brand: var(--dsw-alias-text-on-brand, Canvas);
+    --on-brand: var(--dsw-alias-text-on-brand, #fff);
     --warn: var(--dsw-alias-warn, #d98a3d);
   }
   html[data-theme="dark"] { color-scheme: dark; }
@@ -86,6 +86,7 @@
     main > .banner, main > header, main > footer, main > #build { grid-column: 1 / -1; }
     main > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
   }
+html[data-theme="light"]{color-scheme:light}
 </style>
 <!-- MOUNT/BASE 只在 panel-base.js 里算一次：相对地址在两种打开方式下都对，
      直开核 → /panel-base.js，壳 iframe → /qqagent/panel/panel-base.js（壳剥前缀）。 -->
@@ -120,6 +121,7 @@
     <section class="card" id="recall-card">
       <h2>这次她想起了什么</h2>
       <p class="owner">回忆是程序写的：回想过程挑出来的条目，人改不了。</p>
+      <p class="muted" id="recall-summary">尚无本轮取舍记录。</p>
       <ul class="rows" id="recall-list"></ul>
       <p class="muted" id="recall-empty">这次没想起什么</p>
     </section>
@@ -149,9 +151,10 @@
       </dl>
     </section>
     <section class="card" id="readouts-card">
-      <div class="head"><h2>这一轮的温度、连续性与锚句</h2><span class="owner">由程序写：温度档位按数据选，最近几轮从账上读；锚句是人写在家的仓库里的</span></div>
+      <div class="head"><h2>这一轮的温度、连续性与锚句</h2><span class="owner">温度展示请求值，是否生效取决于模型；最近几轮从账上读，锚句来自家的仓库</span></div>
+      <p class="muted">DeepSeek 思考模式会忽略温度参数，切换事实档或默认档不会改变其采样温度。本轮是否开启思考及返回的思考内容，可在模型调用记录中核对。</p>
       <dl class="kv">
-        <dt>温度</dt><dd id="llm-temperature">还没说话</dd>
+        <dt>请求温度</dt><dd id="llm-temperature">还没说话</dd>
         <dt>连续性</dt><dd id="continuity-line">还没说话</dd>
         <dt>锚句</dt><dd id="anchors-line">还没说话</dd>
         <dt>口癖护栏</dt><dd id="guard-line">还没说话</dd>
@@ -265,7 +268,10 @@
   }
 
   // 「这次她想起了什么」：每条带正文、来源、来源类型、证据指针。
-  function renderRecall(items) {
+  function renderRecall(items, audit) {
+    el("recall-summary").textContent = audit ?
+      "入选 " + audit.selected.length + " 条 · 交给回复模型 " + audit.selected.filter(function(x){return x.sent_to_model;}).length +
+      " 条 · 名额落选 " + audit.skipped.length + " 条。完整取舍保存在观察页的近期对话记录。" : "旧记录未保存本轮取舍。";
     var list = el("recall-list");
     clear(list);
     if (!items.length) {
@@ -277,7 +283,18 @@
     for (var i = 0; i < items.length; i += 1) {
       var item = items[i];
       var li = node("li", "recall-item");
+      if (item.rank != null) li.appendChild(node("div", "muted", "去重后候选第 " + item.rank + " 位 · 字面加权分 " + item.score));
+      li.appendChild(node("div", item.in_prompt === false ? "warn" : "muted",
+        item.in_prompt === true ? "已完整放入本轮上下文" :
+        item.in_prompt === false ? "已召回，但未放入本轮上下文（长度限制或未启用记忆段）" : "旧记录未标注是否放入上下文"));
       li.appendChild(node("div", "recall-text", item.text));
+      if (item.note_display || (item.display_text && item.display_text !== item.text)) {
+        var detail = node("details");
+        detail.appendChild(node("summary", "", "查看原文和理解"));
+        detail.appendChild(node("div", "recall-text", item.display_text || item.text));
+        if (item.note_display) { detail.appendChild(node("div", "recall-text", item.note_display)); }
+        li.appendChild(detail);
+      }
       var meta = node("div", "recall-meta");
       meta.appendChild(node("span", "badge", SOURCE_TEXT[item.source] || String(item.source || "来源不明")));
       meta.appendChild(node("span", "badge", TYPE_TEXT[item.source_type] || String(item.source_type || "类型不明")));
@@ -352,7 +369,7 @@
 
   // 装配结果：逐段显示中文名与 chars/cap（超了标「超限」）；不认识的 key 照实显示，不静默丢。
   var SECTION_TEXT = { soul: "魂六件", anchors: "锚句", recent: "最近几轮",
-                       banned: "近轮禁用", action: "动作池",
+                       banned: "近期表达参考", action: "动作池",
                        memory: "脑装包", heart: "心读数", mouth: "嘴语气" };
   // 温度档位词：后端给 factual / default，这里只翻成人话，认不出就原样显示。
   var TIER_TEXT = { factual: "事实档", "default": "默认档" };
@@ -388,7 +405,8 @@
         var section = sections[i];
         var li = node("li", "assembly-row");
         li.appendChild(node("div", "assembly-name", sectionText(section.key)));
-        li.appendChild(node("div", "row-meta", charText(section)));
+        var placement = {system: "身份与规则", user: "对话参考资料"}[section.role] || "旧记录未标注位置";
+        li.appendChild(node("div", "row-meta", charText(section) + " · " + placement));
         list.appendChild(li);
       }
     }
@@ -400,7 +418,7 @@
       : String(tier) + " · 最多 " + ((chars === undefined || chars === null) ? "没给字数" : String(chars) + " 字");
   }
 
-  // 这一轮真用的温度与档位：「温度 0.5 · 事实档」；缺字段时如实写「没给」，不留白。
+  // 这一轮请求中的温度与档位，不代表服务端实际采用；缺字段时如实写「没给」。
   function temperatureText(llm) {
     var conf = llm || {};
     var temp = conf.temperature;
@@ -548,7 +566,7 @@
         return;
       }
       renderChunks(data.chunks || []);
-      renderRecall(data.recalled || []);
+      renderRecall(data.recalled || [], data.memory_recall);
       renderHeart(data.heart || {});
       renderGate(data.gate || {});
       renderRefusal(data.refusal || {});

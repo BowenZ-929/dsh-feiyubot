@@ -6,15 +6,75 @@
 from __future__ import annotations
 
 import io
+import http.client
 import os
+import socket
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from typing import Any, Dict, List, Optional, Tuple
 from unittest import mock
 
 from api import day as day_api
 from api import devserver
+
+
+class HealthWhileBusyTest(unittest.TestCase):
+    def test_health_responds_before_slow_chat_finishes_and_other_business_waits(self):
+        entered, release, other_entered = threading.Event(), threading.Event(), threading.Event()
+        order = []
+
+        def handle(method, path, body, store, brain=None):
+            if path == '/chat':
+                order.append('chat_start')
+                entered.set()
+                release.wait(5)
+                order.append('chat_end')
+            elif path == '/day/overview':
+                other_entered.set()
+                order.append('other')
+            return 200, {'ok': True}
+
+        server = devserver.HTTPServer(('127.0.0.1', 0), devserver._Handler)
+        worker = threading.Thread(target=server.serve_forever)
+
+        def request(path, method='GET', timeout=3):
+            client = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=timeout)
+            try:
+                client.request(method, path, body='{}' if method == 'POST' else None)
+                response = client.getresponse()
+                response.read()
+                return response.status
+            finally:
+                client.close()
+
+        with mock.patch.object(devserver.api, 'handle', handle), ThreadPoolExecutor(max_workers=2) as pool:
+            worker.start()
+            try:
+                chat = pool.submit(request, '/chat', 'POST')
+                self.assertTrue(entered.wait(2))
+                other = pool.submit(request, '/day/overview')
+                for path in ('/soul/check', '/healthz', '/observe/channel', '/observe/channel-runtime', '/eye/status', '/ear/status', '/voice/status'):
+                    try:
+                        status = request(path, timeout=1)
+                    except socket.timeout:
+                        self.fail('慢聊天尚未完成时，守护探活被阻塞：' + path)
+                    self.assertEqual(200, status)
+                self.assertFalse(chat.done(), '探活应在聊天完成前返回')
+                self.assertEqual(200,request('/day/proactive/disable',method='POST',timeout=1),
+                                 '停止主动发送不能排在慢生成之后')
+                self.assertFalse(other_entered.wait(0.1), '普通业务仍保持串行，不能同时改同一份器官状态')
+                release.set()
+                self.assertEqual(200, chat.result(timeout=2))
+                self.assertEqual(200, other.result(timeout=2))
+                self.assertEqual(['chat_start', 'chat_end', 'other'], order)
+            finally:
+                release.set()
+                server.shutdown()
+                worker.join(2)
+                server.server_close()
 
 
 def _payload(calls: int) -> Dict[str, Any]:

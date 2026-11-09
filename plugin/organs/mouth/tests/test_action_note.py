@@ -1,12 +1,4 @@
-"""动作括注判据只管一件事：她自己的身体 + 我们没给过的场景，不许写在一起。
-
-词表与说法一个字都不写在这份文件里：环境词表、身体部位词表、括号对、两条路的名字、命中与放行
-两句人话模板全从 organs/mouth/data/action_note.json 读（走 warehouse）。这里出现的素材是她真写过的
-那句与几条例行放行的话——**素材不是判据**：判据改了，下面的期望值跟着数据走，不跟着这份文件走。
-
-「改一条数据，行为跟着变」是这一关的全部意义，所以有一组测试把表拷到临时目录、改一条再按同样的
-读法读回来——验的是「读数据」，不是验内存里那个 dict。
-"""
+"""动作括注检查保留括注判定，不将普通描述、询问和引用误判为动作。"""
 from __future__ import annotations
 
 import json
@@ -21,7 +13,6 @@ from organs.mouth.warehouse import load
 
 TABLE = load("action_note")
 WHERE_BRACKET = TABLE["where"]["bracket"]
-WHERE_SENTENCE = TABLE["where"]["sentence"]
 OPEN, CLOSE = TABLE["brackets"][0]                 # 中文圆括号那一对：素材用它
 
 LINE = "尾巴尖在水里轻轻蜷了一下"                    # 她真写过的那一句（括注里那段）
@@ -60,22 +51,19 @@ class BracketedActionIsStopped(unittest.TestCase):
         self.assertGreater(len(hit.reason), 12)                 # 一句话，不是一个词
         self.assertIn("「%s」" % hit.matched, hit.reason)        # 点名命中的那一段
         self.assertIn("「%s」" % hit.env_word, hit.reason)       # 点名那个场景词
-        self.assertIn("没给过", hit.reason)                      # 说清毛病在哪
+        self.assertIn("不判断场景是否真实", hit.reason)                      # 说清毛病在哪
         self.assertNotIn("{", hit.reason)                       # 模板得填完，不许漏占位符
 
     def test_the_env_word_comes_from_the_table(self):
         self.assertIn(check(_bracketed(LINE)).env_word, TABLE["env_words"])
 
 
-class BareSentenceIsStillStopped(unittest.TestCase):
-    """验收 2：不带括号，同一句照样命中——这一关不只认括号。"""
-
-    def test_without_brackets_it_still_hits(self):
-        hit = check(LINE)
-        self.assertIsInstance(hit, ActionHit)
-        self.assertEqual(WHERE_SENTENCE, hit.where)
-        self.assertIn(hit.env_word, TABLE["env_words"])
-        self.assertEqual(LINE, hit.matched)             # 那一句原样回来，连句末标点都不带
+class OrdinarySpeechIsNotAnAside(unittest.TestCase):
+    def test_description_question_and_quotation_do_not_trigger_rewrite(self):
+        for text in ('房间里的人手里拿着杯子。', '你的手是在外面冻红的吗？',
+                     '你说的“缸里就我一条鱼，尾巴也是自己的”是在开玩笑吧。', LINE):
+            with self.subTest(text=text):
+                self.assertIsNone(check(text))
 
 
 class PassesWithGrounds(unittest.TestCase):
@@ -105,10 +93,10 @@ class PassesWithGrounds(unittest.TestCase):
         self.assertNotIn("{", said)
 
 
-class TwoRoutesAreDifferent(unittest.TestCase):
-    """两路同时在的时候报括号那一路（更严），括号里的字也不再算进句子那一路上。"""
+class BracketScope(unittest.TestCase):
+    """正文不参与括注判定。"""
 
-    def test_bracket_wins_when_both_hit(self):
+    def test_bracket_is_checked_alongside_plain_text(self):
         text = _bracketed("外面风大") + LINE + "。"
         self.assertEqual(WHERE_BRACKET, check(text).where)
 
@@ -169,7 +157,7 @@ class BrokenTableIsLoud(unittest.TestCase):
         self.assertIn("env_words", self._broken(data))
 
     def test_words_must_be_a_list_not_a_string(self):
-        data = dict(TABLE, body_parts="".join(TABLE["body_parts"]))
+        data = dict(TABLE, env_words="".join(TABLE["env_words"]))
         self.assertIn("清单", self._broken(data))
 
     def test_empty_word_list_is_not_a_judgement(self):
@@ -183,9 +171,9 @@ class BrokenTableIsLoud(unittest.TestCase):
         data = dict(TABLE, reason={"clear": TABLE["reason"]["clear"]})
         self.assertIn("hit", self._broken(data))
 
-    def test_two_routes_must_be_named_differently(self):
-        data = dict(TABLE, where={"bracket": "一样", "sentence": "一样"})
-        self.assertIn("where", self._broken(data))
+    def test_bracket_location_must_be_named(self):
+        data = dict(TABLE, where={})
+        self.assertIn("bracket", self._broken(data))
 
     def test_placeholder_must_be_fillable(self):
         data = dict(TABLE, reason=dict(TABLE["reason"], hit="缺占位符的模板 {not_a_field}"))

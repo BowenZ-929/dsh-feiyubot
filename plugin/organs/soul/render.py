@@ -36,7 +36,7 @@ def stance_line(manner: model.Manner, audience: str = "") -> str:
 
 
 def self_statements(identity: model.Identity) -> str:
-    """三句自述逐句分隔；本句已自带句末标点就不再加。"""
+    """初始性格逐句分隔；本句已自带句末标点就不再加。"""
     parts = []
     for text in identity.self_statements:
         if not text:
@@ -51,7 +51,7 @@ def fears_line(identity: model.Identity) -> str:
 
 
 def likes_line(identity: model.Identity) -> str:
-    """她喜欢什么：一句，逐字进注入。只有人写的那一句，不自动增长、不加料。"""
+    """标志性喜好：人工设定的一句，逐字保留；成长兴趣由persona另行组合。"""
     return identity.likes
 
 

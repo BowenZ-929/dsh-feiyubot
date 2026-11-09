@@ -15,12 +15,16 @@
 """
 from __future__ import annotations
 
+from organs.mind import persona as persona_mod
+
 import importlib
 import inspect
 import warnings
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+from organs.day import life as life_mod
 from organs.day import model as day_model
 from organs.day import night as night_mod
 from organs.day import plan as plan_mod
@@ -29,6 +33,13 @@ from organs.day import rhythm as rhythm_mod
 from .core import Result
 
 DAY_ROUTES = {
+    "/day/growth": "GET",
+    "/day/growth/config": "POST",
+    "/day/growth/profile": "POST",
+    "/day/life": "GET",
+    "/day/life/config": "POST",
+    "/day/life/adjust": "POST",
+    "/day/life/generate": "POST",
     "/day/tick": "POST",
     "/day/plan": "GET",
     "/day/night": "POST",
@@ -40,6 +51,8 @@ DAY_ROUTES = {
     "/day/ack": "POST",
     "/day/reconcile": "POST",
     "/day/proactive": "GET",
+    "/day/proactive/disable": "POST",
+    "/day/proactive/enable": "POST",
     "/day/proactive/consider": "POST",
     "/day/proactive/outcome": "POST",
     "/day/solitude": "GET",
@@ -58,6 +71,8 @@ _REQUIRES = {
     "/day/ack": "organs.day.delivery",
     "/day/reconcile": "organs.day.delivery",
     "/day/proactive": "organs.day.proactive",
+    "/day/proactive/disable": "organs.day.proactive",
+    "/day/proactive/enable": "organs.day.proactive",
     "/day/proactive/consider": "organs.day.proactive",
     "/day/proactive/outcome": "organs.day.proactive",
     "/day/solitude": "organs.day.solitude",
@@ -221,18 +236,54 @@ def unconnected_routes() -> List[str]:
 
 def run_tick(now: Any = None, *, root: Any = None, brain: Any = None,
              heart_root: Any = None, home_root: Any = None,
-             break_step: Optional[int] = None) -> Dict[str, Any]:
+             break_step: Optional[int] = None, store: Any = None, proactive_guard=None) -> Dict[str, Any]:
     """一次 tick 的唯一实现：HTTP 的 /day/tick 与 devserver 的节律线程都从这里走。
 
     now 不给就是"现在"（线程永远不传 now，只有验收与测试才指名时刻）；
-    三个根与 break_step 原样交给 rhythm.tick，这里不替器官做任何判断。
+    原有节律交给 rhythm.tick；有魂时再由 life.tick 补连续生活计划。
     抽这一层只有一个理由：端点与线程共用同一份，世上没有第二套 tick。
     """
-    return rhythm_mod.tick(now, root=root, brain=brain, heart_root=heart_root,
-                           home_root=home_root, break_step=break_step)
+    persona = persona_mod.render(store, brain, root=root)
+    from organs.day import autonomy
+    # 已执行活动的回执也要在关闭新模式后收尾；不发起新活动。
+    activity_receipts = autonomy.settle(now, root=root, home_root=home_root)
+    from organs.heart import rest, pending
+    actual_heart = heart_root if heart_root is not None else (Path(root)/'heart' if root is not None else None)
+    resting = rest.advance(actual_heart, now)
+    from . import sleep_delivery
+    sleep_notices = sleep_delivery.run(root=root, heart_root=actual_heart, brain=brain, store=store,
+                                      guard=proactive_guard)
+    if resting['phase'] == 'awake':
+        pending.derive(actual_heart, now)
+    from organs.day import proactive
+    from . import proactive_delivery
+    settings = proactive.load_config(root).get('delivery', {})
+    runner = (partial(proactive_delivery.run, root=root, heart_root=actual_heart,
+                      home_root=home_root, brain=brain, store=store, guard=proactive_guard)
+              if isinstance(settings, dict) and settings.get('enabled') is True
+              and store is not None and brain is not None else None)
+    result = rhythm_mod.tick(now, root=root, brain=brain, heart_root=heart_root,
+                             home_root=home_root, break_step=break_step, persona=persona, proactive_runner=runner,
+                             store=store)
+    result['rest'] = resting
+    if sleep_notices:
+        result['sleep_notices'] = sleep_notices
+    if activity_receipts:
+        result['activity_receipts'] = activity_receipts
+    if store is not None:
+        persona = persona_mod.render(store, brain, root=root)
+        result["life"] = life_mod.tick(persona=persona, now=now, root=root, heart_root=actual_heart)
+        from organs.day import phone_browse
+        from organs.day import growth, autonomy
+        if growth.enabled(root):
+            result["autonomy"] = autonomy.tick(now, persona=persona, root=root, heart_root=actual_heart,
+                                                home_root=home_root, brain=brain)
+        else:
+            result["phone"] = phone_browse.tick(persona=persona, now=now, root=root, heart_root=heart_root)
+    return result
 
 
-def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
+def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any, store: Any = None) -> Result:
     """/day/tick：手工 tick 一次（幂等；支持 ?now=）。
 
     到点的夜在这里真跑（四步固定顺序）并结账：手工触发与节律线程走同一条路，
@@ -245,7 +296,7 @@ def _tick(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Res
     roots = _roots(params)
     payload = run_tick(_now(params), root=roots["root"], brain=brain,
                        heart_root=roots["heart_root"],
-                       break_step=_break_step(params, body))
+                       break_step=_break_step(params, body), store=store)
     return 200, payload
 
 
@@ -254,12 +305,12 @@ def _plan(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Res
     return 200, plan_mod.listing(_root(params))
 
 
-def _night(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
+def _night(params: Mapping[str, str], body: Mapping[str, Any], brain: Any, store: Any = None) -> Result:
     """/day/night：手工跑一次夜（?now= / ?break_step=N 故意让第 N 步抛错）。"""
     roots = _roots(params)
     payload = night_mod.run(_now(params), root=roots["root"], brain=brain,
                             heart_root=roots["heart_root"],
-                            break_step=_int(params, "break_step"))
+                            break_step=_int(params, "break_step"), persona=persona_mod.render(store, brain, root=roots["root"]))
     return 200, payload
 
 
@@ -319,8 +370,9 @@ def _ack(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Resu
         retcode = int(str(raw_code))
     except (TypeError, ValueError):
         return 400, {"ok": False, "message": "retcode 要一个整数，收到 %r" % (raw_code,)}
+    roots = _roots(params)
     return 200, dict(_invoke(module, "ack", item_id=item_id, retcode=retcode,
-                             now_ts=_now(params), root=_root(params)))
+                             now_ts=_now(params), root=roots["root"], heart_root=roots["heart_root"]))
 
 
 def _reconcile(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -> Result:
@@ -338,6 +390,21 @@ def _proactive(params: Mapping[str, str], body: Mapping[str, Any], brain: Any) -
     roots = _roots(params)
     return 200, dict(_invoke(module, "overview", now_ts=_now(params), brain=brain,
                              limit=_int(params, "limit"), **roots))
+
+
+def _proactive_disable(params, body, brain):
+    module = _module('organs.day.proactive')
+    return 200, module.disable_delivery(root=_roots(params)['root'])
+
+
+def _proactive_enable(params, body, brain):
+    if not isinstance(body, dict) or set(body) != {'private_qq'}:
+        raise QueryError('只接受私聊接收人的 QQ 号')
+    module = _module('organs.day.proactive')
+    try:
+        return 200, module.enable_delivery(body['private_qq'], root=_roots(params)['root'])
+    except ValueError as exc:
+        raise QueryError(str(exc)) from exc
 
 
 def _proactive_consider(params: Mapping[str, str], body: Mapping[str, Any],
@@ -417,6 +484,8 @@ _ROUTES = {
     "/day/ack": _ack,
     "/day/reconcile": _reconcile,
     "/day/proactive": _proactive,
+    "/day/proactive/disable": _proactive_disable,
+    "/day/proactive/enable": _proactive_enable,
     "/day/proactive/consider": _proactive_consider,
     "/day/proactive/outcome": _proactive_outcome,
     "/day/solitude": _solitude,
@@ -426,11 +495,85 @@ _ROUTES = {
 
 def dispatch(route: str, params: Mapping[str, str], body: Optional[Mapping[str, Any]] = None,
              store: Any = None, brain: Any = None) -> Result:
-    """十五条路由的实际分派；store 不用（日子线自带账），brain 喂夜 / 日程 / 动念 / 独处。"""
+    """路由分派；store 为连续日程提供角色设定，brain 喂夜 / 日程 / 动念 / 独处。"""
+    if route.startswith('/day/growth'):
+        from organs.day import growth, autonomy, phone_browse, solitude
+        from organs.home import intentions
+        root = _root(params)
+        try:
+            if route == '/day/growth':
+                phone_state = phone_browse.availability(root)
+                opportunities = autonomy.opportunities(root)
+                now = day_model.parse_ts(day_model.now_iso())
+                life_day = day_model.day_key(now)
+                limits = growth.limits(root)
+                used = sum(day_model.parse_ts(r['at']) <= now and day_model.day_key(r['at']) == life_day
+                           for r in opportunities)
+                turns = {}
+                for row in night_mod.log_tail(0, root=root)['lines']:
+                    result = row.get('result', {})
+                    turn = row.get('model_turn_id', '')
+                    if (row.get('event') == 'growth_result' and result.get('status') == 'ok'
+                            and result.get('changed') is True and result.get('record', {}).get('id')
+                            and isinstance(turn, str) and len(turn) == 32
+                            and all(c in '0123456789abcdef' for c in turn)):
+                        turns[result['record']['id']] = turn
+                versions = [dict(v, **({'model_turn_id': turns[v['id']]} if v.get('id') in turns else {}))
+                            for v in (brain.selfnarration_versions() if brain else [])]
+                return 200, {'settings': growth.config(root), 'profile': brain.current_profile() if brain else {},
+                    'versions': versions,
+                    'persona': persona_mod.render(store, brain, root=root),
+                    'intentions': intentions.listing(solitude._home_root(root)),
+                    'log': [r for r in solitude.log_lines(root) if r.get('event', '').startswith('autonomy_')][-30:],
+                    **limits,
+                    'usage': {'day': life_day, 'used': used, 'remaining': max(0, limits['daily_cap'] - used)},
+                    'phone_available': phone_state['available'], 'phone': phone_state,
+                    'opportunities': opportunities[-30:]}
+            if route == '/day/growth/config':
+                if (not isinstance(body, dict) or 'enabled' not in body
+                        or not set(body) <= {'enabled', 'interval_minutes', 'daily_cap'}):
+                    raise ValueError('只接受总开关、机会间隔与每日次数')
+                return 200, growth.configure(root=root, value=body['enabled'],
+                    **{k: body[k] for k in ('interval_minutes', 'daily_cap') if k in body})
+            if route == '/day/growth/profile':
+                if brain is None:
+                    raise ValueError('脑尚未载入')
+                if not isinstance(body, dict) or set(body) not in ({'patch', 'note'}, {'version', 'note'}):
+                    raise ValueError('只接受 patch/note 或 version/note')
+                if 'patch' in body:
+                    return 200, brain.update_profile(body['patch'], note=body['note'])
+                if type(body['version']) is not int:
+                    raise ValueError('版本需要整数')
+                old = next((v for v in brain.selfnarration_versions()
+                            if v.get('version') == body['version'] and isinstance(v.get('profile'), dict)), None)
+                if old is None:
+                    raise ValueError('没有这个结构化成长版本')
+                return 200, brain.update_profile(old['profile'], note=body['note'], sources=old.get('sources', []), replace=True)
+        except ValueError as exc:
+            return 400, {'ok': False, 'message': str(exc)}
+    if route.startswith("/day/life"):
+        try:
+            roots, now = _roots(params), _now(params)
+            root = roots['root']
+            if route == "/day/life":
+                return 200, life_mod.view(now, day=params.get("day"), root=root, heart_root=roots['heart_root'])
+            if route == "/day/life/config":
+                return 200, life_mod.configure((body or {}).get("enabled"), root=root, now=now)
+            if route == "/day/life/adjust":
+                return 200, life_mod.adjust(body or {}, root=root, now=now)
+            if route == "/day/life/generate":
+                if store is None:
+                    raise life_mod.LifeError("魂尚未加载，不能生成日程")
+                return 200, life_mod.generate((body or {}).get("day"), persona=persona_mod.render(store, brain, root=root),
+                                              root=root, heart_root=roots['heart_root'], now=now, retry=True)
+        except ValueError as exc:
+            return 400, {"ok": False, "message": str(exc)}
     handler = _ROUTES.get(route)
     if handler is None:
         return 404, {"ok": False, "message": "没有这个端点：%s" % route}
     try:
+        if route in ("/day/tick", "/day/night"):
+            return handler(params or {}, body or {}, brain, store)
         return handler(params or {}, body or {}, brain)
     except QueryError as exc:
         return 400, {"ok": False, "message": str(exc)}

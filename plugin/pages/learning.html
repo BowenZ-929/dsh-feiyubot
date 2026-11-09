@@ -1,0 +1,34 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>视频资料 · 她的面板</title><script src="panel-base.js" data-page="learning"></script>
+<style>
+:root{color-scheme:light dark;font:15px/1.6 -apple-system,"PingFang SC",sans-serif;color:var(--dsw-alias-text-l1,CanvasText);background:var(--dsw-alias-bg-l1,Canvas)}*{box-sizing:border-box}body{max-width:1100px;margin:auto;padding:28px}header{display:flex;justify-content:space-between;align-items:center}h1{font-size:25px;font-weight:550}h2{font-size:18px}p{margin:8px 0}.dim{color:GrayText}a{color:#6b94d9}form,.actions{display:flex;gap:10px;flex-wrap:wrap}input,button{font:inherit;border:1px solid #8391a566;border-radius:9px;padding:10px 13px;background:var(--dsw-alias-bg-l2,Canvas);color:inherit}input{flex:1;min-width:220px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:24px;margin-top:24px}.box{padding:18px;border:1px solid #8391a544;border-radius:12px}.jobs{display:grid;gap:8px;align-content:start}.jobs button{text-align:left}.card{border-top:1px solid #8391a544;padding:16px 0}.card:first-child{border:0}blockquote{margin:8px 0;padding:10px 14px;border-left:3px solid #7399bb;background:#8391a511}small{display:block;color:GrayText}#notice{min-height:24px;white-space:pre-wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}details{margin-top:16px}@media(max-width:740px){.grid{grid-template-columns:1fr}body{padding:18px}}
+html[data-theme="dark"]{color-scheme:dark}
+html[data-theme="light"]{color-scheme:light}
+</style></head><body>
+<header><div><h1>视频资料</h1><p class="dim">这里保存字幕资料。<a href="phone">手机浏览</a> · <a href="expressions">评论表达学习</a></p></div><a href="settings">返回设置</a></header>
+<section class="box"><form id="learn-form"><input id="reference" aria-label="B站视频链接或BV号" placeholder="粘贴 B 站分享链接或 BV 号" required><button id="start" type="submit">读取并提炼</button></form>
+<p class="dim">使用已有 DeepSeek 提炼知识。每次最多 3 段、每段约 4200 字；长视频可以继续。当前读取字幕，尚未观看画面。</p><small id="account">读取配置…</small><p id="notice" role="status" aria-live="polite"></p></section>
+<div class="grid"><section><h2>提炼记录</h2><div id="jobs" class="jobs"></div></section><section class="box" id="detail"><h2>先选一条记录</h2><p class="dim">这里显示资料要点，以及原视频在哪一秒讲到它。</p></section></div>
+<script>
+(()=>{"use strict";
+const el=id=>document.getElementById(id), label={running:"进行中",done:"提炼完成",partial:"还有分段未学习",failed:"本次失败",interrupted:"已中断",no_subtitles:"未取得字幕"};
+const deliveryLabel={pending:"完成后发送",sending:"正在发送",sent:"通道已确认发出",partial:"仅部分气泡确认发出，不自动重发",replaced:"通道改发了简短提示，原通知未完整发送",unconfirmed:"未确认送达，不自动重发"};
+let selected="",timer=null,busy=false;
+function n(tag,text){const item=document.createElement(tag);item.textContent=text;return item;}
+async function call(method,path,body){const r=await panelFetch(path,{method,headers:body?{"Content-Type":"application/json"}:{},body:body?JSON.stringify(body):undefined});const d=await r.json();if(!r.ok)throw new Error(d.message||"请求失败");return d;}
+async function start(body){el("start").disabled=true;try{const d=await call("POST","/learning/start",body);selected=d.id;el("notice").textContent="已经开始，可以继续聊天，稍后回来查看。";await refresh();}catch(e){el("notice").textContent=e.message;}finally{el("start").disabled=false;}}
+el("learn-form").onsubmit=e=>{e.preventDefault();start({reference:el("reference").value});};
+async function detail(id){selected=id;const d=await call("GET","/learning/read?id="+encodeURIComponent(id));if(selected!==id)return;const box=el("detail"),meta=d.source?.meta;
+box.replaceChildren(n("h2",meta?.title||"读取中"),n("p",label[d.status]||d.status),n("p",d.note||""));
+if(d.destination){const dest=d.destination;box.append(n("small","由 "+dest.who+" 发起 · "+(dest.scene==="group"?"群 ":"私聊 ")+dest.target+" · "+(deliveryLabel[d.delivery?.status]||"暂无发送记录")));if(d.delivery?.text){const fold=n("details","");fold.append(n("summary","查看拟发送通知（不代表实际送达原文）"),n("pre",d.delivery.text));box.append(fold);}}
+if(d.submitted_reference)box.append(n("small","原分享链接："+d.submitted_reference));
+if(meta){const a=n("a","打开原视频 · "+meta.owner);a.href=meta.url;a.target="_blank";a.rel="noopener noreferrer";box.append(a,n("small",(meta.auto_subtitle?"AI 字幕":"字幕")+" · 分 P "+meta.page+" · 已提炼 "+d.next_segment+" / "+(d.total_segments||0)+" 段"));}
+if(["partial","failed","interrupted"].includes(d.status)){const b=n("button","从已保存进度继续");b.type="button";b.onclick=()=>start({id});box.append(b);}
+if(d.deliveries?.length>1){const fold=n("details","");fold.append(n("summary","此前完成通知（"+(d.deliveries.length-1)+"）"),n("pre",d.deliveries.slice(0,-1).map(x=>(x.at||"")+" · "+(deliveryLabel[x.status]||"暂无发送记录")+"\n拟发送内容：\n"+(x.text||"未取得发送回执")).join("\n\n")));box.append(fold);}
+if(d.rejected?.length){const fold=n("details","");fold.append(n("summary","未采纳的候选卡（"+d.rejected.length+"）"),n("pre",d.rejected.map(x=>"第 "+(x.segment+1)+" 段，第 "+(x.card_index+1)+" 张："+x.reason).join("\n")));box.append(fold);}
+for(const card of d.cards){const section=n("section","");section.className="card";section.append(n("h2",card.title),n("p",card.claim));for(const e of card.evidence){const quote=n("blockquote",e.quote),a=n("a",Math.floor(e.t/60)+":"+String(Math.floor(e.t%60)).padStart(2,"0")+" 回看");a.href=e.url;a.target="_blank";a.rel="noopener noreferrer";quote.append(document.createTextNode(" "),a);section.append(quote);}section.append(n("small",card.verification));box.append(section);}
+if(d.source?.lines.length){const fold=n("details",""),summary=n("summary","查看读取的字幕（"+d.source.lines.length+" 条）");fold.append(summary,n("pre",d.source.lines.map(x=>"["+x.t+"秒] "+x.text).join("\n")));box.append(fold);}}
+async function refresh(){if(busy||document.hidden)return;busy=true;clearTimeout(timer);try{const data=await call("GET","/learning/status");el("account").textContent=data.credential_ready?"已有本地 B 站登录配置，仅用于读取。":"未配置登录资料，部分视频可能读不到字幕。";el("jobs").replaceChildren();for(const row of data.jobs){const b=n("button",row.title);b.type="button";b.append(n("small",(label[row.status]||row.status)+" · "+row.cards+" 张知识卡"));b.onclick=()=>detail(row.id).catch(e=>el("notice").textContent=e.message);el("jobs").append(b);}if(!data.jobs.length)el("jobs").append(n("p","还没有学习记录。"));if(selected)await detail(selected);}catch(e){el("notice").textContent=e.message;}finally{busy=false;if(!document.hidden)timer=setTimeout(refresh,3000);}}
+document.addEventListener("visibilitychange",()=>{clearTimeout(timer);if(!document.hidden)refresh();});window.addEventListener("pagehide",()=>clearTimeout(timer));refresh();
+})();
+</script></body></html>

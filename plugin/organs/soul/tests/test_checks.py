@@ -23,7 +23,7 @@ class CheckTest(unittest.TestCase):
         self.root = copy_fixture("valid", self._tmp.name)
 
     def test_clean_fixture_reports_no_issues(self):
-        self.assertEqual([], codes(checks.collect(self.root)))
+        self.assertEqual([], codes(checks.collect(self.root, cross_check=False)))
 
     def test_check_returns_issue_objects(self):
         issues = checks.collect(self.root)
@@ -54,7 +54,7 @@ class CheckTest(unittest.TestCase):
         edit_card(self.root, "bounds", lambda data: data["items"].append({
             "id": "b03", "rule": "不刷脏话", "match": {"type": "external", "source": "家·仓库/脏话词表"},
             "action": "block", "active": True}))
-        issues = checks.collect(self.root)
+        issues = checks.collect(self.root, cross_check=False)
         self.assertIn("MATCH_UNENFORCED", codes(issues))
         self.assertNotIn("error", [issue.level for issue in issues])
 
@@ -73,14 +73,14 @@ class CheckTest(unittest.TestCase):
     def test_placeholder_is_warned_not_rejected(self):
         edit_card(self.root, "identity", lambda data: data["self_statements"].__setitem__(
             0, "我是 {{name}}"))
-        issues = checks.collect(self.root)
+        issues = checks.collect(self.root, cross_check=False)
         self.assertIn("TEXT_HAS_PLACEHOLDER", codes(issues))
         self.assertNotIn("error", [issue.level for issue in issues])
 
     def test_placeholder_in_bounds_pattern_is_warned(self):
         edit_card(self.root, "bounds", lambda data: data["items"][1].update(
             {"match": {"type": "literal", "pattern": "{% if %}"}}))
-        self.assertIn("TEXT_HAS_PLACEHOLDER", codes(checks.collect(self.root)))
+        self.assertIn("TEXT_HAS_PLACEHOLDER", codes(checks.collect(self.root, cross_check=False)))
 
     def test_missing_block_rejects_load(self):
         (self.root / "bounds.json").unlink()
@@ -121,7 +121,7 @@ class CheckTest(unittest.TestCase):
     def test_summary_reports_seven_items_and_total(self):
         lines = checks.summary(self.root)
         text = "\n".join(lines)
-        for word in ("七件·名字与自称", "七件·形象", "七件·三句自述", "七件·怕什么",
+        for word in ("七件·名字与自称", "七件·形象", "七件·初始性格", "七件·怕什么",
                      "七件·喜欢什么", "七件·待人姿态", "七件·红线条目", "七件合计"):
             self.assertIn(word, text)
         self.assertIn("七件·形象 %d/60 字（硬线）" % model.char_count(
@@ -161,7 +161,7 @@ class CheckTest(unittest.TestCase):
     def test_missing_enforcer_is_a_warn_not_a_block(self):
         """没写执行方的线照样生效，但没人接线会永久悬空：报 warn 让人看得见。"""
         edit_card(self.root, "bounds", lambda data: data["items"][0].pop("enforced_by"))
-        issues = checks.collect(self.root)
+        issues = checks.collect(self.root, cross_check=False)
         warned = [issue for issue in issues if issue.code == "BOUNDS_ENFORCER_MISSING"]
         self.assertTrue(warned)
         self.assertEqual({"warn"}, {issue.level for issue in warned})
@@ -182,7 +182,7 @@ class CheckTest(unittest.TestCase):
             "id": "b03", "rule": "有人难过时不开玩笑",
             "match": {"type": "review"}, "action": "block", "active": True,
             "enforced_by": "mouth·语义复核"}))
-        messages = [issue.message for issue in checks.collect(self.root)
+        messages = [issue.message for issue in checks.collect(self.root, cross_check=False)
                     if issue.code == "MATCH_UNENFORCED"]
         self.assertTrue(messages)
         self.assertIn("mouth·语义复核", messages[-1])

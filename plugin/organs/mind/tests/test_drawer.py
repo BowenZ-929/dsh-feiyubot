@@ -172,7 +172,7 @@ class DrawerTest(unittest.TestCase):
     def _body(self, cap: list, label: str = None) -> str:
         """这一轮抽屉那一节的正文（标题之后、下一个空行分节之前）；没翻就是空串。"""
         label = label if label is not None else conversation.load_assembly()["drawer"]["label"]
-        system = cap[0]["messages"][0]["content"]
+        system = "\n\n".join(row["content"] for row in cap[0]["messages"])
         return _section(system, label) if ("[%s]" % label) in system else ""
 
     def _drawer_row(self, got):
@@ -186,7 +186,7 @@ class DrawerTest(unittest.TestCase):
         self._five()
         got, cap = self._answer()
         conf = conversation.load_assembly()["drawer"]
-        system = cap[0]["messages"][0]["content"]
+        system = "\n\n".join(row["content"] for row in cap[0]["messages"])
         self.assertIn("[%s]" % conf["label"], system, "这一节的标题没进提示词")
         body = _section(system, conf["label"])
         row = self._drawer_row(got)
@@ -215,7 +215,7 @@ class DrawerTest(unittest.TestCase):
             self._ledger([])          # 每一档都从头带，别让上一档的去重把它挡掉
             calls = self._count_reads()
             got, cap = self._answer(MISS, scene=scene)
-            system = cap[0]["messages"][0]["content"]
+            system = "\n\n".join(row["content"] for row in cap[0]["messages"])
             self.assertNotIn("[%s]" % label, system, "没命中却加了那一节（%r 档）" % (scene,))
             self.assertTrue(self._always_body(cap), "没命中就连恒定那篇也没了（%r 档）" % (scene,))
             self.assertGreaterEqual(calls["list_room"], 1, "恒定那篇没去读抽屉（%r 档）" % (scene,))
@@ -311,11 +311,38 @@ class DrawerTest(unittest.TestCase):
         got, cap = self._answer(seed="翻翻以前的日记，十月那阵子",
                                 scene=brain_model.SCENE_PRIVATE)
         label = conversation.load_assembly()["drawer"]["label"]
-        self.assertIn("[%s]" % label, cap[0]["messages"][0]["content"],
+        self.assertIn("[%s]" % label, "\n\n".join(row["content"] for row in cap[0]["messages"]),
                       "主动那一轮没按同一份判据翻")
         self.assertEqual(3, self._drawer_row(got)["count"])
 
     # —— 4) 恋爱日记只在私聊 ————————————————————————
+
+    def test_newly_written_diary_reaches_private_chat_but_not_group_or_unknown(self):
+        from organs.day import night
+        from organs.day.tests.helpers import fake_mind
+        from organs.home import rooms
+        for name in rooms.ROOM_NAMES:
+            (self.home/name).mkdir(parents=True,exist_ok=True)
+        (self.home/'access.json').write_text(json.dumps({'version':1,'writable':[]}))
+        text = '刷到纸箱里的小狐狸，探头又缩了回去。'
+        stamp = '2025-01-14T21:00:00+09:00'
+        self.brain.ingest(who=WHO, text='聊到纸箱里的小狐狸。', ts=stamp)
+        result = night.run(stamp, root=self.tmp/'day', brain=self.brain,
+                           heart_root=self.tmp/'heart', home_root=self.home,
+                           mind=fake_mind(text), only=['home_diary'])
+        self.assertEqual('ok',result['steps']['home_diary']['status'],result)
+        entries=self.brain.today_view(stamp)['entries']
+        self.assertTrue(any(row.get('source_type')=='日记' for row in entries))
+        self.assertFalse(any(text in row.get('text','') for row in entries))
+        path = self.home/'抽屉'/'日记'/'index.jsonl'
+        self.assertTrue(path.is_file())
+        before = path.read_bytes()
+        for scene in (brain_model.SCENE_GROUP,brain_model.SCENE_UNKNOWN):
+            _, captured = self._answer('还记得纸箱里的小狐狸吗', scene=scene)
+            self.assertNotIn(text,"\n\n".join(row["content"] for row in captured[0]['messages']))
+        _, captured = self._answer('还记得纸箱里的小狐狸吗',scene=brain_model.SCENE_PRIVATE)
+        self.assertIn(text,"\n\n".join(row["content"] for row in captured[0]['messages']))
+        self.assertEqual(before,path.read_bytes())
 
     def test_shelves_say_love_diary_is_private_only(self):
         conf = conversation.load_assembly()["drawer"]
@@ -331,12 +358,46 @@ class DrawerTest(unittest.TestCase):
             _row("b2", "2026-10-02", "十月二号，喜欢他这件事写在纸上，一直没改。"),
         ]})
         got, cap = self._answer(scene=brain_model.SCENE_PRIVATE)
-        body = _section(cap[0]["messages"][0]["content"],
+        body = _section("\n\n".join(row["content"] for row in cap[0]["messages"]),
                         conversation.load_assembly()["drawer"]["label"])
         self.assertIn("喜欢他这件事写在纸上", body, "私聊里选不到恋爱日记")
         self.assertEqual(1, self._drawer_row(got)["count"])
 
     # —— 5) 挑法：相关性优先于日期 ————————————————————
+
+    def test_body_topic_past_list_excerpt_reaches_prompt_with_whole_sentence(self):
+        topic = '旧渡口那只纸船漂到了桥洞下面。'
+        body = '那天只是坐着发呆。' * 24 + topic + '后来就回去了。' * 10
+        self._house({PLAIN:[_row('old-topic','2024-01-01',body)] + [
+            _row('new-'+str(i),'2024-12-%02d' % i,'那天整理了桌面。') for i in range(1,6)],
+            LOVE:[_row('private-topic','2024-12-20','旧渡口那只纸船旁有私密约定。')]})
+        before={p:p.read_bytes() for p in self.home.rglob('index.jsonl')}
+        for scene in (brain_model.SCENE_GROUP,brain_model.SCENE_UNKNOWN):
+            _, captured=self._answer('还记得旧渡口那只纸船吗',scene=scene)
+            system="\n\n".join(row["content"] for row in captured[0]['messages'])
+            self.assertIn(topic,system)
+            self.assertNotIn('私密约定',system)
+        conf=conversation.load_assembly()
+        text=self._body(captured)
+        self.assertLessEqual(len(text),conf['drawer']['cap'])
+        self.assertIn('…'+topic,system, '从正文中间取出时应明确前文省略')
+        self.assertEqual(before,{p:p.read_bytes() for p in before})
+
+    def test_diary_topic_excerpt_preserves_boundaries_and_marks_both_omissions(self):
+        spec={'more':'…'}
+        body='前面是无关闲话。旧渡口那只纸船漂走了。后面还是无关闲话。'
+        piece,cut=conversation._drawer_excerpt(body,18,spec,'。！？',said='旧渡口那只纸船',topic_min_chars=3)
+        self.assertEqual('…旧渡口那只纸船漂走了。…',piece)
+        self.assertTrue(cut)
+        self.assertLessEqual(len(piece),18)
+        self.assertEqual(('',True),conversation._drawer_excerpt(body,8,spec,'。！？',said='旧渡口那只纸船',topic_min_chars=3))
+
+    def test_longest_topic_match_keeps_repeated_text_and_unicode(self):
+        for query,body,expected in [('', '旧日记',0),('纸船','纸和船',1),
+                                    ('旧渡口纸船','桥洞旧渡口纸船漂走',5),
+                                    ('哈'*210,'哈'*300,210),('鲸鱼🐋','蓝色鲸鱼🐋',3)]:
+            with self.subTest(query=query[:10]):
+                self.assertEqual(expected,conversation._drawer_overlap(query,body))
 
     def test_a_topic_hit_wins_over_a_newer_diary(self):
         self._house({PLAIN: [
@@ -349,7 +410,7 @@ class DrawerTest(unittest.TestCase):
         conf = conversation.load_assembly()
         conf["drawer"]["max_entries"] = 1
         got, cap = self._answer("翻翻以前的日记，医院复查那次", assembly=conf)
-        body = _section(cap[0]["messages"][0]["content"], conf["drawer"]["label"])
+        body = _section("\n\n".join(row["content"] for row in cap[0]["messages"]), conf["drawer"]["label"])
         self.assertIn("医院复查", body, "题材对得上的那篇没先选上")
         self.assertEqual(1, self._drawer_row(got)["count"])
 
@@ -362,7 +423,7 @@ class DrawerTest(unittest.TestCase):
         conf = conversation.load_assembly()
         conf["drawer"]["max_entries"] = 1
         _got, cap = self._answer("翻翻日记，十月那阵子", assembly=conf)
-        body = _section(cap[0]["messages"][0]["content"], conf["drawer"]["label"])
+        body = _section("\n\n".join(row["content"] for row in cap[0]["messages"]), conf["drawer"]["label"])
         self.assertIn("十月二号", body, "问句里的月份词没当相关性")
 
     # —— 6) 超长：按 cap 收，收在句末 ————————————————
@@ -378,7 +439,7 @@ class DrawerTest(unittest.TestCase):
         ]})
         conf = conversation.load_assembly()["drawer"]
         got, cap = self._answer()
-        body = _section(cap[0]["messages"][0]["content"], conf["label"])
+        body = _section("\n\n".join(row["content"] for row in cap[0]["messages"]), conf["label"])
         self.assertLessEqual(len(body), conf["cap"], "整节超过 cap")
         self.assertEqual(len(body), self._drawer_row(got)["chars"])
         ends = conversation.load_assembly()["tone_rules"]["sentence_end_chars"]
@@ -395,10 +456,10 @@ class DrawerTest(unittest.TestCase):
         self._five()
         conf = conversation.load_assembly()
         got, cap = self._answer(MISS, assembly=conf)
-        self.assertNotIn(conf["drawer"]["label"], cap[0]["messages"][0]["content"])
+        self.assertNotIn(conf["drawer"]["label"], "\n\n".join(row["content"] for row in cap[0]["messages"]))
         conf["drawer"]["keywords"] = ["天气"]
         got, cap = self._answer(MISS, assembly=conf)
-        self.assertIn(conf["drawer"]["label"], cap[0]["messages"][0]["content"],
+        self.assertIn(conf["drawer"]["label"], "\n\n".join(row["content"] for row in cap[0]["messages"]),
                       "keywords 改了，判据没跟着改")
         conf["drawer"]["max_entries"] = 1
         got, cap = self._answer(MISS, assembly=conf)
@@ -411,7 +472,7 @@ class DrawerTest(unittest.TestCase):
         label = conf["sections"]["drawer"]["label"]
         del conf["drawer"]
         got, cap = self._answer(HIT, assembly=conf)
-        self.assertNotIn(label, cap[0]["messages"][0]["content"])
+        self.assertNotIn(label, "\n\n".join(row["content"] for row in cap[0]["messages"]))
         self.assertEqual({"list_room": 0, "read_item": 0}, calls, "缺 drawer 块还去翻了")
         self.assertEqual([], [row for row in got["assembly"]["sections"] if row["key"] == "drawer"])
 
@@ -429,7 +490,7 @@ class DrawerTest(unittest.TestCase):
         body = "十月二十二号，去医院陪他复查，走廊里冷得像水里。"
         self._house({PLAIN: [_row("a1", "2026-10-22", body)]})
         got, cap = self._answer()
-        self.assertIn(body[:12], cap[0]["messages"][0]["content"], "没进提示词，这条断言就没意义")
+        self.assertIn(body[:12], "\n\n".join(row["content"] for row in cap[0]["messages"]), "没进提示词，这条断言就没意义")
         wrote = got["memory"]["wrote"]
         self.assertTrue(wrote, "这一轮人那句与她那句都没落脑？")
         dump = ""
@@ -478,7 +539,7 @@ class DrawerTest(unittest.TestCase):
 
     def _always_body(self, cap: list, conf: dict = None) -> str:
         """提示词里恒定那一段的正文（标题之后、下一节之前）；没有这一段就是空串。"""
-        system = cap[0]["messages"][0]["content"]
+        system = "\n\n".join(row["content"] for row in cap[0]["messages"])
         label = self._always_label(conf)
         return _section(system, label) if ("[%s]" % label) in system else ""
 
@@ -576,7 +637,7 @@ class DrawerTest(unittest.TestCase):
         self._five()
         conf = conversation.load_assembly()
         got, cap = self._answer(HIT)
-        system = cap[0]["messages"][0]["content"]
+        system = "\n\n".join(row["content"] for row in cap[0]["messages"])
         asked = _section(system, conf["sections"]["drawer"]["label"])
         always = self._always_body(cap)
         self.assertTrue(asked, "命中关键词却没有那一节")
@@ -637,7 +698,7 @@ class DrawerTest(unittest.TestCase):
         for scene in (brain_model.SCENE_PRIVATE, brain_model.SCENE_UNKNOWN):
             self._ledger([])
             _got, cap = self._answer(HIT, scene=scene)
-            system = cap[0]["messages"][0]["content"]
+            system = "\n\n".join(row["content"] for row in cap[0]["messages"])
             for word in banned:
                 self.assertNotIn(word, system,
                                  "注入里出现了实现词「%s」（%r 档）" % (word, scene))
@@ -667,7 +728,7 @@ class DrawerTest(unittest.TestCase):
         self._house({PLAIN: [_row("only", "2026-10-22", "十月二十二号，去医院陪他复查。")]})
         conf = conversation.load_assembly()
         got, cap = self._answer(HIT)
-        system = cap[0]["messages"][0]["content"]
+        system = "\n\n".join(row["content"] for row in cap[0]["messages"])
         self.assertNotIn("[%s]" % conf["sections"]["drawer"]["label"], system,
                          "同一篇在两节里都放了")
         self.assertEqual([], [row for row in got["assembly"]["sections"] if row["key"] == "drawer"],

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>评论表达 · 她的面板</title><script src="panel-base.js" data-page="expressions"></script>
+<style>
+:root{color-scheme:light dark;font:15px/1.65 -apple-system,"PingFang SC",sans-serif;color:var(--dsw-alias-text-l1,CanvasText);background:var(--dsw-alias-bg-l1,Canvas)}*{box-sizing:border-box}body{max-width:1100px;margin:auto;padding:28px}header,.toolbar,.row-head,.actions{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}h1{font-size:26px;font-weight:550;margin:0}h2{font-size:18px;margin:0}h3{font-size:21px;font-weight:550;margin:12px 0 6px}p{margin:8px 0}a{color:#6b94d9}nav{display:flex;gap:16px}.dim,small{color:GrayText}small{display:block}button,input,select{font:inherit;padding:9px 13px;border:1px solid #8391a566;border-radius:9px;color:inherit;background:var(--dsw-alias-bg-l2,Canvas)}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}input{min-width:180px;flex:1}.toolbar{margin:24px 0 8px}.toolbar label{display:flex;align-items:center;gap:8px}.notice{min-height:24px}.records{display:grid;gap:22px}.record{border:1px solid #8391a544;border-radius:14px;padding:22px;overflow-wrap:anywhere}.badge{font-size:13px;padding:3px 10px;border-radius:20px;background:#8391a518}.rejected{color:#b66c36}.adopted{color:#468870}.card{border-top:1px solid #8391a533;margin-top:18px;padding-top:4px}blockquote{margin:12px 0;padding:10px 14px;border-left:3px solid #7399bb;background:#8391a50c;white-space:pre-wrap}dl{display:grid;grid-template-columns:70px 1fr;gap:6px 14px;margin:14px 0}dt{color:GrayText}dd{margin:0}details{margin-top:14px}summary{cursor:pointer}.actions{border-top:1px solid #8391a533;padding-top:14px;margin-top:18px}.actions small{flex:1;min-width:180px}.empty{border:1px dashed #8391a544;border-radius:14px;padding:32px;text-align:center}@media(max-width:650px){body{padding:18px}.record{padding:16px}.toolbar label{width:100%}.toolbar select{flex:1}nav{font-size:14px}dl{grid-template-columns:58px 1fr;gap:6px 10px}}
+.source-clip{grid-template-columns:4em minmax(0,1fr)}
+html[data-theme="dark"]{color-scheme:dark}
+html[data-theme="light"]{color-scheme:light}
+</style></head><body>
+<header><div><h1>评论表达</h1><p class="dim">从评论里学说话，先看原句，再由她决定是否采用。</p></div><nav><a href="phone">手机</a><a href="learning">视频资料</a><a href="settings">设置</a></nav></header>
+<p class="dim">采用后，她会结合整段对话判断是否合适，不会每次照搬。关闭会影响后续挑选，已经在生成的回复不会撤回。</p>
+<p class="dim">送达匹配从本次更新后记录，只统计本轮参考过且 QQ 确认发出的原句，不含改写用法；旧记录不补算，匹配也不等于已经学会。</p>
+<div class="toolbar"><input id="search" type="search" aria-label="搜索表达、语境或原句" placeholder="搜索表达、语境或原句"><label>整组状态<select id="filter"><option value="all">全部</option><option value="pending">尚未判断</option><option value="inactive">未采用</option><option value="enabled">已采用</option><option value="rejected">来源有误</option></select></label><button id="refresh">刷新</button></div>
+<p id="counts" class="dim"></p><p id="notice" class="notice" role="status" aria-live="polite"></p><main id="records" class="records" aria-label="评论表达记录"></main>
+<script>
+(()=>{"use strict";
+const el=id=>document.getElementById(id);let rows=[],busy=false;
+function n(tag,text,cls){const v=document.createElement(tag);v.textContent=text;if(cls)v.className=cls;return v;}
+function time(value){return value?new Date(value).toLocaleString():"未记录";}
+async function call(method,path,body){const r=await panelFetch(path,{method,headers:body?{"Content-Type":"application/json"}:{},body:body?JSON.stringify(body):undefined});const d=await r.json();if(!r.ok)throw new Error(d.message||"请求失败");return d;}
+function render(){
+const query=el("search").value.trim().toLocaleLowerCase(),filter=el("filter").value;
+el("counts").textContent=rows.length+" 组记录 · "+rows.reduce((sum,row)=>sum+row.cards.length,0)+" 张表达 · "+rows.reduce((sum,row)=>sum+row.cards.filter(c=>c.enabled&&!row.source_rejected).length,0)+" 张已采用";
+el("refresh").disabled=busy;const list=el("records");list.replaceChildren();
+for(const row of rows){const pending=row.cards.some(c=>!c.enabled&&!c.selection_source&&!c.review);
+const state=row.source_rejected?"rejected":row.enabled?"enabled":!row.cards.length?"empty":pending?"pending":"inactive";
+if(filter!=="all"&&state!==filter)continue;
+if(query&&!JSON.stringify([row.source,row.cards]).toLocaleLowerCase().includes(query))continue;
+const box=n("article","","record"),head=n("div","","row-head"),badge=n("span",{rejected:"来源有误",enabled:"已采用",pending:"尚未判断",inactive:"未采用",empty:"未提炼出表达"}[state],"badge "+({rejected:"rejected",enabled:"adopted"}[state]||""));
+head.append(n("h2",row.source.context),badge);box.append(head,n("small","读取于 "+time(row.source.at)),n("p",row.verification,row.source_rejected?"rejected":"dim"));
+for(const card of row.cards){const section=n("section","","card");section.append(n("h3",card.phrase),n("blockquote",card.quote));const dl=n("dl","");for(const [label,value] of [["原意",card.meaning],["适合",card.when],["避免",card.avoid]])dl.append(n("dt",label),n("dd",value));section.append(dl);
+if(card.review){const review=n("details","");review.append(n("summary","模型复核："+(card.review.adopt?"认为可采用":"建议不采用")),n("p","字面："+card.review.literal),n("p","实际用意："+card.review.intended),n("p",card.review.reason),n("blockquote",card.review.evidence||"未提供依据"));section.append(review);}
+section.append(n("small",(row.source_rejected?"来源有误，不能采用":card.enabled?"已采用":!card.selection_source&&!card.review?"尚未判断":"未采用")+" · "+({user:"你的决定",model:"她的决定（模型复核）"}[card.selection_source]||(card.review?"已有复核记录":"原有设置"))));
+if(!row.source_rejected){const control=n("button",card.enabled?"停用这张":"采用这张");control.type="button";control.disabled=busy;control.onclick=()=>toggle(row,card);section.append(control);}
+section.append(n("small","提供给回复模型 "+card.offered_count+" 次"+(card.last_offered_at?" · 最近 "+time(card.last_offered_at):"")+"；不代表实际说过。"));
+if(card.last_offered_turn_id){const link=n("a","查看最近参考回合");link.href="observe?source=chat&turn_id="+encodeURIComponent(card.last_offered_turn_id);section.append(link);}
+section.append(n("small","送达原句匹配 "+(card.sent_match_count||0)+" 次（不含改写用法）"+(card.last_sent_at?" · 最近 "+time(card.last_sent_at):"")));
+if(card.last_sent_turn_id){const link=n("a","查看最近匹配的对话");link.href="observe?source=chat&turn_id="+encodeURIComponent(card.last_sent_turn_id);section.append(link);}
+box.append(section);}
+const source=n("details","");source.append(n("summary","查看当时的依据"),n("p",row.source.provenance),n("small","提炼于 "+time(row.created_at)),n("small","记录编号："+row.id));
+source.append(n("h3","关联浏览记录"));
+if(row.browse_sessions?.length){
+ source.append(n("small","这些浏览记录明确记下了取得这组表达的编号，可能包含再次遇到；视频链接以各条记录为准。"));
+ for(const session of row.browse_sessions){
+  const entry=n("div","");entry.append(n("p",time(session.created_at)+" · "+({done:"已结束",partial:"部分完成",failed:"未完成",stopped:"已停止",interrupted:"曾中断",running:"浏览中",queued:"准备中"}[session.status]||session.status)+(session.title?" · "+session.title:"")));
+  if(session.model_turn_id){const link=n("a","查看这次浏览的模型调用");link.href="observe?source=model&turn_id="+encodeURIComponent(session.model_turn_id);entry.append(link);}
+  else entry.append(n("small","该记录未关联模型调用。"));
+  if(session.video_source?.status==="ok"){const link=n("a","打开当时的视频");link.href=session.video_source.url;link.target="_blank";link.rel="noopener noreferrer";entry.append(n("p",""));entry.append(link);}
+  else entry.append(n("small","未取得原视频链接"+(session.video_source?.reason?"："+session.video_source.reason:"；旧记录不补猜。")));
+  source.append(entry);
+ }
+}else source.append(n("p","没有找到关联浏览记录；保留下面已有的采样依据，不推测来源。","dim"));
+source.append(n("h3","当时的视频片段语境"),n("small","这是当时交给模型的观察和机器转写，可能有误，不代表完整视频。"));
+if(row.source.viewed_clip){
+ let clip;try{clip=JSON.parse(row.source.viewed_clip);}catch{clip=null;}
+ if(clip&&typeof clip==='object'&&!Array.isArray(clip)){
+  const labels={scope:'观看范围',audio_status:'声音状态',transcript:'机器转写',transcript_truncated:'转写截断',subject:'画面主体',scene:'场景',visible_text:'可见文字',meaning:'可能含义',uncertainty:'不确定'};
+  const values=Object.entries(clip).flatMap(([key,value])=>key==='observation'&&value&&typeof value==='object'?Object.entries(value):[[key,value]]);
+  const fields=n("dl","","source-clip");
+  for(const [key,value] of values){
+   const display=key==='audio_status'?({ok:'已取得机器转写',partial:'部分机器转写',unclear:'未可靠听清',unavailable:'未取得转写',failed:'本次失败',stopped:'已停止',empty:'没有识别出对白',short:'片段太短'}[value]||value):key==='transcript_truncated'?(value?'是，仅保留前段':'否'):value;
+   fields.append(n("dt",labels[key]||key),n("dd",typeof display==='object'?JSON.stringify(display):String(display??'')));
+  }
+  source.append(fields);
+ }else source.append(n("blockquote",row.source.viewed_clip));
+}else source.append(n("p","这份记录未保存视频片段语境，不能据此补写当时看到了什么。","dim"));
+const pageText=n("details","");pageText.append(n("summary","当时读取的页面文字（"+(row.source.nodes?.length||0)+" 条）"),n("small","按采集顺序保留；包含未选中的文字，不代表完整评论区，也不证明每条都是评论。"));
+for(const node of row.source.nodes||[]){pageText.append(n("small",({"tv.danmaku.bili":"B站","com.baidu.tieba":"贴吧","com.ss.android.ugc.aweme":"抖音"}[node.package]||node.package||'来源未记录')+" · 位置 "+node.node),n("blockquote",node.text));}
+if(!row.source.nodes?.length)pageText.append(n("p","这份记录未保存当时的页面文字。","dim"));
+source.append(pageText);box.append(source);
+const actions=n("div","","actions");if(row.source_rejected){actions.append(n("small","需要重新采集。原记录留作核对，不能采用。"));}
+if(row.enabled||(!row.source_rejected&&row.cards.length)){const button=n("button",row.enabled?"停止采用这组":"采用这组（"+row.cards.length+" 张）");button.type="button";button.disabled=busy;button.onclick=()=>toggle(row);actions.append(n("small",row.enabled?"已采用的卡片可参与语境挑选，仍由她决定是否说。":"可分别采用上方卡片；也可整组采用。模型解释可能有误，请对照原句核对。"),button);}
+box.append(actions);list.append(box);}
+if(!list.children.length)list.append(n("p",rows.length?"没有符合条件的表达。":"还没有评论表达。手机浏览取得的候选会出现在这里。","empty"));}
+async function refresh(){if(busy)return;busy=true;el("notice").textContent="读取中…";render();try{rows=(await call("GET","/learning/expressions")).records;el("notice").textContent="";}catch(e){el("notice").textContent=e.message;}finally{busy=false;render();}}
+async function toggle(row,card=null){if(busy)return;busy=true;render();try{const result=await call("POST","/learning/expressions/set",{id:row.id,enabled:card?!card.enabled:!row.enabled,...(card?{card_id:card.id}:{})});rows=(await call("GET","/learning/expressions")).records;el("notice").textContent="已保存采用设置，后续对话按更新后的卡片挑选。";}catch(e){el("notice").textContent=e.message;}finally{busy=false;render();}}
+el("refresh").onclick=refresh;el("search").oninput=render;el("filter").onchange=render;refresh();
+})();
+</script></body></html>
